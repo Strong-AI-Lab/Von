@@ -66,12 +66,18 @@ _GMAIL_PAYLOAD = {
 }
 
 
+# Spec output schema (JVNAUTOSCI-2118 / 2112): list of items shaped as
+# {type, identifier, url, intent_context, sender_ask}. The workflow itself is
+# tool-agnostic; arxiv here is only a concrete instance of the generic
+# {arxiv, doi, url, pdf} type set the hint covers.
 _LLM_RESPONSE_JSON = (
     '{"items": ['
-    '{"item_type": "arxiv_paper",'
-    ' "arxiv_id": "2501.12345",'
+    '{"type": "arxiv",'
+    ' "identifier": "2501.12345",'
     ' "url": "https://arxiv.org/abs/2501.12345",'
-    ' "intent_context": "preprint shared as relevant to routing work"}'
+    ' "intent_context": "worth a look at this preprint: '
+    'https://arxiv.org/abs/2501.12345 -- relevant to our routing work.",'
+    ' "sender_ask": "FYI / please review"}'
     ']}'
 )
 
@@ -130,9 +136,16 @@ def test_email_resource_link_extraction_workflow_runs_end_to_end(
     ) -> str:
         assert tool_concept_id == "#V#gmail_get_message_tool"
         assert hint_predicate_id == "#V#output_item_signal_extraction_hint"
+        # Faithful (abridged) reflection of the spec-defined hint shape: the
+        # generic {arxiv, doi, url, pdf} type set with the spec's output
+        # schema {type, identifier, url, intent_context, sender_ask}. The
+        # actual authored hint body in Vontology is longer; this stub keeps
+        # only the bits the test needs to assert against.
         return (
-            "From the tool result, extract resource references as JSON "
-            "with field 'items' [{item_type, arxiv_id, url, intent_context}]."
+            "Extract every external-resource reference in the email payload. "
+            "type must be one of {arxiv, doi, url, pdf}. Return JSON with key "
+            "'items' whose entries are objects {type, identifier, url, "
+            "intent_context, sender_ask}."
         )
 
     monkeypatch.setattr(
@@ -179,12 +192,19 @@ def test_email_resource_link_extraction_workflow_runs_end_to_end(
     assert isinstance(signals, dict)
     items = signals.get("items")
     assert isinstance(items, list) and len(items) == 1
-    assert items[0]["arxiv_id"] == "2501.12345"
-    assert items[0]["url"] == "https://arxiv.org/abs/2501.12345"
-    assert "routing" in items[0]["intent_context"].lower()
+    # Spec-defined generic schema: {type, identifier, url, intent_context,
+    # sender_ask}. arxiv is only one of {arxiv, doi, url, pdf}.
+    item = items[0]
+    assert item["type"] == "arxiv"
+    assert item["identifier"] == "2501.12345"
+    assert item["url"] == "https://arxiv.org/abs/2501.12345"
+    assert "routing" in item["intent_context"].lower()
+    assert "sender_ask" in item
 
     # The LLM was called exactly once, with a prompt body that came from the
-    # authored hint (not Python literals).
+    # authored (stubbed) hint, not from Python literals -- and the prompt
+    # carries the generic type set rather than any arxiv-specific schema.
     assert len(fake_llm.calls) == 1
     prompt = fake_llm.calls[0]["prompt"]
-    assert "From the tool result, extract resource references as JSON" in prompt
+    assert "{arxiv, doi, url, pdf}" in prompt
+    assert "{type, identifier, url, intent_context, sender_ask}" in prompt
