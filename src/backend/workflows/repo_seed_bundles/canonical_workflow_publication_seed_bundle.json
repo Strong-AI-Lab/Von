@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "3",
   "workflows": [
     {
       "publication_spec": {
