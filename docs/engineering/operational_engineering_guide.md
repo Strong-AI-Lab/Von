@@ -653,6 +653,41 @@ Pause before doing this. If the canonical Jira, GitHub, workflow, or Vontology
 path is unreliable, the durable fix is usually to repair that path, document
 the failure mode, and keep the system's intended control surface intact.
 
+### 9.5 Repo seed-bundle invariants and version-bump guard
+
+The workflow seed bundles in
+[src/backend/workflows/repo_seed_bundles/](../../src/backend/workflows/repo_seed_bundles/)
+seed missing Vontology state at runtime; Vontology remains the authority. Two
+local guards reduce the chance that an edit silently breaks the runtime
+seed-version gate:
+
+- [tests/backend/test_repo_seed_bundle_invariants.py](../../tests/backend/test_repo_seed_bundle_invariants.py)
+  asserts structural invariants: every bundle parses; workflow bundles declare
+  a non-empty `seed_version`; every `to_state` references a defined state; the
+  canonical conversation-turn workflow's `completion_gate` keeps routing
+  empty/missing `response_text` and `completion_gate_requires_follow_up` to
+  `recovery_decision`; `recovery_decision` exposes `thinking_card_mode`,
+  `invocations`, `tool_messages`, and `response_text` in its LLM context; and
+  the recovery-decision prompt seed keeps teaching the
+  default/expert/debug thinking-card-mode adaptation rules.
+- [scripts/check_seed_bundle_version_bumps.py](../../scripts/check_seed_bundle_version_bumps.py)
+  fails when a workflow seed bundle changed against the comparison ref
+  (`origin/main` by default) without a strictly increasing integer
+  `seed_version`. The pure helper that powers it lives in
+  [src/backend/workflows/repo_seed_bundle_version_guard.py](../../src/backend/workflows/repo_seed_bundle_version_guard.py)
+  and is also exercised by
+  [tests/backend/test_seed_version_bump_guard.py](../../tests/backend/test_seed_version_bump_guard.py).
+
+Run the CLI manually before pushing seed-bundle edits:
+
+```powershell
+pdm run python scripts/check_seed_bundle_version_bumps.py
+```
+
+If the guard fires, bump `seed_version` in each affected bundle so the runtime
+gate in `src/backend/services/workflow_repo_seed_bootstrap.py` will republish
+the change.
+
 ## 10. Maintaining This Guide
 
 - Put durable practical lessons here when they are too detailed for
