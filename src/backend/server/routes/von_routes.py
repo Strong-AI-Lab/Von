@@ -7646,6 +7646,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
+    # JVNAUTOSCI-2130: Forward the thinking-card display mode so the orchestrator
+    # can produce a partial-progress summary (instead of the canned "couldn't
+    # complete that request" fallback) when the user has explicitly opted into
+    # expert/debug detail.
+    _raw_thinking_card_mode = data.get("thinking_card_mode")
+    if isinstance(_raw_thinking_card_mode, str):
+        _normalised_thinking_card_mode = _raw_thinking_card_mode.strip().lower()
+        if _normalised_thinking_card_mode in {"default", "expert", "debug"}:
+            thinking_card_mode = _normalised_thinking_card_mode
+        else:
+            thinking_card_mode = "default"
+    else:
+        thinking_card_mode = "default"
+
     request_start_perf = time.perf_counter()
     workflow_discovery_result = None
     progress_heartbeat_stop_event: threading.Event | None = None
@@ -9252,6 +9266,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
                     turn_memory_context=request_turn_memory_context,
+                    thinking_card_mode=thinking_card_mode,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

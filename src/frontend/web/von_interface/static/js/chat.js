@@ -24,7 +24,22 @@ export async function sendMessageToServer() {
   addMessageToChat('user', prompt, { turnId: userTurnId });
   elements.promptInput.value = '';
   try {
-    const data = await postJson('/von/generate', { prompt, presenter_mode: true });
+    // JVNAUTOSCI-2130: Forward thinking-card mode if the user has selected
+    // an expert/debug variant via the main chat tab (stored in localStorage).
+    let thinkingCardMode = 'default';
+    try {
+      const stored = window.localStorage.getItem('von:thinkingCardMode');
+      if (stored === 'expert' || stored === 'debug' || stored === 'default') {
+        thinkingCardMode = stored;
+      }
+    } catch (_err) {
+      // Ignore storage access errors; fall back to default.
+    }
+    const data = await postJson('/von/generate', {
+      prompt,
+      presenter_mode: true,
+      thinking_card_mode: thinkingCardMode,
+    });
     const assistantText = data.response || data.message || 'No response';
     const assistantTurnId = `a-${Date.now()}`;
     addMessageToChat('assistant', assistantText, { turnId: assistantTurnId });

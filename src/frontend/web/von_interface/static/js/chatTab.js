@@ -25531,7 +25531,8 @@ async function handleSendPrompt(options = {}) {
                 language: userContext.language,
                 gmail_profile: userContext.gmail_profile,
                 ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
-                presenter_mode: presenterMode
+                presenter_mode: presenterMode,
+                thinking_card_mode: getThinkingCardMode()
             })
         });
         startToolUseProgressPolling(request);

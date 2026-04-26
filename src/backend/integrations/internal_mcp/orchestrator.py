@@ -31894,12 +31894,22 @@ class InternalMCPChatOrchestrator:
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
         turn_memory_context: Mapping[str, Any] | None = None,
+        thinking_card_mode: str | None = None,
     ) -> OrchestratorResult:
         """Execute the current turn via the durable Master Turn Workflow.
 
         JVNAUTOSCI-1763: This is the 'Supervised Path' where the workflow
         owns the turn lifecycle, supports real-time narration, and reports
         durable outcomes (e.g. ingestion or retrieval workflow reports).
+
+        JVNAUTOSCI-2130: ``thinking_card_mode`` is a pass-through enabling
+        flag ("default" | "expert" | "debug"). It is exposed to the
+        conversation-turn workflow via ``workflow_inputs["thinking_card_mode"]``
+        so VWL states and Vontology-authored prompts can branch on it (for
+        example, to dispatch a richer partial-progress summary subworkflow
+        when ``data.response_text`` would otherwise be empty). No
+        Python-side rendering of user-facing partial-progress text is
+        performed here — that is workflow/Vontology authority.
         """
         from ...workflows.action_registry import WorkflowEnvironment
 
@@ -32197,6 +32207,18 @@ class InternalMCPChatOrchestrator:
             "workflow_episode_source": "conversation_turn_supervised",
             "workflow_episode_stage": "conversation_turn",
             "prefer_default_model": prefer_default_model,
+            # JVNAUTOSCI-2130: Expose the user's thinking-card display mode
+            # ("default" | "expert" | "debug") to the workflow runtime so
+            # VWL workflows and Vontology-authored prompts can branch on it
+            # (e.g. dispatch a richer partial-progress summary subworkflow
+            # in expert/debug mode). The orchestrator's canned-fallback
+            # rendering is only the support-surface backstop.
+            "thinking_card_mode": (
+                thinking_card_mode.strip().lower()
+                if isinstance(thinking_card_mode, str)
+                and thinking_card_mode.strip()
+                else "default"
+            ),
             "model_for_stage": _model_for_stage,
             "record_llm_call": _record_llm_call,
             "emit_progress": _emit_progress_local,
@@ -32338,6 +32360,14 @@ class InternalMCPChatOrchestrator:
                 response_text = final_response
 
         if wf_result is None:
+            # JVNAUTOSCI-2130: Genuine fail-closed Python backstop — the
+            # conversation-turn workflow definition itself was not available,
+            # so there is no workflow to dispatch a partial-progress summary.
+            # Cases where the workflow ran but failed / returned empty text
+            # are workflow-authority concerns and must be handled by a
+            # finaliser/recovery state inside the conversation-turn workflow
+            # (which can branch on data.thinking_card_mode); they are NOT
+            # rendered in Python.
             response_text = (
                 "I couldn't complete that request because the authoritative "
                 "conversation-turn workflow definition was not available."

@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
+  "seed_version": "2",
   "workflows": [
     {
       "publication_spec": {
@@ -1932,6 +1932,25 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
+                  "kind": "any",
+                  "conditions": [
+                    {
+                      "kind": "context_is_null",
+                      "key": "response_text",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_value_equals",
+                      "key": "response_text",
+                      "value": ""
+                    }
+                  ]
+                },
+                "reason": "missing_user_facing_response",
+                "to_state": "recovery_decision"
+              },
+              {
+                "condition_spec": {
                   "key": "completion_gate_requires_follow_up",
                   "kind": "context_flag"
                 },
@@ -2163,6 +2182,18 @@
                 {
                   "context_key": "response_text",
                   "label": "Current User-Facing Response"
+                },
+                {
+                  "context_key": "thinking_card_mode",
+                  "label": "Thinking Card Mode"
+                },
+                {
+                  "context_key": "invocations",
+                  "label": "Tool Invocations Observed"
+                },
+                {
+                  "context_key": "tool_messages",
+                  "label": "Tool Messages Observed"
                 }
               ]
             },
