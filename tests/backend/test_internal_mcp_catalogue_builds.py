@@ -97,6 +97,39 @@ def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
     assert "subject" in detail_output_description
 
 
+def test_internal_mcp_gmail_list_profiles_registered_and_handler_returns_summaries(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import (
+        build_default_catalogue,
+        catalogue as catalogue_module,
+    )
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("gmail_list_profiles")
+    assert method is not None
+    assert method.category == "read"
+    assert "authorised" in (method.description or "").lower() or "authorized" in (
+        method.description or ""
+    ).lower()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_profile_summaries",
+        lambda: [
+            {"profile_id": "zhan-gmail", "authorised_email": "zhanvonwitbrock@gmail.com"},
+            {"profile_id": "vonwitbrock-gmail", "authorised_email": None},
+        ],
+    )
+
+    payload = catalogue_module._gmail_list_profiles()
+    assert payload["count"] == 2
+    assert payload["profiles"][0]["profile_id"] == "zhan-gmail"
+    assert payload["profiles"][0]["authorised_email"] == "zhanvonwitbrock@gmail.com"
+    # Non-sensitive: only the two declared keys per row.
+    for entry in payload["profiles"]:
+        assert set(entry.keys()) == {"profile_id", "authorised_email"}
+
+
 def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 

@@ -19655,6 +19655,26 @@ def _gmail_get_message_output_schema() -> Schema:
     )
 
 
+def _gmail_list_profiles(**kwargs):  # noqa: ARG001 (namespace ignored)
+    from ...integrations.google import gmail_service as gs
+
+    try:
+        summaries = gs.list_profile_summaries()
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail profile listing failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Check VON_GMAIL_PROFILES / VON_GMAIL_TOKEN_PATH and the agent_gmail_tokens store",
+            ],
+        )
+    return {
+        "profiles": summaries,
+        "count": len(summaries),
+    }
+
+
 def _gmail_list_messages(**kwargs):
     from ...integrations.google import gmail_service as gs
 
@@ -26869,6 +26889,18 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
 
 
 def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition]:
+    gmail_list_profiles_input_schema = Schema(
+        required={},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=True,
+        description="List configured Gmail profiles with their authorised email addresses.",
+    )
+    gmail_list_profiles_output_schema = Schema(
+        required={"profiles": list},
+        optional={"count": int},
+        allow_unknown=False,
+        description="Gmail profile summaries: [{profile_id, authorised_email}].",
+    )
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
         optional={
@@ -27278,6 +27310,22 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ),
         ),
         # Gmail MCP tools (read-only surface)
+        MethodDefinition(
+            name="gmail_list_profiles",
+            handler=_gmail_list_profiles,
+            input_schema=gmail_list_profiles_input_schema,
+            output_schema=gmail_list_profiles_output_schema,
+            category="read",
+            timeout_sec=10.0,
+            description=(
+                "List the Gmail profiles configured for this deployment, with "
+                "the authorised Gmail address for each profile when known. "
+                "Returns rows shaped {profile_id, authorised_email}. Use this "
+                "first when a user asks about a mailbox by email address so "
+                "you can pass the correct profile alias to gmail_list_messages "
+                "and gmail_get_message. Does not return tokens or secrets."
+            ),
+        ),
         MethodDefinition(
             name="gmail_list_messages",
             handler=_gmail_list_messages,
