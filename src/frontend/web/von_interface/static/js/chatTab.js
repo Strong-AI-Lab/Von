@@ -13614,6 +13614,23 @@ function clearLastSubmittedUserPromptForActiveSession() {
     lastSubmittedUserPromptBySession.delete(recallSessionKey());
 }
 
+// JVNAUTOSCI-2128: rebuild the active session's recall buffer from a
+// freshly loaded history payload so ArrowUp works after a page reload /
+// Von restart, not only within the current page session. Picks the most
+// recent user-role message with non-empty content; absence of any user
+// message leaves the buffer untouched.
+function rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
+    for (let i = historyMessages.length - 1; i >= 0; i--) {
+        const msg = historyMessages[i];
+        if (!msg || msg.role !== 'user') continue;
+        const content = typeof msg.content === 'string' ? msg.content : '';
+        if (!content) continue;
+        lastSubmittedUserPromptBySession.set(recallSessionKey(), content);
+        return;
+    }
+}
+
 function handlePromptInputArrowUpRecall(event) {
     if (!event || event.key !== 'ArrowUp') return;
     if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
@@ -20455,6 +20472,11 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
         }
     });
+
+    // JVNAUTOSCI-2128: rehydrate the per-conversation ArrowUp recall buffer
+    // from history so the most recent user prompt is recallable after a
+    // page reload / Von restart, not only within the current page session.
+    rehydrateLastSubmittedUserPromptFromHistory(historyMessages);
 
     if (showResetNotice) {
         appendResetNotice(scrollableField);
@@ -28205,6 +28227,10 @@ export function __testOnly_clearLastSubmittedUserPromptForActiveSession() {
 }
 export function __testOnly_resetAllArrowUpRecallBuffers() {
     lastSubmittedUserPromptBySession.clear();
+}
+// JVNAUTOSCI-2129: history-rehydration test hook.
+export function __testOnly_rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
+    rehydrateLastSubmittedUserPromptFromHistory(historyMessages);
 }
 export function __testOnly_setLiveChatRequestForSession(sessionId, request = null) {
     setLiveChatRequestForSession(sessionId, request);
