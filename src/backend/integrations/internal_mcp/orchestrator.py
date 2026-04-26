@@ -8504,6 +8504,17 @@ class InternalMCPChatOrchestrator:
             for tool_name in (data.get("llm_allowed_tools") or [])
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
+        # JVNAUTOSCI-2109: expand the execution allowlist with follow-up tools
+        # declared by prior successful invocations via _tool_follow_up contracts.
+        # The validation phase already does this (via _preflight_tool_calls →
+        # _extract_allowed_tool_follow_up_tool_names), but the execution phase
+        # was not, causing all contract-driven follow-up calls (e.g.
+        # gmail_get_message after gmail_list_messages) to be blocked here even
+        # though they passed validation. _extract_allowed_tool_follow_up_tool_names
+        # only reads from completed-successfully invocations, so this is safe.
+        allowed_tool_names.update(
+            self._extract_allowed_tool_follow_up_tool_names(invocations)
+        )
         turn_id = data.get("turn_id")
 
         for tool_request in tool_calls:
