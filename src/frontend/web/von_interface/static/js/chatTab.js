@@ -13587,6 +13587,53 @@ function getPromptInputElement() {
     return document.getElementById('promptInput');
 }
 
+// JVNAUTOSCI-2128: Remember the most recent user-submitted prompt per chat
+// session so that pressing ArrowUp on an empty composer recalls it,
+// mirroring the behaviour of terminals and other chat systems. Recall is
+// scoped per conversation: switching sessions or resetting the active
+// session clears that session's buffer.
+const lastSubmittedUserPromptBySession = new Map();
+const NO_SESSION_RECALL_KEY = '__no_session__';
+
+function recallSessionKey() {
+    const sid = typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '';
+    return sid || NO_SESSION_RECALL_KEY;
+}
+
+function rememberLastSubmittedUserPrompt(rawValue) {
+    if (typeof rawValue !== 'string') return;
+    if (!rawValue) return;
+    lastSubmittedUserPromptBySession.set(recallSessionKey(), rawValue);
+}
+
+function getLastSubmittedUserPromptForActiveSession() {
+    return lastSubmittedUserPromptBySession.get(recallSessionKey()) || '';
+}
+
+function clearLastSubmittedUserPromptForActiveSession() {
+    lastSubmittedUserPromptBySession.delete(recallSessionKey());
+}
+
+function handlePromptInputArrowUpRecall(event) {
+    if (!event || event.key !== 'ArrowUp') return;
+    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    const promptInput = event.currentTarget || getPromptInputElement();
+    if (!promptInput) return;
+    // Strict empty check so ArrowUp still navigates within in-progress drafts.
+    if (promptInput.value !== '') return;
+    const recall = getLastSubmittedUserPromptForActiveSession();
+    if (!recall) return;
+
+    event.preventDefault();
+    setPromptComposerValue(recall, { promptInput });
+    try {
+        const len = promptInput.value.length;
+        promptInput.setSelectionRange(len, len);
+    } catch (_) {
+        // Ignore browsers/environments without setSelectionRange support.
+    }
+}
+
 function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement()) {
     if (!promptInput) {
         return;
@@ -24454,6 +24501,10 @@ export function initializeChatTab() {
         }
     });
 
+    // JVNAUTOSCI-2128: ArrowUp on an empty composer recalls the last
+    // submitted user prompt with the cursor at the end.
+    promptInput.addEventListener('keydown', handlePromptInputArrowUpRecall);
+
     // Initialize concept autocomplete for #V# trigger
     initializeConceptAutocomplete(promptInput);
 
@@ -25318,6 +25369,7 @@ async function handleSendPrompt(options = {}) {
             sessionId: targetSessionId,
             sessionName: targetSessionName
         });
+        rememberLastSubmittedUserPrompt(promptRaw);
         setPromptComposerValue('', { promptInput });
         return;
     }
@@ -25423,6 +25475,7 @@ async function handleSendPrompt(options = {}) {
 
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
+        rememberLastSubmittedUserPrompt(promptRaw);
         setPromptComposerValue('', { promptInput });
     }
 
@@ -25654,6 +25707,8 @@ async function handleResetContext() {
             syncActiveChatSessionThinkingState();
             updateHistoryLength();
             scheduleChatSessionTabsRefresh(true);
+            // JVNAUTOSCI-2128: ArrowUp recall is per-conversation; clear on reset.
+            clearLastSubmittedUserPromptForActiveSession();
 
             // Trigger immediate health poll to update RAG cartouche with new session context
             // Dispatch custom event that main.js health polling can listen for
@@ -28137,6 +28192,19 @@ export async function __testOnly_refreshChatSessionTabs() {
 export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
     setActiveChatSession(sessionId, sessionName);
     syncActiveChatRequestPointers();
+}
+// JVNAUTOSCI-2128: ArrowUp recall test hooks.
+export function __testOnly_rememberLastSubmittedUserPrompt(rawValue) {
+    rememberLastSubmittedUserPrompt(rawValue);
+}
+export function __testOnly_handlePromptInputArrowUpRecall(event) {
+    handlePromptInputArrowUpRecall(event);
+}
+export function __testOnly_clearLastSubmittedUserPromptForActiveSession() {
+    clearLastSubmittedUserPromptForActiveSession();
+}
+export function __testOnly_resetAllArrowUpRecallBuffers() {
+    lastSubmittedUserPromptBySession.clear();
 }
 export function __testOnly_setLiveChatRequestForSession(sessionId, request = null) {
     setLiveChatRequestForSession(sessionId, request);
