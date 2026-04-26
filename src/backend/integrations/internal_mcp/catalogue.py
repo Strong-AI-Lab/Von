@@ -27287,11 +27287,15 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             timeout_sec=20.0,
             description=(
                 "List Gmail messages for a profile with optional query and label "
-                "filters. Returned rows include a message_id alias for Gmail's "
-                "id. Use gmail_get_message with profile and message_id to fetch "
-                "sender, subject, date, snippet, headers, and other per-message "
-                "details when the list response lacks them. Read-only; relies on "
-                "pre-provisioned tokens per profile."
+                "filters. The 'profile' parameter accepts either the configured "
+                "profile alias (e.g. 'zhan-gmail') or the authorised Gmail "
+                "address itself (e.g. 'alice@example.com'); the address is "
+                "resolved to the matching profile via the stored OAuth "
+                "credentials. Returned rows include a message_id alias for "
+                "Gmail's id. Use gmail_get_message with profile and message_id "
+                "to fetch sender, subject, date, snippet, headers, and other "
+                "per-message details when the list response lacks them. "
+                "Read-only; relies on pre-provisioned tokens per profile."
             ),
         ),
         MethodDefinition(
@@ -27303,7 +27307,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             timeout_sec=20.0,
             description=(
                 "Fetch a Gmail message for a profile using message_id from "
-                "gmail_list_messages. Supports Gmail API formats "
+                "gmail_list_messages. The 'profile' parameter accepts either "
+                "the configured profile alias or the authorised Gmail address. "
+                "Supports Gmail API formats "
                 "metadata|full|raw|minimal and returns normalised sender, "
                 "subject, date, and snippet fields when available. Read-only; "
                 "profile token required."

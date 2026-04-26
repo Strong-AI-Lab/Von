@@ -261,6 +261,65 @@ def list_profile_ids_from_env() -> List[str]:
     return sorted(profiles.keys())
 
 
+def _resolve_profile_by_authorised_email(
+    candidates: Dict[str, GmailProfile], email: str
+) -> Optional[GmailProfile]:
+    """Best-effort resolution from authorised Gmail address to configured profile.
+
+    Consults the agent Gmail token store (``agent_gmail_tokens``) for each
+    configured profile and returns the first profile whose stored
+    ``authorised_email`` matches ``email`` case-insensitively. Returns ``None``
+    if the token store is unavailable or no profile matches.
+    """
+
+    if not callable(_get_agent_gmail_token_status):
+        return None
+
+    target = email.strip().lower()
+    if "@" not in target:
+        return None
+
+    for profile_id, profile in candidates.items():
+        try:
+            status = _get_agent_gmail_token_status(profile_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "[gmail_service] token status lookup failed for %s: %s",
+                profile_id,
+                exc,
+            )
+            continue
+        authorised = (status.authorised_email or "").strip().lower()
+        if authorised and authorised == target:
+            return profile
+    return None
+
+
+def list_profile_summaries(
+    profiles: Optional[Dict[str, GmailProfile]] = None,
+) -> List[Dict[str, Optional[str]]]:
+    """Return non-sensitive summaries of configured Gmail profiles.
+
+    Each entry contains ``profile_id`` and the ``authorised_email`` from the
+    token store when available. Suitable for surfacing in tool descriptions
+    and discovery surfaces; never exposes secrets or token paths.
+    """
+
+    candidates = profiles or load_profiles_from_env()
+    summaries: List[Dict[str, Optional[str]]] = []
+    for profile_id in sorted(candidates.keys()):
+        authorised: Optional[str] = None
+        if callable(_get_agent_gmail_token_status):
+            try:
+                authorised = _get_agent_gmail_token_status(
+                    profile_id
+                ).authorised_email
+            except Exception:  # pragma: no cover - defensive
+                authorised = None
+        summaries.append({"profile_id": profile_id, "authorised_email": authorised})
+    return summaries
+
+
 def get_profile(
     profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None
 ) -> GmailProfile:
@@ -271,11 +330,29 @@ def get_profile(
         )
 
     profile = candidates.get(profile_id)
-    if not profile:
-        raise KeyError(
-            f"Profile '{profile_id}' not found. Available: {sorted(candidates.keys())}"
-        )
-    return profile
+    if profile:
+        return profile
+
+    # Allow callers (notably LLMs) to pass the authorised Gmail address itself
+    # rather than the configured alias.
+    resolved = _resolve_profile_by_authorised_email(candidates, profile_id)
+    if resolved is not None:
+        return resolved
+
+    summaries = list_profile_summaries(candidates)
+    available_aliases = sorted(candidates.keys())
+    known_emails = sorted(
+        {
+            (s.get("authorised_email") or "").lower()
+            for s in summaries
+            if s.get("authorised_email")
+        }
+    )
+    raise KeyError(
+        f"Profile '{profile_id}' not found. "
+        f"Available aliases: {available_aliases}. "
+        f"Known authorised emails: {known_emails}."
+    )
 
 
 def get_service(profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None):
