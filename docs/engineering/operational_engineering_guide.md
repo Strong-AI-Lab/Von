@@ -393,6 +393,23 @@ found the right reusable workflow boundary.
 - Ask before Jira mutations that materially change planning intent or ownership,
   such as rewording issue scope, changing assignee away from the authenticated
   user, reprioritising, bulk-editing many issues, or creating uncertain links.
+- The `JVNAUTOSCI` workflow distinguishes `Backlog` from `To Do`. They are
+  different statuses with different planning meaning, not synonyms. Treat the
+  motion between them as explicit triage:
+  - `Backlog`: known work that is not committed for the current focus window.
+    Newly-created subtasks that are intentionally deferred (e.g. spun off as
+    follow-ups while implementing the in-scope sibling) belong here, not in
+    `To Do`.
+  - `To Do`: work that is committed and ready to be picked up next. Use this
+    only when the task is genuinely on deck.
+  - When a task is created via the standard issue-creation path it usually
+    lands in `To Do` by default. If the intent is "track for later, not now",
+    transition it to `Backlog` (`transition_id=2` for `JVNAUTOSCI`) in the
+    same step rather than leaving the queue cluttered.
+  - When promoting a backlog item to active work, transition it explicitly to
+    `To Do` (or directly to `In Progress` when starting immediately). Do not
+    pick work directly out of `Backlog` and silently bypass `To Do`; the
+    state change is the signal that the queue has been re-triaged.
 
 Jira MCP failure checkpoint:
 
