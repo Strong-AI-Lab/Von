@@ -14,6 +14,9 @@ from ..client import (
     LLMClientConfig,
     resolve_safe_temperature_for_model,
 )
+from ....integrations.internal_mcp.tool_call_contracts import (
+    validation_diagnostic,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,7 @@ class OpenAIClient(LLMClient):
 
         try:
             request_kwargs = dict(kwargs)
+            request_model = request_kwargs.pop("model", None) or self.config.model
             if self.config.max_tokens is not None:
                 request_kwargs["max_tokens"] = self.config.max_tokens
 
@@ -74,7 +78,7 @@ class OpenAIClient(LLMClient):
                 request_kwargs["temperature"] = safe_temperature
 
             response = await self._client.chat.completions.create(
-                model=self.config.model,
+                model=request_model,
                 messages=messages,  # type: ignore[arg-type]
                 tools=tools,  # type: ignore[arg-type]
                 **request_kwargs,
@@ -149,6 +153,7 @@ class OpenAIClient(LLMClient):
 
         text_response = ""
         tool_calls: List[ToolCall] = []
+        tool_call_diagnostics: List[Dict[str, Any]] = []
 
         # Process response content
         if response.choices and len(response.choices) > 0:
@@ -163,6 +168,7 @@ class OpenAIClient(LLMClient):
                 tool_name_map = {tool.name: tool for tool in available_tools}
 
                 for tc in choice.message.tool_calls:
+                    tool_name: str | None = None
                     try:
                         # Parse OpenAI function call format
                         tool_name = tc.function.name
@@ -175,7 +181,28 @@ class OpenAIClient(LLMClient):
 
                         # Validate tool exists
                         if tool_name not in tool_name_map:
-                            self.logger.warning(f"Unknown tool requested: {tool_name}")
+                            message = f"Unknown tool requested: {tool_name}"
+                            self.logger.warning(message)
+                            tool_call_diagnostics.append(
+                                validation_diagnostic(
+                                    tool=tool_name,
+                                    error_code="unknown_tool",
+                                    message=message,
+                                )
+                            )
+                            continue
+                        if not isinstance(payload, dict):
+                            message = (
+                                f"Tool '{tool_name}' arguments must decode to a JSON object."
+                            )
+                            self.logger.error(message)
+                            tool_call_diagnostics.append(
+                                validation_diagnostic(
+                                    tool=tool_name,
+                                    error_code="arguments_not_object",
+                                    message=message,
+                                )
+                            )
                             continue
 
                         tool_calls.append(
@@ -191,7 +218,15 @@ class OpenAIClient(LLMClient):
                         )
 
                     except (json.JSONDecodeError, AttributeError) as exc:
-                        self.logger.error(f"Failed to parse tool call: {exc}")
+                        message = f"Failed to parse tool call: {exc}"
+                        self.logger.error(message)
+                        tool_call_diagnostics.append(
+                            validation_diagnostic(
+                                tool=tool_name,
+                                error_code="provider_tool_call_parse_error",
+                                message=message,
+                            )
+                        )
                         continue
 
         # Build usage info
@@ -211,4 +246,5 @@ class OpenAIClient(LLMClient):
             ),
             model=response.model,
             usage=usage,
+            tool_call_diagnostics=tool_call_diagnostics,
         )

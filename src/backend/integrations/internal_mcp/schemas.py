@@ -226,9 +226,8 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
         "type": "object",
         "properties": properties,
         "required": required_names,
+        "additionalProperties": bool(schema.allow_unknown),
     }
-    if schema.allow_unknown:
-        payload["additionalProperties"] = True
     if isinstance(schema.description, str) and schema.description.strip():
         payload["description"] = schema.description.strip()
     if schema.aliases:

@@ -238,6 +238,60 @@ class TestTemperatureGuards:
         assert result.text_response == "ok"
         assert "temperature" not in captured_kwargs
 
+    def test_openai_provider_accepts_model_override_kwarg(self, monkeypatch):
+        """The orchestrator passes a resolved model through the generic interface."""
+        _install_openai_temperature_registry(monkeypatch)
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            openai_client as provider_module,
+        )
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def _create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+                model="gpt-4.1",
+            )
+
+        monkeypatch.setattr(
+            provider_module.openai,
+            "AsyncOpenAI",
+            lambda **_kwargs: types.SimpleNamespace(
+                chat=types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=_create)
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            provider_module.openai,
+            "OpenAI",
+            lambda **_kwargs: object(),
+        )
+
+        client = OpenAIClient(
+            LLMClientConfig(model="configured-model", api_key="test-key")
+        )
+
+        result = asyncio.run(
+            client.generate_with_tools(
+                prompt="hello",
+                available_tools=[],
+                model="gpt-4.1",
+            )
+        )
+
+        assert result.text_response == "ok"
+        assert captured_kwargs["model"] == "gpt-4.1"
+
     def test_unknown_model_defaults_to_ollama(self):
         """Test that unknown models default to Ollama."""
         from src.backend.languagemodels.structured_tool_calling.providers import (
@@ -315,3 +369,111 @@ class TestLLMClientBaseValidation:
                     input_schema=invalid_schema,
                 )
             )
+
+    def test_tool_definition_to_dict_closes_and_stricts_compatible_schema(self):
+        """Closed all-required contracts should be sent as strict tool definitions."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        payload = client._tool_definition_to_dict(
+            ToolDefinition(
+                name="lookup",
+                description="Lookup a record.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                    "x-von-argument-aliases": {"q": "query"},
+                },
+            )
+        )
+
+        function_payload = payload["function"]
+        assert function_payload["strict"] is True
+        assert function_payload["parameters"]["additionalProperties"] is False
+        assert "x-von-argument-aliases" not in function_payload["parameters"]
+
+    def test_tool_definition_to_dict_does_not_strict_optional_schema(self):
+        """Optional arguments stay closed but avoid provider strict mode."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        payload = client._tool_definition_to_dict(
+            ToolDefinition(
+                name="list_messages",
+                description="List messages.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "profile": {"type": "string"},
+                        "max_results": {"type": "integer"},
+                    },
+                    "required": ["profile"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        function_payload = payload["function"]
+        assert "strict" not in function_payload
+        assert function_payload["parameters"]["additionalProperties"] is False
+
+    def test_openai_parse_preserves_tool_call_diagnostics_for_invalid_calls(self):
+        """Provider parse failures should be recoverable diagnostics, not silence."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        response = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            types.SimpleNamespace(
+                                id="call_1",
+                                function=types.SimpleNamespace(
+                                    name="lookup",
+                                    arguments="{bad json",
+                                ),
+                            ),
+                            types.SimpleNamespace(
+                                id="call_2",
+                                function=types.SimpleNamespace(
+                                    name="missing_tool",
+                                    arguments="{}",
+                                ),
+                            ),
+                        ],
+                    )
+                )
+            ],
+            usage=None,
+            model="gpt-4",
+        )
+
+        parsed = client._parse_response(
+            response,
+            [
+                ToolDefinition(
+                    name="lookup",
+                    description="Lookup a record.",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ],
+        )
+
+        assert parsed.tool_calls == []
+        assert [item["error_code"] for item in parsed.tool_call_diagnostics] == [
+            "provider_tool_call_parse_error",
+            "unknown_tool",
+        ]

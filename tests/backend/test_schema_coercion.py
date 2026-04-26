@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
+from types import SimpleNamespace
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
@@ -183,6 +184,119 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
     assert json_schema["description"] == "List records."
     assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
+
+
+def test_preflight_emits_contract_validation_diagnostics() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    catalogue = {
+        "gmail_list_messages": {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages.",
+            "input_schema": {
+                "required": {"profile": str},
+                "optional": {"max_results": int},
+                "allow_unknown": False,
+                "description": "Gmail list arguments",
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+
+    preflight = orchestrator._preflight_tool_calls(
+        [
+            {
+                "action": "call_tool",
+                "tool": "gmail_list_messages",
+                "payload": {"max_results": 10},
+            }
+        ],
+        catalogue,
+        allowed_tool_names=None,
+        user_namespace="#V#test_user",
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == [
+        "gmail_list_messages: Missing required field 'profile' for Gmail list arguments."
+    ]
+    assert preflight.diagnostics
+    diagnostic = preflight.diagnostics[0]
+    assert diagnostic["schema_version"] == "tool_call_contract_validation.v1"
+    assert diagnostic["error_code"] == "schema_validation_failed"
+    assert diagnostic["tool"] == "gmail_list_messages"
+    assert diagnostic["contract"]["input_schema"]["required"] == ["profile"]
+    assert diagnostic["contract"]["input_schema"]["additionalProperties"] is False
+
+
+def test_tool_call_repair_prompt_receives_selected_contract() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    captured: dict[str, str] = {}
+
+    class _RepairLLM:
+        def generate(self, prompt: str, context=None, model=None) -> str:
+            captured["prompt"] = prompt
+            return (
+                '{"action":"call_tool","tool":"gmail_list_messages",'
+                '"payload":{"profile":"zhan-gmail","max_results":10}}'
+            )
+
+    orchestrator._render_authoritative_prompt = cast(  # type: ignore[method-assign]
+        Any,
+        lambda *args, **kwargs: SimpleNamespace(
+            text="Repair the tool call using this contract:\n{tool_contracts}"
+        ),
+    )
+    catalogue = {
+        "gmail_list_messages": {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages.",
+            "input_schema": {
+                "required": {"profile": str},
+                "optional": {"max_results": int},
+                "allow_unknown": False,
+                "description": "Gmail list arguments",
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+
+    repaired = orchestrator._attempt_tool_call_repair(
+        current_response=(
+            '[{"action":"call_tool","tool":"gmail_list_messages","payload":{}}]'
+        ),
+        errors=["gmail_list_messages: Missing required field 'profile'."],
+        tool_list=["gmail_list_messages"],
+        tool_calls=[
+            {
+                "action": "call_tool",
+                "tool": "gmail_list_messages",
+                "payload": {},
+            }
+        ],
+        method_catalogue=catalogue,
+        llm_client=_RepairLLM(),
+        policy_state=cast(Any, None),
+        default_model="test-model",
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        aux_llm_calls=[],
+        llm_calls_log=[],
+        record_llm_call=None,
+    )
+
+    assert repaired == [
+        {
+            "action": "call_tool",
+            "tool": "gmail_list_messages",
+            "payload": {"profile": "zhan-gmail", "max_results": 10},
+        }
+    ]
+    assert '"name": "gmail_list_messages"' in captured["prompt"]
+    assert '"profile"' in captured["prompt"]
+    assert '"additionalProperties": false' in captured["prompt"]
 
 
 def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:

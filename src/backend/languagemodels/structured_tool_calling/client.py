@@ -12,6 +12,10 @@ from ...services.model_registry_service import (
     resolve_model_parameter_policy,
     sanitise_model_parameter_value,
 )
+from ...integrations.internal_mcp.tool_call_contracts import (
+    is_strict_tool_schema_compatible,
+    strip_internal_schema_extensions,
+)
 from .types import ToolDefinition, LLMResponse
 
 
@@ -158,13 +162,18 @@ class LLMClient(ABC):
             }
         }
         """
+        parameters = strip_internal_schema_extensions(tool.input_schema)
+        function_payload: Dict[str, Any] = {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": parameters,
+        }
+        if is_strict_tool_schema_compatible(parameters):
+            function_payload["strict"] = True
+
         return {
             "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            },
+            "function": function_payload,
         }
 
     def _validate_input_schema(self, tool: ToolDefinition) -> None:

@@ -702,6 +702,7 @@ def test_mcp_schema_to_json_schema_conversion(orchestrator):
     assert json_schema["properties"]["names"]["type"] == "array"
     assert json_schema["properties"]["names"]["items"] == {}
     assert json_schema["properties"]["offset"]["type"] == "integer"
+    assert json_schema["additionalProperties"] is False
     assert "required" in json_schema
     assert "query" in json_schema["required"]
     assert "limit" in json_schema["required"]
@@ -1030,6 +1031,108 @@ def test_structured_calling_passes_capped_tool_list_to_llm():
     )
     assert selection_logs[0]["truncation_applied"] is False
     assert "planner_shortlist_cap_applied:16" in selection_logs[0]["warnings"]
+
+
+def test_structured_calling_forces_single_required_openai_tool():
+    """A selected required tool should become provider-level tool_choice."""
+
+    class _CapturingLLM:
+        def __init__(self):
+            self.kwargs: dict[str, Any] = {}
+
+        def _should_use_structured_calling(self) -> bool:
+            return True
+
+        def generate_with_tools(
+            self,
+            prompt: str,
+            available_tools: List[ToolDefinition],
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model: Optional[str] = None,
+            system_message: Optional[str] = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.kwargs = dict(kwargs)
+            return LLMResponse(text_response="", tool_calls=[])
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "gmail_list_messages": {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages.",
+            "input_schema": {
+                "required": {"profile": str},
+                "optional": {"max_results": int},
+                "allow_unknown": False,
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+    gateway.describe_methods.return_value = catalogue
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    llm_client = _CapturingLLM()
+    cast(Any, orch)._create_client_for_candidate = (
+        lambda _candidate, **_kwargs: (
+            llm_client,
+            "gpt-4",
+            {
+                "provider": "openai",
+                "model": "gpt-4",
+                "source": "test",
+                "raw": "gpt-4",
+                "host": None,
+            },
+        )
+    )
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, _, _ = orch._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="List the last ten Gmail messages.",
+        context=[],
+        tool_definitions=orch._convert_mcp_tools_to_structured_definitions(
+            method_catalogue=catalogue
+        ),
+        default_client=llm_client,
+        default_model="gpt-4",
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_kwargs: None,
+        workflow_action_id="tool_calling.plan",
+        method_catalogue=catalogue,
+        required_prompt_tools=["gmail_list_messages"],
+    )
+
+    assert response.text_response == ""
+    assert llm_client.kwargs["parallel_tool_calls"] is False
+    assert llm_client.kwargs["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "gmail_list_messages"},
+    }
+    candidate_log = next(
+        entry
+        for entry in aux_log
+        if isinstance(entry, Mapping)
+        and entry.get("type") == "structured_tool_candidates"
+    )
+    assert candidate_log["required_available_tools"] == ["gmail_list_messages"]
+    assert candidate_log["structured_call_options"]["tool_choice"]["function"][
+        "name"
+    ] == "gmail_list_messages"
 
 
 def test_structured_candidate_resolver_readds_required_tool_deterministically():

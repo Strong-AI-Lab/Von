@@ -37,6 +37,12 @@ from .schemas import (
     normalise_payload_aliases,
     validate_payload,
 )
+from .tool_call_contracts import (
+    contract_attempt,
+    tool_definition_contract_summary,
+    validation_diagnostic,
+    stable_json_dumps,
+)
 
 # Structured tool calling support (JVNAUTOSCI-799 Phase 3)
 from ...languagemodels.structured_tool_calling import (
@@ -1403,6 +1409,7 @@ class _ToolCallPreflightResult:
     errors: list[str]
     warnings: list[str]
     tool_unavailable: list[str]
+    diagnostics: list[Mapping[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -8128,6 +8135,35 @@ class InternalMCPChatOrchestrator:
                 )
             except Exception:
                 pass
+        try:
+            contract_summaries = self._catalogue_contract_summaries_for_tools(
+                [
+                    str(call.get(self._TOOL_FIELD))
+                    for call in cast(Sequence[Mapping[str, Any]], tool_calls)
+                    if isinstance(call, Mapping)
+                    and isinstance(call.get(self._TOOL_FIELD), str)
+                ],
+                method_catalogue,
+                include_schema=True,
+                max_tools=20,
+            )
+            aux_llm_calls.append(
+                {
+                    "type": "tool_contract_attempt",
+                    **contract_attempt(
+                        stage="tool_calling.validate",
+                        tool_calls=cast(Sequence[Mapping[str, Any]], tool_calls),
+                        contracts=contract_summaries,
+                        validation_errors=preflight.errors,
+                        validation_warnings=preflight.warnings,
+                        repair_attempted=bool(preflight.errors),
+                        repair_succeeded=None,
+                    ),
+                    "diagnostics": list(preflight.diagnostics),
+                }
+            )
+        except Exception:
+            contract_summaries = []
 
         if preflight.errors:
             repaired_calls = None
@@ -8135,14 +8171,13 @@ class InternalMCPChatOrchestrator:
                 tool_call_model = data.get("tool_call_model") or model_for_stage(
                     "tool_call"
                 )
+                raw_tool_call = stable_json_dumps(tool_calls, max_chars=4000)
                 repaired_calls = self._attempt_tool_call_repair(
-                    current_response=(
-                        data.get("response", "")
-                        if isinstance(data.get("response"), str)
-                        else str(data.get("response", ""))
-                    ),
+                    current_response=raw_tool_call,
                     errors=preflight.errors,
                     tool_list=sorted(method_catalogue.keys()),
+                    tool_calls=cast(Sequence[Mapping[str, Any]], tool_calls),
+                    method_catalogue=method_catalogue,
                     llm_client=llm_client,
                     policy_state=policy_state,
                     default_model=tool_call_model,
@@ -8177,6 +8212,26 @@ class InternalMCPChatOrchestrator:
                 )
                 if not preflight.errors:
                     tool_calls = repaired_calls
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "tool_contract_attempt",
+                            **contract_attempt(
+                                stage="tool_calling.validate.repair",
+                                tool_calls=cast(
+                                    Sequence[Mapping[str, Any]], repaired_calls
+                                ),
+                                contracts=contract_summaries,
+                                validation_errors=preflight.errors,
+                                validation_warnings=preflight.warnings,
+                                repair_attempted=True,
+                                repair_succeeded=not bool(preflight.errors),
+                            ),
+                            "diagnostics": list(preflight.diagnostics),
+                        }
+                    )
+                except Exception:
+                    pass
 
         if preflight.errors:
             invocations = data.get("invocations", [])
@@ -11029,6 +11084,11 @@ class InternalMCPChatOrchestrator:
                 input_schema = self._mcp_schema_to_json_schema(
                     metadata.get("input_schema", {})
                 )
+                output_schema = None
+                if isinstance(metadata.get("output_schema"), Mapping):
+                    output_schema = self._mcp_schema_to_json_schema(
+                        cast(Mapping[str, Any], metadata.get("output_schema"))
+                    )
 
                 # Create ToolDefinition
                 tool_def = ToolDefinition(
@@ -11038,6 +11098,7 @@ class InternalMCPChatOrchestrator:
                         metadata if isinstance(metadata, Mapping) else None,
                     ),
                     input_schema=input_schema,
+                    output_schema=output_schema,
                 )
                 tool_definitions.append(tool_def)
             except Exception as exc:
@@ -11590,10 +11651,8 @@ class InternalMCPChatOrchestrator:
         json_schema = {
             "type": "object",
             "properties": properties,
+            "additionalProperties": bool(allow_unknown is True),
         }
-
-        if allow_unknown is True:
-            json_schema["additionalProperties"] = True
 
         if required_list:
             json_schema["required"] = required_list
@@ -15800,7 +15859,7 @@ class InternalMCPChatOrchestrator:
                 org_concept_id=org_concept_id,
             )
             provider = (
-                str(telemetry.get("provider")).strip()
+                str(telemetry.get("provider")).strip().lower()
                 if isinstance(telemetry, Mapping) and telemetry.get("provider")
                 else None
             )
@@ -16110,6 +16169,91 @@ class InternalMCPChatOrchestrator:
         raise RuntimeError("No model candidates available for stage")
 
     @staticmethod
+    def _tool_definition_contract_summaries(
+        tool_definitions: Sequence[ToolDefinition] | None,
+        *,
+        include_schema: bool,
+        max_tools: int = 20,
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for definition in list(tool_definitions or ())[:max(0, int(max_tools))]:
+            tool_name = getattr(definition, "name", None)
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                continue
+            summaries.append(
+                tool_definition_contract_summary(
+                    name=tool_name.strip(),
+                    description=getattr(definition, "description", None),
+                    input_schema=(
+                        getattr(definition, "input_schema", None)
+                        if isinstance(getattr(definition, "input_schema", None), Mapping)
+                        else None
+                    ),
+                    output_schema=(
+                        getattr(definition, "output_schema", None)
+                        if isinstance(
+                            getattr(definition, "output_schema", None), Mapping
+                        )
+                        else None
+                    ),
+                    include_schema=include_schema,
+                )
+            )
+        return summaries
+
+    def _catalogue_contract_summaries_for_tools(
+        self,
+        tool_names: Sequence[str],
+        method_catalogue: Mapping[str, Any],
+        *,
+        include_schema: bool = True,
+        max_tools: int = 20,
+    ) -> list[dict[str, Any]]:
+        definitions: list[ToolDefinition] = []
+        seen: set[str] = set()
+        lookup = {
+            key.lower(): key
+            for key in method_catalogue.keys()
+            if isinstance(key, str) and key.strip()
+        }
+        for raw_name in tool_names:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                continue
+            canonical_name = lookup.get(raw_name.strip().lower())
+            if not canonical_name or canonical_name.lower() in seen:
+                continue
+            seen.add(canonical_name.lower())
+            metadata = method_catalogue.get(canonical_name)
+            if not isinstance(metadata, Mapping):
+                continue
+            input_schema = self._mcp_schema_to_json_schema(
+                cast(Mapping[str, Any], metadata.get("input_schema") or {})
+            )
+            output_schema = None
+            if isinstance(metadata.get("output_schema"), Mapping):
+                output_schema = self._mcp_schema_to_json_schema(
+                    cast(Mapping[str, Any], metadata.get("output_schema"))
+                )
+            definitions.append(
+                ToolDefinition(
+                    name=canonical_name,
+                    description=self._build_tool_planner_description(
+                        canonical_name,
+                        metadata,
+                    ),
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                )
+            )
+            if len(definitions) >= max_tools:
+                break
+        return self._tool_definition_contract_summaries(
+            definitions,
+            include_schema=include_schema,
+            max_tools=max_tools,
+        )
+
+    @staticmethod
     def _build_llm_request_telemetry(
         *,
         prompt: str,
@@ -16147,6 +16291,12 @@ class InternalMCPChatOrchestrator:
             if isinstance(tool_name, str) and tool_name.strip():
                 tool_names.append(tool_name.strip())
 
+        tool_contracts = InternalMCPChatOrchestrator._tool_definition_contract_summaries(
+            tool_definitions,
+            include_schema=False,
+            max_tools=50,
+        )
+
         payload: dict[str, Any] = {
             "prompt": InternalMCPChatOrchestrator._build_context_text_capture(prompt),
             "context_messages": context_messages or None,
@@ -16156,6 +16306,10 @@ class InternalMCPChatOrchestrator:
             ),
             "tool_names": tool_names or None,
             "tool_count": len(tool_names),
+            "tool_contracts": tool_contracts or None,
+            "tool_contracts_truncated": (
+                len(tool_names) > len(tool_contracts) if tool_names else False
+            ),
         }
         if isinstance(workflow_action_id, str) and workflow_action_id.strip():
             payload["workflow_action_id"] = workflow_action_id.strip()
@@ -16333,6 +16487,28 @@ class InternalMCPChatOrchestrator:
                 required_prompt_tools=required_prompt_tools,
             )
             available_tool_definitions = list(tool_candidates.tool_definitions)
+            available_tool_name_lookup = {
+                definition.name.lower(): definition.name
+                for definition in available_tool_definitions
+                if isinstance(getattr(definition, "name", None), str)
+            }
+            required_available_tool_names: list[str] = []
+            for raw_tool_name in required_prompt_tools:
+                if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                    continue
+                matched_name = available_tool_name_lookup.get(
+                    raw_tool_name.strip().lower()
+                )
+                if matched_name and matched_name not in required_available_tool_names:
+                    required_available_tool_names.append(matched_name)
+            structured_call_kwargs: dict[str, Any] = {}
+            if provider == "openai":
+                structured_call_kwargs["parallel_tool_calls"] = False
+                if len(required_available_tool_names) == 1:
+                    structured_call_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": required_available_tool_names[0]},
+                    }
 
             exclusion_reason_counts: dict[str, int] = {}
             for item in tool_candidates.excluded_tools:
@@ -16374,6 +16550,17 @@ class InternalMCPChatOrchestrator:
                     "excluded_tool_count": len(tool_candidates.excluded_tools),
                     "top_exclusion_reasons": top_exclusion_reasons,
                     "required_tools": list(tool_candidates.required_tools),
+                    "required_available_tools": list(required_available_tool_names),
+                    "selected_tool_contracts": self._tool_definition_contract_summaries(
+                        available_tool_definitions,
+                        include_schema=True,
+                        max_tools=20,
+                    ),
+                    "selected_tool_contracts_truncated": len(
+                        available_tool_definitions
+                    )
+                    > 20,
+                    "structured_call_options": dict(structured_call_kwargs),
                     "hinted_families": list(tool_candidates.hinted_families),
                     "write_policy_reason": tool_candidates.write_policy_reason,
                     "warnings": list(tool_candidates.warnings),
@@ -16497,6 +16684,7 @@ class InternalMCPChatOrchestrator:
                         context=cast(Optional[List[Dict[str, Any]]], context),
                         model=model_name,
                         system_message=None,
+                        **structured_call_kwargs,
                     ),
                     stage_name=stage,
                     model_name=model_name,
@@ -16593,6 +16781,14 @@ class InternalMCPChatOrchestrator:
                         "raw_response_present": bool(
                             getattr(llm_response, "raw_response", None)
                         ),
+                        "tool_call_diagnostics": (
+                            list(llm_response.tool_call_diagnostics)
+                            if isinstance(
+                                getattr(llm_response, "tool_call_diagnostics", None),
+                                list,
+                            )
+                            else []
+                        ),
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
@@ -16625,6 +16821,19 @@ class InternalMCPChatOrchestrator:
                         **selection_metadata,
                     }
                 )
+                if isinstance(
+                    getattr(llm_response, "tool_call_diagnostics", None), list
+                ) and llm_response.tool_call_diagnostics:
+                    aux_log.append(
+                        {
+                            "type": "tool_call_contract_validation",
+                            "schema_version": "tool_call_contract_validation.v1",
+                            "stage": stage,
+                            "provider": provider,
+                            "model": model_name,
+                            "diagnostics": list(llm_response.tool_call_diagnostics),
+                        }
+                    )
                 return llm_response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
@@ -17806,9 +18015,12 @@ class InternalMCPChatOrchestrator:
         errors: list[str] = []
         warnings: list[str] = []
         tool_unavailable: list[str] = []
+        diagnostics: list[Mapping[str, Any]] = []
 
         if not tool_calls:
-            return _ToolCallPreflightResult(None, errors, warnings, tool_unavailable)
+            return _ToolCallPreflightResult(
+                None, errors, warnings, tool_unavailable, diagnostics
+            )
 
         available_tools = set(method_catalogue.keys())
         enforce_availability = bool(available_tools)
@@ -17829,26 +18041,68 @@ class InternalMCPChatOrchestrator:
             payload = tool_call.get(self._PAYLOAD_FIELD)
 
             if not isinstance(tool_name, str):
-                errors.append("Tool name must be a string.")
+                error = "Tool name must be a string."
+                errors.append(error)
+                diagnostics.append(
+                    validation_diagnostic(
+                        tool=None,
+                        error_code="tool_name_not_string",
+                        message=error,
+                    )
+                )
                 continue
             tool_name_key = tool_name.strip().lower()
+            contract_summary = self._catalogue_contract_summaries_for_tools(
+                [tool_name],
+                method_catalogue,
+                include_schema=True,
+                max_tools=1,
+            )
+            contract = contract_summary[0] if contract_summary else None
 
             if enforce_availability and tool_name not in available_tools:
                 tool_unavailable.append(tool_name)
-                errors.append(f"Tool '{tool_name}' is not available.")
+                error = f"Tool '{tool_name}' is not available."
+                errors.append(error)
+                diagnostics.append(
+                    validation_diagnostic(
+                        tool=tool_name,
+                        error_code="tool_unavailable",
+                        message=error,
+                        payload=payload if isinstance(payload, Mapping) else None,
+                        contract=contract,
+                    )
+                )
                 continue
             if (
                 effective_allowed_tool_names
                 and tool_name_key not in effective_allowed_tool_names
             ):
                 tool_unavailable.append(tool_name)
-                errors.append(
-                    f"Tool '{tool_name}' is not allowed for this workflow step."
+                error = f"Tool '{tool_name}' is not allowed for this workflow step."
+                errors.append(error)
+                diagnostics.append(
+                    validation_diagnostic(
+                        tool=tool_name,
+                        error_code="tool_not_allowed_for_step",
+                        message=error,
+                        payload=payload if isinstance(payload, Mapping) else None,
+                        contract=contract,
+                    )
                 )
                 continue
 
             if not isinstance(payload, MutableMapping):
-                errors.append(f"Tool '{tool_name}' payload must be a JSON object.")
+                error = f"Tool '{tool_name}' payload must be a JSON object."
+                errors.append(error)
+                diagnostics.append(
+                    validation_diagnostic(
+                        tool=tool_name,
+                        error_code="payload_not_object",
+                        message=error,
+                        contract=contract,
+                    )
+                )
                 continue
 
             schema = self._tool_schema_for_name(tool_name, method_catalogue)
@@ -17871,7 +18125,7 @@ class InternalMCPChatOrchestrator:
                         f"{tool_name}: Filled field '{field_key}' from another same-tool batch item."
                     )
 
-            self._apply_payload_defaults(
+            default_bindings = self._apply_payload_defaults(
                 tool_name,
                 payload,
                 schema=schema,
@@ -17880,6 +18134,15 @@ class InternalMCPChatOrchestrator:
                 conversation_session_id=conversation_session_id,
                 turn_id=turn_id,
             )
+            for binding in default_bindings:
+                if not isinstance(binding, Mapping):
+                    continue
+                field_name = binding.get("field")
+                source_name = binding.get("source")
+                if isinstance(field_name, str) and field_name:
+                    warnings.append(
+                        f"{tool_name}: Filled field '{field_name}' from {source_name or 'context binding'}."
+                    )
             # Deterministically resolve close-but-invalid concept IDs for
             # write tools before schema validation/execution.
             self._rewrite_write_payload_concept_ids(
@@ -17910,9 +18173,23 @@ class InternalMCPChatOrchestrator:
 
             ok, validation_errors = validate_payload(schema, validation_payload)
             if not ok:
-                errors.extend([f"{tool_name}: {error}" for error in validation_errors])
+                for validation_error in validation_errors:
+                    error = f"{tool_name}: {validation_error}"
+                    errors.append(error)
+                    diagnostics.append(
+                        validation_diagnostic(
+                            tool=tool_name,
+                            error_code="schema_validation_failed",
+                            message=error,
+                            payload=validation_payload,
+                            contract=contract,
+                            warnings=warnings,
+                        )
+                    )
 
-        return _ToolCallPreflightResult(tool_calls, errors, warnings, tool_unavailable)
+        return _ToolCallPreflightResult(
+            tool_calls, errors, warnings, tool_unavailable, diagnostics
+        )
 
     @classmethod
     def _extract_allowed_tool_follow_up_tool_names(
@@ -17986,16 +18263,38 @@ class InternalMCPChatOrchestrator:
         selected_gmail_profile: str | None,
         conversation_session_id: str | None = None,
         turn_id: str | None = None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
+        bindings: list[dict[str, Any]] = []
         if tool_name.startswith("gmail_"):
             if not payload.get("profile") and selected_gmail_profile:
                 payload["profile"] = selected_gmail_profile
+                bindings.append(
+                    {
+                        "field": "profile",
+                        "source": "selected_gmail_profile",
+                        "value_present": True,
+                    }
+                )
             if "namespace" in payload:
                 payload.pop("namespace", None)
-            return
+                bindings.append(
+                    {
+                        "field": "namespace",
+                        "source": "removed_for_gmail_contract",
+                        "value_present": False,
+                    }
+                )
+            return bindings
 
         if user_namespace and "namespace" not in payload:
             payload["namespace"] = user_namespace
+            bindings.append(
+                {
+                    "field": "namespace",
+                    "source": "user_namespace",
+                    "value_present": True,
+                }
+            )
 
         # Preserve user-attribution for auto-created concepts so namespace
         # isolation has a deterministic provenance trail (JVNAUTOSCI-925).
@@ -18009,6 +18308,13 @@ class InternalMCPChatOrchestrator:
             )
             if actor_concept_id:
                 payload["created_by_concept_id"] = actor_concept_id
+                bindings.append(
+                    {
+                        "field": "created_by_concept_id",
+                        "source": "derived_actor_concept_id",
+                        "value_present": True,
+                    }
+                )
 
         # Attach lightweight provenance for auto text writes so generated
         # content remains attributable in text_value provenance fields.
@@ -18037,11 +18343,27 @@ class InternalMCPChatOrchestrator:
                 provenance.setdefault("turn_id", turn_id)
             if provenance:
                 payload["provenance"] = provenance
+                bindings.append(
+                    {
+                        "field": "provenance",
+                        "source": "conversation_context",
+                        "value_present": True,
+                    }
+                )
 
         # JVNAUTOSCI-1040: Inject conversation session ID for task_create
         if tool_name == "task_create" and conversation_session_id:
             if "originating_session_id" not in payload and "session_id" not in payload:
                 payload["originating_session_id"] = conversation_session_id
+                bindings.append(
+                    {
+                        "field": "originating_session_id",
+                        "source": "conversation_session_id",
+                        "value_present": True,
+                    }
+                )
+
+        return bindings
 
     def _build_turn_scoped_search_query_text(
         self,
@@ -18580,6 +18902,8 @@ class InternalMCPChatOrchestrator:
         current_response: str,
         errors: Sequence[str],
         tool_list: Sequence[str],
+        tool_calls: Sequence[Mapping[str, Any]] = (),
+        method_catalogue: Mapping[str, Any] | None = None,
         preferred_tools: Sequence[str] = (),
         llm_client: Any,
         policy_state: _WorkflowModelPolicyState,
@@ -18659,6 +18983,28 @@ class InternalMCPChatOrchestrator:
             "raw_tool_call": (current_response[:4000] if current_response else ""),
             "preferred_tools": "\n".join(f"- {name}" for name in preferred_tool_names),
         }
+        contract_summaries: list[dict[str, Any]] = []
+        if isinstance(method_catalogue, Mapping) and method_catalogue:
+            contract_names: list[str] = []
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, Mapping):
+                    continue
+                tool_name = tool_call.get(self._TOOL_FIELD)
+                if isinstance(tool_name, str) and tool_name.strip():
+                    contract_names.append(tool_name.strip())
+            if not contract_names:
+                contract_names = list(repair_tool_list[:10])
+            contract_summaries = self._catalogue_contract_summaries_for_tools(
+                contract_names,
+                method_catalogue,
+                include_schema=True,
+                max_tools=10,
+            )
+        if contract_summaries:
+            variables["tool_contracts"] = stable_json_dumps(
+                contract_summaries,
+                max_chars=6000,
+            )
         rendered_prompt = self._render_authoritative_prompt(
             self._TOOL_CALL_REPAIR_PROMPTS,
             variables=variables,
@@ -18668,6 +19014,12 @@ class InternalMCPChatOrchestrator:
         if rendered_prompt is None:
             return None
         prompt_text = rendered_prompt.text
+        if contract_summaries:
+            prompt_text = self._inject_prompt_variable(
+                prompt_text,
+                key="tool_contracts",
+                value=stable_json_dumps(contract_summaries, max_chars=6000),
+            )
 
         try:
             aux_llm_calls.append(
@@ -18678,6 +19030,8 @@ class InternalMCPChatOrchestrator:
                         "prompt_preview": prompt_text[:800],
                         "repair_tool_list_strategy": repair_tool_list_strategy,
                         "preferred_tools": list(preferred_tool_names),
+                        "tool_contract_count": len(contract_summaries),
+                        "tool_contracts": contract_summaries,
                     },
                     stage="tool_recovery",
                     component="internal_mcp_orchestrator",

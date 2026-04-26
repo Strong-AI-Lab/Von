@@ -1,0 +1,119 @@
+Output of terminal be4225e1-ef30-4d06-a892-16e7e07a84c7:
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> git log --oneline origin/main..HEAD
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> git diff --stat origin/main
+warning: in the working copy of 'src/backend/integrations/internal_mcp/orchestrator.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/integrations/internal_mcp/schemas.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/languagemodels/structured_tool_calling/client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/languagemodels/structured_tool_calling/providers/gemini_client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/languagemodels/structured_tool_calling/providers/ollama_client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/languagemodels/structured_tool_calling/providers/openai_client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/backend/languagemodels/structured_tool_calling/types.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/backend/test_orchestrator_gmail_profile.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/backend/test_orchestrator_structured_calling.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/backend/test_schema_coercion.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/backend/test_structured_tool_calling_client.py', LF will be replaced by CRLF the next time Git touches it
+ .../integrations/internal_mcp/orchestrator.py      | 394 +++++++++++++++++++--
+ src/backend/integrations/internal_mcp/schemas.py   |   3 +-
+ .../structured_tool_calling/client.py              |  19 +-
+ .../providers/gemini_client.py                     |  46 ++-
+ .../providers/ollama_client.py                     |  38 +-
+ .../providers/openai_client.py                     |  42 ++-
+ .../structured_tool_calling/types.py               |   4 +
+ tests/backend/test_orchestrator_gmail_profile.py   |   8 +
+ .../test_orchestrator_structured_calling.py        | 103 ++++++
+ tests/backend/test_schema_coercion.py              | 114 ++++++
+ .../backend/test_structured_tool_calling_client.py | 162 +++++++++
+ 11 files changed, 896 insertions(+), 37 deletions(-)
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> git status
+On branch codex/JVNAUTOSCI-2108-tool-contract-fulfilment
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+        modified:   src/backend/integrations/internal_mcp/orchestrator.py
+        modified:   src/backend/integrations/internal_mcp/schemas.py
+        modified:   src/backend/languagemodels/structured_tool_calling/client.py
+        modified:   src/backend/languagemodels/structured_tool_calling/providers/gemini_client.py
+        modified:   src/backend/languagemodels/structured_tool_calling/providers/ollama_client.py
+        modified:   src/backend/languagemodels/structured_tool_calling/providers/openai_client.py
+        modified:   src/backend/languagemodels/structured_tool_calling/types.py
+        modified:   tests/backend/test_orchestrator_gmail_profile.py
+        modified:   tests/backend/test_orchestrator_structured_calling.py
+        modified:   tests/backend/test_schema_coercion.py
+        modified:   tests/backend/test_structured_tool_calling_client.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        src/backend/integrations/internal_mcp/tool_call_contracts.py
+
+no changes added to commit (use "git add" and/or "git commit -a")
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal
+Risk profile: normal
+
+Changed paths
+-------------
+src/backend/integrations/internal_mcp/orchestrator.py
+src/backend/integrations/internal_mcp/schemas.py
+src/backend/languagemodels/structured_tool_calling/client.py
+src/backend/languagemodels/structured_tool_calling/providers/gemini_client.py
+src/backend/languagemodels/structured_tool_calling/providers/ollama_client.py
+src/backend/languagemodels/structured_tool_calling/providers/openai_client.py
+src/backend/languagemodels/structured_tool_calling/types.py
+tests/backend/test_orchestrator_gmail_profile.py
+tests/backend/test_orchestrator_structured_calling.py
+tests/backend/test_schema_coercion.py
+tests/backend/test_structured_tool_calling_client.py
+src/backend/integrations/internal_mcp/tool_call_contracts.py
+
+Direct targets
+--------------
+pdm run pytest tests/backend/test_client_capabilities_routes.py tests/backend/test_internal_mcp_orchestrator_batch_execution.py tests/backend/test_internal_mcp_orchestrator_context_limits.py tests/backend/test_internal_mcp_orchestrator_identity_context.py tests/backend/test_internal_mcp_orchestrator_preflight.py tests/backend/test_orchestrator_buttonify_timeout.py tests/backend/test_orchestrator_contract_workflow_resolution.py tests/backend/test_orchestrator_durable_instance_telemetry.py tests/backend/test_orchestrator_extraction.py tests/backend/test_orchestrator_gmail_profile.py tests/backend/test_orchestrator_structured_calling.py tests/backend/test_schema_coercion.py tests/backend/test_structured_tool_calling_client.py tests/backend/test_structured_tool_calling_types.py -q
+  tests/backend/test_client_capabilities_routes.py
+  tests/backend/test_internal_mcp_orchestrator_batch_execution.py
+  tests/backend/test_internal_mcp_orchestrator_context_limits.py
+  tests/backend/test_internal_mcp_orchestrator_identity_context.py
+  tests/backend/test_internal_mcp_orchestrator_preflight.py
+  tests/backend/test_orchestrator_buttonify_timeout.py
+  tests/backend/test_orchestrator_contract_workflow_resolution.py
+  tests/backend/test_orchestrator_durable_instance_telemetry.py
+  tests/backend/test_orchestrator_extraction.py
+  tests/backend/test_orchestrator_gmail_profile.py
+  tests/backend/test_orchestrator_structured_calling.py
+  tests/backend/test_schema_coercion.py
+  tests/backend/test_structured_tool_calling_client.py
+  tests/backend/test_structured_tool_calling_types.py
+
+Primary lanes
+-------------
+backend-core: Core backend services, utilities, models, and general regressions.
+  pdm run pytest tests -m lane_backend_core -q
+backend-mcp: Internal MCP, stdio server, orchestrator, and tool wiring regressions.
+  pdm run pytest tests -m lane_backend_mcp -q
+
+Escalation overlays
+-------------------
+backend-external-like: Tests that touch external-like boundaries such as Jira, Gmail, GitHub, arXiv, or stdio.
+  pdm run pytest tests -m 'trait_external_like and not manual_only' -q
+backend-heavy: Large or slower suites that are best run as a dedicated lane.
+  pdm run pytest tests -m 'cost_heavy and not manual_only and not lane_infra' -q
+
+Aggregate coverage plan
+----------------------
+1. backend-core
+   pdm run pytest tests -m lane_backend_core -q
+2. backend-routes
+   pdm run pytest tests -m lane_backend_routes -q
+3. backend-mcp
+   pdm run pytest tests -m lane_backend_mcp -q
+4. backend-workflows
+   pdm run pytest tests -m lane_backend_workflows -q
+5. infra
+   pdm run pytest tests -m lane_infra -q
+Manual suite omitted by default:
+  pdm run pytest tests -m manual_only -q
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> pdm run pytest tests/backend/test_client_capabilities_routes.py tests/backend/test_internal_mcp_orchestrator_batch_execution.py tests/backend/test_internal_mcp_orchestrator_context_limits.py tests/backend/test_internal_mcp_orchestrator_identity_context.py tests/backend/test_internal_mcp_orchestrator_preflight.py tests/backend/test_orchestrator_buttonify_timeout.py tests/backend/test_orchestrator_contract_workflow_resolution.py tests/backend/test_orchestrator_durable_instance_telemetry.py tests/backend/test_orchestrator_extraction.py tests/backend/test_orchestrator_gmail_profile.py tests/backend/test_orchestrator_structured_calling.py tests/backend/test_schema_coercion.py tests/backend/test_structured_tool_calling_client.py tests/backend/test_structured_tool_calling_types.py -q 2>&1
+ImportError while loading conftest 'C:\Users\mwit860\Programming\Strong-AI-Lab\Von\tests\conftest.py'.
+tests\conftest.py:23: in <module>
+    raise RuntimeError(
+E   RuntimeError: Refusing to run pytest with VON_DB_NAME=von_db. Set VON_DB_NAME=test_von_db (recommended) before running tests.
+PS C:\Users\mwit860\Programming\Strong-AI-Lab\Von> $env:VON_DB_NAME="test_von_db"; pdm run pytest tests/backend/test_client_capabilities_routes.py tests/backend/test_internal_mcp_orchestrator_batch_execution.py tests/backend/test_internal_mcp_orchestrator_context_limits.py tests/backend/test_internal_mcp_orchestrator_identity_context.py tests/backend/test_internal_mcp_orchestrator_preflight.py tests/backend/test_orchestrator_buttonify_timeout.py tests/backend/test_orchestrator_contract_workflow_resolution.py tests/backend/test_orchestrator_durable_instance_telemetry.py tests/backend/test_orchestrator_extraction.py tests/backend/test_orchestrator_gmail_profile.py tests/backend/test_orchestrator_structured_calling.py tests/backend/test_schema_coercion.py tests/backend/test_structured_tool_calling_client.py tests/backend/test_structured_tool_calling_types.py -q 2>&1
+........

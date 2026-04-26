@@ -7,6 +7,7 @@ import asyncio
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
 from ..client import LLMClient, LLMClientConfig
+from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ USER REQUEST:
 
         text_response = response_text
         tool_calls: List[ToolCall] = []
+        tool_call_diagnostics: List[Dict[str, Any]] = []
 
         tool_name_map = {tool.name: tool for tool in available_tools}
 
@@ -191,17 +193,46 @@ USER REQUEST:
                     payload = tool_call.get("payload", {})
 
                     if tool_name in tool_name_map:
+                        if not isinstance(payload, dict):
+                            message = (
+                                f"Tool '{tool_name}' payload must be a JSON object."
+                            )
+                            self.logger.error(message)
+                            tool_call_diagnostics.append(
+                                validation_diagnostic(
+                                    tool=tool_name,
+                                    error_code="payload_not_object",
+                                    message=message,
+                                )
+                            )
+                            continue
                         tool_calls.append(
                             ToolCall(
                                 tool_name=tool_name,
-                                payload=payload if isinstance(payload, dict) else {},
+                                payload=payload,
                             )
                         )
                     else:
-                        self.logger.warning(f"Unknown tool requested: {tool_name}")
+                        message = f"Unknown tool requested: {tool_name}"
+                        self.logger.warning(message)
+                        tool_call_diagnostics.append(
+                            validation_diagnostic(
+                                tool=tool_name if isinstance(tool_name, str) else None,
+                                error_code="unknown_tool",
+                                message=message,
+                            )
+                        )
 
                 except (KeyError, ValueError) as exc:
-                    self.logger.error(f"Invalid tool call format: {exc}")
+                    message = f"Invalid tool call format: {exc}"
+                    self.logger.error(message)
+                    tool_call_diagnostics.append(
+                        validation_diagnostic(
+                            tool=None,
+                            error_code="provider_tool_call_parse_error",
+                            message=message,
+                        )
+                    )
 
             # Remove JSON from text response
             text_response = self._remove_json_from_text(
@@ -214,6 +245,7 @@ USER REQUEST:
             raw_response=None,
             model=self.config.model,
             usage=None,
+            tool_call_diagnostics=tool_call_diagnostics,
         )
 
     def _extract_json_tool_calls(self, text: str) -> List[Dict[str, Any]]:

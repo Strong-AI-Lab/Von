@@ -82,6 +82,7 @@ class LLMResponse:
         raw_response: Original provider response for debugging
         model: Model identifier used for this response
         usage: Token usage info (if available from provider)
+        tool_call_diagnostics: Provider-side tool-call parse/contract diagnostics.
     """
 
     text_response: str
@@ -91,6 +92,7 @@ class LLMResponse:
     usage: Optional[Dict[str, Any]] = (
         None  # e.g., {"prompt_tokens": 100, "completion_tokens": 50}
     )
+    tool_call_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
 
     def has_tool_calls(self) -> bool:
         """Return True if this response contains tool calls."""
@@ -101,3 +103,5 @@ class LLMResponse:
             raise ValueError("text_response must be a string")
         if not isinstance(self.tool_calls, list):
             raise ValueError("tool_calls must be a list")
+        if not isinstance(self.tool_call_diagnostics, list):
+            raise ValueError("tool_call_diagnostics must be a list")

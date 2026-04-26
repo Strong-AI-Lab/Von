@@ -6,6 +6,7 @@ import asyncio
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
 from ..client import LLMClient, LLMClientConfig
+from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,7 @@ class GeminiClient(LLMClient):
 
         text_response = ""
         tool_calls: List[ToolCall] = []
+        tool_call_diagnostics: List[Dict[str, Any]] = []
 
         tool_name_map = {tool.name: tool for tool in available_tools}
 
@@ -205,11 +207,32 @@ class GeminiClient(LLMClient):
 
                         # Validate tool exists
                         if tool_name not in tool_name_map:
-                            self.logger.warning(f"Unknown tool requested: {tool_name}")
+                            message = f"Unknown tool requested: {tool_name}"
+                            self.logger.warning(message)
+                            tool_call_diagnostics.append(
+                                validation_diagnostic(
+                                    tool=tool_name,
+                                    error_code="unknown_tool",
+                                    message=message,
+                                )
+                            )
                             continue
 
                         # Get arguments dict
                         payload = dict(fc.args) if hasattr(fc, "args") else {}
+                        if not isinstance(payload, dict):
+                            message = (
+                                f"Tool '{tool_name}' arguments must be a JSON object."
+                            )
+                            self.logger.error(message)
+                            tool_call_diagnostics.append(
+                                validation_diagnostic(
+                                    tool=tool_name,
+                                    error_code="arguments_not_object",
+                                    message=message,
+                                )
+                            )
+                            continue
 
                         tool_calls.append(
                             ToolCall(
@@ -219,13 +242,27 @@ class GeminiClient(LLMClient):
                         )
 
                     except Exception as exc:
-                        self.logger.error(
-                            f"Failed to parse Gemini function call: {exc}"
+                        message = f"Failed to parse Gemini function call: {exc}"
+                        self.logger.error(message)
+                        tool_call_diagnostics.append(
+                            validation_diagnostic(
+                                tool=None,
+                                error_code="provider_tool_call_parse_error",
+                                message=message,
+                            )
                         )
                         continue
 
         except Exception as exc:
-            self.logger.error(f"Error parsing Gemini response: {exc}")
+            message = f"Error parsing Gemini response: {exc}"
+            self.logger.error(message)
+            tool_call_diagnostics.append(
+                validation_diagnostic(
+                    tool=None,
+                    error_code="provider_response_parse_error",
+                    message=message,
+                )
+            )
 
         return LLMResponse(
             text_response=text_response,
@@ -233,4 +270,5 @@ class GeminiClient(LLMClient):
             raw_response=None,  # Gemini response object is not easily serialisable
             model=self.config.model,
             usage=None,  # Gemini doesn't expose token usage easily
+            tool_call_diagnostics=tool_call_diagnostics,
         )

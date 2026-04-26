@@ -61,6 +61,12 @@ class DummyLLM:
         return self.responses.pop(0)
 
 
+def _install_test_base_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
+    orchestrator._load_base_system_prompt_from_vontology = (  # type: ignore[method-assign]
+        lambda preferred_language=None: ("Test base system prompt", "#V#test_prompt")
+    )
+
+
 @pytest.fixture(autouse=True)
 def _bootstrap_conversation_turn_authority() -> Iterator[None]:
     invalidate_shared_workflow_registry_read_only()
@@ -83,6 +89,7 @@ def test_injects_default_gmail_profile_into_payload():
         max_tool_invocations=1,
         default_gmail_profile="service-profile",
     )
+    _install_test_base_prompt(orchestrator)
 
     result = orchestrator.run(
         prompt="hello",
@@ -118,6 +125,7 @@ def test_gmail_profile_prefers_request_over_default():
         max_tool_invocations=1,
         default_gmail_profile="default-profile",
     )
+    _install_test_base_prompt(orchestrator)
 
     result = orchestrator.run(
         prompt="hi",
