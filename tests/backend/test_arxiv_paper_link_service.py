@@ -292,13 +292,26 @@ def test_identity_resolution_request_emits_event_without_python_workflow_selecti
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.services import identity_resolution_workflow_request_service as mod
+    from types import SimpleNamespace
 
     captured: dict[str, object] = {}
+    fake_submission = SimpleNamespace(
+        success=True,
+        workflow_id=mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+        status="pending",
+        instance_id="wf_identity_1",
+        verification={"launch_input_resolved": True},
+        created_new=True,
+        error_code=None,
+        error=None,
+    )
     monkeypatch.setattr(
-        mod,
-        "launch_event_workflow",
-        lambda **kwargs: captured.update(kwargs)
-        or {"success": True, "triggered": True},
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        lambda **kwargs: captured.update(kwargs) or fake_submission,
     )
 
     report = mod.request_identity_resolution_for_materialised_scholarly_authors(
@@ -309,18 +322,25 @@ def test_identity_resolution_request_emits_event_without_python_workflow_selecti
         user_id="#V#michael_witbrock",
     )
 
-    assert report == {"success": True, "triggered": True}
-    assert captured["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
-    assert captured["event_id"] == (
+    assert report["success"] is True
+    assert report["triggered"] is True
+    assert report["status"] == "pending"
+    assert report["selected_workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
+    assert captured["workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
+    assert captured["source_event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
+    assert captured["source_event_id"] == (
         "test_ingest:#V#paper_one:#V#person_michael_witbrock_0880532f"
     )
-    assert "workflow_id" not in captured
+    assert captured["event_idempotency_key"] == (
+        "test_ingest:#V#paper_one:#V#person_michael_witbrock_0880532f"
+    )
     assert captured["inputs"] == {
         "trigger_source": "test_ingest",
         "paper_concept_id": "#V#paper_one",
         "author_concept_ids": ["#V#person_michael_witbrock_0880532f"],
         "candidate_concept_ids": ["#V#person_michael_witbrock_0880532f"],
         "author_names": ["Michael Witbrock"],
+        "candidate_names": ["Michael Witbrock"],
     }
 
 
