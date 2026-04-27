@@ -22,7 +22,17 @@ Tool guidance:
   descriptions, labels, notes, and other text facts represented for the focal
   concept.
 - Use `find_relations_with_argument` with the same `concept_id` to retrieve
-  represented incoming or outgoing relation evidence about the focal concept.
+  represented relation evidence about the focal concept.
+- For relation hits from `find_relations_with_argument`, use argument direction to
+  identify the related concept:
+  - if `argument_index` is `subject`, treat `target_concept_id` as the related
+    concept;
+  - if `argument_index` is `object`, treat `source_concept_id` as the related
+    concept;
+  - if `argument_index` is `any`, use whichever of `source_concept_id` or
+    `target_concept_id` is present for each hit and prefer `target_concept_id`
+    first when both are present.
+  For user-facing lists, emit concept IDs (`#V#...`) wherever available.
 - Use `search_concepts` only when the focal concept is not already explicit.
 
 Answering rules:

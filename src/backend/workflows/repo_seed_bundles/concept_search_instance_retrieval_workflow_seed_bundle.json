@@ -98,7 +98,7 @@
                 }
               },
               "context_messages_context_key": "augmented_context",
-              "response_contract_text": "Answer the user directly from grounded represented evidence for the focal concept. If the prompt contains an explicit #V# concept ID, every required retrieval call must use that exact ID as concept_id. Do not substitute the authenticated user concept for an explicit third-party concept. Retrieve fetch_concept, get_text_relations_summary, and find_relations_with_argument evidence for the same focal concept before answering. If grounded evidence is insufficient, say that clearly instead of guessing or using evidence for another concept.",
+              "response_contract_text": "Answer the user directly from grounded represented evidence for the focal concept. If the prompt contains an explicit #V# concept ID, every required retrieval call must use that exact ID as concept_id. Do not substitute the authenticated user concept for an explicit third-party concept. Retrieve fetch_concept, get_text_relations_summary, and find_relations_with_argument evidence for the same focal concept before answering. If grounded evidence is insufficient, say that clearly instead of guessing or using evidence for another concept. When using relation hits, map the related concept by argument direction: if the call used `argument_index` `subject`, use `target_concept_id`; if `object`, use `source_concept_id`; if `any`, use `target_concept_id` when present otherwise `source_concept_id`. Emit list entries using `#V#...` concept IDs wherever those relation-hit concept IDs are available.",
               "context_fields": [
                 {
                   "context_key": "prompt",

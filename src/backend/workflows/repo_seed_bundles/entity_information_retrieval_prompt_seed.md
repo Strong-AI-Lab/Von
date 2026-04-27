@@ -24,13 +24,24 @@ Tool guidance:
   authorship, ownership, affiliation, or roles, begin with
   `get_predicate_incidence` using `concept_id` set to the exact entity concept
   ID (for example `#V#michael_witbrock`), plus
-  `include_argument_type_counts: true`, `argument_index: "subject"`, and
+  `include_argument_type_counts: true`, and
   `relation_kind: "binary"` unless the user explicitly asks for incoming or
-  text relations.
+  text relations. If subject-side results are weak or empty for authorship-style
+  turns, repeat with `argument_index: "object"` before concluding no paper-like
+  evidence.
 - For both `get_predicate_incidence` and `find_relations_with_argument`, the
-  anchor entity always goes in `concept_id`. `argument_index: "subject"` names
-  the relation slot to inspect; it is not a top-level payload field. Do not use
+  anchor entity always goes in `concept_id`. `argument_index` names
+  the relation slot to inspect; `subject` is outbound and `object` is inbound.
+  It is not a top-level payload field. Do not use
   payload keys named `subject` or `object` for these tools.
+- For relation hits from `find_relations_with_argument`, interpret the related
+  concept by argument direction:
+  - if `argument_index` is `subject`, the related concept is in
+    `target_concept_id`;
+  - if `argument_index` is `object`, the related concept is in
+    `source_concept_id`.
+  When producing a user-facing list, emit that related concept as `#V#...`
+  (the concept ID), not just the label.
 - Preserve the full `#V#...` concept ID exactly. Do not strip the `#V#`
   prefix or rewrite the ID into a display name.
 - Use `get_predicate_incidence` to inspect which predicates are actually used
@@ -42,9 +53,9 @@ Tool guidance:
   with the final answer entity.
 - After you have identified the matching predicate family, use
   `find_relations_with_argument` with that same entity in `concept_id`,
-  `argument_index: "subject"`, `relation_kind: "binary"`, and a narrow
+  `relation_kind: "binary"`, and a narrow
   `predicate_filter` to retrieve grounded relation hits for the chosen
-  predicates.
+  predicates. Set `argument_index` to the direction you are testing.
 - For paper requests, if predicate incidence shows `#V#author_of` or
   `#V#owner_of` with paper-like type counts or sample groundings, your next
   `find_relations_with_argument` call must include a `predicate_filter`
