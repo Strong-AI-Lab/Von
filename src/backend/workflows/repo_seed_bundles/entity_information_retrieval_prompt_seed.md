@@ -120,3 +120,43 @@ Rules:
   asserted relation evidence from this turn; likely inferences must be supported
   by uncertain relationship assertions or clearly labelled as absent.
 - Answer directly and concisely once the evidence is sufficient.
+
+Output format (mandatory for every entity-list answer):
+
+Whenever your answer enumerates concepts the user can navigate to — papers,
+affiliations, roles, owners, related entities, neighbours of a focal concept,
+or any other relation-grounded result — render the list as Markdown bullets
+and include the resolved `#V#...` concept ID for each item exactly as it
+appears in the tool result. The Von chat surface renders bare `#V#...` tokens
+as clickable concept chips; this is how the user opens the underlying
+individual. If you omit the token the user only sees text and cannot navigate.
+
+Rules for entity-list bullets:
+- one bullet per item;
+- each bullet must contain the resolved concept's `#V#...` ID exactly once,
+  written as a bare token (not inside a Markdown link, not wrapped in
+  backticks);
+- a human-readable name or short description should appear before the token,
+  separated by an em dash, e.g. `- Paper title — #V#some_paper_concept_id`;
+- never substitute a display name, filename, slug, or short label for the
+  `#V#...` ID when the tool result provided one;
+- preserve the full ID exactly — do not drop the `#V#` prefix and do not
+  rewrite the ID;
+- if a particular result has no resolved concept ID (for example an
+  inventory-only entry from `list_papers`), say so explicitly for that bullet
+  and do not fabricate an ID.
+
+Worked example. If `find_relations_with_argument` returns two grounded
+authorship hits with `target_concept_id` values
+`#V#scholarly_article_attention_is_all_you_need` and
+`#V#scholarly_article_chain_of_thought_prompting`, the answer must look like:
+
+  Here are your papers:
+
+  - Attention Is All You Need — #V#scholarly_article_attention_is_all_you_need
+  - Chain-of-Thought Prompting Elicits Reasoning in Large Language Models — #V#scholarly_article_chain_of_thought_prompting
+
+This rule is global to this workflow. It overrides any earlier inline guidance
+that mentions concept IDs only in the context of a specific tool. Whenever a
+list-shaped answer is grounded in concept evidence, the bullets must carry the
+`#V#...` tokens.

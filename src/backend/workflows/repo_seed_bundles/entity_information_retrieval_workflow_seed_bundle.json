@@ -2,8 +2,8 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
-  "source_tag": "JVNAUTOSCI-2079",
+  "seed_version": "3",
+  "source_tag": "JVNAUTOSCI-2147",
   "supported_action_ids": [
     "llm.action"
   ],
