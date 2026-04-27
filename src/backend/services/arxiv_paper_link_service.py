@@ -5,6 +5,9 @@ import re
 from typing import Any, Iterable, Mapping
 
 from . import concept_search_service
+from .identity_resolution_workflow_request_service import (
+    request_identity_resolution_for_materialised_scholarly_authors,
+)
 from .relationship_write_service import add_relationship
 from .text_value_service import get_texts_for_concept, upsert_text_for_concept
 
@@ -1096,6 +1099,35 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
                 "success": False,
                 "triggered": False,
                 "reason": f"refresh_request_failed:{exc}",
+            }
+    if author_concept_ids and author_links_written > 0:
+        try:
+            result["identity_resolution_refresh"] = (
+                request_identity_resolution_for_materialised_scholarly_authors(
+                    author_concept_ids=author_concept_ids,
+                    paper_concept_id=paper_concept_id,
+                    author_names=author_names,
+                    trigger_source=(
+                        "materialise_scholarly_representation_for_arxiv_file_copy"
+                    ),
+                    user_id=user_concept_id,
+                    event_payload={
+                        "paper_concept_id": paper_concept_id,
+                        "arxiv_id": normalised_arxiv_id,
+                        "file_copy_concept_id": file_copy_concept_id,
+                        "author_concept_ids": author_concept_ids,
+                        "author_names": author_names,
+                        "source": (
+                            "materialise_scholarly_representation_for_arxiv_file_copy"
+                        ),
+                    },
+                )
+            )
+        except Exception as exc:
+            result["identity_resolution_refresh"] = {
+                "success": False,
+                "triggered": False,
+                "reason": f"identity_resolution_request_failed:{exc}",
             }
     return result
 

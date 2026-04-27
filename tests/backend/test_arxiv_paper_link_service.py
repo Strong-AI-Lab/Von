@@ -73,15 +73,23 @@ def test_link_file_copy_to_arxiv_paper_creates_stable_paper_instance_and_links(
     )
 
 
-def test_materialise_scholarly_representation_adds_metadata_authors_and_topics():
+def test_materialise_scholarly_representation_adds_metadata_authors_and_topics(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from src.backend.services.computer_file_copy_service import (
         create_computer_file_copy_instance,
     )
-    from src.backend.services.arxiv_paper_link_service import (
-        materialise_scholarly_representation_for_arxiv_file_copy,
-    )
+    from src.backend.services import arxiv_paper_link_service as mod
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.text_value_service import get_texts_for_concept
+
+    identity_requests: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "request_identity_resolution_for_materialised_scholarly_authors",
+        lambda **kwargs: identity_requests.append(kwargs)
+        or {"success": True, "triggered": True, "instance_id": "wf_identity_1"},
+    )
 
     record = create_computer_file_copy_instance(
         type_concept_id="#V#arxiv_pdf_file",
@@ -103,7 +111,7 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
         "categories": ["cs.AI", "cs.CL"],
         "publication_date": "2025-02-21",
     }
-    report = materialise_scholarly_representation_for_arxiv_file_copy(
+    report = mod.materialise_scholarly_representation_for_arxiv_file_copy(
         user_concept_id="#V#user_test",
         arxiv_id="2502.14996",
         file_copy_concept_id=record.concept_id,
@@ -116,6 +124,11 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
     assert report["topic_labels"] == ["cs.AI", "cs.CL"]
     assert report["type_asserted"] is True
     assert report["file_link_verified"] is True
+    assert report["identity_resolution_refresh"] == {
+        "success": True,
+        "triggered": True,
+        "instance_id": "wf_identity_1",
+    }
 
     paper_id = report["paper_concept_id"]
     paper_doc = ConceptsRepository.find_one({"concept_id": paper_id})
@@ -130,6 +143,14 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
 
     author_ids = list(rel.get("#V#authored_by") or [])
     assert author_ids
+    assert identity_requests
+    assert identity_requests[0]["paper_concept_id"] == paper_id
+    assert identity_requests[0]["author_concept_ids"] == author_ids
+    assert identity_requests[0]["author_names"] == metadata["authors"]
+    assert identity_requests[0]["trigger_source"] == (
+        "materialise_scholarly_representation_for_arxiv_file_copy"
+    )
+    assert identity_requests[0]["user_id"] == "#V#user_test"
     for author_name, author_id in zip(metadata["authors"], author_ids, strict=False):
         author_name_texts = get_texts_for_concept(
             subject_concept_id=author_id,
@@ -265,6 +286,42 @@ def test_predict_helpers_return_stable_expected_concept_ids() -> None:
     assert paper_id.startswith("#V#paper_on_arxiv_2603_21702_")
     assert author_id.startswith("#V#person_amit_kanujia_")
     assert topic_id.startswith("#V#research_topic_cs_ai_")
+
+
+def test_identity_resolution_request_emits_event_without_python_workflow_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import identity_resolution_workflow_request_service as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "launch_event_workflow",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "triggered": True},
+    )
+
+    report = mod.request_identity_resolution_for_materialised_scholarly_authors(
+        author_concept_ids=["#V#person_michael_witbrock_0880532f"],
+        paper_concept_id="#V#paper_one",
+        author_names=["Michael Witbrock"],
+        trigger_source="test_ingest",
+        user_id="#V#michael_witbrock",
+    )
+
+    assert report == {"success": True, "triggered": True}
+    assert captured["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
+    assert captured["event_id"] == (
+        "test_ingest:#V#paper_one:#V#person_michael_witbrock_0880532f"
+    )
+    assert "workflow_id" not in captured
+    assert captured["inputs"] == {
+        "trigger_source": "test_ingest",
+        "paper_concept_id": "#V#paper_one",
+        "author_concept_ids": ["#V#person_michael_witbrock_0880532f"],
+        "candidate_concept_ids": ["#V#person_michael_witbrock_0880532f"],
+        "author_names": ["Michael Witbrock"],
+    }
 
 
 def test_existing_author_concept_still_reasserts_name_metadata(monkeypatch) -> None:
