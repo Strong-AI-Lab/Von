@@ -291,27 +291,48 @@ def test_predict_helpers_return_stable_expected_concept_ids() -> None:
 def test_identity_resolution_request_emits_event_without_python_workflow_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The request service must route through ``launch_event_workflow``.
+
+    Routing decisions for ``identity_resolution.requested`` belong to the
+    persistent ``EventWorkflowBinding`` registry (see JVNAUTOSCI-2150 phase 1),
+    so the request service is allowed to know only the *event type* — not
+    which workflow handles it.  This test pins that contract: it stubs
+    ``launch_event_workflow`` to capture its arguments and asserts the
+    request service hands the launcher the event-shaped contract and never
+    selects a workflow ID itself.
+    """
+
     from src.backend.services import identity_resolution_workflow_request_service as mod
-    from types import SimpleNamespace
 
     captured: dict[str, object] = {}
-    fake_submission = SimpleNamespace(
-        success=True,
-        workflow_id=mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-        status="pending",
-        instance_id="wf_identity_1",
-        verification={"launch_input_resolved": True},
-        created_new=True,
-        error_code=None,
-        error=None,
-    )
+
+    def _fake_launch(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "triggered": True,
+            "outcome": "triggered",
+            "reason": "created_new_instance",
+            "hint": "Created a new durable workflow instance for this event.",
+            "workflow_id": "#V#some_workflow_resolved_from_binding",
+            "selected_workflow_id": "#V#some_workflow_resolved_from_binding",
+            "instance_id": "wf_identity_1",
+            "event_type": kwargs.get("event_type"),
+            "event_id": kwargs.get("event_id"),
+            "idempotency_key": kwargs.get("event_id"),
+            "idempotent_reused": False,
+            "verification": {"launch_input_resolved": True},
+            "submission_status": "pending",
+            "binding_id": "binding_test_1",
+            "binding_source": "persistent",
+            "launch_strategy": "resolved_persistent_bindings",
+            "launches": [],
+            "launch_count": 1,
+        }
+
     monkeypatch.setattr(
-        "src.backend.workflows.durable.WorkflowInstanceManager",
-        lambda: object(),
-    )
-    monkeypatch.setattr(
-        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
-        lambda **kwargs: captured.update(kwargs) or fake_submission,
+        "src.backend.services.workflow_event_integration_service.launch_event_workflow",
+        _fake_launch,
     )
 
     report = mod.request_identity_resolution_for_materialised_scholarly_authors(
@@ -325,23 +346,91 @@ def test_identity_resolution_request_emits_event_without_python_workflow_selecti
     assert report["success"] is True
     assert report["triggered"] is True
     assert report["status"] == "pending"
-    assert report["selected_workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
-    assert captured["workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
-    assert captured["source_event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
-    assert captured["source_event_id"] == (
+    # The workflow_id in the report comes from the launch result (i.e. from
+    # the persistent binding), not from a Python constant.
+    assert report["workflow_id"] == "#V#some_workflow_resolved_from_binding"
+    assert report["selected_workflow_id"] == "#V#some_workflow_resolved_from_binding"
+    assert report["binding_id"] == "binding_test_1"
+    assert report["launch_strategy"] == "resolved_persistent_bindings"
+
+    # The request service must have called launch_event_workflow with the
+    # event contract and *without* pre-selecting a workflow ID (workflow_id
+    # stays None so binding resolution is the authoritative router).
+    assert captured["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
+    assert captured["event_id"] == (
         "test_ingest:#V#paper_one:#V#person_michael_witbrock_0880532f"
     )
-    assert captured["event_idempotency_key"] == (
-        "test_ingest:#V#paper_one:#V#person_michael_witbrock_0880532f"
+    assert captured["workflow_id"] is None
+    assert captured["user_id"] == "#V#michael_witbrock"
+    inputs = captured["inputs"]
+    assert isinstance(inputs, dict)
+    assert inputs["paper_concept_id"] == "#V#paper_one"
+    assert inputs["candidate_concept_ids"] == [
+        "#V#person_michael_witbrock_0880532f",
+    ]
+    assert inputs["author_concept_ids"] == [
+        "#V#person_michael_witbrock_0880532f",
+    ]
+    assert inputs["author_names"] == ["Michael Witbrock"]
+    assert inputs["candidate_names"] == ["Michael Witbrock"]
+    assert inputs["trigger_source"] == "test_ingest"
+    event_payload = captured["event_payload"]
+    assert isinstance(event_payload, dict)
+    assert event_payload["paper_concept_id"] == "#V#paper_one"
+    assert event_payload["candidate_concept_ids"] == [
+        "#V#person_michael_witbrock_0880532f",
+    ]
+
+
+def test_identity_resolution_request_passes_through_explicit_workflow_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit ``workflow_id`` overrides flow through to ``launch_event_workflow``.
+
+    The override path mirrors ``launch_event_workflow``'s own contract: when
+    callers pass an explicit workflow id, it is used as a one-off binding
+    rather than the persisted registry.  This is allowed as an explicit, not
+    silent, escape hatch.
+    """
+
+    from src.backend.services import identity_resolution_workflow_request_service as mod
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.launch_event_workflow",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "success": True,
+            "triggered": True,
+            "outcome": "triggered",
+            "reason": "created_new_instance",
+            "workflow_id": kwargs.get("workflow_id"),
+            "selected_workflow_id": kwargs.get("workflow_id"),
+            "instance_id": "wf_identity_2",
+            "event_type": kwargs.get("event_type"),
+            "event_id": kwargs.get("event_id"),
+            "idempotency_key": kwargs.get("event_id"),
+            "idempotent_reused": False,
+            "verification": {},
+            "submission_status": "pending",
+            "binding_source": "explicit",
+            "launches": [],
+            "launch_count": 1,
+        },
     )
-    assert captured["inputs"] == {
-        "trigger_source": "test_ingest",
-        "paper_concept_id": "#V#paper_one",
-        "author_concept_ids": ["#V#person_michael_witbrock_0880532f"],
-        "candidate_concept_ids": ["#V#person_michael_witbrock_0880532f"],
-        "author_names": ["Michael Witbrock"],
-        "candidate_names": ["Michael Witbrock"],
-    }
+
+    report = mod.request_identity_resolution_for_candidate_concepts(
+        candidate_concept_ids=["#V#person_a"],
+        paper_concept_id="#V#paper_two",
+        trigger_source="test_override",
+        workflow_id="#V#some_other_workflow",
+    )
+
+    assert report["success"] is True
+    assert report["workflow_id"] == "#V#some_other_workflow"
+    assert captured["workflow_id"] == "#V#some_other_workflow"
+    assert captured["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
 
 
 def test_existing_author_concept_still_reasserts_name_metadata(monkeypatch) -> None:

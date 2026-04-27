@@ -1,8 +1,14 @@
-"""Bootstrap helpers for long-running identity-resolution scheduling.
+"""Bootstrap helpers for long-running identity-resolution authority.
 
-Ensures an idempotent managed interval schedule exists for
-``#V#entity_identity_resolution_workflow`` so duplicate-entity maintenance
-runs automatically over the long term.
+This module owns the Vontology-side bootstrap surfaces for the canonical
+``#V#entity_identity_resolution_workflow``:
+
+* an idempotent managed interval schedule (so duplicate-entity maintenance
+  keeps running automatically), and
+* an idempotent persistent :class:`EventWorkflowBinding` for
+  ``identity_resolution.requested`` (so paper-ingest and any other producers
+  of that event route through the same persisted authority surface, rather
+  than via a hard-coded workflow ID in Python).  See JVNAUTOSCI-2150 phase 1.
 """
 
 from __future__ import annotations
@@ -13,6 +19,9 @@ import os
 import threading
 from typing import Any
 
+from .identity_resolution_workflow_request_service import (
+    IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE,
+)
 from .namespace_service import coerce_namespace, derive_namespace_for_actor
 from ..workflows.durable.models import ScheduleType, WorkflowSchedule
 from ..workflows.durable.startup import get_instance_manager
@@ -27,6 +36,9 @@ from ..workflows.durable.entity_identity_resolution_workflow import (
 logger = logging.getLogger(__name__)
 
 IDENTITY_RESOLUTION_SCHEDULE_MANAGED_KEY = "identity_resolution_background_v1"
+IDENTITY_RESOLUTION_EVENT_BINDING_MANAGED_BY = (
+    "identity_resolution_schedule_bootstrap_service"
+)
 
 _bootstrap_lock = threading.Lock()
 _bootstrap_completed = False
@@ -240,3 +252,52 @@ def ensure_identity_resolution_background_schedule() -> dict[str, Any]:
             "interval_seconds": int(desired["interval_seconds"]),
             "namespace": str(desired["namespace"]),
         }
+
+
+def ensure_identity_resolution_event_bindings() -> dict[str, Any]:
+    """Register the persistent event binding for ``identity_resolution.requested``.
+
+    This is the canonical Vontology-side authority that connects the
+    ``identity_resolution.requested`` event (emitted, for example, by paper
+    ingest after scholarly-author materialisation) to the durable
+    ``#V#entity_identity_resolution_workflow``.  Routing is therefore a
+    persisted-binding decision, not a Python constant.
+
+    The function is idempotent: it uses ``upsert_event_binding`` with
+    ``replace_existing=True`` so repeated startup calls converge on a single
+    enabled binding without producing duplicates.
+    """
+
+    if not _env_flag(
+        "VON_IDENTITY_RESOLUTION_EVENT_BINDING_ENABLE", default=True
+    ):
+        return {
+            "success": True,
+            "ensured": False,
+            "reason": "event_binding_bootstrap_disabled",
+            "created_count": 0,
+            "updated_count": 0,
+            "binding_count": 0,
+            "bindings": [],
+        }
+
+    manager = get_instance_manager()
+    binding, created, updated = manager.upsert_event_binding(
+        event_type=IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE,
+        workflow_id=ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+        input_mapping={},
+        enabled=True,
+        actor=IDENTITY_RESOLUTION_EVENT_BINDING_MANAGED_BY,
+        replace_existing=True,
+    )
+    return {
+        "success": True,
+        "ensured": True,
+        "created_count": 1 if created else 0,
+        "updated_count": 1 if updated else 0,
+        "binding_count": 1,
+        "bindings": [binding.to_status_dict()],
+        "event_type": IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE,
+        "workflow_id": ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+    }
+

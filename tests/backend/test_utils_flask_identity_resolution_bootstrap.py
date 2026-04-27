@@ -183,6 +183,27 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         lambda: {"success": True, "ensured": True, "created_count": 1},
     )
     monkeypatch.setattr(
+        schedule_bootstrap,
+        "ensure_identity_resolution_event_bindings",
+        lambda: {
+            "success": True,
+            "ensured": True,
+            "created_count": 1,
+            "updated_count": 0,
+            "binding_count": 1,
+            "event_type": "identity_resolution.requested",
+            "workflow_id": "#V#entity_identity_resolution_workflow",
+            "bindings": [
+                {
+                    "binding_id": "binding_test_1",
+                    "event_type": "identity_resolution.requested",
+                    "workflow_id": "#V#entity_identity_resolution_workflow",
+                    "enabled": True,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
         parent_specificity_prompt_bootstrap,
         "ensure_parent_specificity_prompt_support",
         lambda: {
@@ -321,6 +342,14 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert isinstance(bootstrap_report, dict)
     assert bootstrap_report.get("success") is True
     assert bootstrap_report.get("created_count") == 1
+    event_binding_report = result.get("identity_resolution_event_binding_bootstrap")
+    assert isinstance(event_binding_report, dict)
+    assert event_binding_report.get("success") is True
+    assert event_binding_report.get("created_count") == 1
+    assert event_binding_report.get("event_type") == "identity_resolution.requested"
+    assert event_binding_report.get("workflow_id") == (
+        "#V#entity_identity_resolution_workflow"
+    )
     parent_prompt_report = result.get("parent_specificity_prompt_bootstrap")
     assert isinstance(parent_prompt_report, dict)
     assert parent_prompt_report.get("success") is True

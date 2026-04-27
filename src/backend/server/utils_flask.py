@@ -671,6 +671,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         try:
             from ..services.identity_resolution_schedule_bootstrap_service import (
                 ensure_identity_resolution_background_schedule,
+                ensure_identity_resolution_event_bindings,
             )
 
             identity_schedule_report = ensure_identity_resolution_background_schedule()
@@ -680,9 +681,19 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                     "[durable_workflows] identity schedule bootstrap failed: %s",
                     identity_schedule_report,
                 )
+
+            identity_event_binding_report = ensure_identity_resolution_event_bindings()
+            result["identity_resolution_event_binding_bootstrap"] = (
+                identity_event_binding_report
+            )
+            if not bool(identity_event_binding_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] identity event-binding bootstrap failed: %s",
+                    identity_event_binding_report,
+                )
         except Exception as schedule_exc:
             app_logger.warning(
-                "[durable_workflows] identity schedule bootstrap error: %s",
+                "[durable_workflows] identity schedule/event-binding bootstrap error: %s",
                 schedule_exc,
             )
 

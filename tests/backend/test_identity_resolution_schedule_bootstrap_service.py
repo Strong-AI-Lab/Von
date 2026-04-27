@@ -146,3 +146,94 @@ def test_bootstrap_recreates_legacy_namespace_schedule(monkeypatch) -> None:
     assert report["disabled_count"] == 1
     assert (legacy.schedule_id, False) in fake.enabled_updates
     assert fake.created[0].namespace == "#V#system@default"
+
+
+# --- Event-binding bootstrap (JVNAUTOSCI-2150 phase 1) -----------------------
+
+
+class _FakeBindingManager:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.created = True
+        self.updated = False
+
+    def upsert_event_binding(self, **kwargs):  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        binding = SimpleNamespace(
+            binding_id="binding_test_1",
+            event_type=kwargs["event_type"],
+            workflow_id=kwargs["workflow_id"],
+            input_mapping=dict(kwargs.get("input_mapping") or {}),
+            enabled=bool(kwargs.get("enabled", True)),
+            revision=1,
+            to_status_dict=lambda self=None: {
+                "binding_id": "binding_test_1",
+                "event_type": kwargs["event_type"],
+                "workflow_id": kwargs["workflow_id"],
+                "enabled": bool(kwargs.get("enabled", True)),
+                "input_mapping": dict(kwargs.get("input_mapping") or {}),
+                "revision": 1,
+            },
+        )
+        return binding, self.created, self.updated
+
+
+def test_event_binding_bootstrap_registers_persistent_binding(monkeypatch) -> None:
+    from src.backend.services import identity_resolution_schedule_bootstrap_service as mod
+
+    fake = _FakeBindingManager()
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+    monkeypatch.setenv("VON_IDENTITY_RESOLUTION_EVENT_BINDING_ENABLE", "1")
+
+    report = mod.ensure_identity_resolution_event_bindings()
+
+    assert report["success"] is True
+    assert report["ensured"] is True
+    assert report["created_count"] == 1
+    assert report["updated_count"] == 0
+    assert report["binding_count"] == 1
+    assert report["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
+    assert report["workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
+
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["event_type"] == mod.IDENTITY_RESOLUTION_REQUESTED_EVENT_TYPE
+    assert call["workflow_id"] == mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
+    assert call["enabled"] is True
+    assert call["replace_existing"] is True
+    assert call["actor"] == mod.IDENTITY_RESOLUTION_EVENT_BINDING_MANAGED_BY
+
+
+def test_event_binding_bootstrap_idempotent_when_already_present(monkeypatch) -> None:
+    from src.backend.services import identity_resolution_schedule_bootstrap_service as mod
+
+    fake = _FakeBindingManager()
+    fake.created = False
+    fake.updated = False
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+    monkeypatch.setenv("VON_IDENTITY_RESOLUTION_EVENT_BINDING_ENABLE", "1")
+
+    report = mod.ensure_identity_resolution_event_bindings()
+
+    assert report["success"] is True
+    assert report["created_count"] == 0
+    assert report["updated_count"] == 0
+    assert report["binding_count"] == 1
+
+
+def test_event_binding_bootstrap_disabled_via_env(monkeypatch) -> None:
+    from src.backend.services import identity_resolution_schedule_bootstrap_service as mod
+
+    fake = _FakeBindingManager()
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+    monkeypatch.setenv("VON_IDENTITY_RESOLUTION_EVENT_BINDING_ENABLE", "0")
+
+    report = mod.ensure_identity_resolution_event_bindings()
+
+    assert report["success"] is True
+    assert report["ensured"] is False
+    assert report["reason"] == "event_binding_bootstrap_disabled"
+    assert report["binding_count"] == 0
+    assert fake.calls == []
