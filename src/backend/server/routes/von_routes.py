@@ -1377,7 +1377,13 @@ def _build_live_llm_exchange_summary(
         if isinstance(latest_progress_payload, Mapping)
         else {}
     )
-    latest_stage_id = _canonicalise_live_runtime_stage(
+    # JVNAUTOSCI-2133: Prefer workflow_stage_id (canonical workflow stage label
+    # threaded by the chokepoint) over orchestrator-internal `stage`/`phase`
+    # labels when matching live progress events to workflow stage rows.
+    latest_workflow_stage_id = _progress_str(
+        latest_progress_mapping.get("workflow_stage_id")
+    )
+    latest_stage_id = latest_workflow_stage_id or _canonicalise_live_runtime_stage(
         _progress_str(latest_progress_mapping.get("phase"))
         or _progress_str(latest_progress_mapping.get("stage"))
     )
@@ -1930,10 +1936,16 @@ def _build_turn_execution_stage_diagnostics(
         stage_events = [
             entry
             for entry in diagnostic_events
-            if _canonicalise_turn_execution_stage_id(
-                entry.get("phase") or entry.get("stage")
+            if (
+                # JVNAUTOSCI-2133: Match by workflow_stage_id (authoritative
+                # workflow stage label threaded through the chokepoint) when
+                # present, falling back to phase/stage canonicalisation.
+                _progress_str(entry.get("workflow_stage_id")) == stage_id
+                or _canonicalise_turn_execution_stage_id(
+                    entry.get("phase") or entry.get("stage")
+                )
+                == stage_id
             )
-            == stage_id
         ]
         latest_stage_event = stage_events[-1] if stage_events else None
         live_stage_payload = dict(live_stage_diagnostic_map.get(stage_id) or {})
@@ -3762,6 +3774,11 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "phase": _progress_str(merged.get("phase")) or stage,
             "phase_label": _progress_str(merged.get("phase_label")),
             "stage_label": _progress_str(merged.get("stage_label")),
+            # JVNAUTOSCI-2133: Preserve the authoritative workflow_stage_id
+            # threaded through the chokepoint so downstream stage matchers can
+            # group LLM exchange events by the workflow stage that owns them
+            # rather than by the orchestrator-internal `stage`/`phase` label.
+            "workflow_stage_id": _progress_str(merged.get("workflow_stage_id")),
             "goal_label": goal_label,
             "subtask": subtask,
             "tool": _progress_str(merged.get("tool")),
@@ -3881,7 +3898,12 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         stage_summaries = _normalise_live_stage_summary_map(
             existing.get("_stage_summaries")
         )
-        live_stage_id = _canonicalise_live_runtime_stage(
+        # JVNAUTOSCI-2133: Prefer authoritative workflow_stage_id (threaded
+        # through the chokepoint) over orchestrator-internal phase/stage labels
+        # when bucketing live progress events into workflow stage summaries.
+        live_stage_id = _progress_str(
+            merged.get("workflow_stage_id")
+        ) or _canonicalise_live_runtime_stage(
             _progress_str(merged.get("phase")) or _progress_str(merged.get("stage"))
         )
         if live_stage_id:

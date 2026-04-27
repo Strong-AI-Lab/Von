@@ -1120,6 +1120,7 @@ def _run_gateway_llm_step_no_tools(
         stage: str | None = None,
         provider: str | None = None,
         candidate: Mapping[str, Any] | None = None,
+        workflow_stage_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1135,6 +1136,8 @@ def _run_gateway_llm_step_no_tools(
             entry["provider"] = provider
         if isinstance(candidate, Mapping):
             entry["candidate"] = dict(candidate)
+        if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+            entry["workflow_stage_id"] = workflow_stage_id.strip()
         llm_calls.append(entry)
 
     try:
@@ -1407,6 +1410,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         stage: str | None = None,
         provider: str | None = None,
         candidate: Mapping[str, Any] | None = None,
+        workflow_stage_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1422,6 +1426,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             entry["provider"] = provider
         if isinstance(candidate, Mapping):
             entry["candidate"] = dict(candidate)
+        if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+            entry["workflow_stage_id"] = workflow_stage_id.strip()
         llm_calls.append(entry)
 
     def _build_simple_error_result(

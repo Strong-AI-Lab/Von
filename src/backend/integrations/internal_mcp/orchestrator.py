@@ -5414,6 +5414,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
                 prefer_default_model=bool(data.get("prefer_default_model")),
+                workflow_stage_id="tool_plan",
             )
             duration_ms = (time.perf_counter() - llm_start) * 1000.0
         else:
@@ -6197,6 +6198,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
                 prefer_default_model=bool(request.data.get("prefer_default_model")),
+                workflow_stage_id="narration",
             )
         else:
             narration_response = request.environment.llm_client.generate(
@@ -7745,6 +7747,7 @@ class InternalMCPChatOrchestrator:
                     required_prompt_tools=required_prompt_tools,
                     context_telemetry=tool_plan_context_telemetry,
                     prefer_default_model=bool(data.get("prefer_default_model")),
+                    workflow_stage_id="tool_plan",
                 )
                 if llm_response.tool_calls:
                     response = llm_response.text_response or ""
@@ -7787,6 +7790,7 @@ class InternalMCPChatOrchestrator:
                 emit_progress=emit_progress_cb,
                 context_telemetry=tool_plan_context_telemetry,
                 prefer_default_model=bool(data.get("prefer_default_model")),
+                workflow_stage_id="tool_plan",
             )
             tool_calls = None
             has_valid_tool_call = False
@@ -9352,6 +9356,7 @@ class InternalMCPChatOrchestrator:
                 emit_progress=emit_progress_cb,
                 context_telemetry=follow_up_context_telemetry,
                 prefer_default_model=bool(data.get("prefer_default_model")),
+                workflow_stage_id="screen_backfill",
             )
             current_response = self._ensure_tool_limit_notice(
                 current_response if isinstance(current_response, str) else "",
@@ -9437,6 +9442,7 @@ class InternalMCPChatOrchestrator:
             emit_progress=emit_progress_cb,
             context_telemetry=follow_up_context_telemetry,
             prefer_default_model=bool(data.get("prefer_default_model")),
+            workflow_stage_id="screen_backfill",
         )
 
         # Check if the summariser response contains more tool calls.
@@ -10052,6 +10058,7 @@ class InternalMCPChatOrchestrator:
                     emit_progress=emit_progress_cb,
                     context_telemetry=follow_up_context_telemetry,
                     prefer_default_model=bool(data.get("prefer_default_model")),
+                    workflow_stage_id="screen_backfill",
                 )
                 if isinstance(limited_response, str) and limited_response.strip():
                     current_response = self._ensure_tool_limit_notice(
@@ -15825,7 +15832,21 @@ class InternalMCPChatOrchestrator:
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
         timeout_override_sec: float | None = None,
+        workflow_stage_id: str | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
+        # JVNAUTOSCI-2133: ``workflow_stage_id`` is the canonical
+        # workflow-path stage identifier (e.g. ``tool_plan``,
+        # ``tool_execute``, ``selector_preparation``) that the per-stage
+        # diagnostics matcher in von_routes uses to locate live LLM
+        # exchanges. The internal ``stage`` argument is the orchestrator-
+        # local label (``tool_call``, ``summariser``, ``critic``, etc.) and
+        # is preserved unchanged for routing/policy decisions; emitting
+        # ``workflow_stage_id`` alongside it lets stage diagnostics match
+        # without forcing every call site to pretend the two namespaces
+        # are the same.
+        _stage_extra: dict[str, Any] = {}
+        if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+            _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = policy_stage or stage
 
         candidates = self._stage_model_candidates(
@@ -15853,6 +15874,7 @@ class InternalMCPChatOrchestrator:
                 {
                     "status": "llm_request_prepared",
                     "stage": stage,
+                    **_stage_extra,
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
@@ -15908,6 +15930,7 @@ class InternalMCPChatOrchestrator:
                             "error": probe_error,
                             "error_class": probe_error_class,
                             "failure_kind": "provider_unreachable",
+                            **_stage_extra,
                             **attempt_meta,
                         }
                     )
@@ -15920,6 +15943,7 @@ class InternalMCPChatOrchestrator:
                     stage=stage,
                     provider=provider,
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -15960,6 +15984,7 @@ class InternalMCPChatOrchestrator:
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
+                        **_stage_extra,
                         **attempt_meta,
                         **self._build_live_llm_progress_payload(
                             request_telemetry=request_telemetry,
@@ -15993,6 +16018,7 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "chunks": 1,
                             "duration_ms": int(duration_ms),
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16013,6 +16039,7 @@ class InternalMCPChatOrchestrator:
                             "success": True,
                             "error": None,
                             "fallback_used": bool(errors),
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16037,6 +16064,7 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 fallback_attempts.append(
                     {
@@ -16078,6 +16106,7 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        **_stage_extra,
                         **selection_metadata,
                     }
                 )
@@ -16100,6 +16129,7 @@ class InternalMCPChatOrchestrator:
                             "error": str(exc),
                             "error_class": type(exc).__name__,
                             "failure_kind": _fk,
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16122,6 +16152,7 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -16171,6 +16202,7 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    **_stage_extra,
                     **selection_metadata,
                 }
             )
@@ -16395,7 +16427,14 @@ class InternalMCPChatOrchestrator:
         required_prompt_tools: Sequence[str] = (),
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
+        workflow_stage_id: str | None = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
+        # JVNAUTOSCI-2133: see ``_run_llm_with_fallbacks`` for the
+        # rationale on ``workflow_stage_id`` vs the orchestrator-internal
+        # ``stage`` argument. The two namespaces remain distinct here.
+        _stage_extra: dict[str, Any] = {}
+        if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+            _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = stage
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
@@ -16425,6 +16464,7 @@ class InternalMCPChatOrchestrator:
                 {
                     "status": "llm_request_prepared",
                     "stage": stage,
+                    **_stage_extra,
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
@@ -16620,6 +16660,7 @@ class InternalMCPChatOrchestrator:
                             "error": probe_error,
                             "error_class": probe_error_class,
                             "failure_kind": "provider_unreachable",
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16637,6 +16678,7 @@ class InternalMCPChatOrchestrator:
                     stage=stage,
                     provider=provider,
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 errors.append(
                     {
@@ -16675,6 +16717,7 @@ class InternalMCPChatOrchestrator:
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
+                        **_stage_extra,
                         **attempt_meta,
                         **self._build_live_llm_progress_payload(
                             request_telemetry=request_telemetry,
@@ -16720,6 +16763,7 @@ class InternalMCPChatOrchestrator:
                             "chunks": 1,
                             "tokens_streamed": completion_tokens,
                             "duration_ms": int(duration_ms),
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16740,6 +16784,7 @@ class InternalMCPChatOrchestrator:
                             "success": True,
                             "error": None,
                             "fallback_used": bool(errors),
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16771,6 +16816,7 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 fallback_attempts.append(
                     {
@@ -16829,6 +16875,7 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        **_stage_extra,
                         **selection_metadata,
                     }
                 )
@@ -16864,6 +16911,7 @@ class InternalMCPChatOrchestrator:
                             "error": str(exc),
                             "error_class": type(exc).__name__,
                             "failure_kind": _fk,
+                            **_stage_extra,
                             **attempt_meta,
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
@@ -16886,6 +16934,7 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
                 )
                 errors.append(
                     {
@@ -16936,6 +16985,7 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    **_stage_extra,
                     **selection_metadata,
                 }
             )
@@ -19075,6 +19125,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
                 prefer_default_model=bool(default_model),
+                workflow_stage_id="tool_plan",
             )
         else:
             repaired_response = llm_client.generate(
@@ -30895,6 +30946,7 @@ class InternalMCPChatOrchestrator:
                             context_telemetry=selector_context_telemetry,
                             prefer_default_model=bool(default_model),
                             timeout_override_sec=timeout_override_sec,
+                            workflow_stage_id="selector_preparation",
                         )
                     )
                     prepared_outputs["selector_raw_response"] = selector_response_text
@@ -31612,6 +31664,7 @@ class InternalMCPChatOrchestrator:
                             context_telemetry=context_telemetry,
                             prefer_default_model=bool(default_model),
                             timeout_override_sec=timeout_override_sec,
+                            workflow_stage_id="response_finalising",
                         )
                     )
                 else:
@@ -31961,6 +32014,7 @@ class InternalMCPChatOrchestrator:
             stage: str | None = None,
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
+            workflow_stage_id: str | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -31972,6 +32026,8 @@ class InternalMCPChatOrchestrator:
             }
             if isinstance(stage, str) and stage.strip():
                 payload["stage"] = stage.strip()
+            if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+                payload["workflow_stage_id"] = workflow_stage_id.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
@@ -32612,6 +32668,7 @@ class InternalMCPChatOrchestrator:
             stage: str | None = None,
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
+            workflow_stage_id: str | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -32623,6 +32680,8 @@ class InternalMCPChatOrchestrator:
             }
             if isinstance(stage, str) and stage.strip():
                 payload["stage"] = stage.strip()
+            if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+                payload["workflow_stage_id"] = workflow_stage_id.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
@@ -33225,6 +33284,7 @@ class InternalMCPChatOrchestrator:
                     record_llm_call=_record_llm_call,
                     emit_progress=_emit_progress_local,
                     prefer_default_model=prefer_default_model,
+                    workflow_stage_id="response_finalising",
                 )
             except Exception as exc:
                 aux_llm_calls.append(
@@ -33353,6 +33413,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call=_record_llm_call,
                 emit_progress=_emit_progress_local,
                 prefer_default_model=prefer_default_model,
+                workflow_stage_id="response_finalising",
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
@@ -34166,6 +34227,7 @@ class InternalMCPChatOrchestrator:
                             emit_progress=_emit_selector_progress,
                             context_telemetry=selector_context_telemetry,
                             prefer_default_model=prefer_default_model,
+                            workflow_stage_id="selector_preparation",
                         )
                     )
                     selector_selection = self._workflow_selector.resolve_selection(
@@ -40021,6 +40083,7 @@ class InternalMCPChatOrchestrator:
                 emit_progress=_emit_progress_local,
                 context_telemetry=plain_response_context_telemetry,
                 prefer_default_model=prefer_default_model,
+                workflow_stage_id="response_finalising",
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
