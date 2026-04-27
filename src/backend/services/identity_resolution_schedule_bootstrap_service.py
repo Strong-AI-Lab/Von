@@ -27,10 +27,8 @@ from ..workflows.durable.models import ScheduleType, WorkflowSchedule
 from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.entity_identity_resolution_workflow import (
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-    DEFAULT_AUTO_MERGE_THRESHOLD,
-    DEFAULT_REVIEW_THRESHOLD,
+    DEFAULT_MAX_CANDIDATE_PAIRS,
     DEFAULT_SCAN_LIMIT,
-    DEFAULT_MAX_PAIR_EVAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,14 +62,6 @@ def _coerce_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def _coerce_float(value: Any, *, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
 def _desired_schedule_config() -> dict[str, Any]:
     user_id = str(
         os.getenv("VON_IDENTITY_RESOLUTION_SCHEDULE_USER_ID", "#V#system")
@@ -100,33 +90,20 @@ def _desired_schedule_config() -> dict[str, Any]:
         minimum=20,
         maximum=2000,
     )
-    max_pair_evaluations = _coerce_int(
-        os.getenv("VON_IDENTITY_RESOLUTION_MAX_PAIR_EVALUATIONS"),
-        default=DEFAULT_MAX_PAIR_EVAL,
-        minimum=20,
+    max_candidate_pairs = _coerce_int(
+        os.getenv("VON_IDENTITY_RESOLUTION_MAX_CANDIDATE_PAIRS"),
+        default=DEFAULT_MAX_CANDIDATE_PAIRS,
+        minimum=10,
         maximum=5000,
     )
-    auto_threshold = _coerce_float(
-        os.getenv("VON_IDENTITY_RESOLUTION_AUTO_MERGE_THRESHOLD"),
-        default=DEFAULT_AUTO_MERGE_THRESHOLD,
-        minimum=0.5,
-        maximum=0.999,
-    )
-    review_threshold = _coerce_float(
-        os.getenv("VON_IDENTITY_RESOLUTION_REVIEW_THRESHOLD"),
-        default=DEFAULT_REVIEW_THRESHOLD,
-        minimum=0.3,
-        maximum=0.999,
-    )
-    if review_threshold > auto_threshold:
-        review_threshold = auto_threshold
 
+    # Note: confidence thresholds are no longer Python policy. The LLM
+    # rumination stage (#V#entity_duplicate_reasoning_prompt) authors
+    # action/confidence per pair. See JVNAUTOSCI-2148.
     default_inputs = {
         "managed_schedule_key": IDENTITY_RESOLUTION_SCHEDULE_MANAGED_KEY,
         "scan_limit": scan_limit,
-        "max_pair_evaluations": max_pair_evaluations,
-        "auto_apply_confidence_threshold": auto_threshold,
-        "review_confidence_threshold": review_threshold,
+        "max_candidate_pairs": max_candidate_pairs,
     }
 
     return {

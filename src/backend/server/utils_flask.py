@@ -438,6 +438,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.episode_evaluation_workflow_vontology_service import (
             bootstrap_canonical_episode_evaluation_workflow,
         )
+        from ..services.entity_identity_resolution_workflow_vontology_service import (
+            bootstrap_canonical_entity_identity_resolution_workflow,
+        )
         from ..services.paper_recommendation_workflow_vontology_service import (
             bootstrap_canonical_paper_recommendation_workflow,
         )
@@ -500,6 +503,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         episode_evaluation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="episode evaluation workflow",
             bootstrap_fn=bootstrap_canonical_episode_evaluation_workflow,
+        )
+        entity_identity_resolution_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="entity identity-resolution workflow",
+            bootstrap_fn=bootstrap_canonical_entity_identity_resolution_workflow,
         )
         paper_recommendation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper recommendation workflow",
@@ -570,6 +577,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["episode_evaluation_workflow_bootstrap"] = (
             episode_evaluation_workflow_bootstrap_report
         )
+        result["entity_identity_resolution_workflow_bootstrap"] = (
+            entity_identity_resolution_workflow_bootstrap_report
+        )
         result["paper_recommendation_workflow_bootstrap"] = (
             paper_recommendation_workflow_bootstrap_report
         )
@@ -630,6 +640,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] episode evaluation workflow bootstrap failed: %s",
                 episode_evaluation_workflow_bootstrap_report,
+            )
+        if not bool(
+            entity_identity_resolution_workflow_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] entity identity-resolution workflow bootstrap failed: %s",
+                entity_identity_resolution_workflow_bootstrap_report,
             )
         if not bool(
             paper_recommendation_workflow_bootstrap_report.get("success", False)

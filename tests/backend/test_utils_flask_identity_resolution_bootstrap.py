@@ -92,6 +92,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         concept_search_instance_retrieval_workflow_vontology_service as concept_search_instance_retrieval_workflow_bootstrap,
         conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
         entity_information_retrieval_workflow_vontology_service as entity_information_retrieval_workflow_bootstrap,
+        entity_identity_resolution_workflow_vontology_service as entity_identity_resolution_workflow_bootstrap,
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
@@ -254,6 +255,16 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        entity_identity_resolution_workflow_bootstrap,
+        "bootstrap_canonical_entity_identity_resolution_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#entity_identity_resolution_workflow",
+            "prompt_concept_id": "#V#entity_duplicate_reasoning_prompt",
+            "seeded_prompt_count": 0,
+        },
+    )
+    monkeypatch.setattr(
         concept_search_instance_retrieval_workflow_bootstrap,
         "bootstrap_canonical_concept_search_instance_retrieval_workflow",
         lambda: {
@@ -379,6 +390,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert (
         concept_search_instance_retrieval_workflow_bootstrap_report.get("success")
         is True
+    )
+    entity_identity_resolution_workflow_bootstrap_report = result.get(
+        "entity_identity_resolution_workflow_bootstrap"
+    )
+    assert isinstance(entity_identity_resolution_workflow_bootstrap_report, dict)
+    assert entity_identity_resolution_workflow_bootstrap_report.get("success") is True
+    assert (
+        entity_identity_resolution_workflow_bootstrap_report.get("prompt_concept_id")
+        == "#V#entity_duplicate_reasoning_prompt"
     )
     conversation_turn_workflow_bootstrap_report = result.get(
         "conversation_turn_workflow_bootstrap"

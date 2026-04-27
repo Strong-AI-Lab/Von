@@ -1,4 +1,22 @@
-"""Durable entity identity-resolution workflow (JVNAUTOSCI-1253)."""
+"""Durable entity identity-resolution workflow.
+
+The reasoning policy lives in Vontology: the workflow definition itself
+(``#V#entity_identity_resolution_workflow``) routes through an LLM rumination
+state that consumes the prompt concept
+``#V#entity_duplicate_reasoning_prompt``. Python here provides only support
+primitives: candidate enumeration, evidence assembly dispatch, and execution
+of the LLM's ``identity_recommendations`` (merge / queue-for-review).
+
+This module deliberately performs NO scoring, ranking, classification, or
+merge-direction policy. Earlier versions encoded those policies in Python
+(``_score_pair``, ``_build_recommendations``, ``_build_clusters``,
+``_merge_direction``); they were retired under JVNAUTOSCI-2148 because they
+were a textbook AGENTS.md section 4.2 violation - code-side semantic steering for
+durable classification and ranking that should be authored.
+
+History: JVNAUTOSCI-1253 (original creation), JVNAUTOSCI-2148 (rumination
+authority migration), JVNAUTOSCI-2153 (heuristic retirement).
+"""
 
 from __future__ import annotations
 
@@ -14,7 +32,11 @@ from ...security.visibility_predicates import (
     get_specific_to_user_values,
 )
 from ...services.concept_merge_service import merge_concepts
-from ...services.text_value_service import get_texts_for_concept
+from ...services.entity_identity_evidence_service import (
+    build_candidate_evidence_pairs,
+    DEFAULT_AUTHORED_PAPER_LIMIT,
+    DEFAULT_TEXT_RELATION_LIMIT,
+)
 from ...services.uncertain_relationship_service import (
     upsert_uncertain_relationship_assertion,
 )
@@ -37,28 +59,29 @@ logger = logging.getLogger(__name__)
 
 ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID = "#V#entity_identity_resolution_workflow"
 IDENTITY_REVIEW_PREDICATE = "#V#potential_duplicate_of"
-IDENTITY_POLICY_VERSION = "entity_identity_resolution_policy.v1"
+IDENTITY_POLICY_VERSION = "entity_identity_resolution_policy.v2_llm_rumination"
+
+ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID = "#V#entity_duplicate_reasoning_prompt"
+ENTITY_DUPLICATE_REASONING_PROMPT_LINK_PREDICATE = "#V#hasEntityDuplicateReasoningPrompt"
 
 DEFAULT_SCAN_LIMIT = 300
-DEFAULT_TEXT_SCAN_LIMIT = 100
-DEFAULT_MAX_PAIR_EVAL = 600
-DEFAULT_AUTO_MERGE_THRESHOLD = 0.93
-DEFAULT_REVIEW_THRESHOLD = 0.72
-DEFAULT_DETAIL_LIMIT = 120
 DEFAULT_FOCUSED_SCAN_LIMIT = 1000
+DEFAULT_MAX_CANDIDATE_PAIRS = 600
+DEFAULT_DETAIL_LIMIT = 120
+DEFAULT_MIN_NAME_KEY_LENGTH = 3
 
-_NAME_PREDICATES = {"hasname", "vhasname"}
-_SOURCE_HINTS = (
-    "source",
-    "url",
-    "email",
-    "doi",
-    "orcid",
-    "github",
-    "jira",
-    "slack",
-    "arxiv",
-)
+VALID_LLM_ACTIONS = {
+    "auto_merge",
+    "queue_review",
+    "leave_distinct",
+    "insufficient_evidence",
+}
+ACTIONABLE_LLM_ACTIONS = {"auto_merge", "queue_review"}
+
+
+# ---------------------------------------------------------------------------
+# Coercion helpers (kept; primitive - not policy)
+# ---------------------------------------------------------------------------
 
 
 def _utc_now_iso() -> str:
@@ -103,19 +126,6 @@ def _as_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _normalise_concept_ids(value: Any) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in _as_string_list(value):
-        candidate = item.strip()
-        if not candidate:
-            continue
-        if candidate not in seen:
-            seen.add(candidate)
-            out.append(candidate)
-    return out
-
-
 def _as_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
@@ -126,6 +136,16 @@ def _as_string_list(value: Any) -> list[str]:
             if isinstance(item, str) and item.strip()
         ]
     return []
+
+
+def _normalise_concept_ids(value: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in _as_string_list(value):
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 
 def _name_key(value: Any) -> str:
@@ -140,38 +160,6 @@ def _name_key(value: Any) -> str:
     lowered = stripped.casefold()
     collapsed = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
     return " ".join(collapsed.split())
-
-
-def _source_key(value: Any) -> str:
-    text = _as_text(value).casefold()
-    if not text:
-        return ""
-    text = re.sub(r"^https?://", "", text)
-    text = text.rstrip("/")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _predicate_key(value: Any) -> str:
-    raw = _as_text(value).casefold()
-    return raw.replace("#", "").replace("_", "").replace("-", "")
-
-
-def _extract_relationship_targets(value: Any) -> list[str]:
-    if isinstance(value, str):
-        cleaned = value.strip()
-        return [cleaned] if cleaned.startswith("#V#") else []
-    if isinstance(value, list):
-        out: list[str] = []
-        for item in value:
-            out.extend(_extract_relationship_targets(item))
-        return out
-    if isinstance(value, dict):
-        out: list[str] = []
-        for item in value.values():
-            out.extend(_extract_relationship_targets(item))
-        return out
-    return []
 
 
 def _scope_key(relationships: Mapping[str, Any]) -> str:
@@ -191,7 +179,6 @@ def _infer_kind(concept_doc: Mapping[str, Any]) -> str:
             return "instance"
         if cleaned in {"type", "instance", "predicate"}:
             return cleaned
-
     relationships = concept_doc.get("relationships")
     if not isinstance(relationships, Mapping):
         return "unknown"
@@ -205,379 +192,237 @@ def _infer_kind(concept_doc: Mapping[str, Any]) -> str:
     return "unknown"
 
 
-def _profile_weight(profile: Mapping[str, Any]) -> int:
-    return (
-        len(profile.get("name_keys") or []) * 2
-        + len(profile.get("source_refs") or []) * 3
-        + len(profile.get("relationship_targets") or [])
-        + len(profile.get("type_ids") or [])
-    )
+# ---------------------------------------------------------------------------
+# Candidate enumeration (no scoring - that is the LLM's job)
+# ---------------------------------------------------------------------------
 
 
-def _merge_direction(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str, str]:
-    a_id = str(a.get("concept_id") or "")
-    b_id = str(b.get("concept_id") or "")
-    if _profile_weight(a) > _profile_weight(b):
-        return b_id, a_id
-    if _profile_weight(b) > _profile_weight(a):
-        return a_id, b_id
-    return (b_id, a_id) if a_id <= b_id else (a_id, b_id)
-
-
-def _build_profile(
-    concept_doc: Mapping[str, Any],
-    *,
-    text_limit: int,
-) -> dict[str, Any] | None:
-    concept_id = _as_text(concept_doc.get("concept_id"))
-    if not concept_id:
-        return None
-
-    relationships = concept_doc.get("relationships")
-    if not isinstance(relationships, Mapping):
-        relationships = {}
-
-    if _infer_kind(concept_doc) != "instance":
-        return None
-
-    type_ids = sorted(
-        {
-            type_id
-            for type_id in _as_string_list(relationships.get("is_an_instance_of"))
-            if type_id and type_id != "#V#predicate"
-        }
-    )
-    if not type_ids:
-        return None
-
-    names: set[str] = set()
+def _collect_candidate_name_keys(concept_doc: Mapping[str, Any]) -> list[str]:
+    keys: set[str] = set()
+    candidates: list[str] = []
     display_name = get_concept_display_name_with_names_fallback(dict(concept_doc))
     if display_name:
-        names.add(display_name)
+        candidates.append(display_name)
     top_name = _as_text(concept_doc.get("name"))
     if top_name:
-        names.add(top_name)
-
-    source_refs: set[str] = set()
-    try:
-        text_rows = get_texts_for_concept(concept_id, limit=text_limit)
-    except Exception as exc:
-        logger.debug("[identity_resolution] text scan failed for %s: %s", concept_id, exc)
-        text_rows = []
-
-    for row in text_rows:
-        if not isinstance(row, Mapping):
-            continue
-        text_value = _as_text(row.get("text"))
-        if not text_value:
-            continue
-        pred_raw = str(row.get("predicate") or "").casefold()
-        pred_key = _predicate_key(row.get("predicate"))
-        if pred_key in _NAME_PREDICATES:
-            names.add(text_value)
-        if any(token in pred_raw for token in _SOURCE_HINTS):
-            source_value = _source_key(text_value)
-            if source_value:
-                source_refs.add(source_value)
-
-    for predicate, raw_val in relationships.items():
-        if any(token in str(predicate or "").casefold() for token in _SOURCE_HINTS):
-            for candidate in _as_string_list(raw_val):
-                source_value = _source_key(candidate)
-                if source_value:
-                    source_refs.add(source_value)
-
-    name_keys = sorted({k for k in (_name_key(name) for name in names) if k and len(k) >= 3})
-    if not name_keys:
-        return None
-
-    rel_targets = sorted(
-        {
-            value
-            for value in _extract_relationship_targets(relationships)
-            if value and value != concept_id
-        }
-    )
-
-    return {
-        "concept_id": concept_id,
-        "display_name": display_name or top_name or concept_id,
-        "type_ids": type_ids,
-        "scope_key": _scope_key(relationships),
-        "name_keys": name_keys,
-        "source_refs": sorted(source_refs),
-        "relationship_targets": rel_targets,
-    }
+        candidates.append(top_name)
+    for raw in concept_doc.get("names") or []:
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(raw.strip())
+    for candidate in candidates:
+        normalised = _name_key(candidate)
+        if normalised and len(normalised) >= DEFAULT_MIN_NAME_KEY_LENGTH:
+            keys.add(normalised)
+    return sorted(keys)
 
 
-def _scan_profiles(
+def _enumerate_candidate_pairs(
     *,
     scan_limit: int,
-    text_limit: int,
-    concept_ids: Sequence[str] | None = None,
-) -> list[dict[str, Any]]:
-    normalised_concept_ids = _normalise_concept_ids(concept_ids)
-    if normalised_concept_ids:
-        query: dict[str, Any] = {
-            "concept_id": {"$in": normalised_concept_ids},
-        }
-    else:
-        query = {"relationships.is_an_instance_of": {"$exists": True, "$ne": []}}
-
-    cursor = ConceptsRepository.find(
-        query,
-        projection={
-            "concept_id": 1,
-            "name": 1,
-            "names": 1,
-            "computed_kind": 1,
-            "relationships": 1,
-        },
-        sort=[("concept_id", 1)],
-        limit=scan_limit,
-    )
-    profiles: list[dict[str, Any]] = []
-    for concept_doc in cursor:
-        if not isinstance(concept_doc, Mapping):
-            continue
-        profile = _build_profile(concept_doc, text_limit=text_limit)
-        if profile is not None:
-            profiles.append(profile)
-    return profiles
-
-
-def _score_pair(
-    *,
-    a: Mapping[str, Any],
-    b: Mapping[str, Any],
-    name_key: str,
-    auto_threshold: float,
-    review_threshold: float,
-) -> dict[str, Any] | None:
-    a_id = str(a.get("concept_id") or "")
-    b_id = str(b.get("concept_id") or "")
-    if not a_id or not b_id or a_id == b_id:
-        return None
-    if str(a.get("scope_key") or "") != str(b.get("scope_key") or ""):
-        return None
-
-    shared_types = sorted(
-        set(str(v) for v in (a.get("type_ids") or [])).intersection(
-            str(v) for v in (b.get("type_ids") or [])
-        )
-    )
-    shared_sources = sorted(
-        set(str(v) for v in (a.get("source_refs") or [])).intersection(
-            str(v) for v in (b.get("source_refs") or [])
-        )
-    )
-    shared_targets = sorted(
-        set(str(v) for v in (a.get("relationship_targets") or [])).intersection(
-            str(v) for v in (b.get("relationship_targets") or [])
-        )
-    )
-
-    score = 0.62
-    rationale = [f"Shared normalised name key '{name_key}'."]
-
-    if shared_types:
-        score += min(0.14, 0.08 + 0.01 * len(shared_types))
-        rationale.append("Shared type context.")
-    if shared_sources:
-        score += min(0.24, 0.12 + 0.04 * len(shared_sources))
-        rationale.append("Shared source references.")
-    if shared_targets:
-        score += min(0.14, 0.04 + 0.02 * len(shared_targets))
-        rationale.append("Shared relationship neighbourhood.")
-    if not shared_sources and not shared_targets:
-        score -= 0.08
-        rationale.append("No shared source/relationship evidence; applying caution.")
-
-    # Short person-name pairs are high-collision; require stronger support.
-    if "#V#person" in shared_types and len(name_key.split()) <= 2 and not shared_sources:
-        score -= 0.08
-        rationale.append("Common short person-name collision risk.")
-
-    score = max(0.0, min(0.999, score))
-    evidence_count = (
-        int(bool(shared_types)) + int(bool(shared_sources)) + int(bool(shared_targets))
-    )
-
-    if score >= auto_threshold and evidence_count >= 1:
-        action = "auto_merge"
-    elif score >= review_threshold:
-        action = "queue_review"
-    else:
-        action = "ignore"
-
-    source_id, target_id = _merge_direction(a, b)
-    return {
-        "source_id": source_id,
-        "target_id": target_id,
-        "pair_ids": sorted([a_id, b_id]),
-        "name_key": name_key,
-        "confidence_score": round(score, 4),
-        "action": action,
-        "evidence_count": evidence_count,
-        "shared_type_ids": shared_types[:8],
-        "shared_source_references": shared_sources[:8],
-        "shared_relationship_targets": shared_targets[:8],
-        "rationale": rationale[:6],
-        "policy_version": IDENTITY_POLICY_VERSION,
-        "generated_at_utc": _utc_now_iso(),
-    }
-
-
-def _build_recommendations(
-    *,
-    profiles: Sequence[Mapping[str, Any]],
-    max_pair_eval: int,
-    auto_threshold: float,
-    review_threshold: float,
+    candidate_concept_ids: Sequence[str],
+    candidate_names: Sequence[str],
+    max_candidate_pairs: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    by_id = {
-        str(profile.get("concept_id") or ""): profile
-        for profile in profiles
-        if str(profile.get("concept_id") or "")
+    """Walk concepts and emit unordered same-name-key pairs.
+
+    No scoring or decision logic - every emitted pair is a question for the
+    LLM rumination stage. The only mechanical filters are: same scope, kind
+    must be ``instance``, name keys must be reasonably long.
+    """
+
+    focused_concept_ids = _normalise_concept_ids(candidate_concept_ids)
+    focused_concept_id_set = set(focused_concept_ids)
+    focused_name_keys: set[str] = {
+        key
+        for key in (_name_key(name) for name in candidate_names)
+        if key and len(key) >= DEFAULT_MIN_NAME_KEY_LENGTH
     }
 
-    name_index: dict[str, list[str]] = {}
-    for concept_id, profile in by_id.items():
-        for key in profile.get("name_keys") or []:
-            if isinstance(key, str) and key:
-                name_index.setdefault(key, []).append(concept_id)
+    base_query: dict[str, Any] = {
+        "relationships.is_an_instance_of": {"$exists": True, "$ne": []}
+    }
+    projection = {
+        "concept_id": 1,
+        "name": 1,
+        "names": 1,
+        "computed_kind": 1,
+        "relationships": 1,
+    }
 
-    pair_map: dict[tuple[str, str], dict[str, Any]] = {}
-    evaluated = 0
+    effective_scan_limit = scan_limit
+    if focused_concept_ids:
+        effective_scan_limit = max(
+            scan_limit,
+            min(DEFAULT_FOCUSED_SCAN_LIMIT, len(focused_concept_ids) * 500),
+        )
+
+    name_key_index: dict[str, list[dict[str, Any]]] = {}
+    indexed_concept_ids: set[str] = set()
+    docs_kept = 0
+    focused_docs_preloaded = 0
+
+    def _index_candidate_doc(
+        concept_id: str,
+        keys: Sequence[str],
+        relationships: Mapping[str, Any],
+    ) -> bool:
+        if concept_id in indexed_concept_ids:
+            return False
+        scope_key = _scope_key(relationships)
+        for key in keys:
+            name_key_index.setdefault(key, []).append(
+                {"concept_id": concept_id, "scope_key": scope_key}
+            )
+        indexed_concept_ids.add(concept_id)
+        return True
+
+    # Pass 1: focused docs. These must be indexed even when their concept IDs
+    # fall outside the bounded full-corpus cursor; paper ingest uses this path
+    # to ask about newly materialised author concepts.
+    if focused_concept_ids:
+        focus_cursor = ConceptsRepository.find(
+            {"concept_id": {"$in": focused_concept_ids}},
+            projection=projection,
+        )
+        for doc in focus_cursor:
+            if isinstance(doc, Mapping) and _infer_kind(doc) == "instance":
+                concept_id = _as_text(doc.get("concept_id"))
+                keys = _collect_candidate_name_keys(doc)
+                if not concept_id or not keys:
+                    continue
+                for key in keys:
+                    focused_name_keys.add(key)
+                relationships = doc.get("relationships")
+                if not isinstance(relationships, Mapping):
+                    relationships = {}
+                if _index_candidate_doc(concept_id, keys, relationships):
+                    docs_kept += 1
+                    focused_docs_preloaded += 1
+
+    # Pass 2: full corpus (bounded). For focused mode we only retain rows
+    # whose name keys overlap focused_name_keys (or are themselves the focus).
+    docs_scanned = 0
+    cursor = ConceptsRepository.find(
+        base_query,
+        projection=projection,
+        sort=[("concept_id", 1)],
+        limit=effective_scan_limit,
+    )
+    for doc in cursor:
+        docs_scanned += 1
+        if not isinstance(doc, Mapping):
+            continue
+        if _infer_kind(doc) != "instance":
+            continue
+        concept_id = _as_text(doc.get("concept_id"))
+        if not concept_id:
+            continue
+        if concept_id in indexed_concept_ids:
+            continue
+
+        keys = _collect_candidate_name_keys(doc)
+        if not keys:
+            continue
+
+        if focused_concept_ids or focused_name_keys:
+            # In focused mode require the doc to be either a focus concept or
+            # share a name key with a focus.
+            is_focus_concept = concept_id in focused_concept_id_set
+            shares_focus_name = bool(set(keys) & focused_name_keys)
+            if not is_focus_concept and not shares_focus_name:
+                continue
+
+        relationships = doc.get("relationships")
+        if not isinstance(relationships, Mapping):
+            relationships = {}
+
+        if _index_candidate_doc(concept_id, keys, relationships):
+            docs_kept += 1
+
+    pairs: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
     truncated = False
 
-    for name_key in sorted(name_index):
-        ids = sorted(set(name_index[name_key]))
-        if len(ids) < 2:
+    for key in sorted(name_key_index):
+        bucket = name_key_index[key]
+        if len(bucket) < 2:
             continue
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
-                pair_key = (ids[i], ids[j])
-                if pair_key not in pair_map and evaluated >= max_pair_eval:
+        bucket_sorted = sorted(bucket, key=lambda row: row["concept_id"])
+        for i in range(len(bucket_sorted)):
+            for j in range(i + 1, len(bucket_sorted)):
+                a = bucket_sorted[i]
+                b = bucket_sorted[j]
+                if a["concept_id"] == b["concept_id"]:
+                    continue
+                if a["scope_key"] != b["scope_key"]:
+                    continue
+                ordered = tuple(sorted([a["concept_id"], b["concept_id"]]))
+                if ordered in seen_pairs:
+                    continue
+                seen_pairs.add(ordered)
+                if len(pairs) >= max_candidate_pairs:
                     truncated = True
                     break
-                candidate = _score_pair(
-                    a=by_id[pair_key[0]],
-                    b=by_id[pair_key[1]],
-                    name_key=name_key,
-                    auto_threshold=auto_threshold,
-                    review_threshold=review_threshold,
+                pairs.append(
+                    {
+                        "a_concept_id": ordered[0],
+                        "b_concept_id": ordered[1],
+                        "name_key": key,
+                        "scope_key": a["scope_key"],
+                    }
                 )
-                evaluated += 1
-                if candidate is None:
-                    continue
-                current = pair_map.get(pair_key)
-                if current is None or float(candidate.get("confidence_score") or 0.0) > float(
-                    current.get("confidence_score") or 0.0
-                ):
-                    pair_map[pair_key] = candidate
             if truncated:
                 break
         if truncated:
             break
 
-    recommendations = sorted(
-        pair_map.values(),
-        key=lambda row: (
-            -float(row.get("confidence_score") or 0.0),
-            str(row.get("source_id") or ""),
-            str(row.get("target_id") or ""),
-        ),
-    )
     diagnostics = {
-        "profile_count": len(by_id),
-        "name_key_count": len(name_index),
-        "evaluated_pairs": evaluated,
-        "max_pair_evaluations": max_pair_eval,
+        "docs_scanned": docs_scanned,
+        "docs_kept_for_indexing": docs_kept,
+        "focused_docs_preloaded": focused_docs_preloaded,
+        "name_key_count": len(name_key_index),
+        "candidate_pair_count": len(pairs),
+        "max_candidate_pairs": max_candidate_pairs,
         "truncated": truncated,
+        "focused_mode": bool(focused_concept_ids or focused_name_keys),
+        "focused_concept_count": len(focused_concept_ids),
+        "focused_name_key_count": len(focused_name_keys),
+        "scan_limit_used": effective_scan_limit,
     }
-    return recommendations, diagnostics
+    return pairs, diagnostics
 
 
-def _build_clusters(
-    recommendations: Sequence[Mapping[str, Any]],
-    *,
-    min_confidence: float,
-) -> list[dict[str, Any]]:
-    parent: dict[str, str] = {}
-    rank: dict[str, int] = {}
-    edges: list[dict[str, Any]] = []
+# ---------------------------------------------------------------------------
+# LLM-recommendation execution (no policy invented; we only execute what the
+# LLM authored)
+# ---------------------------------------------------------------------------
 
-    def _find(node: str) -> str:
-        root = parent.setdefault(node, node)
-        if root != node:
-            parent[node] = _find(root)
-        return parent[node]
 
-    def _union(a: str, b: str) -> None:
-        ra = _find(a)
-        rb = _find(b)
-        if ra == rb:
-            return
-        wa = rank.get(ra, 0)
-        wb = rank.get(rb, 0)
-        if wa < wb:
-            parent[ra] = rb
-            return
-        if wa > wb:
-            parent[rb] = ra
-            return
-        parent[rb] = ra
-        rank[ra] = wa + 1
+def _coerce_recommendations(value: Any, *, max_items: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value[:max_items]:
+        if isinstance(item, Mapping):
+            out.append(dict(item))
+    return out
 
-    for rec in recommendations:
-        confidence = float(rec.get("confidence_score") or 0.0)
-        if confidence < min_confidence:
-            continue
-        if str(rec.get("action") or "") == "ignore":
-            continue
-        source_id = _as_text(rec.get("source_id"))
-        target_id = _as_text(rec.get("target_id"))
-        if not source_id or not target_id or source_id == target_id:
-            continue
-        _union(source_id, target_id)
-        edges.append(
-            {
-                "source_id": source_id,
-                "target_id": target_id,
-                "confidence_score": round(confidence, 4),
-                "name_key": _as_text(rec.get("name_key")),
-                "action": str(rec.get("action") or ""),
-            }
-        )
 
-    nodes_by_root: dict[str, set[str]] = {}
-    for node in parent:
-        nodes_by_root.setdefault(_find(node), set()).add(node)
-
-    clusters: list[dict[str, Any]] = []
-    for root, nodes in sorted(nodes_by_root.items(), key=lambda item: sorted(item[1])):
-        if len(nodes) < 2:
-            continue
-        cluster_edges = [
-            edge
-            for edge in edges
-            if edge["source_id"] in nodes and edge["target_id"] in nodes
-        ]
-        max_confidence = max(
-            (float(edge["confidence_score"]) for edge in cluster_edges),
-            default=0.0,
-        )
-        clusters.append(
-            {
-                "cluster_id": f"dup_cluster:{root}",
-                "concept_ids": sorted(nodes),
-                "pair_count": len(cluster_edges),
-                "max_confidence_score": round(max_confidence, 4),
-                "edges": cluster_edges[:20],
-            }
-        )
-    return clusters
+def _extract_recommendations_from_payload(payload: Any) -> Any:
+    """Accept either a top-level list, a dict containing ``identity_recommendations``,
+    or the engine's ``validated_json`` envelope.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, Mapping):
+        if "identity_recommendations" in payload:
+            return payload.get("identity_recommendations")
+        validated = payload.get("validated_json")
+        if isinstance(validated, Mapping):
+            return validated.get("identity_recommendations")
+        if isinstance(validated, list):
+            return validated
+    return None
 
 
 def _queue_uncertain(
@@ -589,24 +434,24 @@ def _queue_uncertain(
         source_id=source_id,
         predicate=IDENTITY_REVIEW_PREDICATE,
         target=target_id,
-        confidence_score=float(recommendation.get("confidence_score") or 0.0),
+        confidence_score=_coerce_float(
+            recommendation.get("confidence"),
+            default=0.0,
+            minimum=0.0,
+            maximum=1.0,
+        ),
         provenance={
             "source": "entity_identity_resolution_workflow",
             "workflow_id": ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-            "policy_version": recommendation.get("policy_version")
-            or IDENTITY_POLICY_VERSION,
+            "policy_version": IDENTITY_POLICY_VERSION,
+            "rumination_prompt": ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID,
+            "rationale": _as_text(recommendation.get("rationale"))[:1500],
+            "evidence_refs": list(recommendation.get("evidence_refs") or [])[:20],
             "name_key": recommendation.get("name_key"),
-            "rationale": list(recommendation.get("rationale") or [])[:6],
-            "generated_at_utc": recommendation.get("generated_at_utc")
-            or _utc_now_iso(),
+            "generated_at_utc": _utc_now_iso(),
         },
         status="proposed",
-        evidence_count=_coerce_int(
-            recommendation.get("evidence_count"),
-            default=1,
-            minimum=1,
-            maximum=100,
-        ),
+        evidence_count=max(1, len(list(recommendation.get("evidence_refs") or []))),
     )
 
 
@@ -622,15 +467,16 @@ def _record_merge_audit(
         "recorded_at_utc": _utc_now_iso(),
         "source_id": source_id,
         "target_id": target_id,
-        "confidence_score": float(recommendation.get("confidence_score") or 0.0),
-        "policy_version": recommendation.get("policy_version") or IDENTITY_POLICY_VERSION,
-        "rationale": list(recommendation.get("rationale") or [])[:6],
-        "shared_source_references": list(
-            recommendation.get("shared_source_references") or []
-        )[:8],
-        "shared_relationship_targets": list(
-            recommendation.get("shared_relationship_targets") or []
-        )[:8],
+        "confidence": _coerce_float(
+            recommendation.get("confidence"),
+            default=0.0,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "policy_version": IDENTITY_POLICY_VERSION,
+        "rumination_prompt": ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID,
+        "rationale": _as_text(recommendation.get("rationale"))[:2000],
+        "evidence_refs": list(recommendation.get("evidence_refs") or [])[:20],
         "merge_success": bool(merge_result.get("success")),
         "merge_operations_count": len(list(merge_result.get("operations") or [])),
     }
@@ -644,58 +490,116 @@ def _record_merge_audit(
     )
 
 
-def _coerce_recommendations(value: Any, *, max_items: int) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in value[:max_items]:
-        if isinstance(item, Mapping):
-            out.append(dict(item))
-    return out
-
-
-def _cluster_count_after_apply(
-    *,
-    scan_limit: int,
-    text_limit: int,
-    max_pair_eval: int,
-    auto_threshold: float,
-    review_threshold: float,
-) -> int:
-    profiles = _scan_profiles(scan_limit=scan_limit, text_limit=text_limit)
-    recommendations, _diagnostics = _build_recommendations(
-        profiles=profiles,
-        max_pair_eval=max_pair_eval,
-        auto_threshold=auto_threshold,
-        review_threshold=review_threshold,
-    )
-    clusters = _build_clusters(recommendations, min_confidence=review_threshold)
-    return len(clusters)
+# ---------------------------------------------------------------------------
+# Workflow definition
+# ---------------------------------------------------------------------------
 
 
 def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefinition:
+    """Build the workflow definition used by tests and as a built-in fallback.
+
+    The authoritative definition lives in
+    ``canonical_workflow_publication_seed_bundle.json`` and is published into
+    Vontology at backend startup. This Python definition mirrors the same
+    structure so that the in-process registry exposes the workflow even if
+    Vontology bootstrap has not yet run.
+    """
+
     scan = WorkflowStateSpec(
         state_id="scan",
         actions=(
             WorkflowActionInvocation(
                 action_id="identity_resolution.scan_candidates",
                 description=(
-                    "Detect duplicate clusters and confidence-scored recommendations."
+                    "Enumerate same-name candidate pairs (no scoring; LLM owns reasoning)."
                 ),
             ),
         ),
         transitions=(
             WorkflowTransitionSpec(
-                to_state="apply",
-                condition=lambda ctx: bool(ctx.get("duplicate_recommendations")),
-                reason="recommendations_ready",
+                to_state="gather_evidence",
+                condition=lambda ctx: bool(ctx.get("candidate_pairs")),
+                reason="candidate_pairs_present",
             ),
             WorkflowTransitionSpec(
                 to_state="complete",
-                condition=lambda ctx: True,
-                reason="nothing_to_apply",
+                condition=lambda _ctx: True,
+                reason="no_candidate_pairs",
             ),
         ),
+    )
+
+    gather_evidence = WorkflowStateSpec(
+        state_id="gather_evidence",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="identity_resolution.gather_evidence",
+                description=(
+                    "Assemble per-pair evidence profiles for the LLM rumination stage."
+                ),
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="reason_about_identity",
+                condition=lambda ctx: bool(ctx.get("candidate_evidence_pairs")),
+                reason="evidence_ready",
+            ),
+            WorkflowTransitionSpec(
+                to_state="complete",
+                condition=lambda _ctx: True,
+                reason="evidence_unavailable",
+            ),
+        ),
+    )
+
+    reason_about_identity = WorkflowStateSpec(
+        state_id="reason_about_identity",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="llm.action",
+                execution_mode="llm",
+                prompt_contract={
+                    "requested_prompt_concept_ids": [
+                        ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID,
+                    ],
+                },
+                llm_policy={
+                    "policy_stage": "entity_duplicate_reasoning",
+                    "tool_mode": "disallowed",
+                    "context_fields": [
+                        "candidate_evidence_pairs",
+                        "candidate_evidence_diagnostics",
+                        "identity_resolution_scan_summary",
+                    ],
+                    "response_contract_text": (
+                        "Return JSON of the form "
+                        "{\"identity_recommendations\": [...]}, where each "
+                        "recommendation has pair_ids, action (auto_merge | "
+                        "queue_review | leave_distinct | insufficient_evidence), "
+                        "source_id, target_id, confidence (0..1), rationale, "
+                        "evidence_refs."
+                    ),
+                },
+                validation_policy={"output_format": "json_value"},
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="apply",
+                condition=lambda _ctx: True,
+                reason="reasoning_complete",
+            ),
+        ),
+        metadata={
+            "tool_output_context_mappings": [
+                {
+                    "tool_output_field": "validated_json",
+                    "context_key": "identity_reasoning_payload",
+                }
+            ],
+            "writes_context_keys": ["identity_reasoning_payload"],
+        },
     )
 
     apply = WorkflowStateSpec(
@@ -704,14 +608,14 @@ def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefin
             WorkflowActionInvocation(
                 action_id="identity_resolution.apply_resolutions",
                 description=(
-                    "Auto-merge high-confidence duplicates and queue uncertain cases."
+                    "Execute the LLM's identity recommendations: merge or queue for review."
                 ),
             ),
         ),
         transitions=(
             WorkflowTransitionSpec(
                 to_state="complete",
-                condition=lambda ctx: True,
+                condition=lambda _ctx: True,
                 reason="apply_complete",
             ),
         ),
@@ -722,7 +626,7 @@ def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefin
         actions=(
             WorkflowActionInvocation(
                 action_id="identity_resolution.finalise",
-                description="Summarise outcomes and reduction metrics.",
+                description="Summarise outcomes.",
             ),
         ),
         terminal=True,
@@ -735,16 +639,23 @@ def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefin
         initial_state="scan",
         states={
             "scan": scan,
+            "gather_evidence": gather_evidence,
+            "reason_about_identity": reason_about_identity,
             "apply": apply,
             "complete": complete,
             "failed": failed,
         },
         termination_states=("complete", "failed"),
         purpose=(
-            "Background duplicate-entity detection, confidence-scored resolution, "
-            "and provenance maintenance."
+            "Background duplicate-entity detection with LLM-authored "
+            "rumination over assembled evidence; provenance maintenance."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Action handlers
+# ---------------------------------------------------------------------------
 
 
 def _handle_scan_candidates(request: WorkflowActionRequest) -> WorkflowActionResult:
@@ -755,140 +666,86 @@ def _handle_scan_candidates(request: WorkflowActionRequest) -> WorkflowActionRes
         minimum=20,
         maximum=2000,
     )
-    text_limit = _coerce_int(
-        ctx.get("text_relation_limit"),
-        default=DEFAULT_TEXT_SCAN_LIMIT,
-        minimum=20,
-        maximum=500,
-    )
-    max_pair_eval = _coerce_int(
-        ctx.get("max_pair_evaluations"),
-        default=DEFAULT_MAX_PAIR_EVAL,
-        minimum=20,
+    max_candidate_pairs = _coerce_int(
+        ctx.get("max_candidate_pairs"),
+        default=DEFAULT_MAX_CANDIDATE_PAIRS,
+        minimum=10,
         maximum=5000,
     )
-    auto_threshold = _coerce_float(
-        ctx.get("auto_apply_confidence_threshold"),
-        default=DEFAULT_AUTO_MERGE_THRESHOLD,
-        minimum=0.5,
-        maximum=0.999,
-    )
-    review_threshold = _coerce_float(
-        ctx.get("review_confidence_threshold"),
-        default=DEFAULT_REVIEW_THRESHOLD,
-        minimum=0.3,
-        maximum=0.999,
-    )
-    if review_threshold > auto_threshold:
-        review_threshold = auto_threshold
 
     candidate_concept_ids = _normalise_concept_ids(ctx.get("candidate_concepts"))
     candidate_names = _as_string_list(ctx.get("candidate_names"))
     if not candidate_concept_ids:
         candidate_concept_ids = _normalise_concept_ids(ctx.get("candidate_concept_ids"))
-    focused_mode = bool(candidate_concept_ids)
 
-    profiles: list[dict[str, Any]] = []
-    if candidate_concept_ids:
-        focus_scan_limit = max(
-            scan_limit, min(DEFAULT_FOCUSED_SCAN_LIMIT, len(candidate_concept_ids) * 500)
-        )
-        focus_profiles = _scan_profiles(
-            scan_limit=focus_scan_limit,
-            text_limit=text_limit,
-            concept_ids=candidate_concept_ids,
-        )
-
-        focus_name_keys: set[str] = {
-            _name_key(name_key)
-            for profile in focus_profiles
-            for name_key in profile.get("name_keys", [])
-            if isinstance(name_key, str) and _name_key(name_key)
-        }
-        focus_name_keys.update(
-            normalized_name for normalized_name in (_name_key(name) for name in candidate_names)
-            if normalized_name
-        )
-
-        if focus_name_keys:
-            broad_profiles = _scan_profiles(
-                scan_limit=focus_scan_limit,
-                text_limit=text_limit,
-            )
-            profiles = [
-                profile
-                for profile in broad_profiles
-                if str(profile.get("concept_id") or "") in set(candidate_concept_ids)
-                or bool(
-                    {
-                        _name_key(key)
-                        for key in profile.get("name_keys", [])
-                        if isinstance(key, str)
-                    }
-                    & focus_name_keys
-                )
-            ]
-        else:
-            profiles = focus_profiles
-    else:
-        profiles = _scan_profiles(scan_limit=scan_limit, text_limit=text_limit)
-
-    profile_map: dict[str, dict[str, Any]] = {}
-    for profile in profiles:
-        concept_id = str(profile.get("concept_id") or "")
-        if concept_id and concept_id not in profile_map:
-            profile_map[concept_id] = profile
-    profiles = list(profile_map.values())
-
-    recommendations, diagnostics = _build_recommendations(
-        profiles=profiles,
-        max_pair_eval=max_pair_eval,
-        auto_threshold=auto_threshold,
-        review_threshold=review_threshold,
+    pairs, diagnostics = _enumerate_candidate_pairs(
+        scan_limit=scan_limit,
+        candidate_concept_ids=candidate_concept_ids,
+        candidate_names=candidate_names,
+        max_candidate_pairs=max_candidate_pairs,
     )
-    clusters = _build_clusters(recommendations, min_confidence=review_threshold)
-    actionable = [r for r in recommendations if str(r.get("action") or "") != "ignore"]
 
     summary = {
-        "scanned_profiles": len(profiles),
-        "recommendation_count": len(recommendations),
-        "actionable_recommendation_count": len(actionable),
-        "auto_merge_candidate_count": len(
-            [r for r in actionable if str(r.get("action")) == "auto_merge"]
-        ),
-        "review_queue_candidate_count": len(
-            [r for r in actionable if str(r.get("action")) == "queue_review"]
-        ),
-        "duplicate_cluster_count": len(clusters),
-        "focused_mode": focused_mode,
+        "candidate_pair_count": len(pairs),
+        "focused_mode": diagnostics["focused_mode"],
         "candidate_concept_count": len(candidate_concept_ids),
         "candidate_name_hint_count": len(candidate_names),
-        "auto_apply_confidence_threshold": auto_threshold,
-        "review_confidence_threshold": review_threshold,
         "policy_version": IDENTITY_POLICY_VERSION,
         "generated_at_utc": _utc_now_iso(),
     }
 
     logger.info(
-        "[identity_resolution] scan complete: profiles=%d recommendations=%d actionable=%d clusters=%d",
-        len(profiles),
-        len(recommendations),
-        len(actionable),
-        len(clusters),
+        "[identity_resolution] scan complete: pairs=%d focused=%s",
+        len(pairs),
+        diagnostics["focused_mode"],
     )
 
     return WorkflowActionResult(
         outputs={
+            "candidate_pairs": pairs,
             "identity_resolution_scan_summary": summary,
             "identity_resolution_scan_diagnostics": diagnostics,
-            "duplicate_recommendations": recommendations[:DEFAULT_DETAIL_LIMIT],
-            "duplicate_clusters": clusters[:DEFAULT_DETAIL_LIMIT],
-            "duplicate_cluster_count_before": len(clusters),
-            "scan_limit_used": scan_limit,
-            "text_relation_limit_used": text_limit,
-            "max_pair_evaluations_used": max_pair_eval,
-            "auto_apply_confidence_threshold": auto_threshold,
-            "review_confidence_threshold": review_threshold,
+            "scan_limit_used": diagnostics["scan_limit_used"],
+            "max_candidate_pairs_used": max_candidate_pairs,
+        }
+    )
+
+
+def _handle_gather_evidence(request: WorkflowActionRequest) -> WorkflowActionResult:
+    ctx = request.data
+    text_relation_limit = _coerce_int(
+        ctx.get("text_relation_limit"),
+        default=DEFAULT_TEXT_RELATION_LIMIT,
+        minimum=10,
+        maximum=500,
+    )
+    authored_paper_limit = _coerce_int(
+        ctx.get("authored_paper_limit"),
+        default=DEFAULT_AUTHORED_PAPER_LIMIT,
+        minimum=5,
+        maximum=200,
+    )
+    candidate_pairs_raw = ctx.get("candidate_pairs") or []
+    if not isinstance(candidate_pairs_raw, list):
+        candidate_pairs_raw = []
+
+    enriched_pairs, diagnostics = build_candidate_evidence_pairs(
+        candidate_pairs_raw,
+        text_relation_limit=text_relation_limit,
+        authored_paper_limit=authored_paper_limit,
+    )
+
+    logger.info(
+        "[identity_resolution] gather_evidence complete: pairs_in=%d pairs_out=%d concepts_profiled=%d",
+        diagnostics["candidate_pair_count_in"],
+        diagnostics["evidence_pair_count_out"],
+        diagnostics["unique_concepts_profiled"],
+    )
+
+    return WorkflowActionResult(
+        outputs={
+            "candidate_evidence_pairs": enriched_pairs,
+            "candidate_evidence_diagnostics": diagnostics,
         }
     )
 
@@ -903,50 +760,40 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
         maximum=400,
     )
 
-    scan_limit = _coerce_int(
-        ctx.get("scan_limit_used"),
-        default=DEFAULT_SCAN_LIMIT,
-        minimum=20,
-        maximum=2000,
-    )
-    text_limit = _coerce_int(
-        ctx.get("text_relation_limit_used"),
-        default=DEFAULT_TEXT_SCAN_LIMIT,
-        minimum=20,
-        maximum=500,
-    )
-    max_pair_eval = _coerce_int(
-        ctx.get("max_pair_evaluations_used"),
-        default=DEFAULT_MAX_PAIR_EVAL,
-        minimum=20,
-        maximum=5000,
-    )
-    auto_threshold = _coerce_float(
-        ctx.get("auto_apply_confidence_threshold"),
-        default=DEFAULT_AUTO_MERGE_THRESHOLD,
-        minimum=0.5,
-        maximum=0.999,
-    )
-    review_threshold = _coerce_float(
-        ctx.get("review_confidence_threshold"),
-        default=DEFAULT_REVIEW_THRESHOLD,
-        minimum=0.3,
-        maximum=0.999,
-    )
-    if review_threshold > auto_threshold:
-        review_threshold = auto_threshold
-
+    payload = ctx.get("identity_reasoning_payload")
+    raw_recommendations = _extract_recommendations_from_payload(payload)
     recommendations = _coerce_recommendations(
-        ctx.get("duplicate_recommendations"),
-        max_items=max_pair_eval,
+        raw_recommendations, max_items=DEFAULT_MAX_CANDIDATE_PAIRS
     )
-    recommendations.sort(
-        key=lambda row: (
-            -float(row.get("confidence_score") or 0.0),
-            str(row.get("source_id") or ""),
-            str(row.get("target_id") or ""),
+
+    summary_base = {
+        "policy_version": IDENTITY_POLICY_VERSION,
+        "rumination_prompt": ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID,
+        "completed_at_utc": _utc_now_iso(),
+        "dry_run": dry_run,
+    }
+
+    # Fail closed if the LLM stage produced no usable output. We do NOT fall
+    # back to Python heuristics - the rumination stage IS the policy.
+    if raw_recommendations is None and not isinstance(payload, (Mapping, list)):
+        logger.warning(
+            "[identity_resolution] apply: no identity_reasoning_payload present; failing closed."
         )
-    )
+        return WorkflowActionResult(
+            outputs={
+                "identity_resolution_apply_summary": {
+                    **summary_base,
+                    "merged_count": 0,
+                    "queued_count": 0,
+                    "failed_count": 0,
+                    "skipped_count": 0,
+                    "would_merge_count": 0,
+                    "would_queue_count": 0,
+                    "fail_closed_reason": "missing_identity_reasoning_payload",
+                },
+                "identity_resolution_apply_details": [],
+            }
+        )
 
     merged_count = 0
     queued_count = 0
@@ -954,42 +801,35 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
     skipped_count = 0
     would_merge_count = 0
     would_queue_count = 0
+    malformed_count = 0
     consumed_sources: set[str] = set()
     details: list[dict[str, Any]] = []
 
     for rec in recommendations:
+        action = _as_text(rec.get("action")).lower()
+        if action not in VALID_LLM_ACTIONS:
+            malformed_count += 1
+            continue
+        if action not in ACTIONABLE_LLM_ACTIONS:
+            skipped_count += 1
+            continue
+
         source_id = _as_text(rec.get("source_id"))
         target_id = _as_text(rec.get("target_id"))
         if not source_id or not target_id or source_id == target_id:
-            skipped_count += 1
+            malformed_count += 1
             continue
         if source_id in consumed_sources:
             skipped_count += 1
             continue
 
         confidence = _coerce_float(
-            rec.get("confidence_score"),
-            default=0.0,
-            minimum=0.0,
-            maximum=1.0,
+            rec.get("confidence"), default=0.0, minimum=0.0, maximum=1.0
         )
-        action = str(rec.get("action") or "").strip().lower()
-        if not action:
-            if confidence >= auto_threshold:
-                action = "auto_merge"
-            elif confidence >= review_threshold:
-                action = "queue_review"
-            else:
-                action = "ignore"
-
-        if action == "ignore":
-            skipped_count += 1
-            continue
-
         detail = {
             "source_id": source_id,
             "target_id": target_id,
-            "confidence_score": round(confidence, 4),
+            "confidence": round(confidence, 4),
             "action": action,
             "dry_run": dry_run,
         }
@@ -1019,8 +859,8 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
                 else:
                     failed_count += 1
                     detail["outcome"] = "merge_failed"
-                    detail["merge_error"] = merge_result.get("errors") or merge_result.get(
-                        "error"
+                    detail["merge_error"] = (
+                        merge_result.get("errors") or merge_result.get("error")
                     )
                     queue_result = _queue_uncertain(source_id, target_id, rec)
                     if bool(queue_result.get("success")):
@@ -1029,8 +869,7 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
                     else:
                         detail["fallback_queue_outcome"] = "queue_failed"
                         detail["fallback_queue_error"] = queue_result.get("error")
-
-        elif action == "queue_review":
+        else:  # queue_review
             if dry_run:
                 would_queue_count += 1
                 detail["outcome"] = "would_queue_review"
@@ -1046,62 +885,34 @@ def _handle_apply_resolutions(request: WorkflowActionRequest) -> WorkflowActionR
                     failed_count += 1
                     detail["outcome"] = "queue_failed"
                     detail["queue_error"] = queue_result.get("error")
-        else:
-            skipped_count += 1
-            continue
 
         if len(details) < detail_limit:
             details.append(detail)
 
-    cluster_before = _coerce_int(
-        ctx.get("duplicate_cluster_count_before"),
-        default=0,
-        minimum=0,
-        maximum=1_000_000,
-    )
-    cluster_after = cluster_before
-    if not dry_run and merged_count > 0:
-        try:
-            cluster_after = _cluster_count_after_apply(
-                scan_limit=scan_limit,
-                text_limit=text_limit,
-                max_pair_eval=max_pair_eval,
-                auto_threshold=auto_threshold,
-                review_threshold=review_threshold,
-            )
-        except Exception as exc:
-            logger.warning("[identity_resolution] post-apply rescan failed: %s", exc)
-
-    reduction = max(0, cluster_before - cluster_after)
     summary = {
-        "dry_run": dry_run,
+        **summary_base,
         "merged_count": merged_count,
         "queued_count": queued_count,
         "failed_count": failed_count,
         "skipped_count": skipped_count,
         "would_merge_count": would_merge_count,
         "would_queue_count": would_queue_count,
-        "duplicate_cluster_count_before": cluster_before,
-        "duplicate_cluster_count_after": cluster_after,
-        "duplicate_cluster_reduction": reduction,
-        "completed_at_utc": _utc_now_iso(),
-        "policy_version": IDENTITY_POLICY_VERSION,
+        "malformed_recommendation_count": malformed_count,
+        "recommendation_count": len(recommendations),
     }
 
     logger.info(
-        "[identity_resolution] apply complete: merged=%d queued=%d failed=%d reduction=%d",
+        "[identity_resolution] apply complete: merged=%d queued=%d failed=%d malformed=%d",
         merged_count,
         queued_count,
         failed_count,
-        reduction,
+        malformed_count,
     )
 
     return WorkflowActionResult(
         outputs={
             "identity_resolution_apply_summary": summary,
             "identity_resolution_apply_details": details,
-            "duplicate_cluster_count_after": cluster_after,
-            "duplicate_cluster_reduction": reduction,
         }
     )
 
@@ -1113,23 +924,20 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     result = {
         "workflow_id": ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
         "policy_version": IDENTITY_POLICY_VERSION,
+        "rumination_prompt": ENTITY_DUPLICATE_REASONING_PROMPT_CONCEPT_ID,
         "scan_summary": scan_summary,
         "apply_summary": apply_summary,
-        "duplicate_cluster_count_before": apply_summary.get(
-            "duplicate_cluster_count_before",
-            scan_summary.get("duplicate_cluster_count", 0),
-        ),
-        "duplicate_cluster_count_after": apply_summary.get(
-            "duplicate_cluster_count_after",
-            scan_summary.get("duplicate_cluster_count", 0),
-        ),
-        "duplicate_cluster_reduction": apply_summary.get(
-            "duplicate_cluster_reduction",
-            0,
-        ),
+        "merged_count": apply_summary.get("merged_count", 0),
+        "queued_count": apply_summary.get("queued_count", 0),
+        "candidate_pair_count": scan_summary.get("candidate_pair_count", 0),
         "generated_at_utc": _utc_now_iso(),
     }
     return WorkflowActionResult(outputs={"identity_resolution_result": result})
+
+
+# ---------------------------------------------------------------------------
+# Registration helpers
+# ---------------------------------------------------------------------------
 
 
 def build_entity_identity_resolution_workflow_test_registration() -> WorkflowRegistration:
@@ -1137,8 +945,8 @@ def build_entity_identity_resolution_workflow_test_registration() -> WorkflowReg
         workflow_id=ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
         definition=build_entity_identity_resolution_workflow_test_definition(),
         purpose=(
-            "Background duplicate-entity detection, confidence-scored resolution, "
-            "and provenance maintenance."
+            "Background duplicate-entity detection with LLM-authored "
+            "rumination over assembled evidence; provenance maintenance."
         ),
         source="built_in",
     )
@@ -1150,7 +958,15 @@ def register_entity_identity_resolution_actions(registry: ActionRegistry) -> Non
             action_id="identity_resolution.scan_candidates",
             handler=_handle_scan_candidates,
             description=(
-                "Detect duplicate clusters and confidence-scored recommendations."
+                "Enumerate same-name candidate pairs (no scoring; LLM owns reasoning)."
+            ),
+            side_effects="read_only",
+        ),
+        ActionSpec(
+            action_id="identity_resolution.gather_evidence",
+            handler=_handle_gather_evidence,
+            description=(
+                "Assemble per-pair evidence profiles for the LLM rumination stage."
             ),
             side_effects="read_only",
         ),
@@ -1158,14 +974,14 @@ def register_entity_identity_resolution_actions(registry: ActionRegistry) -> Non
             action_id="identity_resolution.apply_resolutions",
             handler=_handle_apply_resolutions,
             description=(
-                "Auto-merge high-confidence duplicates and queue uncertain cases."
+                "Execute LLM-authored identity recommendations (merge or queue)."
             ),
             side_effects="write",
         ),
         ActionSpec(
             action_id="identity_resolution.finalise",
             handler=_handle_finalise,
-            description="Summarise identity-resolution outcomes and trend metrics.",
+            description="Summarise identity-resolution outcomes.",
             side_effects="none",
         ),
     ]

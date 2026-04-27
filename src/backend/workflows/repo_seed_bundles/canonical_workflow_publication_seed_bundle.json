@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "3",
+  "seed_version": "4",
   "workflows": [
     {
       "publication_spec": {
@@ -5420,17 +5420,17 @@
               {
                 "condition_spec": {
                   "expected": true,
-                  "key": "duplicate_recommendations",
+                  "key": "candidate_pairs",
                   "kind": "context_flag"
                 },
-                "reason": "recommendations_ready",
-                "to_state": "apply"
+                "reason": "candidate_pairs_present",
+                "to_state": "gather_evidence"
               },
               {
                 "condition_spec": {
                   "kind": "always"
                 },
-                "reason": "nothing_to_apply",
+                "reason": "no_candidate_pairs",
                 "to_state": "complete"
               }
             ],
@@ -5455,7 +5455,117 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "candidate_pairs",
+              "identity_resolution_scan_summary",
+              "identity_resolution_scan_diagnostics"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "identity_resolution.gather_evidence",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "candidate_evidence_pairs",
+                  "kind": "context_flag"
+                },
+                "reason": "evidence_ready",
+                "to_state": "reason_about_identity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "evidence_unavailable",
+                "to_state": "complete"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "gather_evidence",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "candidate_evidence_pairs",
+              "candidate_evidence_diagnostics"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "entity_duplicate_reasoning",
+              "tool_mode": "disallowed",
+              "response_contract_text": "Return JSON of the form {\"identity_recommendations\": [...]}, where each recommendation has pair_ids, action (auto_merge | queue_review | leave_distinct | insufficient_evidence), source_id, target_id, confidence (0..1), rationale, evidence_refs.",
+              "context_fields": [
+                {
+                  "context_key": "candidate_evidence_pairs",
+                  "label": "Candidate evidence pairs"
+                },
+                {
+                  "context_key": "candidate_evidence_diagnostics",
+                  "label": "Candidate evidence diagnostics"
+                },
+                {
+                  "context_key": "identity_resolution_scan_summary",
+                  "label": "Identity resolution scan summary"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "apply",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#entity_duplicate_reasoning_prompt"
+            ],
+            "state_id": "reason_about_identity",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_entity_identity_resolution_workflow_reason_about_identity_validated_json_to_identity_reasoning_payload",
+                "context_key": "identity_reasoning_payload",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "identity_reasoning_payload"
+            ]
           },
           {
             "action_concept_id": null,
@@ -5491,7 +5601,10 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "identity_resolution_apply_summary",
+              "identity_resolution_apply_details"
+            ]
           },
           {
             "action_concept_id": null,
@@ -5519,7 +5632,9 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "identity_resolution_result"
+            ]
           },
           {
             "action_concept_id": null,
