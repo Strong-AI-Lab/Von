@@ -75,6 +75,112 @@ def test_scan_handler_builds_actionable_recommendations() -> None:
     assert len(clusters) >= 1
 
 
+def test_scan_handler_focuses_to_candidate_concepts() -> None:
+    from src.backend.workflows.action_registry import (
+        WorkflowActionRequest,
+        WorkflowEnvironment,
+    )
+    from src.backend.workflows.durable import entity_identity_resolution_workflow as mod
+
+    focus_profiles = [
+        {
+            "concept_id": "#V#person_michael_g1",
+            "name_keys": ["michael witbrock"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": ["orcid:0000-1"],
+            "relationship_targets": ["#V#org_nao"],
+        },
+        {
+            "concept_id": "#V#person_michael_g2",
+            "name_keys": ["michael witbrock"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": ["orcid:0000-1"],
+            "relationship_targets": ["#V#org_nao"],
+        },
+        {
+            "concept_id": "#V#person_bob",
+            "name_keys": ["bob taylor"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": [],
+            "relationship_targets": [],
+        },
+    ]
+
+    broad_profiles = [
+        {
+            "concept_id": "#V#person_michael_g1",
+            "name_keys": ["michael witbrock"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": ["orcid:0000-1"],
+            "relationship_targets": ["#V#org_nao"],
+        },
+        {
+            "concept_id": "#V#person_michael_g2",
+            "name_keys": ["michael witbrock"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": ["orcid:0000-1"],
+            "relationship_targets": ["#V#org_nao"],
+        },
+        {
+            "concept_id": "#V#person_michael_g3",
+            "name_keys": ["michael witbrock"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": ["orcid:0000-1"],
+            "relationship_targets": ["#V#org_nao"],
+        },
+        {
+            "concept_id": "#V#person_bob",
+            "name_keys": ["bob taylor"],
+            "scope_key": "u:global|o:global",
+            "type_ids": ["#V#person"],
+            "source_refs": [],
+            "relationship_targets": [],
+        },
+    ]
+
+    def fake_scan_profiles(*, scan_limit: int, text_limit: int, concept_ids=None):
+        assert scan_limit > 0
+        assert text_limit > 0
+        if concept_ids:
+            return focus_profiles
+        return broad_profiles
+
+    with patch.object(mod, "_scan_profiles", side_effect=fake_scan_profiles):
+        request = WorkflowActionRequest(
+            action_id="identity_resolution.scan_candidates",
+            inputs={},
+            environment=WorkflowEnvironment(llm_client=None),
+            data={
+                "candidate_concept_ids": [
+                    "#V#person_michael_g1",
+                    "#V#person_michael_g2",
+                ],
+                "candidate_names": ["Michael Witbrock"],
+            },
+        )
+        result = mod._handle_scan_candidates(request)
+
+    summary = result.outputs["identity_resolution_scan_summary"]
+    assert summary["focused_mode"] is True
+    assert summary["candidate_concept_count"] == 2
+    assert summary["candidate_name_hint_count"] == 1
+    assert summary["scanned_profiles"] >= 3
+    recommendations = result.outputs["duplicate_recommendations"]
+    target_pair = {"#V#person_michael_g1", "#V#person_michael_g2"}
+    assert any(
+        item.get("action") in {"auto_merge", "queue_review"}
+        and {str(item.get("source_id") or ""), str(item.get("target_id") or "")}
+        == target_pair
+        for item in recommendations
+    )
+
+
 def test_apply_handler_merges_and_queues_with_metrics() -> None:
     from src.backend.workflows.action_registry import (
         WorkflowActionRequest,

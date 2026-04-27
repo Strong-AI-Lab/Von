@@ -45,6 +45,7 @@ DEFAULT_MAX_PAIR_EVAL = 600
 DEFAULT_AUTO_MERGE_THRESHOLD = 0.93
 DEFAULT_REVIEW_THRESHOLD = 0.72
 DEFAULT_DETAIL_LIMIT = 120
+DEFAULT_FOCUSED_SCAN_LIMIT = 1000
 
 _NAME_PREDICATES = {"hasname", "vhasname"}
 _SOURCE_HINTS = (
@@ -100,6 +101,19 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
 
 def _as_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _normalise_concept_ids(value: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in _as_string_list(value):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        if candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+    return out
 
 
 def _as_string_list(value: Any) -> list[str]:
@@ -296,9 +310,22 @@ def _build_profile(
     }
 
 
-def _scan_profiles(*, scan_limit: int, text_limit: int) -> list[dict[str, Any]]:
+def _scan_profiles(
+    *,
+    scan_limit: int,
+    text_limit: int,
+    concept_ids: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    normalised_concept_ids = _normalise_concept_ids(concept_ids)
+    if normalised_concept_ids:
+        query: dict[str, Any] = {
+            "concept_id": {"$in": normalised_concept_ids},
+        }
+    else:
+        query = {"relationships.is_an_instance_of": {"$exists": True, "$ne": []}}
+
     cursor = ConceptsRepository.find(
-        {"relationships.is_an_instance_of": {"$exists": True, "$ne": []}},
+        query,
         projection={
             "concept_id": 1,
             "name": 1,
@@ -755,7 +782,64 @@ def _handle_scan_candidates(request: WorkflowActionRequest) -> WorkflowActionRes
     if review_threshold > auto_threshold:
         review_threshold = auto_threshold
 
-    profiles = _scan_profiles(scan_limit=scan_limit, text_limit=text_limit)
+    candidate_concept_ids = _normalise_concept_ids(ctx.get("candidate_concepts"))
+    candidate_names = _as_string_list(ctx.get("candidate_names"))
+    if not candidate_concept_ids:
+        candidate_concept_ids = _normalise_concept_ids(ctx.get("candidate_concept_ids"))
+    focused_mode = bool(candidate_concept_ids)
+
+    profiles: list[dict[str, Any]] = []
+    if candidate_concept_ids:
+        focus_scan_limit = max(
+            scan_limit, min(DEFAULT_FOCUSED_SCAN_LIMIT, len(candidate_concept_ids) * 500)
+        )
+        focus_profiles = _scan_profiles(
+            scan_limit=focus_scan_limit,
+            text_limit=text_limit,
+            concept_ids=candidate_concept_ids,
+        )
+
+        focus_name_keys: set[str] = {
+            _name_key(name_key)
+            for profile in focus_profiles
+            for name_key in profile.get("name_keys", [])
+            if isinstance(name_key, str) and _name_key(name_key)
+        }
+        focus_name_keys.update(
+            normalized_name for normalized_name in (_name_key(name) for name in candidate_names)
+            if normalized_name
+        )
+
+        if focus_name_keys:
+            broad_profiles = _scan_profiles(
+                scan_limit=focus_scan_limit,
+                text_limit=text_limit,
+            )
+            profiles = [
+                profile
+                for profile in broad_profiles
+                if str(profile.get("concept_id") or "") in set(candidate_concept_ids)
+                or bool(
+                    {
+                        _name_key(key)
+                        for key in profile.get("name_keys", [])
+                        if isinstance(key, str)
+                    }
+                    & focus_name_keys
+                )
+            ]
+        else:
+            profiles = focus_profiles
+    else:
+        profiles = _scan_profiles(scan_limit=scan_limit, text_limit=text_limit)
+
+    profile_map: dict[str, dict[str, Any]] = {}
+    for profile in profiles:
+        concept_id = str(profile.get("concept_id") or "")
+        if concept_id and concept_id not in profile_map:
+            profile_map[concept_id] = profile
+    profiles = list(profile_map.values())
+
     recommendations, diagnostics = _build_recommendations(
         profiles=profiles,
         max_pair_eval=max_pair_eval,
@@ -776,6 +860,9 @@ def _handle_scan_candidates(request: WorkflowActionRequest) -> WorkflowActionRes
             [r for r in actionable if str(r.get("action")) == "queue_review"]
         ),
         "duplicate_cluster_count": len(clusters),
+        "focused_mode": focused_mode,
+        "candidate_concept_count": len(candidate_concept_ids),
+        "candidate_name_hint_count": len(candidate_names),
         "auto_apply_confidence_threshold": auto_threshold,
         "review_confidence_threshold": review_threshold,
         "policy_version": IDENTITY_POLICY_VERSION,
