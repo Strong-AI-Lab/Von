@@ -508,6 +508,59 @@ See:
 - For slow integration-heavy areas, start with one file per invocation and split
   further by class or test selection as soon as a run stalls or times out.
 
+### 7.1.1 Match validation cost to change shape
+
+Test wall-clock is not free. A 50-minute lane is a real cost paid by the user
+every time it runs, and it should be paid only when the change shape actually
+warrants it. Calibrate validation effort to the architectural surface the
+change touches, not to a reflex of "always run the broadest lane".
+
+Decision rules:
+
+- **Mechanical, backward-compatible changes** (e.g. adding a defaulted kwarg,
+  renaming an internal helper, threading an additional optional field through
+  telemetry) — the impacted surface is exactly what the recommender finds.
+  Run targeted regression tests plus
+  `pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main`
+  direct targets, then stop. Full-lane runs are usually waste here.
+- **Behavioural changes inside a known boundary** (signature change with
+  semantic effect, prompt/template wiring change, new validation branch) —
+  run the recommended lane(s), but prefer running only the impacted *files*
+  the recommender names rather than `run-lane <name>` if the lane is
+  integration-heavy.
+- **Cross-cutting or authority-surface changes** (workflow control, prompt
+  authority, predicate semantics, Vontology schema, gateway routing) —
+  aggregate lanes are appropriate. Plan for the cost up front instead of
+  discovering it after a 50-minute run.
+
+When a targeted run reports failures, the next step is almost never "run a
+broader lane to see if it's pre-existing". Instead:
+
+1. **Baseline-check on origin/main directly**, by running only the failing
+   test ids: `git stash; pdm run pytest <failing-ids> -q --tb=no; git stash
+   pop`. This typically takes 1–3 minutes versus 30–60 minutes for a full
+   lane re-run, and it gives a definitive pre-existing/regression verdict
+   for those exact tests.
+2. Only widen if the baseline check reveals the failures are *new*, in which
+   case run the smallest superset that exercises the suspect code path.
+
+When invoking pytest for failure investigation, default to compact output:
+`-q --tb=no` (or `--tb=line`) avoids dumping multi-megabyte tracebacks into
+the conversation, which is itself an expensive operation that erodes context
+budget and triggers summarisation.
+
+When a long lane is genuinely required, redirect output to a log file
+(`... 2>&1 | Out-File logs/<lane>_<task>.txt`) and surface only the tail
+(`Get-Content ... -Tail 30`) into the conversation. The full log remains
+available on disk if deeper inspection is needed.
+
+If the same closure or helper name exists in multiple files (`_record_llm_call`
+is a recent example with four definitions across two modules), grep the entire
+repository before adding a new kwarg. Adding the parameter to one definition
+and missing the others manifests as a wave of `unexpected keyword argument`
+failures only after a long lane run — exactly the kind of cost this section
+exists to avoid.
+
 ### 7.2 Test the real call path
 
 When changing MCP tools or handlers, do not stop at direct handler tests.
