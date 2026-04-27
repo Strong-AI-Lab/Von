@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 
@@ -520,3 +522,271 @@ def test_exact_existence_checks_do_not_use_recursive_concept_resolution(
 
     assert mod._concept_exists("#V#paper_on_arxiv") is True
     assert mod._concept_exists("#V#paper_on_arxiv_missing") is False
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-2152 — unit tests for extracted support-surface helpers
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_relationship_edge_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_ensure_relationship_edge`` returns True when ``add_relationship`` succeeds.
+
+    No fallback to ``mutate_relationship_edge`` should occur when the edge is
+    already verified after the canonical write.
+    """
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    add_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        mod,
+        "add_relationship",
+        lambda **kwargs: add_calls.append(kwargs) or {"success": True},
+    )
+
+    contains_calls: list[tuple[str, str, str]] = []
+
+    def _fake_contains(concept_id: str, predicate: str, target: str) -> bool:
+        contains_calls.append((concept_id, predicate, target))
+        return True
+
+    monkeypatch.setattr(mod, "_relation_contains_target", _fake_contains)
+
+    # Sentinel: ConceptsRepository.mutate_relationship_edge must NOT be invoked.
+    from src.backend.db.repositories import concepts_repository as repo_mod
+
+    fallback_calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        repo_mod.ConceptsRepository,
+        "mutate_relationship_edge",
+        classmethod(
+            lambda cls, *args, **kwargs: fallback_calls.append((args, kwargs))
+            or True
+        ),
+    )
+
+    verified = mod._ensure_relationship_edge(
+        source_id="#V#paper_x",
+        predicate="#V#authored_by",
+        target_id="#V#person_y",
+    )
+
+    assert verified is True
+    assert len(add_calls) == 1
+    assert add_calls[0]["source_id"] == "#V#paper_x"
+    assert add_calls[0]["predicate"] == "#V#authored_by"
+    assert add_calls[0]["target"] == "#V#person_y"
+    assert fallback_calls == []
+    # Two verification reads: the precondition check and the final verify call.
+    assert contains_calls == [
+        ("#V#paper_x", "#V#authored_by", "#V#person_y"),
+        ("#V#paper_x", "#V#authored_by", "#V#person_y"),
+    ]
+
+
+def test_ensure_relationship_edge_fallback_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the canonical ``add_relationship`` write doesn't show up, fall back to repo."""
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    monkeypatch.setattr(mod, "add_relationship", lambda **kwargs: {"success": False})
+
+    from src.backend.db.repositories import concepts_repository as repo_mod
+
+    fallback_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_mutate(cls, *args: Any, **kwargs: Any) -> bool:
+        fallback_calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        repo_mod.ConceptsRepository,
+        "mutate_relationship_edge",
+        classmethod(_fake_mutate),
+    )
+
+    # First contains-call after add_relationship returns False → triggers fallback.
+    # Second contains-call after the fallback returns True → edge is verified.
+    contains_results = iter([False, True])
+    monkeypatch.setattr(
+        mod,
+        "_relation_contains_target",
+        lambda *args, **kwargs: next(contains_results),
+    )
+
+    verified = mod._ensure_relationship_edge(
+        source_id="#V#paper_x",
+        predicate="#V#about",
+        target_id="#V#topic_y",
+        maintain_inverse=True,
+    )
+
+    assert verified is True
+    assert len(fallback_calls) == 1
+    args, kwargs = fallback_calls[0]
+    assert args == ("#V#paper_x", "#V#about", "#V#topic_y")
+    assert kwargs == {"action": "add", "maintain_inverse": True}
+
+
+def test_link_authors_to_paper_counts_verified_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_link_authors_to_paper`` returns one concept per name and counts only verified edges."""
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_resolve_or_create_person_concept_id",
+        lambda *, user_concept_id, person_name, logger=None: f"#V#person_{person_name.lower().replace(' ', '_')}",
+    )
+
+    # Edge for "Bob Smith" fails to verify — should not count toward author_links_written.
+    edge_results = {
+        "#V#person_alice_jones": True,
+        "#V#person_bob_smith": False,
+        "#V#person_carol_lee": True,
+    }
+    monkeypatch.setattr(
+        mod,
+        "_ensure_relationship_edge",
+        lambda *, source_id, predicate, target_id: edge_results[target_id],
+    )
+
+    out = mod._link_authors_to_paper(
+        user_concept_id="#V#user_test",
+        paper_concept_id="#V#paper_x",
+        author_names=["Alice Jones", "Bob Smith", "Carol Lee"],
+    )
+
+    assert out["author_concept_ids"] == [
+        "#V#person_alice_jones",
+        "#V#person_bob_smith",
+        "#V#person_carol_lee",
+    ]
+    assert out["author_links_written"] == 2
+
+
+def test_link_topics_to_paper_honours_max_relations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_link_topics_to_paper`` truncates to ``max_relations`` and counts verified edges."""
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_resolve_or_create_topic_concept_id",
+        lambda *, user_concept_id, topic_label, logger=None: f"#V#topic_{topic_label.lower().replace('.', '_')}",
+    )
+
+    captured: list[str] = []
+
+    def _fake_edge(*, source_id: str, predicate: str, target_id: str) -> bool:
+        captured.append(target_id)
+        return True
+
+    monkeypatch.setattr(mod, "_ensure_relationship_edge", _fake_edge)
+
+    out = mod._link_topics_to_paper(
+        user_concept_id="#V#user_test",
+        paper_concept_id="#V#paper_x",
+        topic_labels=["cs.AI", "cs.CL", "cs.LG", "stat.ML", "cs.IR"],
+        max_relations=3,
+    )
+
+    # Only the first 3 topics should be processed.
+    assert out["topic_concept_ids"] == [
+        "#V#topic_cs_ai",
+        "#V#topic_cs_cl",
+        "#V#topic_cs_lg",
+    ]
+    assert out["topic_links_written"] == 3
+    assert captured == [
+        "#V#topic_cs_ai",
+        "#V#topic_cs_cl",
+        "#V#topic_cs_lg",
+    ]
+
+
+def test_gather_arxiv_paper_verification_state_emits_each_failure_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each missing precondition produces its specific ``verification_failures`` token."""
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    # Empty text-row reads — no hasName, no hasDescription, no publication_date.
+    monkeypatch.setattr(
+        mod, "get_texts_for_concept", lambda **kwargs: []
+    )
+    # All relations missing.
+    monkeypatch.setattr(
+        mod, "_relation_contains_target", lambda *args, **kwargs: False
+    )
+
+    state = mod._gather_arxiv_paper_verification_state(
+        paper_concept_id="#V#paper_x",
+        file_copy_concept_id="#V#file_y",
+        normalised_arxiv_id="2502.14996",
+        type_relation_success=False,
+        title_asserted=False,
+        summary_asserted=False,
+        publication_date_asserted=False,
+        author_concept_ids=[],
+        author_links_written=0,
+        topic_labels=[],
+        topic_links_written=0,
+    )
+
+    failures = state["verification_failures"]
+    assert "arxiv_identifier_missing" in failures
+    assert "title_missing" in failures
+    assert "summary_missing" in failures
+    assert "publication_date_missing" in failures
+    assert "authors_missing" in failures
+    assert "type_missing" in failures
+    assert "topic_missing" in failures
+    assert "file_link_missing" in failures
+    assert state["type_asserted"] is False
+    assert state["file_link_verified"] is False
+    assert state["summary_present"] is False
+
+
+def test_gather_arxiv_paper_verification_state_all_satisfied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every precondition holds, ``verification_failures`` is empty."""
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    monkeypatch.setattr(
+        mod,
+        "get_texts_for_concept",
+        lambda *, subject_concept_id, predicate, limit: (
+            [{"text": "2502.14996"}, {"text": "Some Title"}]
+            if predicate == "hasName"
+            else [{"text": "abstract"}]
+        ),
+    )
+    monkeypatch.setattr(
+        mod, "_relation_contains_target", lambda *args, **kwargs: True
+    )
+
+    state = mod._gather_arxiv_paper_verification_state(
+        paper_concept_id="#V#paper_x",
+        file_copy_concept_id="#V#file_y",
+        normalised_arxiv_id="2502.14996",
+        type_relation_success=True,
+        title_asserted=True,
+        summary_asserted=True,
+        publication_date_asserted=True,
+        author_concept_ids=["#V#person_a", "#V#person_b"],
+        author_links_written=2,
+        topic_labels=["cs.AI"],
+        topic_links_written=1,
+    )
+
+    assert state["verification_failures"] == []
+    assert state["type_asserted"] is True
+    assert state["file_link_verified"] is True
+    assert state["summary_present"] is True
+
+

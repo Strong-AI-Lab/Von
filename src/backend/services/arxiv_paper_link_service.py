@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, TypedDict
 
 from . import concept_search_service
 from .identity_resolution_workflow_request_service import (
@@ -827,37 +827,35 @@ def materialise_scholarly_representation_for_file_copy(
     return result
 
 
-def materialise_scholarly_representation_for_arxiv_file_copy(
-    *,
-    user_concept_id: str,
-    arxiv_id: str,
-    file_copy_concept_id: str,
-    metadata: Mapping[str, Any] | None = None,
-    logger: Any | None = None,
-) -> dict[str, Any]:
-    """Materialise a rich scholarly-paper representation for an uploaded arXiv file.
+class _PaperMetadataAssertions(TypedDict):
+    title_asserted: bool
+    summary_asserted: bool
+    publication_date_asserted: bool
+    topic_labels_asserted: bool
 
-    This helper is intentionally deterministic and tool-free so workflow-driven
-    upload pipelines can assert strong postconditions without relying on chat
-    heuristics.
+
+class _AuthorLinkResult(TypedDict):
+    author_concept_ids: list[str]
+    author_links_written: int
+
+
+class _TopicLinkResult(TypedDict):
+    topic_concept_ids: list[str]
+    topic_links_written: int
+
+
+class _ArxivPaperVerificationState(TypedDict):
+    type_asserted: bool
+    file_link_verified: bool
+    summary_present: bool
+    verification_failures: list[str]
+
+
+def _ensure_arxiv_scholarly_type_skeleton(*, logger: Any | None = None) -> None:
+    """Ensure the type and predicate concepts required for arXiv scholarly representation exist.
+
+    Idempotent: each ensure-call is a no-op if the concept already exists.
     """
-
-    normalised_arxiv_id = _normalise_arxiv_id(arxiv_id)
-    link_result = link_file_copy_to_arxiv_paper(
-        user_concept_id=user_concept_id,
-        arxiv_id=normalised_arxiv_id,
-        file_copy_concept_id=file_copy_concept_id,
-        logger=logger,
-    )
-    paper_concept_id = str(link_result.get("paper_concept_id") or "").strip()
-    if not paper_concept_id:
-        return {
-            "success": False,
-            "verified": False,
-            "error": "missing_paper_concept_id",
-            "arxiv_id": normalised_arxiv_id,
-            "file_copy_concept_id": file_copy_concept_id,
-        }
 
     _ensure_type_concept(
         "#V#scholarly_article",
@@ -880,20 +878,56 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
     _ensure_predicate_concept("#V#authored_by", "Authored By", logger=logger)
     _ensure_predicate_concept("#V#about", "About", logger=logger)
 
-    type_relation = add_relationship(
-        source_id=paper_concept_id,
-        predicate="is_an_instance_of",
-        target="#V#scholarly_article",
-    )
 
-    title = _extract_metadata_title(metadata)
-    summary = _extract_metadata_summary(metadata)
-    publication_date = _extract_metadata_publication_date(metadata)
-    author_names = _extract_author_names(metadata)
-    topic_labels = _extract_topic_labels(metadata)
+def _ensure_relationship_edge(
+    *,
+    source_id: str,
+    predicate: str,
+    target_id: str,
+    maintain_inverse: bool = False,
+) -> bool:
+    """Ensure a relationship edge exists; fall back to repo-level write if needed.
+
+    Calls :func:`add_relationship` first (the canonical write path). If the edge
+    does not show up via :func:`_relation_contains_target` afterwards (e.g. the
+    relationship-write service silently dropped the edge), falls back to a
+    direct ``ConceptsRepository.mutate_relationship_edge`` write. Returns
+    ``True`` if the edge is verified after the operation.
+    """
+
+    add_relationship(
+        source_id=source_id,
+        predicate=predicate,
+        target=target_id,
+    )
+    if not _relation_contains_target(source_id, predicate, target_id):
+        from ..db.repositories.concepts_repository import ConceptsRepository
+
+        ConceptsRepository.mutate_relationship_edge(
+            source_id,
+            predicate,
+            target_id,
+            action="add",
+            maintain_inverse=maintain_inverse,
+        )
+    return _relation_contains_target(source_id, predicate, target_id)
+
+
+def _assert_arxiv_paper_metadata_text_relations(
+    *,
+    paper_concept_id: str,
+    title: str | None,
+    summary: str | None,
+    publication_date: str | None,
+    topic_labels: list[str],
+) -> _PaperMetadataAssertions:
+    """Upsert the standard arXiv-paper text relations and report which were asserted."""
 
     title_asserted = False
     summary_asserted = False
+    publication_date_asserted = False
+    topic_labels_asserted = False
+
     if isinstance(title, str) and title.strip():
         upsert_text_for_concept(
             subject_concept_id=paper_concept_id,
@@ -914,7 +948,6 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         )
         summary_asserted = True
 
-    publication_date_asserted = False
     if isinstance(publication_date, str) and publication_date.strip():
         upsert_text_for_concept(
             subject_concept_id=paper_concept_id,
@@ -933,6 +966,24 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
             lang="en-NZ",
             context={"source": "arxiv_metadata"},
         )
+        topic_labels_asserted = True
+
+    return {
+        "title_asserted": title_asserted,
+        "summary_asserted": summary_asserted,
+        "publication_date_asserted": publication_date_asserted,
+        "topic_labels_asserted": topic_labels_asserted,
+    }
+
+
+def _link_authors_to_paper(
+    *,
+    user_concept_id: str,
+    paper_concept_id: str,
+    author_names: list[str],
+    logger: Any | None = None,
+) -> _AuthorLinkResult:
+    """Resolve/create author concepts and write verified ``#V#authored_by`` edges."""
 
     author_concept_ids: list[str] = []
     author_links_written = 0
@@ -943,66 +994,64 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
             logger=logger,
         )
         author_concept_ids.append(author_concept_id)
-        add_relationship(
+        if _ensure_relationship_edge(
             source_id=paper_concept_id,
             predicate="#V#authored_by",
-            target=author_concept_id,
-        )
-        if not _relation_contains_target(
-            paper_concept_id,
-            "#V#authored_by",
-            author_concept_id,
-        ):
-            from ..db.repositories.concepts_repository import ConceptsRepository
-
-            ConceptsRepository.mutate_relationship_edge(
-                paper_concept_id,
-                "#V#authored_by",
-                author_concept_id,
-                action="add",
-                maintain_inverse=False,
-            )
-        if _relation_contains_target(
-            paper_concept_id,
-            "#V#authored_by",
-            author_concept_id,
+            target_id=author_concept_id,
         ):
             author_links_written += 1
+    return {
+        "author_concept_ids": author_concept_ids,
+        "author_links_written": author_links_written,
+    }
+
+
+def _link_topics_to_paper(
+    *,
+    user_concept_id: str,
+    paper_concept_id: str,
+    topic_labels: list[str],
+    logger: Any | None = None,
+    max_relations: int = _MAX_TOPIC_RELATIONS,
+) -> _TopicLinkResult:
+    """Resolve/create topic concepts and write verified ``#V#about`` edges."""
 
     topic_concept_ids: list[str] = []
     topic_links_written = 0
-    for label in topic_labels[:_MAX_TOPIC_RELATIONS]:
+    for label in topic_labels[:max_relations]:
         topic_concept_id = _resolve_or_create_topic_concept_id(
             user_concept_id=user_concept_id,
             topic_label=label,
             logger=logger,
         )
         topic_concept_ids.append(topic_concept_id)
-        add_relationship(
+        if _ensure_relationship_edge(
             source_id=paper_concept_id,
             predicate="#V#about",
-            target=topic_concept_id,
-        )
-        if not _relation_contains_target(
-            paper_concept_id,
-            "#V#about",
-            topic_concept_id,
-        ):
-            from ..db.repositories.concepts_repository import ConceptsRepository
-
-            ConceptsRepository.mutate_relationship_edge(
-                paper_concept_id,
-                "#V#about",
-                topic_concept_id,
-                action="add",
-                maintain_inverse=False,
-            )
-        if _relation_contains_target(
-            paper_concept_id,
-            "#V#about",
-            topic_concept_id,
+            target_id=topic_concept_id,
         ):
             topic_links_written += 1
+    return {
+        "topic_concept_ids": topic_concept_ids,
+        "topic_links_written": topic_links_written,
+    }
+
+
+def _gather_arxiv_paper_verification_state(
+    *,
+    paper_concept_id: str,
+    file_copy_concept_id: str,
+    normalised_arxiv_id: str,
+    type_relation_success: bool,
+    title_asserted: bool,
+    summary_asserted: bool,
+    publication_date_asserted: bool,
+    author_concept_ids: list[str],
+    author_links_written: int,
+    topic_labels: list[str],
+    topic_links_written: int,
+) -> _ArxivPaperVerificationState:
+    """Collect verification flags and failure tokens for an arXiv-paper materialisation."""
 
     has_name_rows = get_texts_for_concept(
         subject_concept_id=paper_concept_id,
@@ -1028,7 +1077,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         "#V#propositional_information_thing_has_computer_file",
         file_copy_concept_id,
     )
-    type_asserted = bool(type_relation.get("success")) and _relation_contains_target(
+    type_asserted = type_relation_success and _relation_contains_target(
         paper_concept_id,
         "is_an_instance_of",
         "#V#scholarly_article",
@@ -1057,27 +1106,33 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
     if not file_link_verified:
         verification_failures.append("file_link_missing")
 
-    result = {
-        "success": len(verification_failures) == 0,
-        "verified": len(verification_failures) == 0,
-        "arxiv_id": normalised_arxiv_id,
-        "paper_concept_id": paper_concept_id,
-        "file_copy_concept_id": file_copy_concept_id,
-        "title": title,
-        "author_names": author_names,
-        "author_concept_ids": author_concept_ids,
-        "author_links_written": author_links_written,
-        "topic_labels": topic_labels,
-        "topic_concept_ids": topic_concept_ids,
-        "topic_links_written": topic_links_written,
-        "summary_present": summary_present,
-        "publication_date": publication_date,
-        "publication_date_asserted": publication_date_asserted,
+    return {
         "type_asserted": type_asserted,
         "file_link_verified": file_link_verified,
+        "summary_present": summary_present,
         "verification_failures": verification_failures,
     }
-    if result["success"]:
+
+
+def _dispatch_arxiv_paper_postmaterialisation_refreshes(
+    *,
+    result: dict[str, Any],
+    user_concept_id: str,
+    normalised_arxiv_id: str,
+    paper_concept_id: str,
+    file_copy_concept_id: str,
+    author_concept_ids: list[str],
+    author_names: list[str],
+    author_links_written: int,
+) -> None:
+    """Best-effort dispatch of post-materialisation refresh requests.
+
+    Mutates ``result`` in place to record the refresh outcomes. Failures are
+    coerced to non-success result entries rather than raising, preserving the
+    contract that the materialisation result is always returned.
+    """
+
+    if result.get("success"):
         try:
             from .paper_recommendation_workflow_vontology_service import (
                 request_paper_recommendation_refresh,
@@ -1100,6 +1155,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
                 "triggered": False,
                 "reason": f"refresh_request_failed:{exc}",
             }
+
     if author_concept_ids and author_links_written > 0:
         try:
             result["identity_resolution_refresh"] = (
@@ -1129,6 +1185,125 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
                 "triggered": False,
                 "reason": f"identity_resolution_request_failed:{exc}",
             }
+
+
+def materialise_scholarly_representation_for_arxiv_file_copy(
+    *,
+    user_concept_id: str,
+    arxiv_id: str,
+    file_copy_concept_id: str,
+    metadata: Mapping[str, Any] | None = None,
+    logger: Any | None = None,
+) -> dict[str, Any]:
+    """Materialise a rich scholarly-paper representation for an uploaded arXiv file.
+
+    This helper is intentionally deterministic and tool-free so workflow-driven
+    upload pipelines can assert strong postconditions without relying on chat
+    heuristics.
+
+    The body is a thin orchestrator over reusable support surfaces — see
+    JVNAUTOSCI-2152 for the decomposition rationale.
+    """
+
+    normalised_arxiv_id = _normalise_arxiv_id(arxiv_id)
+    link_result = link_file_copy_to_arxiv_paper(
+        user_concept_id=user_concept_id,
+        arxiv_id=normalised_arxiv_id,
+        file_copy_concept_id=file_copy_concept_id,
+        logger=logger,
+    )
+    paper_concept_id = str(link_result.get("paper_concept_id") or "").strip()
+    if not paper_concept_id:
+        return {
+            "success": False,
+            "verified": False,
+            "error": "missing_paper_concept_id",
+            "arxiv_id": normalised_arxiv_id,
+            "file_copy_concept_id": file_copy_concept_id,
+        }
+
+    _ensure_arxiv_scholarly_type_skeleton(logger=logger)
+
+    type_relation = add_relationship(
+        source_id=paper_concept_id,
+        predicate="is_an_instance_of",
+        target="#V#scholarly_article",
+    )
+
+    title = _extract_metadata_title(metadata)
+    summary = _extract_metadata_summary(metadata)
+    publication_date = _extract_metadata_publication_date(metadata)
+    author_names = _extract_author_names(metadata)
+    topic_labels = _extract_topic_labels(metadata)
+
+    text_assertions = _assert_arxiv_paper_metadata_text_relations(
+        paper_concept_id=paper_concept_id,
+        title=title,
+        summary=summary,
+        publication_date=publication_date,
+        topic_labels=topic_labels,
+    )
+
+    author_link = _link_authors_to_paper(
+        user_concept_id=user_concept_id,
+        paper_concept_id=paper_concept_id,
+        author_names=author_names,
+        logger=logger,
+    )
+    topic_link = _link_topics_to_paper(
+        user_concept_id=user_concept_id,
+        paper_concept_id=paper_concept_id,
+        topic_labels=topic_labels,
+        logger=logger,
+    )
+
+    verification = _gather_arxiv_paper_verification_state(
+        paper_concept_id=paper_concept_id,
+        file_copy_concept_id=file_copy_concept_id,
+        normalised_arxiv_id=normalised_arxiv_id,
+        type_relation_success=bool(type_relation.get("success")),
+        title_asserted=text_assertions["title_asserted"],
+        summary_asserted=text_assertions["summary_asserted"],
+        publication_date_asserted=text_assertions["publication_date_asserted"],
+        author_concept_ids=author_link["author_concept_ids"],
+        author_links_written=author_link["author_links_written"],
+        topic_labels=topic_labels,
+        topic_links_written=topic_link["topic_links_written"],
+    )
+
+    verification_failures = verification["verification_failures"]
+    success = len(verification_failures) == 0
+    result: dict[str, Any] = {
+        "success": success,
+        "verified": success,
+        "arxiv_id": normalised_arxiv_id,
+        "paper_concept_id": paper_concept_id,
+        "file_copy_concept_id": file_copy_concept_id,
+        "title": title,
+        "author_names": author_names,
+        "author_concept_ids": author_link["author_concept_ids"],
+        "author_links_written": author_link["author_links_written"],
+        "topic_labels": topic_labels,
+        "topic_concept_ids": topic_link["topic_concept_ids"],
+        "topic_links_written": topic_link["topic_links_written"],
+        "summary_present": verification["summary_present"],
+        "publication_date": publication_date,
+        "publication_date_asserted": text_assertions["publication_date_asserted"],
+        "type_asserted": verification["type_asserted"],
+        "file_link_verified": verification["file_link_verified"],
+        "verification_failures": verification_failures,
+    }
+
+    _dispatch_arxiv_paper_postmaterialisation_refreshes(
+        result=result,
+        user_concept_id=user_concept_id,
+        normalised_arxiv_id=normalised_arxiv_id,
+        paper_concept_id=paper_concept_id,
+        file_copy_concept_id=file_copy_concept_id,
+        author_concept_ids=author_link["author_concept_ids"],
+        author_names=author_names,
+        author_links_written=author_link["author_links_written"],
+    )
     return result
 
 
