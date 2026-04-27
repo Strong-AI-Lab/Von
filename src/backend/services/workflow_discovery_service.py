@@ -900,11 +900,26 @@ def _lifecycle_allows_routing(
     if lifecycle.get("routing_eligible") is False:
         return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
     phase = str(lifecycle.get("phase") or "").strip().lower()
-    review_state = str(lifecycle.get("review_state") or "").strip().lower()
-    if phase in {"superseded", "demoted"}:
+    published = lifecycle.get("published")
+    if isinstance(published, bool) and not published:
         return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
-    if review_state in {"pending_review", "rejected", "superseded"}:
+    if phase in {
+        "draft",
+        "validated",
+        "validation_failed",
+        "draft_failed_completion_gate",
+        "pending_review",
+        "rejected",
+        "superseded",
+        "rolled_back",
+        "demoted",
+    }:
         return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    rollout_state = str(lifecycle.get("rollout_state") or "").strip().lower()
+    if rollout_state in {"disabled", "superseded", "rolled_back", "demoted"}:
+        return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    # Review state describes the active authoring proposal. A pending proposal
+    # must not disable the currently published workflow version.
     return True, None
 
 

@@ -26,6 +26,7 @@ from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE,
+    ROUTING_EXCLUSION_EXPLICITLY_DISABLED,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
@@ -36,6 +37,7 @@ from src.backend.services.workflow_discovery_service import (
     _get_workflow_description,
     _get_workflow_name,
     _is_executable_workflow_concept,
+    _lifecycle_allows_routing,
     discover_workflows,
     discover_workflows_for_turn,
     invalidate_workflow_discovery_executability_caches,
@@ -102,6 +104,59 @@ class TestWorkflowMatch:
             relevance_score=0.123456789,
         )
         assert match.to_dict()["relevance_score"] == 0.123
+
+
+def test_lifecycle_allows_published_workflow_with_pending_review_proposal() -> None:
+    allowed, reason = _lifecycle_allows_routing(
+        {
+            "schema_version": "workflow_publication_lifecycle.v1",
+            "phase": "published",
+            "published": True,
+            "routing_eligible": True,
+            "review_state": "pending_review",
+            "approval_required": True,
+            "rollout_state": "proposal_pending_review",
+            "proposal_id": "proposal-123",
+        }
+    )
+
+    assert allowed is True
+    assert reason is None
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        {
+            "schema_version": "workflow_publication_lifecycle.v1",
+            "phase": "published",
+            "published": True,
+            "routing_eligible": False,
+            "review_state": "pending_review",
+        },
+        {
+            "schema_version": "workflow_publication_lifecycle.v1",
+            "phase": "draft",
+            "published": False,
+            "routing_eligible": True,
+            "review_state": "pending_review",
+        },
+        {
+            "schema_version": "workflow_publication_lifecycle.v1",
+            "phase": "published",
+            "published": True,
+            "routing_eligible": True,
+            "rollout_state": "superseded",
+        },
+    ],
+)
+def test_lifecycle_blocks_explicitly_disabled_or_non_current_workflow(
+    lifecycle: dict[str, object],
+) -> None:
+    allowed, reason = _lifecycle_allows_routing(lifecycle)
+
+    assert allowed is False
+    assert reason == ROUTING_EXCLUSION_EXPLICITLY_DISABLED
 
 
 class TestWorkflowDiscoveryResult:
@@ -1007,8 +1062,12 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
     )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data"
+    )
     def test_annotation_carries_routing_profile_into_discovery_payload(
         self,
+        mock_lifecycle: MagicMock,
         mock_routing_profile: MagicMock,
         mock_has_authoritative_text: MagicMock,
         mock_classify: MagicMock,
@@ -1018,6 +1077,7 @@ class TestDiscoverWorkflowsForTurn:
         )
         mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
         mock_has_authoritative_text.return_value = True
+        mock_lifecycle.return_value = (None, None)
         mock_routing_profile.return_value = (
             {
                 "role": "authoring",
@@ -1038,6 +1098,62 @@ class TestDiscoverWorkflowsForTurn:
             "prefer_existing_capability": True,
         }
         assert annotated[0].to_dict()["routing_profile"]["role"] == "authoring"
+
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data"
+    )
+    def test_annotation_keeps_published_workflow_routable_while_proposal_pending_review(
+        self,
+        mock_lifecycle: MagicMock,
+        mock_routing_profile: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_classify: MagicMock,
+    ) -> None:
+        match = WorkflowMatch(
+            "#V#arxiv_paper_representation_workflow",
+            "Arxiv Paper Representation Workflow",
+            relevance_score=0.95,
+        )
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = True
+        mock_routing_profile.return_value = (
+            {
+                "role": "execution",
+                "authoring_intent_required": False,
+                "explicit_workflow_context_required": False,
+                "prefer_existing_capability": False,
+            },
+            "text_relation:#V#hasWorkflowRoutingProfileJson",
+        )
+        mock_lifecycle.return_value = (
+            {
+                "schema_version": "workflow_publication_lifecycle.v1",
+                "phase": "published",
+                "published": True,
+                "routing_eligible": True,
+                "review_state": "pending_review",
+                "approval_required": True,
+                "rollout_state": "proposal_pending_review",
+                "proposal_id": "c3c8f0d7-4888-4bce-85e1-89466d3694b0",
+            },
+            "text_relation:#V#hasWorkflowLifecycleJson",
+        )
+
+        annotated = _annotate_and_rank_candidates([match], max_results=1)
+
+        assert len(annotated) == 1
+        assert annotated[0].is_policy_safe is True
+        assert annotated[0].routing_eligible is True
+        assert annotated[0].routing_exclusion_reason is None
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_catches_exceptions(self, mock_discover: MagicMock) -> None:
