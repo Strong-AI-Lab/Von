@@ -1121,6 +1121,7 @@ def _run_gateway_llm_step_no_tools(
         provider: str | None = None,
         candidate: Mapping[str, Any] | None = None,
         workflow_stage_id: str | None = None,
+        exchange_blob_ref: Mapping[str, Any] | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1138,6 +1139,8 @@ def _run_gateway_llm_step_no_tools(
             entry["candidate"] = dict(candidate)
         if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
             entry["workflow_stage_id"] = workflow_stage_id.strip()
+        if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+            entry["exchange_blob_ref"] = dict(exchange_blob_ref)
         llm_calls.append(entry)
 
     try:
@@ -1411,6 +1414,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         provider: str | None = None,
         candidate: Mapping[str, Any] | None = None,
         workflow_stage_id: str | None = None,
+        exchange_blob_ref: Mapping[str, Any] | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1428,6 +1432,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             entry["candidate"] = dict(candidate)
         if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
             entry["workflow_stage_id"] = workflow_stage_id.strip()
+        if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+            entry["exchange_blob_ref"] = dict(exchange_blob_ref)
         llm_calls.append(entry)
 
     def _build_simple_error_result(

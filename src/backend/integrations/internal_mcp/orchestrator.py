@@ -150,6 +150,9 @@ from src.backend.workflows.write_tool_policy import (
     required_mutation_authority_level_for_risk,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
+from ...services.llm_exchange_blob_writer import (
+    get_llm_exchange_blob_writer_from_env,
+)
 from src.backend.services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
     parse_buttonify_options_json,
@@ -16009,8 +16012,8 @@ class InternalMCPChatOrchestrator:
                     timeout_override_sec=timeout_override_sec,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                first_output_at_utc = self._utc_now_iso()
                 if callable(emit_progress):
-                    first_output_at_utc = self._utc_now_iso()
                     emit_progress(
                         {
                             "status": "llm_call_chunk",
@@ -16065,6 +16068,24 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
+                    exchange_blob_ref=self._capture_llm_exchange_blob(
+                        stage=stage,
+                        workflow_stage_id=workflow_stage_id,
+                        call_type="llm.generate",
+                        prompt=prompt,
+                        context=context,
+                        response=response,
+                        model_name=model_name,
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        prepared_at_utc=request_prepared_at_utc,
+                        sent_at_utc=request_sent_at_utc,
+                        first_output_at_utc=first_output_at_utc,
+                        usage=None,
+                    ),
                 )
                 fallback_attempts.append(
                     {
@@ -16404,6 +16425,61 @@ class InternalMCPChatOrchestrator:
         if isinstance(response_preview, Mapping):
             payload["llm_response_preview"] = dict(response_preview)
         return payload
+
+    @staticmethod
+    def _capture_llm_exchange_blob(
+        *,
+        stage: str,
+        workflow_stage_id: str | None,
+        call_type: str,
+        prompt: Any,
+        context: Any,
+        response: Any,
+        model_name: str | None,
+        provider: str | None,
+        prepared_at_utc: str | None,
+        sent_at_utc: str | None,
+        first_output_at_utc: str | None,
+        usage: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist an LLM exchange to the blob store (JVNAUTOSCI-2144).
+
+        Returns a small pointer dict suitable for storing on the recorded
+        LLM call entry, or ``None`` if blob capture is disabled. Errors are
+        captured inline in the returned dict (``{"error": ...}``); this
+        helper never raises, so blob storage failures cannot break the
+        surrounding LLM call.
+        """
+
+        try:
+            writer = get_llm_exchange_blob_writer_from_env()
+        except Exception:
+            return None
+        if writer is None:
+            return None
+        try:
+            return writer.write(
+                turn_execution_id=None,
+                stage=stage,
+                workflow_stage_id=workflow_stage_id,
+                call_type=call_type,
+                model=model_name,
+                provider=provider,
+                request_prompt=prompt,
+                request_context=context,
+                response=response,
+                prepared_at_utc=prepared_at_utc,
+                sent_at_utc=sent_at_utc,
+                first_output_at_utc=first_output_at_utc,
+                usage=usage,
+            )
+        except Exception as exc:
+            return {
+                "error": (
+                    f"llm_exchange_capture_unexpected_error: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            }
 
     def _run_llm_with_tools_fallbacks(
         self,
@@ -16746,8 +16822,8 @@ class InternalMCPChatOrchestrator:
                     attempt_meta=attempt_meta,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                first_output_at_utc = self._utc_now_iso()
                 if callable(emit_progress):
-                    first_output_at_utc = self._utc_now_iso()
                     completion_tokens = None
                     if isinstance(getattr(llm_response, "usage", None), Mapping):
                         raw_completion_tokens = llm_response.usage.get(
@@ -16817,6 +16893,34 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
+                    exchange_blob_ref=self._capture_llm_exchange_blob(
+                        stage=stage,
+                        workflow_stage_id=workflow_stage_id,
+                        call_type="llm.generate_with_tools",
+                        prompt=prompt,
+                        context=context,
+                        response=getattr(llm_response, "content", None)
+                        if hasattr(llm_response, "content")
+                        else getattr(llm_response, "text_response", None),
+                        model_name=(
+                            llm_response.model
+                            if isinstance(getattr(llm_response, "model", None), str)
+                            else model_name
+                        ),
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        prepared_at_utc=request_prepared_at_utc,
+                        sent_at_utc=request_sent_at_utc,
+                        first_output_at_utc=first_output_at_utc,
+                        usage=(
+                            llm_response.usage
+                            if isinstance(getattr(llm_response, "usage", None), Mapping)
+                            else None
+                        ),
+                    ),
                 )
                 fallback_attempts.append(
                     {
@@ -32015,6 +32119,7 @@ class InternalMCPChatOrchestrator:
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
+            exchange_blob_ref: Mapping[str, Any] | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -32032,6 +32137,8 @@ class InternalMCPChatOrchestrator:
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
                 payload["candidate"] = dict(candidate)
+            if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+                payload["exchange_blob_ref"] = dict(exchange_blob_ref)
             llm_calls.append(payload)
 
         def _aggregate_usage_total() -> Mapping[str, int] | None:
@@ -32669,6 +32776,7 @@ class InternalMCPChatOrchestrator:
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
+            exchange_blob_ref: Mapping[str, Any] | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -32686,6 +32794,8 @@ class InternalMCPChatOrchestrator:
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
                 payload["candidate"] = dict(candidate)
+            if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+                payload["exchange_blob_ref"] = dict(exchange_blob_ref)
             llm_calls.append(payload)
 
         def _aggregate_usage_total() -> Mapping[str, int] | None:

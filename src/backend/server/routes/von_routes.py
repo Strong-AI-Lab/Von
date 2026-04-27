@@ -9163,6 +9163,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             stage: str | None = None,
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
+            workflow_stage_id: str | None = None,
+            exchange_blob_ref: Mapping[str, Any] | None = None,
         ) -> None:
             payload = {
                 "type": call_type,
@@ -9178,6 +9180,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["note"] = note
             if isinstance(candidate, Mapping):
                 payload["candidate"] = dict(candidate)
+            if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+                payload["workflow_stage_id"] = workflow_stage_id.strip()
+            if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+                payload["exchange_blob_ref"] = dict(exchange_blob_ref)
             llm_interaction["calls"].append(payload)
 
         def _emit_stage_progress(info: Mapping[str, Any] | None) -> None:
