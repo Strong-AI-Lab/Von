@@ -50,9 +50,20 @@ describe('chat task queue', () => {
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
+        const chatTab = require(chatTabModulePath);
+        chatTab.__testOnly_resetChatRequestState();
+        chatTab.__testOnly_setActiveChatSession('session-1', 'Current');
     });
 
     afterEach(() => {
+        try {
+            const chatTab = require(chatTabModulePath);
+            if (typeof chatTab.__testOnly_resetChatRequestState === 'function') {
+                chatTab.__testOnly_resetChatRequestState();
+            }
+        } catch (_) {
+            // Module may not have been imported in a failed setup.
+        }
         jest.restoreAllMocks();
         delete global.fetch;
     });
@@ -223,5 +234,124 @@ describe('chat task queue', () => {
         expect(generateBodies).toHaveLength(1);
         expect(document.querySelector('.chat-task-queue-item')).toBeNull();
         expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
+    }, 15000);
+
+    test('restores interrupted persisted prompts and restarts them explicitly', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const generateBodies = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [{
+                            queue_id: 'queue-1',
+                            prompt_raw: 'Recovered task',
+                            status: 'in_progress',
+                            session_id: 'session-1',
+                            session_name: 'Recovered'
+                        }]
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-1/requeue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            queue_id: 'queue-1',
+                            prompt_raw: 'Recovered task',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Recovered'
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-1/claim') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            queue_id: 'queue-1',
+                            prompt_raw: 'Recovered task',
+                            status: 'in_progress',
+                            session_id: 'session-1',
+                            session_name: 'Recovered'
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-1/finish') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: { queue_id: 'queue-1', status: 'completed' }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const parsed = JSON.parse(options.body || '{}');
+                generateBodies.push(parsed);
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Recovered response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent).toBe('Interrupted • Recovered');
+        const restartButton = document.querySelector('.chat-task-queue-restart');
+        expect(restartButton).toBeTruthy();
+
+        restartButton.click();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await flushMicrotasks();
+
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].prompt).toBe('Recovered task');
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
     }, 15000);
 });

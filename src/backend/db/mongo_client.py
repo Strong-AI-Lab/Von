@@ -286,6 +286,9 @@ AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
 # Room device identity (JVNAUTOSCI-884)
 ROOM_DEVICES_COLLECTION_NAME = "room_devices"
 
+# Server-side persistence for prompts waiting behind active chat turns.
+CHAT_PROMPT_QUEUE_COLLECTION_NAME = "chat_prompt_queue"
+
 # --- Client Initialization ---
 # REFACTORING_NOTE: We maintain separate clients for real MongoDB vs mongomock.
 # This prevents test suites from “poisoning” the process by enabling VON_USE_MOCK_DB
@@ -774,6 +777,37 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
+def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "queue_id_1_unique" not in existing_indexes:
+        coll.create_index([("queue_id", ASCENDING)], name="queue_id_1_unique", unique=True)
+    if "scope_status_created_at" not in existing_indexes:
+        coll.create_index(
+            [
+                ("user_concept_id", ASCENDING),
+                ("organisation_concept_id", ASCENDING),
+                ("namespace", ASCENDING),
+                ("status", ASCENDING),
+                ("created_at", ASCENDING),
+            ],
+            name="scope_status_created_at",
+        )
+    if "scope_session_status_created_at" not in existing_indexes:
+        coll.create_index(
+            [
+                ("user_concept_id", ASCENDING),
+                ("organisation_concept_id", ASCENDING),
+                ("namespace", ASCENDING),
+                ("session_id", ASCENDING),
+                ("status", ASCENDING),
+                ("created_at", ASCENDING),
+            ],
+            name="scope_session_status_created_at",
+        )
+    if "updated_at_-1" not in existing_indexes:
+        coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+
+
 # --- Collection Access ---
 def get_people_collection() -> Collection | None:
     """DEPRECATED: Returns the 'people' collection instance. Will be replaced by get_entities_collection.
@@ -978,6 +1012,18 @@ def get_meta_relations_collection() -> Collection | None:
             db,
             META_RELATIONS_COLLECTION_NAME,
             _ensure_meta_relations_indexes,
+        )
+    return None
+
+
+def get_chat_prompt_queue_collection() -> Collection | None:
+    """Returns the persisted chat prompt queue collection and ensures indexes."""
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            CHAT_PROMPT_QUEUE_COLLECTION_NAME,
+            _ensure_chat_prompt_queue_indexes,
         )
     return None
 

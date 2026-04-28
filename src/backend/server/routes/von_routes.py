@@ -34,6 +34,7 @@ from ...languagemodels.llm_interface import (
 )
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
 from ...services import chat_history_service
+from ...services import chat_prompt_queue_service
 from ...services.background_task_service import background_task_registry
 from ...services.coding_agent_identity_bootstrap_service import (
     CODING_AGENT_TYPE_ID,
@@ -262,6 +263,179 @@ def _progress_number(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any, int]:
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"success": False, "error": "Not authenticated"}), 401
+
+    window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    effective_context = get_effective_context(
+        window_session_id,
+        dict(session),
+        user_concept_id.strip(),
+    )
+    organisation_concept_id = (
+        effective_context.get("organisation_id")
+        or session.get("org_id")
+        or session.get("organisation_concept_id")
+    )
+    namespace = effective_context.get("namespace") or session.get("namespace")
+    return chat_prompt_queue_service.build_queue_scope(
+        user_concept_id=user_concept_id.strip(),
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+
+
+def _chat_prompt_queue_payload() -> dict[str, Any]:
+    try:
+        payload = request.get_json(silent=True)
+    except Exception:
+        payload = None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _chat_prompt_queue_error_response(exc: Exception):
+    if isinstance(exc, chat_prompt_queue_service.InvalidChatPromptQueueInput):
+        return jsonify({"success": False, "error": str(exc)}), 400
+    if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueRecordNotFound):
+        return jsonify({"success": False, "error": str(exc)}), 404
+    if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueUnavailable):
+        return jsonify({"success": False, "error": str(exc)}), 503
+    current_app.logger.exception("Chat prompt queue route failed")
+    return jsonify({"success": False, "error": "Internal server error"}), 500
+
+
+@von_bp.route("/api/chat_prompt_queue", methods=["GET"])
+def list_chat_prompt_queue_route():
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        records = chat_prompt_queue_service.list_active_queue_records(scope=scope)
+        return jsonify({"success": True, "items": records})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue", methods=["POST"])
+def create_chat_prompt_queue_route():
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    payload = _chat_prompt_queue_payload()
+    status = (
+        chat_prompt_queue_service.STATUS_IN_PROGRESS
+        if payload.get("status") == chat_prompt_queue_service.STATUS_IN_PROGRESS
+        else chat_prompt_queue_service.STATUS_QUEUED
+    )
+    source = (
+        "active"
+        if status == chat_prompt_queue_service.STATUS_IN_PROGRESS
+        else "queued"
+    )
+    try:
+        record = chat_prompt_queue_service.create_queue_record(
+            scope=scope,
+            prompt_raw=payload.get("prompt_raw"),
+            session_id=payload.get("session_id"),
+            session_name=payload.get("session_name"),
+            status=status,
+            source=source,
+        )
+        return jsonify({"success": True, "item": record}), 201
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue/<queue_id>", methods=["PATCH"])
+def update_chat_prompt_queue_route(queue_id: str):
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    payload = _chat_prompt_queue_payload()
+    try:
+        record = chat_prompt_queue_service.update_queued_record(
+            scope=scope,
+            queue_id=queue_id,
+            prompt_raw=payload.get("prompt_raw"),
+            session_id=payload.get("session_id"),
+            session_name=payload.get("session_name"),
+        )
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue/<queue_id>", methods=["DELETE"])
+def cancel_chat_prompt_queue_route(queue_id: str):
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        record = chat_prompt_queue_service.cancel_prompt_record(
+            scope=scope,
+            queue_id=queue_id,
+        )
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue/<queue_id>/claim", methods=["POST"])
+def claim_chat_prompt_queue_route(queue_id: str):
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        record = chat_prompt_queue_service.claim_queue_record(
+            scope=scope,
+            queue_id=queue_id,
+        )
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue/<queue_id>/requeue", methods=["POST"])
+def requeue_chat_prompt_queue_route(queue_id: str):
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        record = chat_prompt_queue_service.requeue_prompt_record(
+            scope=scope,
+            queue_id=queue_id,
+        )
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
+
+
+@von_bp.route("/api/chat_prompt_queue/<queue_id>/finish", methods=["POST"])
+def finish_chat_prompt_queue_route(queue_id: str):
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    payload = _chat_prompt_queue_payload()
+    try:
+        record = chat_prompt_queue_service.finish_prompt_record(
+            scope=scope,
+            queue_id=queue_id,
+            status=payload.get("status") or chat_prompt_queue_service.STATUS_COMPLETED,
+            error=payload.get("error"),
+        )
+        return jsonify({"success": True, "item": record})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(exc)
 
 
 def _normalise_progress_goal_label(

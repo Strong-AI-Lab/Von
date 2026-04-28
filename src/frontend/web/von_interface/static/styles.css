@@ -8754,6 +8754,11 @@ footer {
     padding: 6px;
 }
 
+.chat-task-queue-item-interrupted {
+    border-color: #facc15;
+    background: #fffbea;
+}
+
 .chat-task-queue-item-label {
     font-size: 12px;
     font-weight: 600;
@@ -8780,10 +8785,32 @@ footer {
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
+.chat-task-queue-edit[readonly] {
+    background: #f8fafc;
+    color: #475569;
+}
+
+.chat-task-queue-sync-warning {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #92400e;
+}
+
 .chat-task-queue-actions {
     margin-top: 6px;
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
+}
+
+.chat-task-queue-restart {
+    border: 1px solid #93c5fd;
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+
+.chat-task-queue-restart:hover {
+    background: #dbeafe;
 }
 
 .chat-task-queue-delete {
