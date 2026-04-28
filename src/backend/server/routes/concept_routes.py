@@ -180,6 +180,8 @@ def set_concept_recommendation_profile(concept_id: str) -> ResponseReturnValue:
         return jsonify(payload), 200
     except ConceptNotFoundError:
         return jsonify({"error": "Concept not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 422
     except Exception as e:
         current_app.logger.error(
             "Failed to save paper recommendation profile for %s: %s",

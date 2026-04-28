@@ -30,6 +30,10 @@ PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID = "#V#has_paper_recommendation_pr
 PAPER_RECOMMENDATION_PROFILE_JSON_PREDICATE_ID = (
     "#V#has_paper_recommendation_profile_json"
 )
+PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID = "#V#paper_recommendation_profile_form"
+PROFILE_HAS_FORM_PREDICATE_ID = "#V#profile_has_form"
+PROFILE_TYPE_SALIENT_TO_PREDICATE_ID = "#V#profile_type_salient_to"
+RESEARCHER_TYPE_ID = "#V#researcher"
 RESEARCH_INTEREST_PREDICATE_ID = "#V#has_research_interest"
 MEMBER_OF_ORGANISATION_PREDICATE_ID = "#V#member_of_organisation"
 
@@ -48,6 +52,27 @@ def _safe_str(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _normalise_concept_id(value: Any) -> str:
+    return _safe_str(value)
+
+
+def _normalise_concept_id_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        cleaned = _normalise_concept_id(value)
+        return [cleaned] if cleaned else []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        cleaned = _normalise_concept_id(item)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        rows.append(cleaned)
+    return rows
 
 
 def _dedupe_casefold(values: Sequence[str]) -> list[str]:
@@ -145,6 +170,134 @@ def _ensure_predicate_concept(*, concept_id: str, name: str, description: str) -
     )
 
 
+def _collect_type_and_ancestor_type_ids(type_ids: Sequence[str] | None) -> list[str]:
+    queue: list[str] = _normalise_concept_id_list(type_ids)
+    visited: set[str] = set()
+    ordered: list[str] = []
+
+    while queue:
+        raw_type_id = queue.pop(0)
+        type_id = _normalise_concept_id(raw_type_id)
+        if not type_id or type_id in visited:
+            continue
+        visited.add(type_id)
+        ordered.append(type_id)
+
+        concept_doc = load_concept(type_id)
+        parent_type_ids = normalise_relationship_targets(
+            (concept_doc or {}).get("relationships", {}).get("is_a_type_of")
+        )
+        for parent_type_id in parent_type_ids:
+            if parent_type_id not in visited:
+                queue.append(parent_type_id)
+    return ordered
+
+
+def _load_profile_type_salient_to_type_ids() -> list[str]:
+    profile_type_doc = load_concept(PAPER_RECOMMENDATION_PROFILE_TYPE_ID)
+    salient_to_type_ids = _normalise_concept_id_list(
+        (profile_type_doc or {}).get("relationships", {}).get(
+            PROFILE_TYPE_SALIENT_TO_PREDICATE_ID
+        )
+    )
+    if salient_to_type_ids:
+        return salient_to_type_ids
+    return [RESEARCHER_TYPE_ID] if RESEARCHER_TYPE_ID else []
+
+
+def _profile_applicability_payload(
+    *,
+    is_applicable: bool,
+    applicability: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "is_applicable": is_applicable,
+        "profile_type_id": PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+        "form_type_id": PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,
+        "direct_type_ids": applicability.get("direct_type_ids", []),
+        "inherited_type_ids": applicability.get("inherited_type_ids", []),
+        "salient_to_type_ids": applicability.get("salient_to_type_ids", []),
+        "reasons": applicability.get("reasons", []),
+    }
+
+
+def is_subject_relevant_for_paper_recommendation_profile(
+    *,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
+    subject_doc: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return true when a subject concept is (directly or indirectly) of a profile-relevant type."""
+    return bool(
+        _resolve_subject_profile_type_applicability(
+            subject_concept_id=subject_concept_id,
+            user_concept_id=user_concept_id,
+            subject_doc=subject_doc,
+        ).get("is_applicable")
+    )
+
+
+def _resolve_subject_profile_type_applicability(
+    *,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
+    subject_doc: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return profile applicability details for a subject concept."""
+
+    subject_id = _safe_str(subject_concept_id) or _safe_str(user_concept_id)
+    if not subject_id:
+        if isinstance(subject_doc, Mapping):
+            subject_id = _safe_str(subject_doc.get("concept_id"))
+    if not subject_id:
+        return {
+            "is_applicable": False,
+            "subject_concept_id": None,
+            "direct_type_ids": [],
+            "inherited_type_ids": [],
+            "salient_to_type_ids": [],
+            "reasons": ["missing_subject_concept_id"],
+        }
+
+    if subject_doc is None:
+        subject_doc = _load_subject_doc(subject_id)
+
+    direct_type_ids = _normalise_concept_id_list(
+        subject_doc.get("relationships", {}).get("is_an_instance_of")
+    )
+    if not direct_type_ids:
+        return {
+            "is_applicable": False,
+            "subject_concept_id": subject_id,
+            "direct_type_ids": [],
+            "inherited_type_ids": [],
+            "salient_to_type_ids": [],
+            "reasons": ["subject_has_no_instance_type"],
+        }
+
+    profile_target_type_ids = set(_load_profile_type_salient_to_type_ids())
+    if not profile_target_type_ids:
+        return {
+            "is_applicable": False,
+            "subject_concept_id": subject_id,
+            "direct_type_ids": direct_type_ids,
+            "inherited_type_ids": _collect_type_and_ancestor_type_ids(direct_type_ids),
+            "salient_to_type_ids": [],
+            "reasons": ["profile_type_has_no_salient_target_types"],
+        }
+
+    inherited_type_ids = set(_collect_type_and_ancestor_type_ids(direct_type_ids))
+    is_applicable = bool(profile_target_type_ids.intersection(inherited_type_ids))
+    return {
+        "is_applicable": is_applicable,
+        "subject_concept_id": subject_id,
+        "direct_type_ids": direct_type_ids,
+        "inherited_type_ids": sorted(inherited_type_ids),
+        "salient_to_type_ids": sorted(profile_target_type_ids),
+        "reasons": ([] if is_applicable else ["subject_not_subclass_of_salient_target"]),
+    }
+
+
 def ensure_paper_recommendation_profile_primitives() -> dict[str, Any]:
     """Ensure the recommendation-profile type and predicates exist."""
 
@@ -177,6 +330,58 @@ def ensure_paper_recommendation_profile_primitives() -> dict[str, Any]:
             ),
         )
         created_or_repaired.append(PAPER_RECOMMENDATION_PROFILE_JSON_PREDICATE_ID)
+        _ensure_type_concept(
+            concept_id=PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,
+            name="Paper recommendation profile form",
+            description=(
+                "A UI-facing form concept for capturing the author's preferred "
+                "paper-matching profile for a specific recommendation subject."
+            ),
+        )
+        created_or_repaired.append(PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID)
+        _ensure_predicate_concept(
+            concept_id=PROFILE_HAS_FORM_PREDICATE_ID,
+            name="Profile has form",
+            description=(
+                "Links a profile type to one of its canonical UI form types."
+            ),
+        )
+        created_or_repaired.append(PROFILE_HAS_FORM_PREDICATE_ID)
+        _ensure_predicate_concept(
+            concept_id=PROFILE_TYPE_SALIENT_TO_PREDICATE_ID,
+            name="Profile type salient to",
+            description=(
+                "Relates a paper recommendation profile type to concept types that "
+                "should render and own that profile form."
+            ),
+        )
+        created_or_repaired.append(PROFILE_TYPE_SALIENT_TO_PREDICATE_ID)
+
+        profile_type_doc = load_concept(PAPER_RECOMMENDATION_PROFILE_TYPE_ID)
+        if profile_type_doc is not None:
+            existing_form_target_ids = normalise_relationship_targets(
+                (profile_type_doc.get("relationships") or {}).get(
+                    PROFILE_HAS_FORM_PREDICATE_ID
+                )
+            )
+            if PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID not in existing_form_target_ids:
+                add_relationship(
+                    source_id=PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                    predicate=PROFILE_HAS_FORM_PREDICATE_ID,
+                    target=PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,
+                )
+
+            existing_salient_targets = normalise_relationship_targets(
+                (profile_type_doc.get("relationships") or {}).get(
+                    PROFILE_TYPE_SALIENT_TO_PREDICATE_ID
+                )
+            )
+            if RESEARCHER_TYPE_ID and RESEARCHER_TYPE_ID not in existing_salient_targets:
+                add_relationship(
+                    source_id=PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                    predicate=PROFILE_TYPE_SALIENT_TO_PREDICATE_ID,
+                    target=RESEARCHER_TYPE_ID,
+                )
     except Exception as exc:
         return {
             "success": False,
@@ -295,14 +500,18 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
         subject_concept_id=subject_concept_id,
         user_concept_id=user_concept_id,
     )
+    subject_doc = _load_subject_doc(subject_id)
+    if create_if_missing and not is_subject_relevant_for_paper_recommendation_profile(
+        subject_doc=subject_doc,
+        subject_concept_id=subject_id,
+    ):
+        return None
 
     ensure_report = ensure_paper_recommendation_profile_primitives()
     if not ensure_report.get("success"):
         raise RuntimeError(
             f"Failed to ensure recommendation profile primitives: {ensure_report.get('error')}"
         )
-
-    subject_doc = _load_subject_doc(subject_id)
     relationships = dict(subject_doc.get("relationships") or {})
     linked_profile_ids = normalise_relationship_targets(
         relationships.get(PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID)
@@ -315,6 +524,10 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
             concept_id=candidate_id,
             type_ids=(PAPER_RECOMMENDATION_PROFILE_TYPE_ID,),
         )
+        ensure_instance_typing(
+            concept_id=candidate_id,
+            type_ids=(PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,),
+        )
         return candidate_id
 
     stable_profile_id = _build_profile_concept_id(subject_id)
@@ -323,6 +536,10 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
         ensure_instance_typing(
             concept_id=stable_profile_id,
             type_ids=(PAPER_RECOMMENDATION_PROFILE_TYPE_ID,),
+        )
+        ensure_instance_typing(
+            concept_id=stable_profile_id,
+            type_ids=(PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,),
         )
         add_relationship(
             source_id=subject_id,
@@ -341,7 +558,10 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
             "User-editable paper recommendation profile used by recommendation "
             "and explanation workflows."
         ),
-        parent_concept_ids=[PAPER_RECOMMENDATION_PROFILE_TYPE_ID],
+        parent_concept_ids=[
+            PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+            PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,
+        ],
         create_as_instance=True,
     )
     add_relationship(
@@ -365,6 +585,35 @@ def load_paper_recommendation_profile(
         user_concept_id=user_concept_id,
     )
     subject_doc = _load_subject_doc(subject_id)
+    applicability = _resolve_subject_profile_type_applicability(
+        subject_doc=subject_doc,
+        subject_concept_id=subject_id,
+    )
+    is_applicable = bool(applicability.get("is_applicable"))
+    if not is_applicable:
+        return {
+            "success": True,
+            "subject_concept_id": subject_id,
+            "user_concept_id": subject_id,
+            "profile_concept_id": _build_profile_concept_id(subject_id),
+            "profile": _empty_profile(
+                subject_concept_id=subject_id,
+                profile_concept_id=_build_profile_concept_id(subject_id),
+            ),
+            "derived_context": {},
+            "diagnostics": {
+                "source_predicate": None,
+                "profile_exists": False,
+                "profile_materialised": False,
+            },
+            "profile_applicability": {
+                **_profile_applicability_payload(
+                    is_applicable=False,
+                    applicability=applicability,
+                ),
+            },
+        }
+
     profile_concept_id = resolve_or_create_paper_recommendation_profile_concept_id(
         subject_concept_id=subject_id,
         create_if_missing=create_if_missing,
@@ -421,6 +670,10 @@ def load_paper_recommendation_profile(
         "user_concept_id": subject_id,
         "profile_concept_id": profile_concept_id,
         "profile": loaded_profile,
+        "profile_applicability": _profile_applicability_payload(
+            is_applicable=is_applicable,
+            applicability=applicability,
+        ),
         "derived_context": _derived_context_for_subject(subject_doc),
         "diagnostics": {
             "source_predicate": source_predicate,
@@ -447,6 +700,14 @@ def upsert_paper_recommendation_profile(
         subject_concept_id=subject_concept_id,
         user_concept_id=user_concept_id,
     )
+    subject_doc = _load_subject_doc(subject_id)
+    if not is_subject_relevant_for_paper_recommendation_profile(
+        subject_doc=subject_doc,
+        subject_concept_id=subject_id,
+    ):
+        raise ValueError(
+            "Paper recommendation profile is only supported for concepts that are instances of researcher-like types."
+        )
 
     profile_concept_id = resolve_or_create_paper_recommendation_profile_concept_id(
         subject_concept_id=subject_id,
@@ -502,10 +763,15 @@ __all__ = [
     "PAPER_RECOMMENDATION_PROFILE_JSON_PREDICATE_ID",
     "PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID",
     "PAPER_RECOMMENDATION_PROFILE_TYPE_ID",
+    "PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID",
     "PROFILE_SCHEMA_VERSION",
+    "PROFILE_HAS_FORM_PREDICATE_ID",
+    "PROFILE_TYPE_SALIENT_TO_PREDICATE_ID",
+    "RESEARCHER_TYPE_ID",
     "RESEARCH_INTEREST_PREDICATE_ID",
     "ensure_paper_recommendation_profile_primitives",
     "load_paper_recommendation_profile",
+    "is_subject_relevant_for_paper_recommendation_profile",
     "resolve_or_create_paper_recommendation_profile_concept_id",
     "upsert_paper_recommendation_profile",
 ]

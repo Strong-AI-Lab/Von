@@ -45,6 +45,11 @@ describe('concept recommendation profile panel', () => {
                         { concept_id: '#V#knowledge_graph', name: 'Knowledge Graph' },
                     ],
                 },
+                profile_applicability: {
+                    is_applicable: true,
+                    profile_type_id: '#V#paper_recommendation_profile',
+                    form_type_id: '#V#paper_recommendation_profile_form',
+                },
                 permissions: { can_edit: true },
             },
         });
@@ -114,6 +119,11 @@ describe('concept recommendation profile panel', () => {
                 success: true,
                 profile: {},
                 derived_context: {},
+                profile_applicability: {
+                    is_applicable: true,
+                    profile_type_id: '#V#paper_recommendation_profile',
+                    form_type_id: '#V#paper_recommendation_profile_form',
+                },
                 permissions: { can_edit: false },
             },
         });
@@ -131,5 +141,38 @@ describe('concept recommendation profile panel', () => {
         expect(document.getElementById('recommendationProfilePermissionHint_test').textContent).toContain(
             'Read-only here',
         );
+    });
+
+    test('hides the recommendation profile panel when the backend marks the concept ineligible', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockResolvedValue({
+            data: {
+                success: true,
+                profile: {},
+                derived_context: {},
+                profile_applicability: {
+                    is_applicable: false,
+                    profile_type_id: '#V#paper_recommendation_profile',
+                    form_type_id: '#V#paper_recommendation_profile_form',
+                    reasons: ['subject_not_subclass_of_salient_target'],
+                },
+                permissions: { can_edit: true },
+            },
+        });
+
+        const {
+            ensureRecommendationProfilePanelForConceptTab,
+        } = require('../../src/frontend/web/von_interface/static/js/components/paperRecommendationProfilePanel.js');
+
+        await ensureRecommendationProfilePanelForConceptTab({
+            conceptId: '#V#strong_ai_lab',
+            suffix: 'test',
+        });
+
+        const panel = document.getElementById('recommendationProfilePanel_test');
+        expect(panel.style.display).toBe('none');
+        expect(panel.dataset.profileTypeId).toBe('#V#paper_recommendation_profile');
+        expect(panel.dataset.formTypeId).toBe('#V#paper_recommendation_profile_form');
+        expect(document.getElementById('saveRecommendationProfileButton_test').disabled).toBe(true);
     });
 });

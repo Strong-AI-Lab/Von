@@ -20,6 +20,7 @@ def test_load_paper_recommendation_profile_returns_profile_and_derived_context(
                 "concept_id": concept_id,
                 "name": "Lu Yunli",
                 "relationships": {
+                    "is_an_instance_of": ["#V#machine_learning_researcher"],
                     service.RESEARCH_INTEREST_PREDICATE_ID: [
                         "#V#knowledge_graph",
                         "#V#causal_reasoning",
@@ -34,6 +35,28 @@ def test_load_paper_recommendation_profile_returns_profile_and_derived_context(
 
     monkeypatch.setattr(
         service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda concept_id: {
+            service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID: {
+                "concept_id": service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                "relationships": {
+                    service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID: [
+                        service.RESEARCHER_TYPE_ID
+                    ],
+                },
+            },
+            "#V#machine_learning_researcher": {
+                "concept_id": "#V#machine_learning_researcher",
+                "relationships": {"is_a_type_of": [service.RESEARCHER_TYPE_ID]},
+            },
+            service.RESEARCHER_TYPE_ID: {
+                "concept_id": service.RESEARCHER_TYPE_ID,
+                "relationships": {},
+            },
+        }.get(concept_id),
     )
 
     def _fake_get_texts_for_concept(subject_concept_id: str, predicate=None, limit=50):
@@ -82,6 +105,10 @@ def test_load_paper_recommendation_profile_returns_profile_and_derived_context(
     assert payload["diagnostics"]["source_predicate"] == (
         service.PAPER_RECOMMENDATION_PROFILE_JSON_PREDICATE_ID
     )
+    assert payload["profile_applicability"]["is_applicable"] is True
+    assert service.RESEARCHER_TYPE_ID in payload["profile_applicability"][
+        "inherited_type_ids"
+    ]
 
 
 def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
@@ -91,6 +118,37 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
         service,
         "resolve_or_create_paper_recommendation_profile_concept_id",
         lambda **_kwargs: "#V#paper_recommendation_profile_for_lu_yunli",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "name": "Lu Yunli",
+            "relationships": {"is_an_instance_of": ["#V#research_fellow"]},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda concept_id: {
+            service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID: {
+                "concept_id": service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                "relationships": {
+                    service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID: [
+                        service.RESEARCHER_TYPE_ID
+                    ],
+                },
+            },
+            "#V#research_fellow": {
+                "concept_id": "#V#research_fellow",
+                "relationships": {"is_a_type_of": [service.RESEARCHER_TYPE_ID]},
+            },
+            service.RESEARCHER_TYPE_ID: {
+                "concept_id": service.RESEARCHER_TYPE_ID,
+                "relationships": {},
+            },
+        }.get(concept_id),
     )
 
     captured: dict[str, object] = {}
@@ -151,6 +209,145 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
     assert result["generic_subject_profile"]["success"] is True
 
 
+def test_ensure_primitives_uses_general_profile_has_form_predicate(monkeypatch):
+    ensured_types: list[str] = []
+    ensured_predicates: list[str] = []
+    relationships: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        service,
+        "_ensure_type_concept",
+        lambda **kwargs: ensured_types.append(kwargs["concept_id"]),
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_predicate_concept",
+        lambda **kwargs: ensured_predicates.append(kwargs["concept_id"]),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "relationships": {},
+        }
+        if concept_id == service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID
+        else None,
+    )
+    monkeypatch.setattr(
+        service,
+        "add_relationship",
+        lambda source_id, predicate, target: relationships.append(
+            (source_id, predicate, target)
+        ),
+    )
+
+    report = service.ensure_paper_recommendation_profile_primitives()
+
+    assert report["success"] is True
+    assert service.PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID in ensured_types
+    assert service.PROFILE_HAS_FORM_PREDICATE_ID in ensured_predicates
+    assert service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID in ensured_predicates
+    assert (
+        service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+        service.PROFILE_HAS_FORM_PREDICATE_ID,
+        service.PAPER_RECOMMENDATION_PROFILE_FORM_TYPE_ID,
+    ) in relationships
+    assert (
+        service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+        service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID,
+        service.RESEARCHER_TYPE_ID,
+    ) in relationships
+
+
+def test_subject_relevant_for_profile_follows_researcher_type_ancestry(monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "relationships": {"is_an_instance_of": ["#V#postdoctoral_researcher"]},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda concept_id: {
+            service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID: {
+                "concept_id": service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                "relationships": {
+                    service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID: [
+                        service.RESEARCHER_TYPE_ID
+                    ],
+                },
+            },
+            "#V#postdoctoral_researcher": {
+                "concept_id": "#V#postdoctoral_researcher",
+                "relationships": {"is_a_type_of": ["#V#research_staff"]},
+            },
+            "#V#research_staff": {
+                "concept_id": "#V#research_staff",
+                "relationships": {"is_a_type_of": [service.RESEARCHER_TYPE_ID]},
+            },
+            service.RESEARCHER_TYPE_ID: {
+                "concept_id": service.RESEARCHER_TYPE_ID,
+                "relationships": {},
+            },
+        }.get(concept_id),
+    )
+
+    assert (
+        service.is_subject_relevant_for_paper_recommendation_profile(
+            subject_concept_id="#V#lu_yunli"
+        )
+        is True
+    )
+
+
+def test_upsert_paper_recommendation_profile_rejects_ineligible_subject(monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "name": "Strong AI Lab",
+            "relationships": {"is_an_instance_of": ["#V#organisation"]},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda concept_id: {
+            service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID: {
+                "concept_id": service.PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
+                "relationships": {
+                    service.PROFILE_TYPE_SALIENT_TO_PREDICATE_ID: [
+                        service.RESEARCHER_TYPE_ID
+                    ],
+                },
+            },
+            "#V#organisation": {
+                "concept_id": "#V#organisation",
+                "relationships": {"is_a_type_of": ["#V#group"]},
+            },
+            "#V#group": {
+                "concept_id": "#V#group",
+                "relationships": {},
+            },
+        }.get(concept_id),
+    )
+
+    try:
+        service.upsert_paper_recommendation_profile(
+            subject_concept_id="#V#strong_ai_lab",
+            recommendation_profile={"project_description": "Lab-level research"},
+        )
+    except ValueError as exc:
+        assert "researcher-like types" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for ineligible profile subject")
+
+
 def test_load_paper_recommendation_profile_returns_blank_overlay_without_creating_profile(
     monkeypatch,
 ):
@@ -187,3 +384,4 @@ def test_load_paper_recommendation_profile_returns_blank_overlay_without_creatin
     assert payload["profile"]["subject_concept_id"] == "#V#strong_ai_lab"
     assert payload["diagnostics"]["profile_exists"] is False
     assert payload["diagnostics"]["profile_materialised"] is False
+    assert payload["profile_applicability"]["is_applicable"] is False

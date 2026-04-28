@@ -149,6 +149,19 @@ export async function ensureRecommendationProfilePanelForConceptTab({
     );
 
     if (elements.panel.dataset.subjectConceptId !== conceptId) return;
+    const applicability = data?.profile_applicability || {};
+    const isApplicable = applicability?.is_applicable === true;
+    elements.panel.dataset.profileTypeId = applicability?.profile_type_id || '';
+    elements.panel.dataset.formTypeId = applicability?.form_type_id || '';
+    elements.panel.style.display = isApplicable ? '' : 'none';
+
+    if (!isApplicable) {
+      setStatus(
+        elements.statusElement,
+        'Paper recommendation profile is not available for this concept type.',
+      );
+      return;
+    }
 
     applyRecommendationProfileToElements(
       {
@@ -225,6 +238,7 @@ export async function ensureRecommendationProfilePanelForConceptTab({
     }
   } catch (error) {
     console.warn('[paperRecommendationProfilePanel] Failed to load profile', error);
+    elements.panel.style.display = '';
     if (elements.observedInterestsElement) {
       elements.observedInterestsElement.textContent = 'Recommendation profile is unavailable for this concept.';
     }

@@ -125,3 +125,36 @@ def test_post_concept_recommendation_profile_allows_current_org_context(monkeypa
     assert refresh_captured["trigger_source"] == (
         "concept_routes.paper_recommendation_profile"
     )
+
+
+def test_post_concept_recommendation_profile_returns_422_for_ineligible_subject(
+    monkeypatch,
+):
+    app = _make_concept_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.upsert_paper_recommendation_profile",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError(
+                "Paper recommendation profile is only supported for concepts that are "
+                "instances of researcher-like types."
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.request_paper_recommendation_refresh",
+        lambda **_kwargs: {"success": True, "triggered": True},
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#strong_ai_lab"
+
+        resp = client.post(
+            "/api/concepts/%23V%23strong_ai_lab/paper_recommendation_profile",
+            json={"project_description": "Organisation-level research"},
+        )
+
+    assert resp.status_code == 422
+    payload = resp.get_json() or {}
+    assert "researcher-like types" in payload["error"]
