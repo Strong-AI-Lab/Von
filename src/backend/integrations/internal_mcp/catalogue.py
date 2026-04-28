@@ -14521,6 +14521,7 @@ def _workflow_list_definitions(**kwargs):
                 build_workflow_listing_entry(
                     registry=registry,
                     workflow_id=wid,
+                    resolve_vontology_metadata=False,
                 )
             )
 
@@ -25473,10 +25474,20 @@ def _resolve_chat_history_read_target(
     user_concept_id, organisation_concept_id, _actor_concept_id, namespace = (
         _resolve_shared_conversation_actor_context(payload)
     )
-    session_id = _clean_optional_string(payload.get("session_id"))
+    raw_session_id = payload.get("session_id")
+    raw_conversation_session_id = payload.get("conversation_session_id")
+    session_id = _clean_optional_string(raw_session_id or raw_conversation_session_id)
     identifier_binding: dict[str, Any] = {
         "mode": "raw_parameters",
-        "chat_session_id_source": "payload.session_id" if session_id else None,
+        "chat_session_id_source": (
+            "payload.session_id"
+            if _clean_optional_string(raw_session_id)
+            else (
+                "payload.conversation_session_id"
+                if _clean_optional_string(raw_conversation_session_id)
+                else None
+            )
+        ),
         "history_index_source": (
             "payload.history_index"
             if isinstance(payload.get("history_index"), int)

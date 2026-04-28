@@ -1379,6 +1379,81 @@ def test_tool_messages_prompt_blob_includes_create_concepts_canonical_ids():
     assert "Otter Session 2 (#V#otter_session_2)" in blob
 
 
+def test_tool_messages_prompt_blob_includes_relation_evidence_concept_ids():
+    import json
+
+    from src.backend.server.routes.von_routes import _build_tool_messages_prompt_blob
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "find_relations_with_argument",
+                    "status": "ok",
+                    "payload": {
+                        "total_hits": 1,
+                        "hits": [
+                            {
+                                "source_concept_id": "#V#example_subject",
+                                "source_name": "Example Subject",
+                                "predicate_concept_id": "#V#example_predicate",
+                                "target_concept_id": "#V#example_object",
+                                "target_name": "Example Object",
+                            }
+                        ],
+                    },
+                }
+            ),
+        }
+    ]
+
+    blob = _build_tool_messages_prompt_blob(tool_messages)
+
+    assert "TOOL RELATION EVIDENCE (authoritative):" in blob
+    assert "source_concept_id=#V#example_subject" in blob
+    assert "predicate_concept_id=#V#example_predicate" in blob
+    assert "target_concept_id=#V#example_object" in blob
+
+
+def test_tool_messages_prompt_blob_recovers_target_concept_id_from_preview_and_value():
+    import json
+
+    from src.backend.server.routes.von_routes import _build_tool_messages_prompt_blob
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "find_relations_with_argument",
+                    "status": "ok",
+                    "payload": {
+                        "total_hits": 1,
+                        "hits": [
+                            {
+                                "source_concept_id": "#V#example_subject",
+                                "source_name": "Example Subject",
+                                "predicate_concept_id": "#V#example_predicate",
+                                "target_value": "Scholarly Paper For File Copy V Arxiv Pdf File 60060",
+                                "target_value_preview": "Learning to Tell Two Spirals Apart #V#learning_to_tell_two_spirals_apart",
+                                "target_name": "Learning to Tell Two Spirals Apart",
+                            }
+                        ],
+                    },
+                }
+            ),
+        }
+    ]
+
+    blob = _build_tool_messages_prompt_blob(tool_messages)
+
+    assert "TOOL RELATION EVIDENCE (authoritative):" in blob
+    assert "source_concept_id=#V#example_subject" in blob
+    assert "predicate_concept_id=#V#example_predicate" in blob
+    assert "target_concept_id=#V#learning_to_tell_two_spirals_apart" in blob
+
+
 def test_presenter_screen_summary_includes_create_concepts_canonical_ids():
     import json
 

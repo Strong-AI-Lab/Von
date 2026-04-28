@@ -179,6 +179,44 @@ def test_chat_history_get_segments_accepts_bound_conversation_ref(monkeypatch):
     assert result["identifier_binding"]["validation_status"] == "verified"
 
 
+def test_chat_history_get_segments_accepts_conversation_session_id(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#owner",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#owner" and session_id == "chat-session-alias"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *args, **kwargs: ([{"segment_index": 0, "history": []}], {}),
+    )
+
+    result = cat._chat_history_get_segments(
+        conversation_session_id="chat-session-alias",
+        namespace="#V#owner@org",
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#org",
+    )
+
+    assert result["success"] is True
+    assert result["session_id"] == "chat-session-alias"
+    assert result["identifier_binding"]["mode"] == "raw_parameters"
+    assert (
+        result["identifier_binding"]["chat_session_id_source"]
+        == "payload.conversation_session_id"
+    )
+
+
 def test_chat_history_get_segments_rejects_mismatched_session_id_and_bound_ref(
     monkeypatch,
 ):

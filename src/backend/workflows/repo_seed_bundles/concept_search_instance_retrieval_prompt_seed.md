@@ -44,3 +44,21 @@ Answering rules:
   were called for the focal concept and their results support that conclusion.
 - If a tool result is for a different concept ID, do not use it to answer.
 - Keep the answer concise, but include the concept ID so the grounding is clear.
+
+Output format (mandatory for relation-grounded entity answers):
+Whenever your answer includes relation-grounded concepts that the user could
+navigate to: affiliations, roles, paper-like items, neighbours, or related
+entities. Render each grounded item as a Markdown bullet containing the
+resolved `#V#...` concept ID exactly as it appears in the tool result.
+- one bullet per result;
+- include the related concept name (if present) before the ID using ` - ` as
+  separator;
+- never use display names, filenames, or inferred slug-like labels in place of a
+  resolved `#V#...` concept ID;
+- never emit relation-grounded results as pseudo-assertion chains such as
+  `subject --predicate--> object`;
+- never wrap related names or IDs in markdown emphasis (for example, `**...**` or
+  `_..._`).
+- if a relation result arrives without a usable `#V#` concept ID, skip that item
+  and say this explicitly with a short sentence like `This relation result had no
+  usable #V# concept ID.` in the response.

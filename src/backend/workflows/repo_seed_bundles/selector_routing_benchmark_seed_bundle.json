@@ -231,6 +231,162 @@
         "notes": "Supported event-representation route."
       },
       {
+        "case_id": "entity_event_write_with_tool_calling_competitor",
+        "turn_text": "Represent the Strong AI Lab reading group meeting on 28 April 2026 in the Vontology with start time 11am NZ and presenter Jian Cheng.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General tool-seeking execution path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          },
+          {
+            "concept_id": "#V#event_representation_workflow",
+            "name": "Event Representation Workflow",
+            "description": "Canonical event representation workflow."
+          },
+          {
+            "concept_id": "#V#planning_workflow",
+            "name": "Planning workflow",
+            "description": "Workflow for planning and decomposition tasks."
+          }
+        ],
+        "expected_workflow_id": "#V#event_representation_workflow",
+        "baseline_workflow_id": "#V#tool_calling_workflow",
+        "selector_response": {
+          "workflow_id": "#V#event_representation_workflow",
+          "confidence": 0.98,
+          "reasoning": "The request is to materialise event facts in the Vontology, so the event representation workflow is the most specific represented-knowledge route."
+        },
+        "notes": "Regression case: avoid routing event persistence request to tool-calling or planning."
+      },
+      {
+        "case_id": "entity_event_write_without_explicit_vontology_phrasing",
+        "turn_text": "The strong AI lab had a reading group meeting at 11am NZ time on 28 April 2026. Jian CHENG was the presenter. Can you represent that meeting",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General tool-seeking execution path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          },
+          {
+            "concept_id": "#V#event_representation_workflow",
+            "name": "Event Representation Workflow",
+            "description": "Canonical event representation workflow."
+          },
+          {
+            "concept_id": "#V#planning_workflow",
+            "name": "Planning workflow",
+            "description": "Workflow for planning and decomposition tasks."
+          }
+        ],
+        "expected_workflow_id": "#V#event_representation_workflow",
+        "baseline_workflow_id": "#V#tool_calling_workflow",
+        "selector_response": {
+          "workflow_id": "#V#event_representation_workflow",
+          "confidence": 0.99,
+          "reasoning": "The turn explicitly asks to represent a meeting with date/time and presenter grounding, so event representation is the most specific represented-knowledge workflow."
+        },
+        "notes": "Exact failure replay shape with no explicit 'in Vontology' phrase."
+      },
+      {
+        "case_id": "entity_event_write_with_storage_verb",
+        "turn_text": "I can tell you that Strong AI Lab had a reading group meeting at 11am NZ time on 28 April 2026, presenter Jian Cheng. Please save it as a represented event record.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General tool-seeking execution path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          },
+          {
+            "concept_id": "#V#event_representation_workflow",
+            "name": "Event Representation Workflow",
+            "description": "Canonical event representation workflow."
+          },
+          {
+            "concept_id": "#V#planning_workflow",
+            "name": "Planning workflow",
+            "description": "Workflow for planning and decomposition tasks."
+          }
+        ],
+        "expected_workflow_id": "#V#event_representation_workflow",
+        "baseline_workflow_id": "#V#tool_calling_workflow",
+        "selector_response": {
+          "workflow_id": "#V#event_representation_workflow",
+          "confidence": 0.99,
+          "reasoning": "The user asks to save event facts with temporal and presenter evidence, so this is represented event-writing and should route to event representation."
+        },
+        "notes": "Event persistence wording without explicit 'represent' or ontology lexicon, to enforce general rule application."
+      },
+      {
+        "case_id": "entity_event_write_with_capture_verb",
+        "turn_text": "I need this reading-group event logged as an event: Strong AI Lab, 11am NZ, 28 April 2026, presenter Jian Cheng.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General tool-seeking execution path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          },
+          {
+            "concept_id": "#V#event_representation_workflow",
+            "name": "Event Representation Workflow",
+            "description": "Canonical event representation workflow."
+          },
+          {
+            "concept_id": "#V#planning_workflow",
+            "name": "Planning workflow",
+            "description": "Workflow for planning and decomposition tasks."
+          }
+        ],
+        "expected_workflow_id": "#V#event_representation_workflow",
+        "baseline_workflow_id": "#V#tool_calling_workflow",
+        "selector_response": {
+          "workflow_id": "#V#event_representation_workflow",
+          "confidence": 0.98,
+          "reasoning": "The turn asks to log a concrete event with temporal and presenter grounding, so event representation is the most specific represented-knowledge route."
+        },
+        "notes": "Additional lexically distinct event persistence case without explicit ontology phrases."
+      },
+      {
         "case_id": "entity_place_representation_success",
         "turn_text": "Represent the Auckland Domain in the Vontology as a place.",
         "candidate_workflows": [
