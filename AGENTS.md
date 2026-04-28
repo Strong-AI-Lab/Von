@@ -96,6 +96,8 @@ For frontend/browser user-view validation practice, also see
 33. Symptom location is not fix location. A bug or missing behaviour surfacing inside a Python boundary (orchestrator finalisation, route handler, renderer, fallback string) is not by itself evidence that the policy belongs there. Before writing Python, trace the symptom back to the authority surface that *should* own the behaviour (workflow step, prompt concept, predicate, profile) and decide whether the workflow/prompt layer can already express the change, or needs at most a new reusable primitive or context field. See §4.2.1.
 34. Treat existing Python branch tables for user-facing wording, routing, classification, or recovery selection as evidence of past authority drift, not as a precedent to extend. Adding "one more case" to such a table is the most common way Von quietly re-accumulates code-side policy. Prefer migrating the existing table back to the represented authority surface over adding to it.
 35. New user-controllable modes, flags, preferences, or display options must reach the LLM stage that should branch on them by appearing in that stage's authored context (workflow `context_fields`, prompt template, profile artefact). The Python question is "how does this value reach the workflow context unchanged", not "where in Python do I branch on it".
+36. If a task or failed turn names a domain object but the failure class is generic, fix the generic support surface or represented authority path first. Do not let the proper noun in the prompt, Jira title, or nearby code become permission to add a domain-specific Python service.
+37. If the user challenges a change as "Python hackery", "not Von", "backsliding", or similar authority drift, stop extending the patch. Do a short drift incident review, remove or quarantine speculative policy code, update Jira/task wording if it encoded the wrong fix direction, and resume only with a named authority surface plus support-only Python scope.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -132,10 +134,12 @@ Pause and rethink if you are about to introduce:
 - hard-coded ontology term lists that should be resolved from Vontology
 - Python branch tables that emit user-facing wording, follow-up phrasing, recovery summaries, or "what to say when X" copy per failure category, mode, or persona
 - Python branches keyed on a new user-controllable mode/flag/preference whose effect is user-facing semantics rather than wiring
+- domain-specific Python services or tools whose main job is to orchestrate Vontology mutations that a workflow/prompt could plan from represented predicates and tool metadata
+- treating an existing legacy Python registry, default-metadata table, or branch table as precedent for adding one more case-specific policy path
 
 ### 4.2.1 Recognising the Python-hackery temptation
 
-Most authority-drift incidents in Von do not start with a deliberate decision to put policy in Python. They start with a symptom that surfaces *inside* a Python boundary, a nearby Python branch table that already does something similar, and a small "one more case" extension that feels local and safe. Before writing Python for any behaviour-change task, work through this checklist explicitly. If you cannot answer all of it cleanly, you are probably about to author hidden policy.
+Most authority-drift incidents in Von do not start with a deliberate decision to put policy in Python. They start with a symptom that surfaces *inside* a Python boundary, a nearby Python branch table or legacy registry that already does something similar, a task title that names a domain object, and a small "one more case" extension that feels local and safe. Before writing Python for any behaviour-change task, work through this checklist explicitly. If you cannot answer all of it cleanly, you are probably about to author hidden policy.
 
 1. **Where would the desired user-facing behaviour live if it already worked?** Name the workflow step, prompt concept, profile, or predicate that *should* be the authority for this behaviour. If your answer is "an `if` branch in some Python function", that is the design error itself, not the fix.
 2. **Why isn't that authority surface already producing the desired behaviour?** Distinguish between (a) the workflow/prompt is missing the relevant context field, (b) the workflow lacks a transition or step that would route to the right authored handler, (c) the prompt doesn't yet teach the model the new mode/distinction, (d) the runtime cannot yet express what the workflow needs (a genuine missing reusable primitive). Cases (a)–(c) are workflow/prompt edits. Only (d) is a legitimate Python edit, and even then the Python addition is a primitive, not the policy.
@@ -143,6 +147,8 @@ Most authority-drift incidents in Von do not start with a deliberate decision to
 4. **Does the change introduce user-facing wording, follow-up phrasing, recovery copy, or any other text the user will read?** If yes, that text belongs in a Vontology-stored prompt or in workflow-authored response steps. The orchestrator's job is to pass the LLM the inputs it needs to author that text, not to author it.
 5. **Does the change branch on a new user-controllable mode, flag, or preference?** If yes, the design question is "how does this value reach the LLM stage that should adapt to it as part of that stage's authored context", not "where in Python do I branch on it". The Python plumbing should be: parameter → workflow input → workflow context field consumed by an authored prompt.
 6. **What evidence would make a future agent confident this is the canonical fix?** Before merging, the canonical artefacts should explain themselves: the workflow definition shows the new transition or context field, the prompt content shows the new rule, telemetry shows the workflow context the model actually saw. If the only evidence of the fix is the Python diff, the fix is in the wrong place.
+7. **Is the task wording stale or too domain-specific for the actual failure?** If the recent evidence points to a generic support-surface gap, rewrite the task notes or Jira description before implementing. Do not implement the stale wording first and rely on later review to recover the architecture.
+8. **Are you near a legacy registry, fallback table, or catalogue with existing domain examples?** Treat it as a drift-prone support seam. Add only generic wiring, validation, telemetry, or tool exposure there; put domain policy in represented artefacts. If a short warning comment would prevent future misuse of the seam, add one.
 
 When the temptation feels strongest — the Python change is small, the existing fallback looks like the obvious extension point, the new flag is already in scope — that is exactly when this checklist matters. Run it anyway.
 
@@ -274,7 +280,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 11. When adding a new parameter to a closure or helper whose name appears in multiple places, grep the entire repository before the first run. Missing one definition manifests as a wave of `unexpected keyword argument` failures only after a long lane finishes — exactly the cost rule 10 exists to prevent.
 12. Never run backend tests against `VON_DB_NAME=von_db`. Use the test DB.
 13. Before every commit, run the lint/type-check gate and fix outstanding diagnostics.
-11. After any significant architectural change — replacing a heuristic with an authority surface, decomposing a monolith, or removing code-side semantic steering — perform a bounded anti-pattern test audit in the affected area. Scan for tests that (a) directly assert on outputs of the removed or replaced heuristic, (b) autostub the new authority-backed path to return empty/fixed values so the real architecture is never exercised, or (c) pin downstream effects of heuristic code through end-to-end assertions. Remove or rewrite such tests, then remove any code that existed only to satisfy them. Tests that validate anti-patterns are load-bearing obstacles to architectural progress; leaving them in place causes the old code to persist indefinitely because developers fear breaking the test suite.
+14. After any significant architectural change — replacing a heuristic with an authority surface, decomposing a monolith, or removing code-side semantic steering — perform a bounded anti-pattern test audit in the affected area. Scan for tests that (a) directly assert on outputs of the removed or replaced heuristic, (b) autostub the new authority-backed path to return empty/fixed values so the real architecture is never exercised, or (c) pin downstream effects of heuristic code through end-to-end assertions. Remove or rewrite such tests, then remove any code that existed only to satisfy them. Tests that validate anti-patterns are load-bearing obstacles to architectural progress; leaving them in place causes the old code to persist indefinitely because developers fear breaking the test suite.
 
 ## 9. Tooling defaults
 
@@ -299,24 +305,9 @@ If something went wrong in a coding thread, consider whether:
 - hidden coordination or decision policy should move from Python into workflow/Vontology authority
 - execution bookkeeping is leaking into the user-facing answer channel
 - a benchmark or acceptance path is inadequate
+- a task title, proper noun, or nearby legacy code pulled the implementation toward domain-specific Python despite a generic failure class
 - `AGENTS.md` or one of the situation-specific docs should be sharpened
 - `docs/engineering/operational_engineering_guide.md` should absorb durable practical engineering lessons that do not belong in `AGENTS.md`
-
-Promote stable lessons. Do not bloat this file with narrow or temporary observations.
-
-## 11. Bottom line
-
-Von is not mainly a Python application with some prompts attached.
-
-It is a neuro-symbolic agentic system in which:
-
-- enduring knowledge matters
-- workflow and prompt authority matter
-- model portfolios and learned policy matter
-- explicit representation matters
-- evaluation and observability matter
-- and Python exists to support those things rather than replace them
-g lessons that do not belong in `AGENTS.md`
 
 Promote stable lessons. Do not bloat this file with narrow or temporary observations.
 

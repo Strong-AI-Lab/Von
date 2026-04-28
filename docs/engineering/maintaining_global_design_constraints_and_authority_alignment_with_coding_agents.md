@@ -235,6 +235,77 @@ Current examples of this narrower style are:
 - `write_tool_policy.py`: any regex expansion beyond the bounded confirmation
   and destructive-confirmation backstops
 
+### 10.2 Domain-name pull and stale-task drift
+
+A recurring failure pattern is `domain-name pull`: a user-visible failure names
+a concrete domain object, so the coding agent starts building a domain-specific
+Python service even though the actual failure class is generic.
+
+The risk is highest when all of these are true:
+
+- the triggering prompt or Jira title contains a proper noun or domain label
+- nearby Python already contains legacy domain tools, fallback metadata, or a
+  large registry that makes another local addition look natural
+- the observed failure is actually a generic authority-boundary gap, such as
+  missing predicate validation, missing context propagation, or weak telemetry
+- the task wording was drafted before the architecture diagnosis was complete
+
+The countermeasure is to name the failure class before coding:
+
+- `domain symptom`: what concrete case exposed the bug
+- `generic failure class`: what reusable capability or authority boundary
+  failed
+- `authoritative surface`: the workflow, prompt, predicate, profile, or KB
+  artefact that should own the policy
+- `support-only Python scope`: the reusable primitive, validator, telemetry
+  field, or tool wrapper that is legitimate to change
+
+If the domain symptom is the only reason a new Python service exists, delete or
+quarantine that service and rewrite the task notes before proceeding. A
+domain-specific workflow may still be appropriate, but it should be authored as
+workflow/Vontology/prompt policy and should reuse generic support primitives.
+
+### 10.3 Warning comments at drift-prone seams
+
+Warning comments can help, but only when they are placed at precise seams where
+future agents are likely to mistake legacy support code for policy authority.
+They should interrupt a known bad inference, not restate global doctrine in
+every file.
+
+Good candidates are:
+
+- legacy fallback tables that still contain operational metadata because the
+  represented authority surface is not fully populated yet
+- MCP/catalogue/registry builders where a domain-specific tool near the edit
+  site can make another domain-specific Python tool look normal
+- monolithic orchestrator or diagnostics adapters where local branches have
+  historically become user-visible policy
+- compatibility layers that are necessary today but should not become the
+  long-term authoring surface
+
+A useful warning comment should say three things:
+
+1. what the code is allowed to own, such as wiring, validation, telemetry, or
+   compatibility defaults
+2. what it must not own, such as domain modelling policy, routing semantics,
+   user-facing recovery wording, or represented workflow control
+3. where the authority should live instead, such as Vontology predicates,
+   workflow definitions, prompt concepts, or tool metadata concepts
+
+Do not scatter vague comments such as "avoid hacks" or "keep this clean".
+Those become noise. Prefer comments that name the specific wrong move a future
+agent is likely to make.
+
+For example, a fallback tool-metadata table may legitimately expose a generic
+planner hint while Vontology metadata catches up. It should not become the
+place where a coding agent adds a new domain-specific policy because the last
+failed turn happened to mention a paper, event, trip, or diary entry.
+
+When a task has already drifted into Python policy and is later corrected,
+leave a precise comment only if the same code seam is likely to attract the
+same mistake again. Otherwise, record the lesson in task notes, Jira, or this
+guidance document rather than decorating unrelated code.
+
 ## 11. Broader engineering and research context
 
 This note is also motivated by a more general problem that appears to be emerging in current coding-agent practice.

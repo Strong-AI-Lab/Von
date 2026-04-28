@@ -145,7 +145,11 @@ _DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
 }
 
 
-# Default metadata for tools not yet in Vontology (backward compatibility)
+# Authority-boundary warning: this is a backward-compatibility support table for
+# generic tool exposure metadata. Do not add domain modelling policy here just
+# because a nearby failed turn named a domain object. Durable tool policy belongs
+# in Vontology tool metadata, workflows, prompt concepts, or represented
+# predicates; Python defaults should stay wiring/validation-oriented.
 _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     # HIGH salience - always show with details
     "create_concepts": {

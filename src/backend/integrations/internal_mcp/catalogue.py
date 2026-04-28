@@ -26522,6 +26522,10 @@ def _shared_conversation_respond_invite(**kwargs):
 
 
 def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
+    # Authority-boundary warning: catalogue entries expose reusable tool
+    # surfaces and schemas. They are not a place to encode domain-specific
+    # modelling, routing, or recovery policy; put that in Vontology predicates,
+    # workflow definitions, prompt concepts, or tool-metadata concepts.
     concept_search_input_schema = _concept_search_input_schema()
     concept_search_output_schema = _concept_search_output_schema()
     definitions: List[MethodDefinition] = [
