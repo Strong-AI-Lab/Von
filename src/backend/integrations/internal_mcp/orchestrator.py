@@ -2013,12 +2013,12 @@ def _extract_explicit_workflow_failure_detail(workflow_result: Any) -> str | Non
     ):
         error_text = _workflow_execution_summary_text(result_data.get(key))
         if error_text:
-            return error_text
+            return _normalise_workflow_failure_detail_for_user(error_text)
 
     last_step_envelope = result_data.get(LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY)
     step_error = _extract_workflow_step_failure_detail(last_step_envelope)
     if step_error:
-        return step_error
+        return _normalise_workflow_failure_detail_for_user(step_error)
 
     step_envelopes = _workflow_execution_summary_mapping_list(
         result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
@@ -2026,7 +2026,7 @@ def _extract_explicit_workflow_failure_detail(workflow_result: Any) -> str | Non
     for envelope in reversed(step_envelopes):
         step_error = _extract_workflow_step_failure_detail(envelope)
         if step_error:
-            return step_error
+            return _normalise_workflow_failure_detail_for_user(step_error)
 
     result_envelope = result_data.get(WORKFLOW_RESULT_ENVELOPE_KEY)
     if isinstance(result_envelope, Mapping):
@@ -2034,9 +2034,24 @@ def _extract_explicit_workflow_failure_detail(workflow_result: Any) -> str | Non
         if isinstance(diagnostics, Mapping):
             error_text = _workflow_execution_summary_text(diagnostics.get("error"))
             if error_text:
-                return error_text
+                return _normalise_workflow_failure_detail_for_user(error_text)
 
     return None
+
+
+def _normalise_workflow_failure_detail_for_user(error_text: Any) -> str | None:
+    cleaned_error = _workflow_execution_summary_text(error_text)
+    if not cleaned_error:
+        return None
+
+    lowered = cleaned_error.lower()
+    if "insufficient_quota" in lowered:
+        return (
+            "OpenAI quota exhausted (insufficient_quota). "
+            "Please check provider billing or try again later."
+        )
+
+    return cleaned_error
 
 
 def _workflow_error_text_looks_like_machine_reason(error_text: Any) -> bool:

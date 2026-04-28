@@ -10943,24 +10943,29 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     buttonify_suppression_reason = "buttonify_prompt_unavailable"
 
                 if buttonify_prompt_available and not buttonify_options:
-                    buttonify_model_attempted = True
-                    llm_start = time.perf_counter()
                     buttonify_response = None
-                    try:
-                        buttonify_response = _llm_generate_buttonify(
-                            llm_client, buttonify_prompt, buttonify_model_used
-                        )
-                        _record_stage_llm_call(
-                            call_type="llm.generate",
-                            model_name=buttonify_model_used,
-                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                            usage=None,
-                            note="Buttonify quick-reply extraction (workflow unavailable).",
-                            stage="buttonify",
-                        )
-                    except Exception as exc:
-                        buttonify_error_class = type(exc).__name__
-                        buttonify_response = None
+                    if _contains_openai_quota_error(response_text):
+                        buttonify_suppression_reason = "quota_exhausted"
+                    else:
+                        buttonify_model_attempted = True
+                        llm_start = time.perf_counter()
+                        try:
+                            buttonify_response = _llm_generate_buttonify(
+                                llm_client, buttonify_prompt, buttonify_model_used
+                            )
+                            _record_stage_llm_call(
+                                call_type="llm.generate",
+                                model_name=buttonify_model_used,
+                                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                                usage=None,
+                                note="Buttonify quick-reply extraction (workflow unavailable).",
+                                stage="buttonify",
+                            )
+                        except Exception as exc:
+                            buttonify_error_class = type(exc).__name__
+                            if _contains_openai_quota_error(exc):
+                                buttonify_suppression_reason = "quota_exhausted"
+                            buttonify_response = None
 
                     (
                         buttonify_options,
@@ -10972,7 +10977,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_status = "success"
             else:
                 buttonify_status = "no_op"
-                if buttonify_error_class:
+                if buttonify_suppression_reason:
+                    pass
+                elif buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
                 elif not buttonify_prompt_available:
                     buttonify_suppression_reason = "buttonify_prompt_unavailable"
@@ -15166,4 +15173,14 @@ def _llm_generate_buttonify(llm_client, prompt, model):
         prompt=prompt,
         context=[],
         model=model,
+    )
+
+
+def _contains_openai_quota_error(message: object) -> bool:
+    raw_message = str(message) if message is not None else ""
+    lowered = raw_message.lower()
+    return (
+        "insufficient_quota" in lowered
+        or "quota_exhausted" in lowered
+        or ("openai quota" in lowered and "exhausted" in lowered)
     )
