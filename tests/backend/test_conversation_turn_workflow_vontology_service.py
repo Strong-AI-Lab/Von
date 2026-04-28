@@ -34,6 +34,7 @@ EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
 SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_postcondition_critic"
 )
@@ -64,7 +65,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 6
+    assert report.get("seeded_prompt_count") == 7
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -95,6 +96,41 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "prefer ontology-native predicate narrowing" in expected_outcome_text
     assert "`get_predicate_incidence` and then `find_relations_with_argument`" in (
         expected_outcome_text
+    )
+    assert "simple represented artefact" in expected_outcome_text
+    assert "`create_concepts`, `upsert_singleton_text_relation`" in (
+        expected_outcome_text
+    )
+    assert "Do not invent tools such as `diary_create`" in expected_outcome_text
+    assert "Use `task_create` only when the user asks for a task" in (
+        expected_outcome_text
+    )
+
+    missing_tool_retry_rows = get_texts_for_concept(
+        MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    missing_tool_retry_text = next(
+        (
+            (row or {}).get("text")
+            for row in missing_tool_retry_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    assert isinstance(missing_tool_retry_text, str)
+    assert "Choose exact tool names from the available tool list" in (
+        missing_tool_retry_text
+    )
+    assert "`create_concepts` for the represented instance" in (
+        missing_tool_retry_text
+    )
+    assert "`upsert_singleton_text_relation` for supplied content" in (
+        missing_tool_retry_text
+    )
+    assert "Do NOT invent domain-specific tool names such as `diary_create`" in (
+        missing_tool_retry_text
     )
 
     selector_rows = get_texts_for_concept(

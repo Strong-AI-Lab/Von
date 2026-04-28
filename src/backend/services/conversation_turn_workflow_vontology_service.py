@@ -35,6 +35,7 @@ _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
 _SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 _NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_postcondition_critic"
 )
@@ -62,6 +63,12 @@ _RECOVERY_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "prompt_turn_execution_recovery_decision_seed.md"
+)
+_MISSING_TOOL_RETRY_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "missing_tool_call_retry_prompt_seed.md"
 )
 _POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -111,6 +118,15 @@ def _load_recovery_prompt_seed_text() -> str:
     prompt_text = _RECOVERY_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
         raise ValueError("turn_execution_recovery_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_missing_tool_retry_prompt_seed_text() -> str:
+    prompt_text = _MISSING_TOOL_RETRY_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("missing_tool_call_retry_prompt_seed_missing")
     return prompt_text
 
 
@@ -179,6 +195,19 @@ def _ensure_conversation_turn_prompt_support(
                     "tool batch, a direct grounded answer, or an explicit "
                     "follow-up response when no further automated route is "
                     "likely to help."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
+                concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
+                name="Missing tool-call retry prompt",
+                description=(
+                    "Canonical retry prompt used when a response describes an "
+                    "action requiring MCP tools but omits the executable "
+                    "tool-call JSON. The prompt instructs the model to use "
+                    "available generic Vontology mutation tools for explicit "
+                    "low-risk additive writes rather than inventing "
+                    "domain-specific tool names."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -252,6 +281,18 @@ def _ensure_conversation_turn_prompt_support(
         )
         seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
     if force_prompt_seed or not prompt_concept_has_content(
+        _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_missing_tool_retry_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
+    if force_prompt_seed or not prompt_concept_has_content(
         _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
@@ -322,6 +363,17 @@ def _ensure_conversation_turn_prompt_support(
         validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
         if _RECOVERY_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
     if prompt_concept_has_content(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID):
         errors_by_target.pop(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID, None)
