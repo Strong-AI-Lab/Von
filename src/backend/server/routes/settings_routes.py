@@ -30,6 +30,10 @@ from ...services.settings_service import (
     set_show_tool_use_during_thinking,
     set_internal_mcp_max_tool_invocations,
     set_internal_mcp_tool_batch_cap,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
+    INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+    INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
     get_global_mutation_authority_level,
@@ -1095,13 +1099,83 @@ def save_all_settings():
             current_app.logger.info(f"disable_remote_ollama_scan set to: {disabled}")
 
         if "internal_mcp_max_tool_invocations" in data:
-            set_internal_mcp_max_tool_invocations(
-                data.get("internal_mcp_max_tool_invocations")
-            )
+            raw_invocations = data.get("internal_mcp_max_tool_invocations")
+            try:
+                parsed_invocations = int(raw_invocations)
+            except (TypeError, ValueError):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "internal_mcp_max_tool_invocations must be an integer "
+                                f"between {INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN} and "
+                                f"{INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX}; got "
+                                f"{raw_invocations!r}."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            if (
+                parsed_invocations < INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN
+                or parsed_invocations > INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX
+            ):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "internal_mcp_max_tool_invocations cannot be more "
+                                f"than {INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX} "
+                                f"(or less than {INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN}); "
+                                f"attempted {parsed_invocations}."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            set_internal_mcp_max_tool_invocations(parsed_invocations)
             current_app.logger.info("internal_mcp_max_tool_invocations updated")
 
         if "internal_mcp_tool_batch_cap" in data:
-            set_internal_mcp_tool_batch_cap(data.get("internal_mcp_tool_batch_cap"))
+            raw_batch = data.get("internal_mcp_tool_batch_cap")
+            try:
+                parsed_batch = int(raw_batch)
+            except (TypeError, ValueError):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "internal_mcp_tool_batch_cap must be an integer "
+                                f"between {INTERNAL_MCP_TOOL_BATCH_CAP_MIN} and "
+                                f"{INTERNAL_MCP_TOOL_BATCH_CAP_MAX}; got "
+                                f"{raw_batch!r}."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            if (
+                parsed_batch < INTERNAL_MCP_TOOL_BATCH_CAP_MIN
+                or parsed_batch > INTERNAL_MCP_TOOL_BATCH_CAP_MAX
+            ):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "internal_mcp_tool_batch_cap cannot be more than "
+                                f"{INTERNAL_MCP_TOOL_BATCH_CAP_MAX} (or less than "
+                                f"{INTERNAL_MCP_TOOL_BATCH_CAP_MIN}); attempted "
+                                f"{parsed_batch}."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            set_internal_mcp_tool_batch_cap(parsed_batch)
             current_app.logger.info("internal_mcp_tool_batch_cap updated")
 
         if "show_tool_use_during_thinking" in data:

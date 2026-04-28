@@ -30,7 +30,7 @@ class _StubGateway:
         (-5, 0),
         (0, 0),
         (7, 7),
-        (999, 50),
+        (999, 500),
         ("12", 12),
     ],
 )
@@ -51,7 +51,7 @@ def test_get_internal_mcp_max_tool_invocations_clamps(
         (0, 1),
         (1, 1),
         (7, 7),
-        (999, 50),
+        (999, 20),
         ("12", 12),
     ],
 )
@@ -90,7 +90,7 @@ def test_set_internal_mcp_max_tool_invocations_persists_clamped_value(monkeypatc
         captured["name"]
         == settings_service.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME
     )
-    assert captured["value"] == 50
+    assert captured["value"] == 500
 
 
 def test_set_internal_mcp_tool_batch_cap_persists_clamped_value(monkeypatch):
