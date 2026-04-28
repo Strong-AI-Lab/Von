@@ -45,7 +45,11 @@ def test_contract_resolution_uses_bounded_candidates_without_registry_scan(
         required_action_ids=frozenset(
             {
                 "tool_calling.preflight_requirements",
-                "tool_calling.respond",
+                "tool_calling.plan",
+                "tool_calling.validate",
+                "tool_calling.repair",
+                "tool_calling.execute",
+                "tool_calling.backfill",
                 "workflow_invoke_subworkflow",
                 "turn_execution.completion_gate",
             }

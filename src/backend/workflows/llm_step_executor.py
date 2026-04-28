@@ -1566,6 +1566,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             "missing_tool_call_retry_budget": int(
                 getattr(orchestrator, "_max_missing_tool_call_retries_per_turn", 1)
             ),
+            "tool_call_repair_attempts": 0,
+            "tool_call_repair_budget": 1,
             "llm_allowed_tools": allowed_tools,
             "method_catalogue": method_catalogue,
         }
@@ -1591,6 +1593,12 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             shared_data.update(validate_result.outputs)
             if validate_result.status == "failed":
                 return validate_result
+            if bool(shared_data.get("tool_call_repair_required")):
+                repair_result = orchestrator._action_tool_calling_repair(plan_request)
+                shared_data.update(repair_result.outputs)
+                if repair_result.status == "failed":
+                    return repair_result
+                continue
             if not shared_data.get("tool_calls_validated"):
                 break
 

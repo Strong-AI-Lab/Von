@@ -38,6 +38,7 @@ _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_postcondition_critic"
 )
+_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID = "#V#tool_call_repair_prompt"
 _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -67,6 +68,12 @@ _POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "prompt_turn_execution_postcondition_critic_seed.md"
+)
+_TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "tool_call_repair_prompt_seed.md"
 )
 _TARGET_WORKFLOW_IDS: tuple[str, ...] = (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -113,6 +120,15 @@ def _load_postcondition_critic_prompt_seed_text() -> str:
     ).strip()
     if not prompt_text:
         raise ValueError("turn_execution_postcondition_critic_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_tool_call_repair_prompt_seed_text() -> str:
+    prompt_text = _TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("tool_call_repair_prompt_seed_missing")
     return prompt_text
 
 
@@ -173,6 +189,16 @@ def _ensure_conversation_turn_prompt_support(
                     "Canonical postcondition-critic prompt for deciding whether "
                     "a turn's answer is safely supported by the evidence actually "
                     "produced by the selected workflow and verification reads."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
+                concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
+                name="Tool-call repair prompt",
+                description=(
+                    "Canonical one-shot repair prompt for converting a malformed "
+                    "or schema-invalid tool plan into a corrected JSON-only MCP "
+                    "tool-call batch, or an empty batch when no repair is possible."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -237,6 +263,18 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
+    if force_prompt_seed or not prompt_concept_has_content(
+        _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_tool_call_repair_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
 
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
@@ -295,6 +333,17 @@ def _ensure_conversation_turn_prompt_support(
         validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
         if _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
 
     report["errors_by_target"] = errors_by_target

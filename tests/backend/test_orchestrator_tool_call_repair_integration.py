@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from src.backend.integrations.internal_mcp.gateway import MethodDefinition
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
+    OrchestratorResult,
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.services.prompt_template_service import RenderedPrompt
@@ -61,6 +63,55 @@ class _Gateway:
         return _TransportResult(payload={"ok": True}, duration_ms=1.0)
 
 
+class _JiraGateway:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+        self._definition = MethodDefinition(
+            name="jira_get_issue",
+            handler=lambda **_kwargs: None,
+            input_schema=Schema(
+                required={"issue_key": str},
+                optional={"fields": list, "expand": list},
+                allow_unknown=False,
+                description="jira_get_issue input",
+            ),
+            category="read",
+            description="Fetch a Jira issue by issue key",
+        )
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "jira_get_issue": {
+                "category": "read",
+                "description": "Fetch a Jira issue by issue key",
+                "input_schema": {
+                    "required": {"issue_key": str},
+                    "optional": {"fields": list, "expand": list},
+                    "allow_unknown": False,
+                    "description": "jira_get_issue input",
+                },
+            }
+        }
+
+    def get_method_definition(self, method_name: str) -> MethodDefinition | None:
+        if method_name == "jira_get_issue":
+            return self._definition
+        return None
+
+    def invoke(self, tool_name: str, payload: Mapping[str, Any]) -> _TransportResult:
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        return _TransportResult(
+            payload={
+                "key": payload.get("issue_key"),
+                "summary": "Produce a use case for describing publication topics.",
+                "status": "Done",
+            },
+            duration_ms=1.0,
+        )
+
+
 class _SequencedLLM:
     def __init__(self, responses: Sequence[str]) -> None:
         self._responses = list(responses)
@@ -97,6 +148,75 @@ _TEST_TOOL_CALL_REPAIR_PROMPT = (
     "Original:\n"
     "{raw_tool_call}\n"
 )
+
+
+def _tool_calling_request(
+    *,
+    llm: Any,
+    prompt: str,
+    gateway: Any,
+) -> SimpleNamespace:
+    data: dict[str, Any] = {
+        "prompt": prompt,
+        "prompt_for_requirements": prompt,
+        "augmented_context": [],
+        "policy_state": SimpleNamespace(enabled=False, policy=None),
+        "registry_snapshot": {},
+        "user_concept_id": "#V#user",
+        "org_concept_id": None,
+        "model_for_stage": lambda _stage: None,
+        "record_llm_call": lambda **_kwargs: None,
+        "aux_llm_calls": [],
+        "llm_calls": [],
+        "invocations": [],
+        "tool_messages": [],
+        "iteration_count": 0,
+        "allowed_write_tools": set(),
+        "missing_tool_call_retry_attempts": 0,
+        "missing_tool_call_retry_budget": 1,
+        "tool_call_repair_attempts": 0,
+        "tool_call_repair_budget": 1,
+        "llm_allowed_tools": ["jira_get_issue"],
+        "method_catalogue": gateway.describe_methods(),
+        "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: OrchestratorResult(
+            response_text=(
+                "Tool call was not executed due to a validation error.\n"
+                + "\n".join(str(error) for error in errors)
+            ),
+            extra_messages=(),
+            tool_invocations=(
+                {
+                    "tool": "__tool_call_validation_error__",
+                    "payload": {
+                        "errors": list(errors),
+                        "warnings": list(warnings),
+                        "tool_unavailable": list(unavailable),
+                        "raw_tool_call": kwargs.get("raw_tool_call"),
+                    },
+                    "error": "; ".join(errors),
+                },
+            ),
+            aux_llm_calls=(),
+        ),
+    }
+    return SimpleNamespace(
+        action_id="tool_calling.respond",
+        data=data,
+        environment=SimpleNamespace(
+            llm_client=llm,
+            gateway=gateway,
+            model=None,
+            user_namespace="#V#user",
+            max_tool_invocations=4,
+            max_tool_result_chars=4000,
+            max_tool_result_field_chars=2000,
+            default_gmail_profile=None,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="plan",
+        workflow_state_metadata={},
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -209,6 +329,98 @@ def test_tool_call_repair_recovers_unknown_tool_with_params(
     assert gateway.invocations[0]["payload"]["query"].strip()
     assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()
+
+
+def test_tool_call_repair_recovers_mixed_jira_plan_with_invalid_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
+
+    gateway = _JiraGateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    raw_mixed_plan = "\n".join(
+        [
+            '{"action": "call_tool", "tool": "jira_get_issue", "payload": {"issue_key": "JVNAUTOSCI-150"}}',
+            '{"action": "call_tool", "tool": "jira_get_issue", "payload": {"key": "JVNAUTOSCI-150"}}',
+            "I'm unable to give a grounded summary because Jira did not return an issue payload.",
+        ]
+    )
+    llm = _SequencedLLM(
+        [
+            raw_mixed_plan,
+            '{"action": "call_tool", "tool": "jira_get_issue", "payload": {"issue_key": "JVNAUTOSCI-150"}}',
+            "JVNAUTOSCI-150 is Done.",
+        ]
+    )
+
+    action_result = orchestrator._action_tool_calling_respond(
+        _tool_calling_request(
+            llm=llm,
+            prompt="Tell me about JVNAUTOSCI-150 in JIRA",
+            gateway=gateway,
+        )
+    )
+
+    assert action_result.status == "success"
+    assert gateway.invocations == [
+        {
+            "tool": "jira_get_issue",
+            "payload": {"issue_key": "JVNAUTOSCI-150", "namespace": "#V#user"},
+        }
+    ]
+    aux_llm_calls = action_result.outputs.get("aux_llm_calls") or []
+    repair_events = [
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, Mapping) and entry.get("type") == "tool_call_repair"
+    ]
+    assert len(repair_events) == 2
+    assert action_result.outputs["tool_call_repair_attempts"] == 1
+    assert action_result.outputs["tool_call_repair_succeeded"] is True
+    assert "validation error" not in str(
+        action_result.outputs.get("response_text", "")
+    ).lower()
+
+
+def test_tool_call_repair_is_one_shot_before_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
+
+    gateway = _JiraGateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    llm = _SequencedLLM(
+        [
+            '{"action": "call_tool", "tool": "jira_get_issue", "payload": {"key": "JVNAUTOSCI-150"}}',
+            '{"action": "call_tool", "tool": "jira_get_issue", "payload": {"key": "JVNAUTOSCI-150"}}',
+        ]
+    )
+
+    action_result = orchestrator._action_tool_calling_respond(
+        _tool_calling_request(
+            llm=llm,
+            prompt="Tell me about JVNAUTOSCI-150 in JIRA",
+            gateway=gateway,
+        )
+    )
+
+    assert gateway.invocations == []
+    assert len(llm.calls) == 2
+    assert action_result.outputs["tool_call_repair_attempts"] == 1
+    assert action_result.outputs["tool_call_repair_succeeded"] is False
+    response_text = str(
+        action_result.outputs.get("response_text")
+        or action_result.outputs.get("final_response")
+        or ""
+    )
+    assert "validation error" in response_text.lower()
+    validation_invocations = [
+        invocation
+        for invocation in action_result.outputs["invocations"]
+        if isinstance(invocation, Mapping)
+        and invocation.get("tool") == "__tool_call_validation_error__"
+    ]
+    assert len(validation_invocations) == 1
 
 
 def test_attempt_tool_call_repair_emits_annotated_prompt_and_response_events(

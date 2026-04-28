@@ -64,7 +64,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 5
+    assert report.get("seeded_prompt_count") == 6
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -199,16 +199,16 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         TOOL_CALLING_WORKFLOW_ID
     )
     assert tool_calling_definition is not None
-    tool_calling_respond_step_id = authority_service._step_concept_id(
+    tool_calling_repair_step_id = authority_service._step_concept_id(
         workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        state_id="respond",
+        state_id="repair",
     )
-    tool_calling_respond_action = tool_calling_definition.states[
-        tool_calling_respond_step_id
+    tool_calling_repair_action = tool_calling_definition.states[
+        tool_calling_repair_step_id
     ].actions[0]
-    assert tool_calling_respond_action.action_id == "tool_calling.respond"
-    assert tool_calling_respond_action.execution_mode == "deterministic"
-    assert tool_calling_respond_action.llm_policy is None
+    assert tool_calling_repair_action.action_id == "tool_calling.repair"
+    assert tool_calling_repair_action.execution_mode == "deterministic"
+    assert tool_calling_repair_action.prompt_contract is None
     required_effects_contract = tool_calling_definition.metadata.get(
         "required_effects_contract"
     )
@@ -554,7 +554,9 @@ def test_bootstrap_repairs_bundle_snapshot_drift_for_conversation_turn_workflow_
     assert drifted_definition is not None
     assert drifted_definition.initial_state == routing_step_id
 
-    repair_report = bootstrap_canonical_conversation_turn_workflows()
+    repair_report = bootstrap_canonical_conversation_turn_workflows(
+        force_republish=True,
+    )
     publication = repair_report.get("publication") or {}
     assert publication.get("materialisation_status") == "repaired_from_repo_seed"
     assert publication.get("skipped") is not True

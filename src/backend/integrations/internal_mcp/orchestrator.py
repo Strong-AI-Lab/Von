@@ -184,7 +184,11 @@ _SELECTOR_GENERIC_WORKFLOW_IDS = frozenset(
 _TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS = frozenset(
     {
         "tool_calling.preflight_requirements",
-        "tool_calling.respond",
+        "tool_calling.plan",
+        "tool_calling.validate",
+        "tool_calling.repair",
+        "tool_calling.execute",
+        "tool_calling.backfill",
         "workflow_invoke_subworkflow",
         "turn_execution.completion_gate",
     }
@@ -3901,6 +3905,13 @@ class InternalMCPChatOrchestrator:
         )
         registry.register(
             ActionSpec(
+                action_id="tool_calling.repair",
+                handler=self._action_tool_calling_repair,
+                description="Run one Vontology-prompted repair attempt for invalid tool calls.",
+            )
+        )
+        registry.register(
+            ActionSpec(
                 action_id="tool_calling.execute",
                 handler=self._action_tool_calling_execute,
                 description="Execute tool-call batch against MCP gateway.",
@@ -7392,6 +7403,11 @@ class InternalMCPChatOrchestrator:
             "missing_prompt_read_file_copy_ids",
             "missing_prompt_scholarly_representation_for_file_copy_ids",
             "llm_allowed_tools",
+            "tool_call_validation_errors",
+            "tool_call_validation_warnings",
+            "tool_call_validation_unavailable_tools",
+            "tool_call_validation_diagnostics",
+            "tool_call_repaired_calls",
         ):
             value = data.get(key)
             if isinstance(value, list):
@@ -7400,6 +7416,7 @@ class InternalMCPChatOrchestrator:
             "prompt_requirement_url_policy",
             "tool_plan_context_lineage",
             "tool_follow_up_context_lineage",
+            "tool_call_repair_decision",
         ):
             value = data.get(key)
             if isinstance(value, Mapping):
@@ -7413,10 +7430,29 @@ class InternalMCPChatOrchestrator:
             "required_prompt_url_extraction_url",
             "required_prompt_create_type_name",
             "missing_tool_call_retry_reason_override",
+            "raw_tool_plan_text",
+            "tool_call_repair_outcome",
+            "tool_call_repair_stop_reason",
         ):
             value = data.get(key)
             if isinstance(value, str) and value.strip():
                 outputs[key] = value
+        for key in (
+            "tool_call_repair_required",
+            "tool_call_validation_error_pending",
+            "tool_call_repair_attempted",
+            "tool_call_repair_succeeded",
+        ):
+            if isinstance(data.get(key), bool):
+                outputs[key] = bool(data.get(key))
+        for key in (
+            "tool_call_repair_attempts",
+            "tool_call_repair_budget",
+            "tool_call_repair_remaining",
+        ):
+            value = data.get(key)
+            if isinstance(value, int):
+                outputs[key] = int(value)
         if isinstance(data.get("prompt_requirements_preflight_completed"), bool):
             outputs["prompt_requirements_preflight_completed"] = bool(
                 data.get("prompt_requirements_preflight_completed")
@@ -7480,6 +7516,30 @@ class InternalMCPChatOrchestrator:
                 )
             if not validate_result.ok:
                 return validate_result
+            if bool(data.get("tool_call_repair_required")):
+                repair_result = self._action_tool_calling_repair(request)
+                self._merge_action_outputs_into_workflow_data(
+                    data,
+                    repair_result.outputs,
+                )
+                orchestrator_result = data.get("orchestrator_result")
+                if isinstance(orchestrator_result, OrchestratorResult):
+                    self._materialise_tool_calling_orchestrator_result(
+                        data,
+                        orchestrator_result,
+                    )
+                    return WorkflowActionResult(
+                        outputs=self._build_tool_calling_state_outputs(
+                            data,
+                            orchestrator_result=orchestrator_result,
+                            tool_calls_present=False,
+                            direct_response=True,
+                            result=False,
+                        )
+                    )
+                if not repair_result.ok:
+                    return repair_result
+                continue
             if not bool(data.get("tool_calls_validated")):
                 return WorkflowActionResult(
                     status="failed",
@@ -8188,74 +8248,97 @@ class InternalMCPChatOrchestrator:
             contract_summaries = []
 
         if preflight.errors:
-            repaired_calls = None
-            if method_catalogue:
-                tool_call_model = data.get("tool_call_model") or model_for_stage(
-                    "tool_call"
-                )
-                raw_tool_call = stable_json_dumps(tool_calls, max_chars=4000)
-                repaired_calls = self._attempt_tool_call_repair(
-                    current_response=raw_tool_call,
-                    errors=preflight.errors,
-                    tool_list=sorted(method_catalogue.keys()),
-                    tool_calls=cast(Sequence[Mapping[str, Any]], tool_calls),
-                    method_catalogue=method_catalogue,
-                    llm_client=llm_client,
-                    policy_state=policy_state,
-                    default_model=tool_call_model,
-                    registry_snapshot=registry_snapshot,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
-                    aux_llm_calls=aux_llm_calls,
-                    llm_calls_log=llm_calls,
-                    record_llm_call=record_llm_call,
-                )
-            if repaired_calls:
-                preflight = self._preflight_tool_calls(
-                    repaired_calls,
-                    method_catalogue,
-                    allowed_tool_names=set(
-                        str(tool_name).strip().lower()
-                        for tool_name in (data.get("llm_allowed_tools") or [])
-                        if isinstance(tool_name, str) and str(tool_name).strip()
-                    ),
-                    user_namespace=env.user_namespace,
-                    selected_gmail_profile=gmail_profile,
-                    tool_invocations=(
-                        data.get("invocations")
-                        if isinstance(data.get("invocations"), Sequence)
-                        and not isinstance(
-                            data.get("invocations"), (str, bytes, bytearray)
-                        )
-                        else ()
-                    ),
-                    conversation_session_id=conversation_session_id,
-                    turn_id=data.get("turn_id"),
-                )
-                if not preflight.errors:
-                    tool_calls = repaired_calls
+            raw_tool_call = stable_json_dumps(
+                cast(Sequence[Mapping[str, Any]], tool_calls),
+                max_chars=8000,
+            )
+            repair_attempts = self._coerce_non_negative_int(
+                data.get("tool_call_repair_attempts"),
+                default=0,
+                max_value=20,
+            )
+            repair_budget = self._coerce_non_negative_int(
+                data.get("tool_call_repair_budget"),
+                default=1,
+                max_value=20,
+            )
+            repair_remaining = max(0, repair_budget - repair_attempts)
+            repair_required = bool(
+                method_catalogue
+                and self._tool_call_repair_enabled()
+                and repair_remaining > 0
+            )
+
+            data["tool_call_validation_errors"] = list(preflight.errors)
+            data["tool_call_validation_warnings"] = list(preflight.warnings)
+            data["tool_call_validation_unavailable_tools"] = list(
+                preflight.tool_unavailable
+            )
+            data["tool_call_validation_diagnostics"] = list(preflight.diagnostics)
+            data["raw_tool_plan_text"] = raw_tool_call
+            data["tool_call_validation_error_pending"] = True
+            data["tool_call_repair_required"] = repair_required
+            data["tool_call_repair_budget"] = repair_budget
+            data["tool_call_repair_remaining"] = repair_remaining
+            data["tool_call_repair_decision"] = {
+                "schema_version": "tool_call_repair_decision.v1",
+                "required": repair_required,
+                "attempts": repair_attempts,
+                "budget": repair_budget,
+                "remaining": repair_remaining,
+                "error_count": len(preflight.errors),
+                "unavailable_tools": list(preflight.tool_unavailable),
+                "reason": (
+                    "validation_error_repair_available"
+                    if repair_required
+                    else (
+                        "repair_budget_exhausted"
+                        if repair_budget <= repair_attempts
+                        else "repair_unavailable"
+                    )
+                ),
+            }
+            if repair_required:
                 try:
                     aux_llm_calls.append(
                         {
-                            "type": "tool_contract_attempt",
-                            **contract_attempt(
-                                stage="tool_calling.validate.repair",
-                                tool_calls=cast(
-                                    Sequence[Mapping[str, Any]], repaired_calls
-                                ),
-                                contracts=contract_summaries,
-                                validation_errors=preflight.errors,
-                                validation_warnings=preflight.warnings,
-                                repair_attempted=True,
-                                repair_succeeded=not bool(preflight.errors),
-                            ),
+                            "type": "tool_call_validation_repair_requested",
+                            "stage": "tool_calling.validate",
+                            "attempts": repair_attempts,
+                            "budget": repair_budget,
+                            "remaining": repair_remaining,
+                            "errors": list(preflight.errors),
+                            "warnings": list(preflight.warnings),
+                            "tool_unavailable": list(preflight.tool_unavailable),
                             "diagnostics": list(preflight.diagnostics),
                         }
                     )
                 except Exception:
                     pass
+                return WorkflowActionResult(
+                    outputs={
+                        "tool_calls_validated": False,
+                        "tool_call_repair_required": True,
+                        "tool_call_validation_error_pending": True,
+                        "tool_call_validation_errors": list(preflight.errors),
+                        "tool_call_validation_warnings": list(preflight.warnings),
+                        "tool_call_validation_unavailable_tools": list(
+                            preflight.tool_unavailable
+                        ),
+                        "tool_call_validation_diagnostics": list(
+                            preflight.diagnostics
+                        ),
+                        "raw_tool_plan_text": raw_tool_call,
+                        "tool_call_repair_attempts": repair_attempts,
+                        "tool_call_repair_budget": repair_budget,
+                        "tool_call_repair_remaining": repair_remaining,
+                        "tool_call_repair_decision": dict(
+                            data["tool_call_repair_decision"]
+                        ),
+                        "result": False,
+                    }
+                )
 
-        if preflight.errors:
             invocations = data.get("invocations", [])
             tool_messages = data.get("tool_messages", [])
             build_error = data.get("build_validation_error_result")
@@ -8264,17 +8347,22 @@ class InternalMCPChatOrchestrator:
                     preflight.errors,
                     preflight.warnings,
                     preflight.tool_unavailable,
-                    raw_tool_call=(
-                        data.get("response", "")
-                        if isinstance(data.get("response"), str)
-                        else str(data.get("response", ""))
-                    ),
+                    raw_tool_call=raw_tool_call,
                     invocations_override=tuple(invocations),
                     tool_messages_override=tuple(tool_messages),
                 )
                 return WorkflowActionResult(
                     outputs={
                         "tool_calls_validated": False,
+                        "tool_call_repair_required": False,
+                        "tool_call_validation_error_pending": True,
+                        "tool_call_repair_succeeded": False,
+                        "tool_call_repair_outcome": "validation_failed_after_repair",
+                        "tool_call_repair_stop_reason": (
+                            "repair_budget_exhausted"
+                            if repair_budget <= repair_attempts
+                            else "validation_failed"
+                        ),
                         "orchestrator_result": error_result,
                         "result": False,
                     }
@@ -8289,9 +8377,191 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "tool_calls_validated": True,
                 "tool_calls": tool_calls,
+                "tool_call_repair_required": False,
+                "tool_call_validation_error_pending": False,
+                "tool_call_validation_errors": [],
+                "tool_call_validation_warnings": list(preflight.warnings),
+                "tool_call_validation_unavailable_tools": [],
+                "tool_call_validation_diagnostics": list(preflight.diagnostics),
                 "result": True,
             }
         )
+
+    def _action_tool_calling_repair(self, request: Any) -> WorkflowActionResult:
+        """Run the bounded Vontology-prompted repair step for invalid tool calls."""
+
+        data = request.data
+        env = request.environment
+        llm_client = env.llm_client
+        tool_calls = data.get("tool_calls")
+        method_catalogue = data.get("method_catalogue")
+        if not isinstance(method_catalogue, Mapping):
+            try:
+                method_catalogue = self._gateway.describe_methods()
+                data["method_catalogue"] = method_catalogue
+            except Exception:
+                method_catalogue = {}
+
+        errors = [
+            str(error).strip()
+            for error in (data.get("tool_call_validation_errors") or [])
+            if isinstance(error, str) and str(error).strip()
+        ]
+        if not isinstance(tool_calls, Sequence) or isinstance(
+            tool_calls,
+            (str, bytes, bytearray),
+        ):
+            tool_calls = []
+        if not errors or not method_catalogue:
+            return WorkflowActionResult(
+                outputs={
+                    "tool_call_repair_required": False,
+                    "tool_call_repair_attempted": False,
+                    "tool_call_repair_succeeded": False,
+                    "tool_call_repair_outcome": "not_applicable",
+                    "tool_call_repair_stop_reason": (
+                        "missing_validation_errors"
+                        if not errors
+                        else "missing_method_catalogue"
+                    ),
+                    "result": False,
+                }
+            )
+
+        repair_attempts = self._coerce_non_negative_int(
+            data.get("tool_call_repair_attempts"),
+            default=0,
+            max_value=20,
+        )
+        repair_budget = self._coerce_non_negative_int(
+            data.get("tool_call_repair_budget"),
+            default=1,
+            max_value=20,
+        )
+        if repair_attempts >= repair_budget:
+            return WorkflowActionResult(
+                outputs={
+                    "tool_call_repair_required": False,
+                    "tool_call_repair_attempted": False,
+                    "tool_call_repair_succeeded": False,
+                    "tool_call_repair_attempts": repair_attempts,
+                    "tool_call_repair_budget": repair_budget,
+                    "tool_call_repair_remaining": 0,
+                    "tool_call_repair_outcome": "skipped",
+                    "tool_call_repair_stop_reason": "repair_budget_exhausted",
+                    "result": False,
+                }
+            )
+
+        policy_state = data["policy_state"]
+        registry_snapshot = data.get("registry_snapshot")
+        model_for_stage = data["model_for_stage"]
+        record_llm_call = data["record_llm_call"]
+        aux_llm_calls = data["aux_llm_calls"]
+        llm_calls = data["llm_calls"]
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        tool_call_model = data.get("tool_call_model") or model_for_stage("tool_call")
+        raw_tool_call = (
+            data.get("raw_tool_plan_text")
+            if isinstance(data.get("raw_tool_plan_text"), str)
+            and data.get("raw_tool_plan_text").strip()
+            else stable_json_dumps(
+                cast(Sequence[Mapping[str, Any]], tool_calls),
+                max_chars=8000,
+            )
+        )
+        preferred_tools = (
+            list(data.get("missing_prompt_tools"))
+            if isinstance(data.get("missing_prompt_tools"), list)
+            else []
+        )
+
+        next_attempts = repair_attempts + 1
+        repaired_calls = self._attempt_tool_call_repair(
+            current_response=raw_tool_call,
+            errors=errors,
+            tool_list=sorted(str(name) for name in method_catalogue.keys()),
+            tool_calls=cast(Sequence[Mapping[str, Any]], tool_calls),
+            method_catalogue=method_catalogue,
+            preferred_tools=preferred_tools,
+            llm_client=llm_client,
+            policy_state=policy_state,
+            default_model=tool_call_model,
+            registry_snapshot=registry_snapshot,
+            user_concept_id=(
+                str(user_concept_id).strip()
+                if isinstance(user_concept_id, str) and user_concept_id.strip()
+                else None
+            ),
+            org_concept_id=(
+                str(org_concept_id).strip()
+                if isinstance(org_concept_id, str) and org_concept_id.strip()
+                else None
+            ),
+            aux_llm_calls=aux_llm_calls,
+            llm_calls_log=llm_calls,
+            record_llm_call=record_llm_call,
+        )
+        succeeded = bool(repaired_calls)
+        remaining = max(0, repair_budget - next_attempts)
+        decision = {
+            "schema_version": "tool_call_repair_decision.v1",
+            "required": False,
+            "attempted": True,
+            "succeeded": succeeded,
+            "attempts": next_attempts,
+            "budget": repair_budget,
+            "remaining": remaining,
+            "error_count": len(errors),
+            "reason": (
+                "repair_produced_tool_calls"
+                if succeeded
+                else "repair_failed_or_returned_empty"
+            ),
+        }
+        if isinstance(data.get("tool_call_validation_unavailable_tools"), list):
+            decision["unavailable_tools"] = list(
+                data.get("tool_call_validation_unavailable_tools") or []
+            )
+        try:
+            aux_llm_calls.append(
+                {
+                    "type": "tool_call_validation_repair_result",
+                    "stage": "tool_calling.repair",
+                    "attempt": next_attempts,
+                    "budget": repair_budget,
+                    "succeeded": succeeded,
+                    "repaired_call_count": len(repaired_calls or []),
+                    "decision": dict(decision),
+                }
+            )
+        except Exception:
+            pass
+
+        outputs: dict[str, Any] = {
+            "tool_call_repair_required": False,
+            "tool_call_repair_attempted": True,
+            "tool_call_repair_succeeded": succeeded,
+            "tool_call_repair_attempts": next_attempts,
+            "tool_call_repair_budget": repair_budget,
+            "tool_call_repair_remaining": remaining,
+            "tool_call_repair_decision": decision,
+            "tool_call_repair_outcome": (
+                "repair_succeeded" if succeeded else "repair_failed"
+            ),
+            "tool_call_repair_stop_reason": (
+                "" if succeeded else "repair_failed_or_returned_empty"
+            ),
+            "result": succeeded,
+        }
+        if succeeded:
+            outputs["tool_calls"] = repaired_calls
+            outputs["tool_call_repaired_calls"] = list(repaired_calls or [])
+            outputs["tool_call_validation_error_pending"] = False
+        else:
+            outputs["tool_call_validation_error_pending"] = True
+        return WorkflowActionResult(outputs=outputs)
 
     def _action_tool_calling_execute(self, request: Any) -> WorkflowActionResult:
         """Execute a batch of tool calls against the MCP gateway.
@@ -11180,7 +11450,11 @@ class InternalMCPChatOrchestrator:
 
         if action == "tool_calling.plan" or stage_name in {"tool_call", "planner"}:
             return "planner"
-        if action == "tool_calling.validate" or stage_name in {"validate", "validator"}:
+        if action in {"tool_calling.validate", "tool_calling.repair"} or stage_name in {
+            "validate",
+            "validator",
+            "tool_recovery",
+        }:
             return "validator"
         if action == "tool_calling.execute" or stage_name in {"execute", "executor"}:
             return "executor"

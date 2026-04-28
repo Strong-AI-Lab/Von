@@ -74,23 +74,69 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     workflow = build_authoritative_test_workflow_definition(TOOL_CALLING_WORKFLOW_ID)
     assert workflow.initial_state == "preflight_requirements"
     assert "preflight_requirements" in workflow.states
-    assert "respond" in workflow.states
+    assert "plan" in workflow.states
+    assert "validate" in workflow.states
+    assert "repair" in workflow.states
+    assert "execute" in workflow.states
+    assert "backfill" in workflow.states
     assert "postcondition_critic" in workflow.states
     assert "completion_gate" in workflow.states
 
     preflight = workflow.states["preflight_requirements"]
     assert preflight.actions[0].action_id == "tool_calling.preflight_requirements"
     assert any(
-        t.to_state == "respond" and t.reason == "requirements_preflight_completed"
+        t.to_state == "plan" and t.reason == "requirements_preflight_completed"
         for t in preflight.transitions
     )
 
-    respond = workflow.states["respond"]
-    assert respond.actions[0].action_id == "tool_calling.respond"
-    assert respond.actions[0].execution_mode == "deterministic"
+    plan = workflow.states["plan"]
+    assert plan.actions[0].action_id == "tool_calling.plan"
+    assert any(
+        t.to_state == "validate" and t.reason == "tool_calls_planned"
+        for t in plan.transitions
+    )
+    assert any(
+        t.to_state == "postcondition_critic"
+        and t.reason == "planning_completed_without_tool_calls"
+        for t in plan.transitions
+    )
+
+    validate = workflow.states["validate"]
+    assert validate.actions[0].action_id == "tool_calling.validate"
+    assert any(
+        t.to_state == "repair" and t.reason == "validation_error_repair_required"
+        for t in validate.transitions
+    )
+    assert any(
+        t.to_state == "execute" and t.reason == "tool_calls_validated"
+        for t in validate.transitions
+    )
+
+    repair = workflow.states["repair"]
+    assert repair.actions[0].action_id == "tool_calling.repair"
+    assert repair.actions[0].prompt_contract is None
+    assert any(
+        t.to_state == "validate" and t.reason == "repair_attempt_completed"
+        for t in repair.transitions
+    )
+
+    execute = workflow.states["execute"]
+    assert execute.actions[0].action_id == "tool_calling.execute"
+    assert execute.actions[0].execution_mode == "deterministic"
+    assert any(
+        t.to_state == "backfill" and t.reason == "tool_execution_completed"
+        for t in execute.transitions
+    )
+
+    backfill = workflow.states["backfill"]
+    assert backfill.actions[0].action_id == "tool_calling.backfill"
+    assert any(
+        t.to_state == "validate" and t.reason == "backfill_requested_more_tool_calls"
+        for t in backfill.transitions
+    )
     assert any(
         t.to_state == "postcondition_critic" and t.reason == "response_ready"
-        for t in respond.transitions
+        for t in backfill.transitions
     )
 
     postcondition_critic = workflow.states["postcondition_critic"]
@@ -106,7 +152,7 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "respond" and t.reason == "completion_gate_repeat_iteration"
+        t.to_state == "plan" and t.reason == "completion_gate_repeat_iteration"
         for t in completion_gate.transitions
     )
     assert any(t.to_state == "completed" for t in completion_gate.transitions)

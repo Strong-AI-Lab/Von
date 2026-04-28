@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "workflows": [
     {
       "publication_spec": {
@@ -1054,7 +1054,7 @@
                   "kind": "always"
                 },
                 "reason": "requirements_preflight_completed",
-                "to_state": "respond"
+                "to_state": "plan"
               }
             ],
             "context_input_mapping_specs": [],
@@ -1082,15 +1082,147 @@
           },
           {
             "action_concept_id": null,
-            "action_id": "tool_calling.respond",
+            "action_id": "tool_calling.plan",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "tool_calls_present",
+                  "kind": "context_flag"
+                },
+                "reason": "tool_calls_planned",
+                "to_state": "validate"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "planning_completed_without_tool_calls",
+                "to_state": "postcondition_critic"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "plan",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "tool_calling.validate",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "tool_call_repair_required",
+                  "kind": "context_flag"
+                },
+                "reason": "validation_error_repair_required",
+                "to_state": "repair"
+              },
+              {
+                "condition_spec": {
+                  "key": "tool_calls_validated",
+                  "kind": "context_flag"
+                },
+                "reason": "tool_calls_validated",
+                "to_state": "execute"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "validation_terminal_failure",
+                "to_state": "postcondition_critic"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "validate",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "tool_calling.repair",
             "concept_id": null,
             "conditional_transitions": [
               {
                 "condition_spec": {
                   "kind": "always"
                 },
-                "reason": "response_ready",
-                "to_state": "postcondition_critic"
+                "reason": "repair_attempt_completed",
+                "to_state": "validate"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "repair",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "tool_calling.execute",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "tool_execution_completed",
+                "to_state": "backfill"
               }
             ],
             "context_input_mapping_specs": [],
@@ -1112,7 +1244,51 @@
             "on_true_state": null,
             "on_unknown_state": null,
             "prompt_concept_ids": [],
-            "state_id": "respond",
+            "state_id": "execute",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "tool_calling.backfill",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "more_tool_calls",
+                  "kind": "context_flag"
+                },
+                "reason": "backfill_requested_more_tool_calls",
+                "to_state": "validate"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "response_ready",
+                "to_state": "postcondition_critic"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "backfill",
             "static_input_bindings": [],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
@@ -1192,7 +1368,7 @@
                   "kind": "context_flag"
                 },
                 "reason": "completion_gate_repeat_iteration",
-                "to_state": "respond"
+                "to_state": "plan"
               },
               {
                 "condition_spec": {
