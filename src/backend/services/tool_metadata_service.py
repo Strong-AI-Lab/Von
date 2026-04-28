@@ -475,11 +475,21 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "vontology",
         "display_template": "{action}: {predicate}",
+        "planner_hint": (
+            "Use only after the target concept is known and the predicate is a "
+            "core text predicate or an existing #V# predicate concept. Do not "
+            "invent ad-hoc #V# field-name predicates."
+        ),
     },
     "upsert_singleton_text_relation": {
         "salience": "medium",
         "category": "vontology",
         "display_template": "{action}: {predicate}",
+        "planner_hint": (
+            "Use for singleton text fields only with a core text predicate or an "
+            "existing #V# predicate concept. Resolve or create durable predicates "
+            "before writing; missing #V# predicates are rejected."
+        ),
     },
     "delete_text_relation": {
         "salience": "medium",

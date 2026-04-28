@@ -1183,6 +1183,10 @@ def _search_concepts(**kwargs):
 
 def _upsert_text_relation(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
+    from ...services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+        resolve_text_relation_predicate_for_write,
+    )
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
     )
@@ -1220,9 +1224,11 @@ def _upsert_text_relation(**kwargs):
         )
 
     try:
+        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
+        storage_predicate = predicate_resolution.storage_predicate
         result = upsert_text_for_concept(
             subject_concept_id=concept_id,
-            predicate=predicate,
+            predicate=storage_predicate,
             text=text,
             lang=language,
             provenance=provenance if isinstance(provenance, dict) else None,
@@ -1234,7 +1240,7 @@ def _upsert_text_relation(**kwargs):
         maybe_sync_concept_text_relations_to_rag(
             namespace=namespace,
             concept_id=concept_id,
-            predicate=predicate,
+            predicate=storage_predicate,
         )
 
         text_preview = text[:100] + "..." if len(text) > 100 else text
@@ -1243,10 +1249,19 @@ def _upsert_text_relation(**kwargs):
             "text_value_id": str(result.get("text_value_id")),
             "relation_id": str(result.get("relation_id")),
             "relation_created": result.get("relation_created"),
-            "predicate": predicate,
+            "predicate": storage_predicate,
+            "input_predicate": predicate_resolution.input_predicate,
+            "predicate_concept_id": predicate_resolution.predicate_concept_id,
             "text_preview": text_preview,
             "language": language,
         }
+    except TextRelationPredicateResolutionError as exc:
+        return make_error_response(
+            exc.error_code,
+            str(exc),
+            details=exc.details,
+            suggestions=exc.suggestions,
+        )
     except Exception as exc:
         return make_error_response(
             "exception",
@@ -1487,6 +1502,10 @@ def _get_text_relations_summary(**kwargs):
 
 def _upsert_singleton_text_relation(**kwargs):
     from ...services.text_value_service import upsert_singleton_text_relation
+    from ...services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+        resolve_text_relation_predicate_for_write,
+    )
 
     concept_id = kwargs.get("concept_id")
     predicate = kwargs.get("predicate")
@@ -1520,9 +1539,10 @@ def _upsert_singleton_text_relation(**kwargs):
         )
 
     try:
-        return upsert_singleton_text_relation(
+        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
+        result = upsert_singleton_text_relation(
             subject_concept_id=concept_id,
-            predicate=predicate,
+            predicate=predicate_resolution.storage_predicate,
             text=text,
             lang=language,
             policy=policy,
@@ -1531,6 +1551,16 @@ def _upsert_singleton_text_relation(**kwargs):
             garbage_collect=(
                 True if garbage_collect is None else bool(garbage_collect)
             ),
+        )
+        result["input_predicate"] = predicate_resolution.input_predicate
+        result["predicate_concept_id"] = predicate_resolution.predicate_concept_id
+        return result
+    except TextRelationPredicateResolutionError as exc:
+        return make_error_response(
+            exc.error_code,
+            str(exc),
+            details=exc.details,
+            suggestions=exc.suggestions,
         )
     except Exception as exc:
         return make_error_response(
@@ -6826,7 +6856,7 @@ def _upsert_text_relation_input_schema() -> Schema:
             "context": (dict, type(None)),
         },
         allow_unknown=True,
-        description="upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)",
+        description="upsert_text_relation input: concept_id (str), predicate (str; core text predicate such as 'hasContent'/'hasDescription'/'hasName' or an existing #V# predicate concept; missing #V# concepts are rejected), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)",
     )
 
 
@@ -6840,12 +6870,14 @@ def _upsert_text_relation_output_schema() -> Schema:
             "relation_id": (str, type(None)),
             "relation_created": (bool, type(None)),
             "predicate": (str, type(None)),
+            "input_predicate": (str, type(None)),
+            "predicate_concept_id": (str, type(None)),
             "text_preview": (str, type(None)),
             "language": (str, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
-        description="upsert_text_relation output: success (bool), text_value_id (str), relation_id (str), relation_created (bool), predicate (str), text_preview (str), language (str), error (str if failed)",
+        description="upsert_text_relation output: success (bool), text_value_id (str), relation_id (str), relation_created (bool), predicate (str), predicate_concept_id (str), text_preview (str), language (str), error (str if failed)",
     )
 
 
@@ -6972,7 +7004,7 @@ def _upsert_singleton_text_relation_input_schema() -> Schema:
             "context": (dict, type(None)),
         },
         allow_unknown=True,
-        description="upsert_singleton_text_relation input: concept_id (str), predicate (str), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)",
+        description="upsert_singleton_text_relation input: concept_id (str), predicate (str; core text predicate such as 'hasContent'/'hasDescription'/'hasName' or an existing #V# predicate concept; missing #V# concepts are rejected), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)",
     )
 
 
@@ -6991,9 +7023,11 @@ def _upsert_singleton_text_relation_output_schema() -> Schema:
         optional={
             "text_value_id": (str, type(None)),
             "error": (str, type(None)),
+            "input_predicate": (str, type(None)),
+            "predicate_concept_id": (str, type(None)),
         },
         allow_unknown=True,
-        description="upsert_singleton_text_relation output: success, kept_relation_id, replaced_relation_ids/count, relation_created, text_value_id",
+        description="upsert_singleton_text_relation output: success, kept_relation_id, replaced_relation_ids/count, relation_created, text_value_id, predicate_concept_id",
     )
 
 
@@ -19561,7 +19595,9 @@ def _gmail_headers_to_mapping(payload: Mapping[str, Any]) -> dict[str, str]:
     return headers
 
 
-def _normalise_gmail_message_detail_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+def _normalise_gmail_message_detail_payload(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
     payload = dict(result)
     message_id = payload.get("message_id") or payload.get("id")
     if isinstance(message_id, str) and message_id.strip():
@@ -19747,9 +19783,11 @@ def _gmail_list_messages(**kwargs):
             applied_label_filter = (
                 None
                 if bypass_profile_query_prefix
-                else (list(resolved_profile.label_filter)
-                      if resolved_profile.label_filter
-                      else None)
+                else (
+                    list(resolved_profile.label_filter)
+                    if resolved_profile.label_filter
+                    else None
+                )
             )
         except Exception:  # noqa: BLE001
             applied_query_prefix = None

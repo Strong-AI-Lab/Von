@@ -49,6 +49,10 @@ if TYPE_CHECKING:
         upsert_singleton_text_relation,
         upsert_text_for_concept,
     )
+    from src.backend.services.text_relation_predicate_validation_service import (
+        TextRelationPredicateResolutionError,
+        resolve_text_relation_predicate_for_write,
+    )
     from src.backend.services.rag_text_relation_change_hook_service import (
         maybe_delete_text_relation_doc_from_rag,
         maybe_sync_concept_text_relations_to_rag,
@@ -294,6 +298,13 @@ _bind_imports(
         "update_text_relation_text",
         "delete_text_relation",
         "delete_text_relation_by_predicate_and_text",
+    ],
+)
+_bind_imports(
+    "src.backend.services.text_relation_predicate_validation_service",
+    [
+        "TextRelationPredicateResolutionError",
+        "resolve_text_relation_predicate_for_write",
     ],
 )
 _bind_imports(
@@ -1384,9 +1395,11 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
         return [_json_text({"success": False, "error": "Missing text parameter"})]
 
     try:
+        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
+        storage_predicate = predicate_resolution.storage_predicate
         result = upsert_text_for_concept(
             subject_concept_id=concept_id,
-            predicate=predicate,
+            predicate=storage_predicate,
             text=text,
             lang=language,
             context=context,
@@ -1395,7 +1408,7 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
         maybe_sync_concept_text_relations_to_rag(
             namespace=namespace,
             concept_id=concept_id,
-            predicate=predicate,
+            predicate=storage_predicate,
         )
 
         text_preview = text[:100] + "..." if len(text) > 100 else text
@@ -1404,11 +1417,22 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
             "text_value_id": str(result.get("text_value_id")),
             "relation_id": str(result.get("relation_id")),
             "relation_created": result.get("relation_created"),
-            "predicate": predicate,
+            "predicate": storage_predicate,
+            "input_predicate": predicate_resolution.input_predicate,
+            "predicate_concept_id": predicate_resolution.predicate_concept_id,
             "text_preview": text_preview,
             "language": language,
         }
         return [_json_text(payload)]
+    except TextRelationPredicateResolutionError as exc:
+        return [
+            _json_error(
+                str(exc),
+                error_code=exc.error_code,
+                details=exc.details,
+                suggestions=exc.suggestions,
+            )
+        ]
     except Exception as exc:
         return [
             _json_text(
@@ -1905,7 +1929,9 @@ async def _handle_find_relations_with_argument(
         ]
 
 
-async def _handle_get_predicate_incidence(arguments: dict[str, Any]) -> list[TextContent]:
+async def _handle_get_predicate_incidence(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     instance_of = arguments.get("instance_of")
     if not (
@@ -1925,7 +1951,9 @@ async def _handle_get_predicate_incidence(arguments: dict[str, Any]) -> list[Tex
 
     try:
         payload = get_predicate_incidence(
-            concept_id=(str(concept_id).strip() if isinstance(concept_id, str) else None),
+            concept_id=(
+                str(concept_id).strip() if isinstance(concept_id, str) else None
+            ),
             instance_of=(
                 str(instance_of).strip() if isinstance(instance_of, str) else None
             ),
@@ -2056,9 +2084,10 @@ async def _handle_upsert_singleton_text_relation(
         ]
 
     try:
+        predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
         payload = upsert_singleton_text_relation(
             subject_concept_id=concept_id,
-            predicate=predicate,
+            predicate=predicate_resolution.storage_predicate,
             text=text,
             lang=arguments.get("language", "en-NZ"),
             policy=arguments.get("policy", "replace_others"),
@@ -2066,7 +2095,18 @@ async def _handle_upsert_singleton_text_relation(
             context=arguments.get("context"),
             garbage_collect=arguments.get("garbage_collect", True),
         )
+        payload["input_predicate"] = predicate_resolution.input_predicate
+        payload["predicate_concept_id"] = predicate_resolution.predicate_concept_id
         return [_json_text(payload)]
+    except TextRelationPredicateResolutionError as exc:
+        return [
+            _json_error(
+                str(exc),
+                error_code=exc.error_code,
+                details=exc.details,
+                suggestions=exc.suggestions,
+            )
+        ]
     except Exception as exc:
         return [
             _json_error(

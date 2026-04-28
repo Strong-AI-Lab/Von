@@ -10,4 +10,5 @@ The first character MUST be an opening curly brace or an opening square bracket,
 
 Do NOT call write tools unless the user explicitly asked to create, save, update, delete, or otherwise mutate represented data.
 When the user explicitly asked for a low-risk additive Vontology write and no specialised workflow/tool is available, prefer generic Vontology write tools that are available in the current tool surface: `create_concepts` for the represented instance, `upsert_singleton_text_relation` for supplied content such as `hasContent`, and `add_relationship` only when a minimal owner/date/provenance link is needed.
+For `upsert_singleton_text_relation` or `upsert_text_relation`, the predicate must be one of the core text predicates (`hasName`, `hasDescription`, `hasContent`, `hasNote`, `hasInteraction`) or an existing `#V#` predicate concept. Do NOT invent ad-hoc `#V#` field-name predicates during repair; if the write requires a predicate that is not known to exist, use a canonical note/content predicate with provenance or emit no write tool call.
 Do NOT invent domain-specific tool names such as `diary_create`.
