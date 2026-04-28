@@ -13588,61 +13588,165 @@ function getPromptInputElement() {
 }
 
 // JVNAUTOSCI-2128: Remember the most recent user-submitted prompt per chat
-// session so that pressing ArrowUp on an empty composer recalls it,
-// mirroring the behaviour of terminals and other chat systems. Recall is
+// session so that pressing ArrowUp on an empty composer recalls it, with the
+// added 2163 enhancement to cycle through multiple previous prompts. Recall is
 // scoped per conversation: switching sessions or resetting the active
-// session clears that session's buffer.
-const lastSubmittedUserPromptBySession = new Map();
+// session clears that session's buffers.
+const submittedUserPromptHistoryBySession = new Map();
+const submittedUserPromptHistoryCursorBySession = new Map();
 const NO_SESSION_RECALL_KEY = '__no_session__';
+const MAX_SUBMITTED_PROMPT_HISTORY = 200;
+
+function extractPromptTextFromHistoryMessageContent(content) {
+    if (typeof content === 'string') {
+        return content.trim();
+    }
+
+    if (Array.isArray(content)) {
+        for (const segment of content) {
+            const segmentText = extractPromptTextFromHistoryMessageContent(segment);
+            if (segmentText) {
+                return segmentText;
+            }
+        }
+        return '';
+    }
+
+    if (!content || typeof content !== 'object') {
+        return '';
+    }
+
+    if (typeof content.text === 'string') {
+        return content.text.trim();
+    }
+    if (typeof content.content === 'string') {
+        return content.content.trim();
+    }
+    return '';
+}
 
 function recallSessionKey() {
     const sid = typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '';
     return sid || NO_SESSION_RECALL_KEY;
 }
 
+function getPromptHistoryForActiveSession() {
+    const key = recallSessionKey();
+    return submittedUserPromptHistoryBySession.get(key) || [];
+}
+
+function getPromptHistoryCursorForActiveSession() {
+    const key = recallSessionKey();
+    const history = getPromptHistoryForActiveSession();
+    const cursor = submittedUserPromptHistoryCursorBySession.get(key);
+    return Number.isInteger(cursor) ? cursor : history.length;
+}
+
+function setPromptHistoryCursorForActiveSession(cursor) {
+    const key = recallSessionKey();
+    const history = getPromptHistoryForActiveSession();
+    if (!Number.isInteger(cursor)) return;
+    let normalised = cursor;
+    if (normalised < 0) normalised = 0;
+    if (normalised > history.length) normalised = history.length;
+    submittedUserPromptHistoryCursorBySession.set(key, normalised);
+}
+
 function rememberLastSubmittedUserPrompt(rawValue) {
     if (typeof rawValue !== 'string') return;
     if (!rawValue) return;
-    lastSubmittedUserPromptBySession.set(recallSessionKey(), rawValue);
-}
 
-function getLastSubmittedUserPromptForActiveSession() {
-    return lastSubmittedUserPromptBySession.get(recallSessionKey()) || '';
+    const key = recallSessionKey();
+    const existing = submittedUserPromptHistoryBySession.get(key);
+    const history = Array.isArray(existing) ? existing.slice() : [];
+    history.push(rawValue);
+
+    if (history.length > MAX_SUBMITTED_PROMPT_HISTORY) {
+        history.splice(0, history.length - MAX_SUBMITTED_PROMPT_HISTORY);
+    }
+
+    submittedUserPromptHistoryBySession.set(key, history);
+    // New submit should start navigation from the empty prompt state (just
+    // before the newest recalled turn).
+    submittedUserPromptHistoryCursorBySession.set(key, history.length);
 }
 
 function clearLastSubmittedUserPromptForActiveSession() {
-    lastSubmittedUserPromptBySession.delete(recallSessionKey());
+    const key = recallSessionKey();
+    submittedUserPromptHistoryBySession.delete(key);
+    submittedUserPromptHistoryCursorBySession.delete(key);
 }
 
 // JVNAUTOSCI-2128: rebuild the active session's recall buffer from a
-// freshly loaded history payload so ArrowUp works after a page reload /
-// Von restart, not only within the current page session. Picks the most
-// recent user-role message with non-empty content; absence of any user
-// message leaves the buffer untouched.
+// freshly loaded history payload so ArrowUp/ArrowDown work after a page reload /
+// Von restart, not only within the current page session.
 function rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
-    if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
-    for (let i = historyMessages.length - 1; i >= 0; i--) {
-        const msg = historyMessages[i];
-        if (!msg || msg.role !== 'user') continue;
-        const content = typeof msg.content === 'string' ? msg.content : '';
-        if (!content) continue;
-        lastSubmittedUserPromptBySession.set(recallSessionKey(), content);
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) {
         return;
     }
+
+    const key = recallSessionKey();
+    const history = [];
+
+    for (const msg of historyMessages) {
+        if (!msg || msg.role !== 'user') continue;
+        const content = extractPromptTextFromHistoryMessageContent(msg.content);
+        if (!content) continue;
+        history.push(content);
+    }
+
+    if (history.length === 0) {
+        return;
+    }
+
+    submittedUserPromptHistoryBySession.set(key, history);
+    submittedUserPromptHistoryCursorBySession.set(key, history.length);
 }
 
-function handlePromptInputArrowUpRecall(event) {
-    if (!event || event.key !== 'ArrowUp') return;
-    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+function handlePromptInputHistoryNavigation(event) {
+    if (!event) return;
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+
     const promptInput = event.currentTarget || getPromptInputElement();
     if (!promptInput) return;
-    // Strict empty check so ArrowUp still navigates within in-progress drafts.
-    if (promptInput.value !== '') return;
-    const recall = getLastSubmittedUserPromptForActiveSession();
-    if (!recall) return;
+
+    const history = getPromptHistoryForActiveSession();
+    if (history.length === 0) return;
+
+    let cursor = getPromptHistoryCursorForActiveSession();
+    let nextValue = null;
+    const isShiftJump = event.shiftKey;
+    const promptValue = String(promptInput.value || '');
+    const isCurrentHistoryValue = cursor >= 0 && cursor < history.length && history[cursor] === promptValue;
+    const allowsHistoryNavigation = promptValue === '' || isCurrentHistoryValue;
+    if (!allowsHistoryNavigation) return;
+
+    if (event.key === 'ArrowUp') {
+        cursor = isShiftJump ? 0 : Math.max(0, cursor - 1);
+        nextValue = history[cursor];
+    } else {
+        if (isShiftJump) {
+            cursor = Math.max(0, history.length - 1);
+        } else {
+            if (cursor >= history.length) return;
+            cursor = cursor + 1;
+        }
+        if (cursor >= history.length) {
+            setPromptHistoryCursorForActiveSession(cursor);
+            event.preventDefault();
+            setPromptComposerValue('', { promptInput });
+            return;
+        }
+        nextValue = history[cursor];
+    }
+
+    if (!nextValue) return;
+
+    setPromptHistoryCursorForActiveSession(cursor);
 
     event.preventDefault();
-    setPromptComposerValue(recall, { promptInput });
+    setPromptComposerValue(nextValue, { promptInput });
     try {
         const len = promptInput.value.length;
         promptInput.setSelectionRange(len, len);
@@ -24523,9 +24627,9 @@ export function initializeChatTab() {
         }
     });
 
-    // JVNAUTOSCI-2128: ArrowUp on an empty composer recalls the last
-    // submitted user prompt with the cursor at the end.
-    promptInput.addEventListener('keydown', handlePromptInputArrowUpRecall);
+    // JVNAUTOSCI-2128/2163: ArrowUp/ArrowDown on an empty composer recalls
+    // historical submitted prompts with cursor navigation.
+    promptInput.addEventListener('keydown', handlePromptInputHistoryNavigation);
 
     // Initialize concept autocomplete for #V# trigger
     initializeConceptAutocomplete(promptInput);
@@ -28216,18 +28320,19 @@ export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
     setActiveChatSession(sessionId, sessionName);
     syncActiveChatRequestPointers();
 }
-// JVNAUTOSCI-2128: ArrowUp recall test hooks.
+// JVNAUTOSCI-2128/2163: prompt-input history navigation test hooks.
 export function __testOnly_rememberLastSubmittedUserPrompt(rawValue) {
     rememberLastSubmittedUserPrompt(rawValue);
 }
 export function __testOnly_handlePromptInputArrowUpRecall(event) {
-    handlePromptInputArrowUpRecall(event);
+    handlePromptInputHistoryNavigation(event);
 }
 export function __testOnly_clearLastSubmittedUserPromptForActiveSession() {
     clearLastSubmittedUserPromptForActiveSession();
 }
 export function __testOnly_resetAllArrowUpRecallBuffers() {
-    lastSubmittedUserPromptBySession.clear();
+    submittedUserPromptHistoryBySession.clear();
+    submittedUserPromptHistoryCursorBySession.clear();
 }
 // JVNAUTOSCI-2129: history-rehydration test hook.
 export function __testOnly_rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
