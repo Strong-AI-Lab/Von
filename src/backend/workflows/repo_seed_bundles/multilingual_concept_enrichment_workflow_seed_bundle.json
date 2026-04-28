@@ -1,0 +1,176 @@
+{
+  "family_id": "multilingual_concept_enrichment_workflow_seed_bundle",
+  "managed_by": "multilingual_concept_enrichment_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "multilingual_concept_enrichment_rumination",
+  "supported_action_ids": [
+    "multilingual_concept_enrichment.assess_candidates",
+    "multilingual_concept_enrichment.prepare_candidate",
+    "multilingual_concept_enrichment.generate_translations",
+    "multilingual_concept_enrichment.apply_translations",
+    "multilingual_concept_enrichment.finalise"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#multilingual_concept_enrichment_rumination_workflow",
+      "display_name": "Multilingual Concept Enrichment Rumination Workflow",
+      "description": "Background ontology-maintenance workflow that adds missing Chinese, Spanish, and French concept names and descriptions for concepts with high-quality English descriptions and non-trivial represented usage. The workflow uses grounded concept-usage profile counters for eligibility, a Vontology-governed prompt for translation decisions, and conservative write guards that only fill missing language slots.",
+      "content": "Scan represented concepts for enough English descriptive content and caller-configured usage, ask the authoritative multilingual translation prompt to generate missing names/descriptions, then upsert only missing target-language text relations.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [],
+        "input_mappings": [
+          {
+            "target_context_key": "scan_limit",
+            "source_expression": "inputs.scan_limit",
+            "extractor": "identity",
+            "required": false,
+            "description": "Maximum number of candidate concepts to review in one run."
+          },
+          {
+            "target_context_key": "minimum_total_usage",
+            "source_expression": "inputs.minimum_total_usage",
+            "extractor": "identity",
+            "required": false,
+            "description": "Workflow-authored threshold for non-trivial represented usage."
+          },
+          {
+            "target_context_key": "target_languages",
+            "source_expression": "inputs.target_languages",
+            "extractor": "identity",
+            "required": false,
+            "description": "Target language tags, normally zh-Hans, es, and fr."
+          },
+          {
+            "target_context_key": "max_mutations_per_run",
+            "source_expression": "inputs.max_mutations_per_run",
+            "extractor": "identity",
+            "required": false,
+            "description": "Maximum text-relation mutations to apply in one run."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"multilingual concept enrichment\",\"translate concept names\",\"Chinese Spanish French concept descriptions\",\"background concept translation rumination\"],\"examples\":[\"Run multilingual concept enrichment rumination.\",\"Fill missing Chinese, Spanish, and French concept descriptions for well-used concepts.\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasBackgroundLaunchPolicyJson",
+          "text": "{\"schema_version\":\"workflow_background_launch_policy.v1\",\"background_capable\":true,\"managed_schedule_key\":\"multilingual_concept_enrichment_background_v1\",\"default_interval_seconds\":86400,\"cost_class\":\"medium\",\"mutation_policy\":\"fill_missing_text_relations_only\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "assess",
+        "steps": [
+          {
+            "state_id": "assess",
+            "action_id": "multilingual_concept_enrichment.assess_candidates",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "multilingual_candidate_found",
+                  "expected": true
+                },
+                "reason": "candidates_found",
+                "to_state": "prepare_candidate"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "no_candidates",
+                "to_state": "complete"
+              }
+            ]
+          },
+          {
+            "state_id": "prepare_candidate",
+            "action_id": "multilingual_concept_enrichment.prepare_candidate",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "multilingual_current_candidate_available",
+                  "expected": true
+                },
+                "reason": "candidate_selected",
+                "to_state": "generate_translations"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "no_remaining_candidates",
+                "to_state": "complete"
+              }
+            ]
+          },
+          {
+            "state_id": "generate_translations",
+            "action_id": "multilingual_concept_enrichment.generate_translations",
+            "prompt_concept_ids": [
+              "#V#multilingual_concept_translation_prompt"
+            ],
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "translation_generation_complete",
+                "to_state": "apply_translations"
+              }
+            ]
+          },
+          {
+            "state_id": "apply_translations",
+            "action_id": "multilingual_concept_enrichment.apply_translations",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "has_remaining_multilingual_candidates",
+                  "expected": true
+                },
+                "reason": "more_candidates",
+                "to_state": "prepare_candidate"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "review_budget_exhausted",
+                "to_state": "complete"
+              }
+            ]
+          },
+          {
+            "state_id": "complete",
+            "action_id": "multilingual_concept_enrichment.finalise"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}

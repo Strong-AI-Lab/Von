@@ -207,6 +207,17 @@ def _get_predicate_incidence(**kwargs):
     )
 
 
+def _get_concept_usage_profile(**kwargs):
+    from ...services.concept_usage_profile_service import build_concept_usage_profile
+
+    return build_concept_usage_profile(
+        concept_id=str(kwargs.get("concept_id") or "").strip(),
+        relation_limit=kwargs.get("relation_limit") or kwargs.get("limit") or 200,
+        text_limit=kwargs.get("text_limit") or 200,
+        minimum_total_usage=kwargs.get("minimum_total_usage"),
+    )
+
+
 def _get_context(**kwargs):
     from ...services.settings_service import (
         resolve_llm_setting,
@@ -7194,6 +7205,50 @@ def _predicate_incidence_output_schema() -> Schema:
             "argument counters, optional role_expansion summaries, and in type mode "
             "grounded_instance_count/sample_instances), plus role_expansions, paging metadata, "
             "and optional typed/uncertainty diagnostics."
+        ),
+    )
+
+
+def _concept_usage_profile_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "relation_limit": (int, type(None)),
+            "text_limit": (int, type(None)),
+            "minimum_total_usage": (int, type(None)),
+            "limit": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_concept_usage_profile input: concept_id (required anchor concept), "
+            "optional relation_limit and text_limit for bounded evidence scans, and "
+            "optional minimum_total_usage. The tool reports grounded usage counters; "
+            "when minimum_total_usage is provided it also reports whether the concept "
+            "meets that caller-supplied threshold."
+        ),
+    )
+
+
+def _concept_usage_profile_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "usage_metrics": dict,
+        },
+        optional={
+            "display_name": (str, type(None)),
+            "minimum_total_usage": (int, type(None)),
+            "meets_minimum_total_usage": (bool, type(None)),
+            "diagnostics": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_concept_usage_profile output: success, concept_id, display_name, "
+            "usage_metrics with binary/text relation counts, optional caller-supplied "
+            "minimum_total_usage decision, and diagnostics."
         ),
     )
 
@@ -26842,6 +26897,21 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "'explicit' with represented node-type or role-predicate filters when "
                 "the immediate neighbour is a reified/event/claim node whose other role "
                 "fillers are the useful retrieval targets."
+            ),
+        ),
+        MethodDefinition(
+            name="get_concept_usage_profile",
+            handler=_get_concept_usage_profile,
+            input_schema=_concept_usage_profile_input_schema(),
+            output_schema=_concept_usage_profile_output_schema(),
+            category="read",
+            description=(
+                "Return grounded usage counters for a concept across binary relation "
+                "hits and text-relation assertions. Use this before background "
+                "description, translation, or ontology-quality rumination when the "
+                "workflow needs evidence that a concept is used to a caller-supplied "
+                "non-trivial degree. The tool does not hard-code the threshold; pass "
+                "minimum_total_usage when the workflow/profile has chosen one."
             ),
         ),
         MethodDefinition(

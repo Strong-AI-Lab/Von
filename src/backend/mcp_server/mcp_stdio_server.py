@@ -33,6 +33,9 @@ if TYPE_CHECKING:
         find_relations_with_argument,
         get_predicate_incidence,
     )
+    from src.backend.services.concept_usage_profile_service import (
+        build_concept_usage_profile,
+    )
     from src.backend.services.concept_search_service import search_concepts
     from src.backend.services.concept_embedding_service import (
         get_concept_embedding_stats,
@@ -278,6 +281,10 @@ _bind_imports(
         "find_relations_with_argument",
         "get_predicate_incidence",
     ],
+)
+_bind_imports(
+    "src.backend.services.concept_usage_profile_service",
+    ["build_concept_usage_profile"],
 )
 _bind_imports("src.backend.services.concept_search_service", ["search_concepts"])
 _bind_imports(
@@ -2003,6 +2010,43 @@ async def _handle_get_predicate_incidence(
                     "Use relation_kind in {any, binary, text}",
                 ],
                 related_concept_ids=related_ids or None,
+            )
+        ]
+
+
+async def _handle_get_concept_usage_profile(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    if not concept_id:
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the concept_id to profile"],
+            )
+        ]
+
+    try:
+        payload = build_concept_usage_profile(
+            concept_id=str(concept_id).strip(),
+            relation_limit=arguments.get("relation_limit")
+            or arguments.get("limit")
+            or 200,
+            text_limit=arguments.get("text_limit") or 200,
+            minimum_total_usage=arguments.get("minimum_total_usage"),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"Failed to build concept usage profile: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Verify the concept_id exists",
+                    "Lower relation_limit or text_limit for a cheaper bounded profile",
+                ],
+                related_concept_ids=[str(concept_id)] if concept_id else None,
             )
         ]
 
@@ -4236,6 +4280,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "fetch_concept": _handle_fetch_concept,
     "find_relations_with_argument": _handle_find_relations_with_argument,
     "get_predicate_incidence": _handle_get_predicate_incidence,
+    "get_concept_usage_profile": _handle_get_concept_usage_profile,
     "fetch_concept_content": _handle_fetch_concept_content,
     "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,

@@ -603,6 +603,23 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_source": "focal_concept",
         "target_concept_max_count": 2,
     },
+    "get_concept_usage_profile": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Usage profile: {concept_id}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "evidence_kind": "relation_bearing",
+        "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 3,
+        "planner_hint": (
+            "Use to gather grounded relation/text assertion counts before "
+            "workflow-governed quality, description, or translation rumination. "
+            "The workflow/profile supplies any non-trivial-use threshold."
+        ),
+    },
     "fetch_concept": {
         "salience": "medium",
         "category": "vontology",
@@ -871,6 +888,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "finalise_cached_paper",
     "materialise_scholarly_representation_for_file_copy",
     "find_relations_with_argument",
+    "get_concept_usage_profile",
     "get_predicate_incidence",
     "find_concepts_by_name",
     "find_subconcepts",
@@ -1148,6 +1166,7 @@ _DEFAULT_SEARCH_EVIDENCE_TOOL_NAMES = {
     "context_search",
     "find_concepts_by_name",
     "find_relations_with_argument",
+    "get_concept_usage_profile",
     "get_predicate_incidence",
     "get_related_concepts",
     "get_text_relations_summary",
