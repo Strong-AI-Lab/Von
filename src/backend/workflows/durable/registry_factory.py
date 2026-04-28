@@ -75,6 +75,7 @@ _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#workflow_introspection_maintenance_workflow",
     "#V#entity_identity_resolution_workflow",
     "#V#jira_task_incremental_import_workflow",
+    "#V#multilingual_concept_enrichment_rumination_workflow",
 )
 
 
@@ -1159,6 +1160,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .jira_task_incremental_import_workflow import (
         register_jira_task_incremental_import_actions,
     )
+    from .multilingual_concept_enrichment_workflow import (
+        register_multilingual_concept_enrichment_actions,
+    )
     from .paper_representation_workflow import register_paper_representation_actions
     from .parent_specificity_concept_dossier_workflow import (
         register_parent_specificity_concept_dossier_actions,
@@ -1201,6 +1205,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_entity_representation_actions(registry)
     register_jira_task_incremental_import_actions(registry)
     register_jira_task_full_reconciliation_actions(registry)
+    register_multilingual_concept_enrichment_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)
     register_paper_representation_actions(registry)

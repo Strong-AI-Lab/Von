@@ -53,6 +53,10 @@ from src.backend.workflows.durable.jira_task_incremental_import_workflow import 
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
     build_jira_task_incremental_import_workflow_test_registration,
 )
+from src.backend.workflows.durable.multilingual_concept_enrichment_workflow import (
+    MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
+    build_multilingual_concept_enrichment_workflow_test_registration,
+)
 from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
@@ -165,6 +169,10 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Synchronise Jira tasks into Von via the shared incremental migration "
         "runner."
     ),
+    MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID: (
+        "Add missing Chinese, Spanish, and French concept names and "
+        "descriptions for well-described, non-trivially used concepts."
+    ),
     PLANNING_WORKFLOW_ID: (
         "Forward inference workflow that proposes concrete, validated next "
         "actions including tool calls and workflow invocations."
@@ -205,6 +213,7 @@ AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+    MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
 )
 AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_TYPING_WORKFLOW_ID,
@@ -402,6 +411,7 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
         build_workflow_introspection_maintenance_workflow_test_registration(),
         build_entity_identity_resolution_workflow_test_registration(),
         build_jira_task_incremental_import_workflow_test_registration(),
+        build_multilingual_concept_enrichment_workflow_test_registration(),
     ):
         registry.register(registration)
 

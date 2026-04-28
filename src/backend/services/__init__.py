@@ -21,6 +21,8 @@ _SERVICE_EXPORT_MODULES = {
     "minimal_imposition_benchmark_profile_vontology_service": ".minimal_imposition_benchmark_profile_vontology_service",
     "minimal_imposition_benchmark_service": ".minimal_imposition_benchmark_service",
     "minimal_imposition_runtime_profile_vontology_service": ".minimal_imposition_runtime_profile_vontology_service",
+    "multilingual_concept_enrichment_schedule_bootstrap_service": ".multilingual_concept_enrichment_schedule_bootstrap_service",
+    "multilingual_concept_enrichment_vontology_service": ".multilingual_concept_enrichment_vontology_service",
     "paper_recommendation_materialisation_service": ".paper_recommendation_materialisation_service",
     "paper_recommendation_delivery_service": ".paper_recommendation_delivery_service",
     "paper_recommendation_profile_vontology_service": ".paper_recommendation_profile_vontology_service",
@@ -64,6 +66,12 @@ if TYPE_CHECKING:
     )
     from . import (
         minimal_imposition_runtime_profile_vontology_service as minimal_imposition_runtime_profile_vontology_service,
+    )
+    from . import (
+        multilingual_concept_enrichment_schedule_bootstrap_service as multilingual_concept_enrichment_schedule_bootstrap_service,
+    )
+    from . import (
+        multilingual_concept_enrichment_vontology_service as multilingual_concept_enrichment_vontology_service,
     )
     from . import (
         paper_recommendation_background_schedule_bootstrap_service as paper_recommendation_background_schedule_bootstrap_service,
@@ -131,6 +139,8 @@ __all__ = [
     "minimal_imposition_benchmark_profile_vontology_service",
     "minimal_imposition_benchmark_service",
     "minimal_imposition_runtime_profile_vontology_service",
+    "multilingual_concept_enrichment_schedule_bootstrap_service",
+    "multilingual_concept_enrichment_vontology_service",
     "paper_recommendation_background_schedule_bootstrap_service",
     "paper_recommendation_delivery_service",
     "paper_recommendation_materialisation_service",

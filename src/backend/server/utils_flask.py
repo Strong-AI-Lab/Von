@@ -224,6 +224,7 @@ def _build_durable_workflow_bootstrap_summary(
         "entity_workflow_bootstrap",
         "entity_information_retrieval_workflow_bootstrap",
         "concept_search_instance_retrieval_workflow_bootstrap",
+        "multilingual_concept_enrichment_workflow_bootstrap",
         "conversation_turn_workflow_bootstrap",
         "paper_workflow_bootstrap",
         "episode_evaluation_workflow_bootstrap",
@@ -435,6 +436,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.concept_search_instance_retrieval_workflow_vontology_service import (
             bootstrap_canonical_concept_search_instance_retrieval_workflow,
         )
+        from ..services.multilingual_concept_enrichment_vontology_service import (
+            bootstrap_canonical_multilingual_concept_enrichment_workflow,
+        )
         from ..services.episode_evaluation_workflow_vontology_service import (
             bootstrap_canonical_episode_evaluation_workflow,
         )
@@ -491,6 +495,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         concept_search_instance_retrieval_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="concept-search instance retrieval workflow",
             bootstrap_fn=bootstrap_canonical_concept_search_instance_retrieval_workflow,
+        )
+        multilingual_concept_enrichment_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="multilingual concept-enrichment workflow",
+                bootstrap_fn=bootstrap_canonical_multilingual_concept_enrichment_workflow,
+            )
         )
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="conversation-turn workflow",
@@ -570,6 +580,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["concept_search_instance_retrieval_workflow_bootstrap"] = (
             concept_search_instance_retrieval_workflow_bootstrap_report
         )
+        result["multilingual_concept_enrichment_workflow_bootstrap"] = (
+            multilingual_concept_enrichment_workflow_bootstrap_report
+        )
         result["conversation_turn_workflow_bootstrap"] = (
             conversation_turn_workflow_bootstrap_report
         )
@@ -613,6 +626,16 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] concept-search instance retrieval workflow bootstrap failed: %s",
                 concept_search_instance_retrieval_workflow_bootstrap_report,
+            )
+        if not bool(
+            multilingual_concept_enrichment_workflow_bootstrap_report.get(
+                "success",
+                False,
+            )
+        ):
+            app_logger.warning(
+                "[durable_workflows] multilingual concept-enrichment workflow bootstrap failed: %s",
+                multilingual_concept_enrichment_workflow_bootstrap_report,
             )
         if not bool(conversation_turn_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
@@ -864,6 +887,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         except Exception as schedule_exc:
             app_logger.warning(
                 "[durable_workflows] parent-specificity schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
+        try:
+            from ..services.multilingual_concept_enrichment_schedule_bootstrap_service import (
+                ensure_multilingual_concept_enrichment_background_schedule,
+            )
+
+            multilingual_enrichment_schedule_report = (
+                ensure_multilingual_concept_enrichment_background_schedule()
+            )
+            result["multilingual_concept_enrichment_schedule_bootstrap"] = (
+                multilingual_enrichment_schedule_report
+            )
+            if not bool(multilingual_enrichment_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] multilingual concept-enrichment schedule bootstrap failed: %s",
+                    multilingual_enrichment_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] multilingual concept-enrichment schedule bootstrap error: %s",
                 schedule_exc,
             )
 

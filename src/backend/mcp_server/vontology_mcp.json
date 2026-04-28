@@ -1906,6 +1906,53 @@
             }
         },
         {
+            "name": "get_concept_usage_profile",
+            "description": "Return grounded usage counters for a concept across binary relation hits and text-relation assertions. Use this before background description, translation, or ontology-quality rumination when the workflow needs evidence that a concept is used to a caller-supplied non-trivial degree. The tool does not hard-code the threshold; pass minimum_total_usage when the workflow/profile has chosen one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "relation_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "text_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "minimum_total_usage": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "get_concept_usage_profile input: concept_id (required anchor concept), optional relation_limit and text_limit for bounded evidence scans, and optional minimum_total_usage. The tool reports grounded usage counters; when minimum_total_usage is provided it also reports whether the concept meets that caller-supplied threshold."
+            }
+        },
+        {
             "name": "get_context",
             "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
             "inputSchema": {
@@ -5334,7 +5381,7 @@
                     "text"
                 ],
                 "additionalProperties": true,
-                "description": "upsert_singleton_text_relation input: concept_id (str), predicate (str), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)"
+                "description": "upsert_singleton_text_relation input: concept_id (str), predicate (str; core text predicate such as 'hasContent'/'hasDescription'/'hasName' or an existing #V# predicate concept; missing #V# concepts are rejected), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)"
             }
         },
         {
@@ -5375,7 +5422,7 @@
                     "text"
                 ],
                 "additionalProperties": true,
-                "description": "upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)"
+                "description": "upsert_text_relation input: concept_id (str), predicate (str; core text predicate such as 'hasContent'/'hasDescription'/'hasName' or an existing #V# predicate concept; missing #V# concepts are rejected), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)"
             }
         },
         {
