@@ -2663,11 +2663,11 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 7
-    assert metrics.get("matched_case_count") == 7
+    assert metrics.get("scanned_count") == 11
+    assert metrics.get("matched_case_count") == 11
     assert metrics.get("selector_accuracy_pct") == 100.0
     assert metrics.get("baseline_accuracy_pct") == 0.0
-    assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 6
+    assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 10
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
         == 1

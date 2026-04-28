@@ -6263,6 +6263,7 @@ def _build_tool_messages_prompt_blob(
 
     executed_lines: list[str] = []
     writes_lines: list[str] = []
+    relation_evidence_lines: list[str] = []
 
     # Track a small set of write categories we care about for UI truthfulness.
     description_write_seen = False
@@ -6348,6 +6349,116 @@ def _build_tool_messages_prompt_blob(
 
         return None
 
+    def _first_non_empty_text(*values: object) -> str | None:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    import re
+
+    concept_token_pattern = re.compile(r"#V#[A-Za-z0-9_]+")
+
+    def _extract_concept_id_from_text(text: str) -> str | None:
+        if not isinstance(text, str):
+            return None
+        candidate = text.strip()
+        if not candidate:
+            return None
+        if candidate.startswith("#V#"):
+            return candidate
+        match = concept_token_pattern.search(candidate)
+        if not match:
+            return None
+        token = match.group(0)
+        return token.rstrip("`.,;:)]}>")
+
+    def _extract_target_concept_id(hit: Mapping[str, Any]) -> str | None:
+        candidate_keys = (
+            "target_concept_id",
+            "target_id",
+            "target",
+            "object",
+            "object_id",
+            "target_value",
+            "target_value_preview",
+        )
+        for key in candidate_keys:
+            candidate = _first_non_empty_text(hit.get(key))
+            extracted = _extract_concept_id_from_text(candidate or "")
+            if extracted:
+                return extracted
+
+        target_preview = hit.get("target_concept_preview")
+        if isinstance(target_preview, Mapping):
+            for preview_key in (
+                "concept_id",
+                "id",
+                "target_id",
+                "target_concept_id",
+            ):
+                candidate = _first_non_empty_text(target_preview.get(preview_key))
+                extracted = _extract_concept_id_from_text(candidate or "")
+                if extracted:
+                    return extracted
+
+        # Broad fallback for odd payloads that only embed concept IDs inline.
+        fallback_keys = {
+            "target",
+            "target_id",
+            "target_name",
+            "target_value",
+            "target_value_preview",
+            "target_concept_preview",
+        }
+        for key in fallback_keys:
+            if key not in hit:
+                continue
+            value = hit.get(key)
+            if isinstance(value, str):
+                extracted = _extract_concept_id_from_text(value)
+                if extracted:
+                    return extracted
+            elif isinstance(value, Mapping):
+                for nested_value in value.values():
+                    extracted = _extract_concept_id_from_text(
+                        nested_value if isinstance(nested_value, str) else ""
+                    )
+                    if extracted:
+                        return extracted
+        return None
+
+    def _append_relation_evidence(tool_name: str, payload: dict) -> None:
+        if (tool_name or "").lower() != "find_relations_with_argument":
+            return
+        raw_hits = payload.get("hits")
+        if not isinstance(raw_hits, list):
+            return
+
+        for hit in raw_hits[:20]:
+            if not isinstance(hit, dict):
+                continue
+            source_id = _first_non_empty_text(hit.get("source_concept_id"))
+            predicate_id = _first_non_empty_text(hit.get("predicate_concept_id"))
+            target_id = _extract_target_concept_id(hit)
+
+            if not (source_id and predicate_id and target_id):
+                continue
+
+            labels: list[str] = []
+            source_name = _first_non_empty_text(hit.get("source_name"))
+            if source_name and source_name != source_id:
+                labels.append(f"source_label={source_name}")
+            target_name = _first_non_empty_text(hit.get("target_name"))
+            if target_name and target_name != target_id:
+                labels.append(f"target_label={target_name}")
+            label_suffix = f" ({'; '.join(labels)})" if labels else ""
+            relation_evidence_lines.append(
+                f"- source_concept_id={source_id}; "
+                f"predicate_concept_id={predicate_id}; "
+                f"target_concept_id={target_id}{label_suffix}"
+            )
+
     for parsed in parsed_results:
         tool_name = _normalise_tool_name(parsed) or "tool"
         status = parsed.get("status")
@@ -6370,6 +6481,7 @@ def _build_tool_messages_prompt_blob(
         if name_or_concept_summary:
             writes_lines.append(name_or_concept_summary)
 
+        _append_relation_evidence(tool_name, payload)
         _mark_description_write(tool_name, payload)
 
     # Always include an explicit description verdict because it is a common source of confusion.
@@ -6395,6 +6507,10 @@ def _build_tool_messages_prompt_blob(
     blob_lines.append("")
     blob_lines.append("TOOL WRITES LEDGER (authoritative):")
     blob_lines.extend(writes_lines or ["- No writes detected"])
+    if relation_evidence_lines:
+        blob_lines.append("")
+        blob_lines.append("TOOL RELATION EVIDENCE (authoritative):")
+        blob_lines.extend(relation_evidence_lines)
     if did_not_lines:
         blob_lines.append("")
         blob_lines.append("WRITES NOT DETECTED:")
