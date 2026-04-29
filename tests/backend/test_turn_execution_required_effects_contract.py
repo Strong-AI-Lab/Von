@@ -8,6 +8,9 @@ from representation_intent_regression_helpers import (
     patch_representation_profile_loader,
 )
 from src.backend.workflows.engine import WorkflowDefinition
+from src.backend.workflows.required_effects_contracts import (
+    normalise_workflow_required_effects_contract,
+)
 
 
 def _paper_continuation_contract() -> dict[str, object]:
@@ -84,11 +87,22 @@ def _entity_information_workflow_required_effects_contract() -> dict[str, object
                 "effect_type": "grounded_evidence",
                 "required_tools": [
                     "fetch_concept",
+                    "get_text_relations_summary",
                     "get_predicate_incidence",
                     "find_relations_with_argument",
                     "list_uncertain_relationship_assertions",
                 ],
                 "required_tools_match": "all",
+                "recovery_strategies": [
+                    {
+                        "strategy_id": "recover_text_relations_for_focal_entity",
+                        "tool": "get_text_relations_summary",
+                        "recovers_tools": ["get_text_relations_summary"],
+                        "target_concept_source": "required_fetch_or_focal_concept",
+                        "target_concept_argument_name": "concept_id",
+                        "target_concept_max_count": 2,
+                    }
+                ],
                 "missing_failure_code": "entity_information_evidence_missing",
                 "failed_failure_code": "entity_information_evidence_failed",
                 "not_executed_reason": (
@@ -127,6 +141,52 @@ def _patch_workflow_required_effects_contract(monkeypatch) -> None:
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         lambda defer_parity_work=True: _Registry(),
     )
+
+
+def test_workflow_required_effects_contract_normalises_recovery_strategies() -> None:
+    contract = normalise_workflow_required_effects_contract(
+        {
+            "contract_id": "grounded_entity_information_retrieval_evidence",
+            "required_effects": [
+                {
+                    "effect_id": "grounded_entity_information_evidence",
+                    "effect_type": "grounded_evidence",
+                    "required_tools": ["get_text_relations_summary"],
+                    "recovery_strategies": [
+                        {
+                            "id": "recover_text_relations_for_focal_entity",
+                            "recover_tool": "get_text_relations_summary",
+                            "missing_tools": ["get_text_relations_summary"],
+                            "bind_target_concept_from": (
+                                "required_fetch_or_focal_concept"
+                            ),
+                            "target_argument": "concept_id",
+                            "target_concept_max_count": "2",
+                            "default_payload": {
+                                "max_relation_ids_per_group": 25,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert contract is not None
+    effect = contract["required_effects"][0]
+    assert effect["recovery_strategies"] == [
+        {
+            "strategy_id": "recover_text_relations_for_focal_entity",
+            "tool": "get_text_relations_summary",
+            "recovers_tools": ["get_text_relations_summary"],
+            "target_concept_source": "required_fetch_or_focal_concept",
+            "target_concept_argument_name": "concept_id",
+            "target_concept_max_count": 2,
+            "default_payload": {
+                "max_relation_ids_per_group": 25,
+            },
+        }
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -676,6 +736,7 @@ def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_exp
     assert summary.get("zero_tool_reason_code") == "required_effect_tools_missing"
     assert summary.get("required_effects_missing_required_tools") == [
         "fetch_concept",
+        "get_text_relations_summary",
         "get_predicate_incidence",
         "find_relations_with_argument",
         "list_uncertain_relationship_assertions",
@@ -687,7 +748,7 @@ def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_exp
     assert isinstance(dispatch, dict)
     assert dispatch.get("zero_tool_execution_expected") is False
     assert dispatch.get("zero_tool_reason_code") == "required_effect_tools_missing"
-    assert dispatch.get("required_effects_missing_required_tool_count") == 4
+    assert dispatch.get("required_effects_missing_required_tool_count") == 5
 
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "escalation_required"

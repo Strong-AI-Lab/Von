@@ -89,9 +89,25 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     assert required_effects[0]["effect_type"] == "grounded_evidence"
     assert required_effects[0]["required_tools"] == [
         "fetch_concept",
+        "get_text_relations_summary",
         "get_predicate_incidence",
         "find_relations_with_argument",
         "list_uncertain_relationship_assertions",
+    ]
+    assert required_effects[0]["recovery_strategies"] == [
+        {
+            "strategy_id": "recover_text_relations_for_focal_entity",
+            "tool": "get_text_relations_summary",
+            "recovers_tools": ["get_text_relations_summary"],
+            "description": (
+                "Recover missing text-relation summary evidence for the focal "
+                "entity from the same concept target used for entity information "
+                "retrieval."
+            ),
+            "target_concept_source": "required_fetch_or_focal_concept",
+            "target_concept_argument_name": "concept_id",
+            "target_concept_max_count": 2,
+        }
     ]
     assert required_effects[0]["required_tools_match"] == "all"
     assert (
@@ -108,6 +124,7 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     assert isinstance(llm_policy, dict)
     assert llm_policy.get("tool_mode") == "allowed"
     assert llm_policy.get("allowed_tools") == [
+        "get_text_relations_summary",
         "get_predicate_incidence",
         "find_relations_with_argument",
         "search_concepts",
@@ -116,6 +133,7 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     ]
     assert llm_policy.get("required_tools") == [
         "fetch_concept",
+        "get_text_relations_summary",
         "get_predicate_incidence",
         "find_relations_with_argument",
         "list_uncertain_relationship_assertions",
@@ -127,6 +145,9 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
             "relation_kind": "binary",
             "include_argument_type_counts": True,
             "limit": 12,
+        },
+        "get_text_relations_summary": {
+            "max_relation_ids_per_group": 25,
         },
         "find_relations_with_argument": {
             "argument_index": "subject",
