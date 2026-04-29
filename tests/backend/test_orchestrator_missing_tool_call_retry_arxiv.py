@@ -2174,6 +2174,198 @@ def test_tool_calling_backfill_uses_workflow_contract_for_required_text_summary(
     ]
 
 
+def test_tool_calling_backfill_uses_workflow_recovery_contract_for_uncertainty_assertions():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "I couldn't complete that request because required evidence was missing.",
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: pytest.fail("represented structural retry should run")
+    )
+    orchestrator._store_prompt_requirement_evaluation = cast(
+        Any, lambda data, prompt_requirements: None
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+
+    class _PromptRequirements:
+        required_tools = [
+            "fetch_concept",
+            "get_text_relations_summary",
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+            "list_uncertain_relationship_assertions",
+        ]
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        missing_tools = ["list_uncertain_relationship_assertions"]
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = (
+            "workflow required-effect required tool(s) not yet invoked successfully: "
+            "list_uncertain_relationship_assertions"
+        )
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_entity_information_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": list(_PromptRequirements.required_tools),
+                "required_tools_match": "all",
+                "recovery_strategies": [
+                    {
+                        "strategy_id": (
+                            "recover_uncertain_relationship_assertions_for_focal_entity"
+                        ),
+                        "tool": "list_uncertain_relationship_assertions",
+                        "recovers_tools": [
+                            "list_uncertain_relationship_assertions"
+                        ],
+                        "target_concept_source": "required_fetch_or_focal_concept",
+                        "target_concept_argument_name": "source_id",
+                        "target_concept_max_count": 2,
+                        "default_payload": {"include_legacy": True},
+                    }
+                ],
+            }
+        ],
+    }
+
+    request = SimpleNamespace(
+        data={
+            "prompt": (
+                "Tell me about my research interests and collaborators as "
+                "represented here."
+            ),
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "fetch_concept",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {
+                        "success": True,
+                        "concept_id": "#V#michael_witbrock",
+                    },
+                },
+                {
+                    "tool": "get_text_relations_summary",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {"success": True},
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {"success": True},
+                },
+                {
+                    "tool": "find_relations_with_argument",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {"success": True},
+                },
+            ],
+            "prompt_requirement_url_policy": {},
+            "required_prompt_tools": list(_PromptRequirements.required_tools),
+            "missing_prompt_tools": ["list_uncertain_relationship_assertions"],
+            "missing_tool_call_retry_reason_override": (
+                _PromptRequirements.missing_retry_reason
+            ),
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=6,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "list_uncertain_relationship_assertions",
+            "payload": {
+                "include_legacy": True,
+                "source_id": "#V#michael_witbrock",
+            },
+        }
+    ]
+    retry_event = next(
+        item
+        for item in request.data["aux_llm_calls"]
+        if item.get("type") == "missing_tool_call_retry"
+    )
+    assert retry_event["retry_binding_sources"] == [
+        {
+            "tool": "list_uncertain_relationship_assertions",
+            "binding_source": "workflow_recovery_contract",
+            "target_concept_source": "required_fetch_or_focal_concept",
+            "recovery_contract_id": (
+                "grounded_entity_information_retrieval_evidence"
+            ),
+            "recovery_contract_source": "definition_metadata",
+            "recovery_effect_id": "grounded_entity_information_evidence",
+            "recovery_strategy_id": (
+                "recover_uncertain_relationship_assertions_for_focal_entity"
+            ),
+        }
+    ]
+
+
 def test_tool_calling_backfill_prefers_structural_retry_over_bad_recovery_llm_call():
     orchestrator = _build_orchestrator_stub()
 

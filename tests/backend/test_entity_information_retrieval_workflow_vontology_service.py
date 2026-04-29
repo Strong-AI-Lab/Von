@@ -107,7 +107,23 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
             "target_concept_source": "required_fetch_or_focal_concept",
             "target_concept_argument_name": "concept_id",
             "target_concept_max_count": 2,
-        }
+        },
+        {
+            "strategy_id": (
+                "recover_uncertain_relationship_assertions_for_focal_entity"
+            ),
+            "tool": "list_uncertain_relationship_assertions",
+            "recovers_tools": ["list_uncertain_relationship_assertions"],
+            "description": (
+                "Recover missing uncertainty-bearing relationship assertions for "
+                "the focal entity from the same concept target used for entity "
+                "information retrieval."
+            ),
+            "target_concept_source": "required_fetch_or_focal_concept",
+            "target_concept_argument_name": "source_id",
+            "target_concept_max_count": 2,
+            "default_payload": {"include_legacy": True},
+        },
     ]
     assert required_effects[0]["required_tools_match"] == "all"
     assert (
