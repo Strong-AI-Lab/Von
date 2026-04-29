@@ -197,6 +197,73 @@ def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> Non
     ]
 
 
+def test_execute_llm_step_applies_json_field_defaults_from_validation_policy() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={},
+        prompt_contract={
+            "prompt_text": "Return the expected-outcome JSON.",
+        },
+        validation_policy={
+            "output_format": "json_value",
+            "json_field_defaults": {
+                "expected_outcome_summary": "Answer from grounded evidence.",
+                "grounding_requirement": "Use authoritative context.",
+                "precision_policy": "State uncertainty when needed.",
+            },
+            "required_json_fields": [
+                "expected_outcome_summary",
+                "grounding_requirement",
+                "precision_policy",
+            ],
+        },
+        workflow_state_id="expected_outcome_inference",
+    )
+    request.environment.llm_client.generate.return_value = "[]"
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"] == {
+        "expected_outcome_summary": "Answer from grounded evidence.",
+        "grounding_requirement": "Use authoritative context.",
+        "precision_policy": "State uncertainty when needed.",
+    }
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["json_object_defaulted_from_non_object"] is True
+    assert envelope["validation"]["json_defaults_applied"] == [
+        "expected_outcome_summary",
+        "grounding_requirement",
+        "precision_policy",
+    ]
+
+
+def test_execute_llm_step_fails_json_value_when_required_fields_missing() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={},
+        prompt_contract={
+            "prompt_text": "Return a JSON object with the required fields.",
+        },
+        validation_policy={
+            "output_format": "json_value",
+            "required_json_fields": ["must_exist"],
+        },
+    )
+    request.environment.llm_client.generate.return_value = '{"other": true}'
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert result.error == "json_required_fields_missing"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["missing_required_fields"] == ["must_exist"]
+
+
 def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     request = _build_request(llm_response="This is not valid JSON.")
 

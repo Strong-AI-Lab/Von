@@ -27,6 +27,15 @@ Return JSON only with this shape:
 }
 ```
 
+Compaction rules:
+
+- Each guidance body must be one sentence and no more than 280 characters.
+- Each body must state one reusable hint only. Do not concatenate multiple lessons.
+- Do not quote, copy, or summarise the full historical guidance entries into the new body.
+- If prior history already contains the same lesson, rewrite it only when this episode adds a clearer or more compact generalisation; otherwise use the no-durable-lesson sentence.
+- Evidence refs must contain no more than 4 compact identifiers.
+- Never include raw prompt text, raw telemetry dumps, full user messages, full assistant responses, or stack traces in a body; refer to them through evidence refs instead.
+
 Rules:
 
 - Each body must be a hint, not a mandatory override of workflow, prompt, security, or user instructions.

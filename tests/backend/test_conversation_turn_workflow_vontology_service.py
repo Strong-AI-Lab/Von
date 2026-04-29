@@ -319,7 +319,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         0
     ]
     assert expected_outcome_action.action_id == "llm.action"
-    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_policy = expected_outcome_action.validation_policy or {}
+    assert expected_outcome_policy.get("output_format") == "json_value"
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (

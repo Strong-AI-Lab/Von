@@ -221,7 +221,14 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     expected_outcome_action = expected_outcome.actions[0]
     assert expected_outcome_action.action_id == "llm.action"
     assert expected_outcome_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
-    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_policy = expected_outcome_action.validation_policy or {}
+    assert expected_outcome_policy.get("output_format") == "json_value"
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("requested_prompt_concept_ids") == [

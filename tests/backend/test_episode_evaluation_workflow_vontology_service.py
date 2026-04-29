@@ -152,6 +152,10 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert guidance_action.prompt_contract.get("requested_prompt_concept_ids") == [
         EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID
     ]
+    guidance_policy = guidance_action.llm_policy or {}
+    assert "no more than 280 characters" in str(
+        guidance_policy.get("response_contract_text") or ""
+    )
     proposal_action_ids = sorted(
         {
             action.action_id
@@ -216,6 +220,10 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     )
     assert "low-imposition probe" in guidance_prompt_text
     assert "workflow_experience_guidance_induction.v1" in guidance_prompt_text
+    assert "no more than 280 characters" in guidance_prompt_text
+    assert "Do not quote, copy, or summarise the full historical guidance entries" in (
+        guidance_prompt_text
+    )
     promotion_prompt_rows = get_texts_for_concept(
         EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
         predicate="hasContent",

@@ -2,7 +2,7 @@
   "family_id": "episode_evaluation_workflow_seed_bundle",
   "managed_by": "episode_evaluation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "3",
   "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "episode_critic.build_evidence_bundle",
@@ -683,7 +683,7 @@
             "llm_policy": {
               "policy_stage": "postcondition_critic",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys schema_version, successful_run_guidance, failure_avoidance_guidance, and next_run_exploration_guidance.",
+              "response_contract_text": "Return JSON with keys schema_version, successful_run_guidance, failure_avoidance_guidance, and next_run_exploration_guidance. Each guidance body must be one sentence, no more than 280 characters, and must not quote or concatenate historical guidance.",
               "context_fields": [
                 {
                   "context_key": "episode_locator",
