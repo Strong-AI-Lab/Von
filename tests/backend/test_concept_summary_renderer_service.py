@@ -3,7 +3,59 @@ from __future__ import annotations
 import src.backend.services.concept_summary_renderer_service as service
 
 
+class _FakeSummaryFieldResolver:
+    _text_predicates = {
+        "description": ("hasDescription", "#V#hasDescription"),
+        "content": ("hasContent", "#V#hasContent"),
+        "email": ("#V#has_email", "has_email"),
+        "event_date": ("#V#date_of_event", "#V#has_start_time"),
+    }
+    _relationship_predicates = {
+        "affiliation": (
+            "#V#has_affiliation",
+            "#V#member_of_organisation",
+            "#V#member_of_faculty",
+        ),
+        "meeting_participant": ("#V#meeting_participant", "#V#performed_by"),
+        "meeting_location": ("#V#meeting_location", "#V#has_location"),
+        "meeting_host": ("#V#meeting_host_organisation",),
+    }
+    _fields_by_type = {
+        "#V#person": ("description", "email", "affiliation"),
+        "#V#meeting": (
+            "description",
+            "event_date",
+            "meeting_participant",
+            "meeting_location",
+            "meeting_host",
+        ),
+        "#V#thing": ("description", "content"),
+    }
+
+    def get_text_predicates_for_field(self, field_key: str) -> tuple[str, ...]:
+        return self._text_predicates.get(field_key, ())
+
+    def get_relationship_predicates_for_field(self, field_key: str) -> tuple[str, ...]:
+        return self._relationship_predicates.get(field_key, ())
+
+    def get_summary_fields_for_types(self, type_ids) -> tuple[str, ...]:
+        for type_id in type_ids:
+            fields = self._fields_by_type.get(type_id)
+            if fields:
+                return fields
+        return ()
+
+
+def _install_summary_field_resolver(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_concept_summary_field_resolver",
+        lambda: _FakeSummaryFieldResolver(),
+    )
+
+
 def test_load_concept_summary_renderer_builds_person_identity_payload(monkeypatch) -> None:
+    _install_summary_field_resolver(monkeypatch)
     concept_docs = {
         "#V#ada": {
             "concept_id": "#V#ada",
@@ -93,6 +145,7 @@ def test_load_concept_summary_renderer_builds_person_identity_payload(monkeypatc
 def test_load_concept_summary_renderer_uses_ancestor_type_for_event_renderer(
     monkeypatch,
 ) -> None:
+    _install_summary_field_resolver(monkeypatch)
     concept_docs = {
         "#V#meeting_1": {
             "concept_id": "#V#meeting_1",
@@ -169,6 +222,7 @@ def test_load_concept_summary_renderer_uses_ancestor_type_for_event_renderer(
 def test_load_concept_summary_renderer_falls_back_to_generic_text_summary(
     monkeypatch,
 ) -> None:
+    _install_summary_field_resolver(monkeypatch)
     concept_docs = {
         "#V#artifact_1": {
             "concept_id": "#V#artifact_1",

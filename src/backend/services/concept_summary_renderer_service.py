@@ -199,7 +199,17 @@ def _index_text_rows(text_rows: list[dict[str, Any]]) -> dict[str, list[str]]:
     return indexed
 
 
-def _first_text_value(indexed: Mapping[str, list[str]], alias_key: str) -> str | None:
+def _summary_field_enabled(summary_field_keys: frozenset[str], field_key: str) -> bool:
+    return field_key in summary_field_keys
+
+
+def _first_text_value(
+    indexed: Mapping[str, list[str]],
+    alias_key: str,
+    summary_field_keys: frozenset[str],
+) -> str | None:
+    if not _summary_field_enabled(summary_field_keys, alias_key):
+        return None
     aliases = get_concept_summary_field_resolver().get_text_predicates_for_field(alias_key)
     for alias in aliases:
         values = indexed.get(alias) or []
@@ -208,7 +218,13 @@ def _first_text_value(indexed: Mapping[str, list[str]], alias_key: str) -> str |
     return None
 
 
-def _all_text_values(indexed: Mapping[str, list[str]], alias_key: str) -> list[str]:
+def _all_text_values(
+    indexed: Mapping[str, list[str]],
+    alias_key: str,
+    summary_field_keys: frozenset[str],
+) -> list[str]:
+    if not _summary_field_enabled(summary_field_keys, alias_key):
+        return []
     aliases = get_concept_summary_field_resolver().get_text_predicates_for_field(alias_key)
     values: list[str] = []
     for alias in aliases:
@@ -220,7 +236,10 @@ def _relationship_values(
     relationships: Mapping[str, Any],
     alias_key: str,
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> list[str]:
+    if not _summary_field_enabled(summary_field_keys, alias_key):
+        return []
     aliases = get_concept_summary_field_resolver().get_relationship_predicates_for_field(alias_key)
     values: list[str] = []
     for alias in aliases:
@@ -249,28 +268,52 @@ def _type_labels(
     return _dedupe_preserve_order(labels)
 
 
-def _description_sources(concept: Mapping[str, Any], indexed_text_rows: Mapping[str, list[str]]) -> list[str]:
+def _description_sources(
+    concept: Mapping[str, Any],
+    indexed_text_rows: Mapping[str, list[str]],
+    summary_field_keys: frozenset[str],
+) -> list[str]:
     values: list[str] = []
-    values.extend(_all_text_values(indexed_text_rows, "description"))
+    values.extend(_all_text_values(indexed_text_rows, "description", summary_field_keys))
     concept_description = concept.get("description")
-    if isinstance(concept_description, str) and concept_description.strip():
+    if (
+        _summary_field_enabled(summary_field_keys, "description")
+        and isinstance(concept_description, str)
+        and concept_description.strip()
+    ):
         values.append(concept_description.strip())
     preserved_description = (
         ((concept.get("concept_data") or {}).get("preserved_fields") or {}).get("description")
     )
-    if isinstance(preserved_description, str) and preserved_description.strip():
+    if (
+        _summary_field_enabled(summary_field_keys, "description")
+        and isinstance(preserved_description, str)
+        and preserved_description.strip()
+    ):
         values.append(preserved_description.strip())
     note = concept.get("note") or concept.get("notes")
-    if isinstance(note, str) and note.strip():
+    if (
+        _summary_field_enabled(summary_field_keys, "description")
+        and isinstance(note, str)
+        and note.strip()
+    ):
         values.append(note.strip())
-    content_values = _all_text_values(indexed_text_rows, "content")
+    content_values = _all_text_values(indexed_text_rows, "content", summary_field_keys)
     if content_values:
         values.append(content_values[0])
     return _dedupe_preserve_order(values)
 
 
-def _summary_text(concept: Mapping[str, Any], indexed_text_rows: Mapping[str, list[str]]) -> str:
-    description_values = _description_sources(concept, indexed_text_rows)
+def _summary_text(
+    concept: Mapping[str, Any],
+    indexed_text_rows: Mapping[str, list[str]],
+    summary_field_keys: frozenset[str],
+) -> str:
+    description_values = _description_sources(
+        concept,
+        indexed_text_rows,
+        summary_field_keys,
+    )
     for value in description_values:
         plain = _plain_text(value)
         if plain:
@@ -296,16 +339,27 @@ def _build_person_panel(
     direct_type_ids: list[str],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
-    emails = _all_text_values(indexed_text_rows, "email")
-    affiliations = _relationship_values(relationships, "affiliation", preview_cache)
+    emails = _all_text_values(indexed_text_rows, "email", summary_field_keys)
+    affiliations = _relationship_values(
+        relationships,
+        "affiliation",
+        preview_cache,
+        summary_field_keys,
+    )
     roles = _type_labels(
         direct_type_ids or resolved_type_ids,
         preview_cache,
         exclude=_PERSON_ROLE_EXCLUSIONS,
         limit=4,
     )
-    authored_works = _relationship_values(relationships, "authored_work", preview_cache)
+    authored_works = _relationship_values(
+        relationships,
+        "authored_work",
+        preview_cache,
+        summary_field_keys,
+    )
     subtitle_parts = []
     if roles:
         subtitle_parts.append(", ".join(roles[:2]))
@@ -317,7 +371,7 @@ def _build_person_panel(
         "title": _display_name(concept),
         "subtitle": " · ".join(subtitle_parts[:2]),
         "badges": roles,
-        "summary": _summary_text(concept, indexed_text_rows),
+        "summary": _summary_text(concept, indexed_text_rows, summary_field_keys),
         "facts": _facts(
             ("Email", emails[0] if emails else None),
             ("Affiliation", ", ".join(affiliations[:2]) if affiliations else None),
@@ -338,16 +392,26 @@ def _build_document_panel(
     indexed_text_rows: Mapping[str, list[str]],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
-    authors = _relationship_values(relationships, "author", preview_cache)
-    publication_date = _first_text_value(indexed_text_rows, "publication_date")
+    authors = _relationship_values(
+        relationships,
+        "author",
+        preview_cache,
+        summary_field_keys,
+    )
+    publication_date = _first_text_value(
+        indexed_text_rows,
+        "publication_date",
+        summary_field_keys,
+    )
     type_labels = _type_labels(
         resolved_type_ids,
         preview_cache,
         exclude=_GENERIC_TYPE_EXCLUSIONS,
         limit=4,
     )
-    summary = _summary_text(concept, indexed_text_rows)
+    summary = _summary_text(concept, indexed_text_rows, summary_field_keys)
     return {
         "variant": "document",
         "eyebrow": "Paper",
@@ -373,18 +437,24 @@ def _build_task_panel(
     relationships: Mapping[str, Any],
     indexed_text_rows: Mapping[str, list[str]],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
-    status = _first_text_value(indexed_text_rows, "task_status")
-    priority = _first_text_value(indexed_text_rows, "priority")
-    due = _first_text_value(indexed_text_rows, "due_date")
-    source = _relationship_values(relationships, "task_source", preview_cache)
+    status = _first_text_value(indexed_text_rows, "task_status", summary_field_keys)
+    priority = _first_text_value(indexed_text_rows, "priority", summary_field_keys)
+    due = _first_text_value(indexed_text_rows, "due_date", summary_field_keys)
+    source = _relationship_values(
+        relationships,
+        "task_source",
+        preview_cache,
+        summary_field_keys,
+    )
     return {
         "variant": "task",
         "eyebrow": "Task",
         "title": _display_name(concept),
         "subtitle": " · ".join([value for value in (status, priority) if value]),
         "badges": [value for value in (status, priority) if value],
-        "summary": _summary_text(concept, indexed_text_rows),
+        "summary": _summary_text(concept, indexed_text_rows, summary_field_keys),
         "facts": _facts(
             ("Status", status),
             ("Priority", priority),
@@ -404,11 +474,27 @@ def _build_event_panel(
     indexed_text_rows: Mapping[str, list[str]],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
-    when = _first_text_value(indexed_text_rows, "event_date")
-    participants = _relationship_values(relationships, "meeting_participant", preview_cache)
-    location = _relationship_values(relationships, "meeting_location", preview_cache)
-    hosts = _relationship_values(relationships, "meeting_host", preview_cache)
+    when = _first_text_value(indexed_text_rows, "event_date", summary_field_keys)
+    participants = _relationship_values(
+        relationships,
+        "meeting_participant",
+        preview_cache,
+        summary_field_keys,
+    )
+    location = _relationship_values(
+        relationships,
+        "meeting_location",
+        preview_cache,
+        summary_field_keys,
+    )
+    hosts = _relationship_values(
+        relationships,
+        "meeting_host",
+        preview_cache,
+        summary_field_keys,
+    )
     type_labels = _type_labels(
         resolved_type_ids,
         preview_cache,
@@ -426,7 +512,7 @@ def _build_event_panel(
         "title": _display_name(concept),
         "subtitle": " · ".join(subtitle_parts),
         "badges": type_labels,
-        "summary": _summary_text(concept, indexed_text_rows),
+        "summary": _summary_text(concept, indexed_text_rows, summary_field_keys),
         "facts": _facts(
             ("When", when),
             ("Location", location[0] if location else None),
@@ -445,6 +531,7 @@ def _build_location_panel(
     indexed_text_rows: Mapping[str, list[str]],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
     aliases = [
         str(item.get("name") or "").strip()
@@ -454,8 +541,8 @@ def _build_location_panel(
         and str(item.get("type") or "").strip() == "NL"
     ]
     aliases = _dedupe_preserve_order(aliases)
-    capacity = _first_text_value(indexed_text_rows, "capacity")
-    url = _first_text_value(indexed_text_rows, "url")
+    capacity = _first_text_value(indexed_text_rows, "capacity", summary_field_keys)
+    url = _first_text_value(indexed_text_rows, "url", summary_field_keys)
     type_labels = _type_labels(
         resolved_type_ids,
         preview_cache,
@@ -468,7 +555,7 @@ def _build_location_panel(
         "title": _display_name(concept),
         "subtitle": ", ".join(type_labels[:2]),
         "badges": type_labels,
-        "summary": _summary_text(concept, indexed_text_rows),
+        "summary": _summary_text(concept, indexed_text_rows, summary_field_keys),
         "facts": _facts(
             ("Alias", aliases[1] if len(aliases) > 1 else None),
             ("Capacity", capacity),
@@ -487,6 +574,7 @@ def _build_generic_panel(
     indexed_text_rows: Mapping[str, list[str]],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
     type_labels = _type_labels(
         resolved_type_ids,
@@ -500,7 +588,7 @@ def _build_generic_panel(
         "title": _display_name(concept),
         "subtitle": ", ".join(type_labels[:2]),
         "badges": type_labels,
-        "summary": _summary_text(concept, indexed_text_rows),
+        "summary": _summary_text(concept, indexed_text_rows, summary_field_keys),
         "facts": _facts(("Type", ", ".join(type_labels[:3]) if type_labels else None)),
         "expanded_sections": [],
     }
@@ -515,6 +603,7 @@ def _build_panel_for_renderer(
     direct_type_ids: list[str],
     resolved_type_ids: list[str],
     preview_cache: dict[str, str],
+    summary_field_keys: frozenset[str],
 ) -> dict[str, Any]:
     if renderer_id == "#V#concept_page_identity_renderer":
         return _build_person_panel(
@@ -524,6 +613,7 @@ def _build_panel_for_renderer(
             direct_type_ids=direct_type_ids,
             resolved_type_ids=resolved_type_ids,
             preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
         )
     if renderer_id == "#V#concept_page_document_renderer":
         return _build_document_panel(
@@ -532,6 +622,7 @@ def _build_panel_for_renderer(
             indexed_text_rows=indexed_text_rows,
             resolved_type_ids=resolved_type_ids,
             preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
         )
     if renderer_id == "#V#concept_page_task_renderer":
         return _build_task_panel(
@@ -539,6 +630,7 @@ def _build_panel_for_renderer(
             relationships=relationships,
             indexed_text_rows=indexed_text_rows,
             preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
         )
     if renderer_id == "#V#concept_page_event_renderer":
         return _build_event_panel(
@@ -547,6 +639,7 @@ def _build_panel_for_renderer(
             indexed_text_rows=indexed_text_rows,
             resolved_type_ids=resolved_type_ids,
             preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
         )
     if renderer_id == "#V#concept_page_location_renderer":
         return _build_location_panel(
@@ -554,12 +647,14 @@ def _build_panel_for_renderer(
             indexed_text_rows=indexed_text_rows,
             resolved_type_ids=resolved_type_ids,
             preview_cache=preview_cache,
+            summary_field_keys=summary_field_keys,
         )
     return _build_generic_panel(
         concept=concept,
         indexed_text_rows=indexed_text_rows,
         resolved_type_ids=resolved_type_ids,
         preview_cache=preview_cache,
+        summary_field_keys=summary_field_keys,
     )
 
 
@@ -579,6 +674,10 @@ def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
     ancestor_type_ids = _collect_ancestor_type_ids(direct_type_ids)
     resolved_type_ids = _dedupe_preserve_order(direct_type_ids + ancestor_type_ids)
     present_predicates = _collect_present_predicates(relationships, text_rows)
+    field_resolver = get_concept_summary_field_resolver()
+    summary_field_keys = frozenset(
+        field_resolver.get_summary_fields_for_types(resolved_type_ids)
+    )
 
     definitions, loading_diagnostics = load_renderer_definitions_from_concept_ids(
         CONCEPT_PAGE_RENDERER_CONCEPT_IDS
@@ -607,6 +706,7 @@ def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
         direct_type_ids=direct_type_ids,
         resolved_type_ids=resolved_type_ids,
         preview_cache=preview_cache,
+        summary_field_keys=summary_field_keys,
     )
 
     return {
@@ -615,6 +715,7 @@ def load_concept_summary_renderer(concept_id: str) -> dict[str, Any]:
         "display_name": _display_name(concept),
         "direct_type_ids": direct_type_ids,
         "resolved_type_ids": resolved_type_ids,
+        "summary_field_keys": sorted(summary_field_keys),
         "selected_renderer": selected.to_dict() if selected else None,
         "panel": panel,
         "diagnostics": {

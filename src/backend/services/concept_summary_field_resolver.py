@@ -1,17 +1,9 @@
-"""Vontology-backed summary field predicate resolution.
+"""Vontology-backed summary field predicate and type-binding resolution.
 
-This service moves concept-summary field-to-predicate configuration out of
-``concept_summary_renderer_service`` and into Vontology-backed field concepts.
-
-Each summary field is represented by a concept whose ID follows the pattern
-``#V#summary_field_<field_key>``. The field concept may define either of these
-singleton text relations, each containing a JSON list of predicate IDs:
-
-- ``#V#has_summary_text_predicates_json``
-- ``#V#has_summary_relationship_predicates_json``
-
-When Vontology metadata is absent, the resolver falls back to the historical
-in-code defaults so the renderer remains deterministic during rollout.
+Each summary field is represented by a ``#V#summary_field_*`` concept. Field
+concepts carry ordered predicate lists as text relations, and type concepts
+link to field concepts through ``#V#has_summary_fields``. Python only resolves
+and caches that represented metadata; field policy lives in Vontology.
 """
 
 from __future__ import annotations
@@ -19,57 +11,34 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Mapping, Sequence
 
-from .task_ontology_service import TASK_SOURCE_RELATIONSHIP_PREDICATES
+from .concept_service import get_concept_by_concept_id
 from .text_value_service import get_texts_for_concept
 
 _logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECONDS: float = 300.0
 
-_TEXT_PREDICATE_CONFIG = "#V#has_summary_text_predicates_json"
-_RELATIONSHIP_PREDICATE_CONFIG = "#V#has_summary_relationship_predicates_json"
+SUMMARY_TEXT_PREDICATE_CONFIG = "#V#has_summary_text_predicates_json"
+SUMMARY_RELATIONSHIP_PREDICATE_CONFIG = (
+    "#V#has_summary_relationship_predicates_json"
+)
+SUMMARY_FIELD_DISPLAY_ORDER_PREDICATE = "#V#summary_field_display_order"
+SUMMARY_TYPE_FIELD_RELATIONSHIP = "#V#has_summary_fields"
 
-_DEFAULT_TEXT_FIELD_PREDICATES: dict[str, tuple[str, ...]] = {
-    "description": ("hasDescription", "#V#hasDescription"),
-    "content": ("hasContent", "#V#hasContent"),
-    "email": ("#V#has_email", "has_email"),
-    "publication_date": ("#V#has_publication_date", "has_publication_date"),
-    "task_status": ("#V#hasTaskStatus", "hasTaskStatus"),
-    "priority": ("#V#hasPriority", "hasPriority"),
-    "due_date": (
-        "#V#hasDueDate",
-        "#V#has_due_date",
-        "#V#has_due_time",
-        "#V#has_due",
-        "hasDueDate",
-        "has_due_date",
-    ),
-    "event_date": (
-        "#V#date_of_event",
-        "#V#has_start_time",
-        "date_of_event",
-        "has_start_time",
-    ),
-    "capacity": ("#V#has_capacity", "has_capacity", "#V#capacity", "capacity"),
-    "url": ("#V#has_url", "has_url"),
-}
-
-_DEFAULT_RELATIONSHIP_FIELD_PREDICATES: dict[str, tuple[str, ...]] = {
-    "affiliation": (
-        "#V#has_affiliation",
-        "#V#member_of_organisation",
-        "#V#member_of_faculty",
-        "#V#homeresearchorganisation",
-    ),
-    "author": ("#V#has_author", "#V#has_first_author", "#V#authored_by"),
-    "meeting_participant": ("#V#meeting_participant", "#V#performed_by"),
-    "meeting_location": ("#V#meeting_location", "#V#has_location"),
-    "meeting_host": ("#V#meeting_host_organisation",),
-    "task_source": TASK_SOURCE_RELATIONSHIP_PREDICATES,
-    "authored_work": ("#V#author_of",),
-}
+_TEXT_PREDICATE_CONFIG_ALIASES: tuple[str, ...] = (
+    SUMMARY_TEXT_PREDICATE_CONFIG,
+    "#V#hasSummaryTextPredicate",
+)
+_RELATIONSHIP_PREDICATE_CONFIG_ALIASES: tuple[str, ...] = (
+    SUMMARY_RELATIONSHIP_PREDICATE_CONFIG,
+    "#V#hasSummaryRelationshipPredicate",
+)
+_TYPE_FIELD_RELATIONSHIP_ALIASES: tuple[str, ...] = (
+    SUMMARY_TYPE_FIELD_RELATIONSHIP,
+    "#V#hasSummaryFields",
+)
 
 
 def _dedupe_preserve_order(values: list[str]) -> tuple[str, ...]:
@@ -86,6 +55,22 @@ def _dedupe_preserve_order(values: list[str]) -> tuple[str, ...]:
 
 def _field_concept_id(field_key: str) -> str:
     return f"#V#summary_field_{field_key}"
+
+
+def _field_key_from_concept_id(concept_id: str) -> str | None:
+    prefix = "#V#summary_field_"
+    if not isinstance(concept_id, str) or not concept_id.startswith(prefix):
+        return None
+    key = concept_id.removeprefix(prefix).strip()
+    return key or None
+
+
+def _normalise_strings(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    return _dedupe_preserve_order([str(item or "").strip() for item in raw])
 
 
 def _normalise_predicate_list(raw_text: Any) -> tuple[str, ...]:
@@ -120,19 +105,44 @@ class ConceptSummaryFieldResolver:
         self._cache_loaded_at = 0.0
         self._text_predicates_by_field: dict[str, tuple[str, ...]] = {}
         self._relationship_predicates_by_field: dict[str, tuple[str, ...]] = {}
+        self._summary_fields_by_type: dict[str, tuple[str, ...]] = {}
 
     def invalidate_cache(self) -> None:
         self._cache_loaded_at = 0.0
         self._text_predicates_by_field = {}
         self._relationship_predicates_by_field = {}
+        self._summary_fields_by_type = {}
 
     def get_text_predicates_for_field(self, field_key: str) -> tuple[str, ...]:
         self._ensure_cache()
-        return self._text_predicates_by_field.get(field_key, ())
+        normalised = str(field_key or "").strip()
+        if normalised not in self._text_predicates_by_field:
+            self._load_field_metadata(normalised)
+        return self._text_predicates_by_field.get(normalised, ())
 
     def get_relationship_predicates_for_field(self, field_key: str) -> tuple[str, ...]:
         self._ensure_cache()
-        return self._relationship_predicates_by_field.get(field_key, ())
+        normalised = str(field_key or "").strip()
+        if normalised not in self._relationship_predicates_by_field:
+            self._load_field_metadata(normalised)
+        return self._relationship_predicates_by_field.get(normalised, ())
+
+    def get_summary_fields_for_type(self, type_id: str) -> tuple[str, ...]:
+        self._ensure_cache()
+        normalised = str(type_id or "").strip()
+        if not normalised:
+            return ()
+        if normalised not in self._summary_fields_by_type:
+            self._load_type_binding(normalised)
+        return self._summary_fields_by_type.get(normalised, ())
+
+    def get_summary_fields_for_types(self, type_ids: Sequence[str]) -> tuple[str, ...]:
+        self._ensure_cache()
+        for type_id in _normalise_strings(type_ids):
+            fields = self.get_summary_fields_for_type(type_id)
+            if fields:
+                return fields
+        return ()
 
     def _ensure_cache(self) -> None:
         if self._cache_loaded_at and (time.time() - self._cache_loaded_at) <= self._cache_ttl_seconds:
@@ -140,51 +150,80 @@ class ConceptSummaryFieldResolver:
         self._load_cache()
 
     def _load_cache(self) -> None:
-        text_predicates_by_field = dict(_DEFAULT_TEXT_FIELD_PREDICATES)
-        relationship_predicates_by_field = dict(_DEFAULT_RELATIONSHIP_FIELD_PREDICATES)
+        self._text_predicates_by_field = {}
+        self._relationship_predicates_by_field = {}
+        self._summary_fields_by_type = {}
+        self._cache_loaded_at = time.time()
 
-        loaded_fields = 0
-        for field_key in sorted(
-            set(text_predicates_by_field.keys()) | set(relationship_predicates_by_field.keys())
-        ):
-            concept_id = _field_concept_id(field_key)
+    def _load_field_metadata(self, field_key: str) -> None:
+        if not field_key:
+            return
+        concept_id = _field_concept_id(field_key)
+        text_predicates = self._load_first_predicate_config(
+            concept_id=concept_id,
+            predicates=_TEXT_PREDICATE_CONFIG_ALIASES,
+        )
+        relationship_predicates = self._load_first_predicate_config(
+            concept_id=concept_id,
+            predicates=_RELATIONSHIP_PREDICATE_CONFIG_ALIASES,
+        )
+        self._text_predicates_by_field[field_key] = text_predicates
+        self._relationship_predicates_by_field[field_key] = relationship_predicates
+
+    def _load_type_binding(self, type_id: str) -> None:
+        try:
+            concept = get_concept_by_concept_id(type_id)
+        except Exception as exc:
+            _logger.debug(
+                "[summary_field_resolver] Failed to load type binding for %s: %s",
+                type_id,
+                exc,
+            )
+            self._summary_fields_by_type[type_id] = ()
+            return
+        if not isinstance(concept, Mapping):
+            self._summary_fields_by_type[type_id] = ()
+            return
+        relationships = concept.get("relationships")
+        if not isinstance(relationships, Mapping):
+            self._summary_fields_by_type[type_id] = ()
+            return
+
+        field_keys: list[str] = []
+        for predicate in _TYPE_FIELD_RELATIONSHIP_ALIASES:
+            for field_concept_id in _normalise_strings(relationships.get(predicate)):
+                field_key = _field_key_from_concept_id(field_concept_id)
+                if field_key:
+                    field_keys.append(field_key)
+            if field_keys:
+                break
+        self._summary_fields_by_type[type_id] = _dedupe_preserve_order(field_keys)
+
+    @staticmethod
+    def _load_first_predicate_config(
+        *,
+        concept_id: str,
+        predicates: Sequence[str],
+    ) -> tuple[str, ...]:
+        for predicate in predicates:
             try:
-                text_rows = get_texts_for_concept(
+                rows = get_texts_for_concept(
                     concept_id,
-                    predicate=_TEXT_PREDICATE_CONFIG,
-                    limit=5,
-                )
-                relationship_rows = get_texts_for_concept(
-                    concept_id,
-                    predicate=_RELATIONSHIP_PREDICATE_CONFIG,
+                    predicate=predicate,
                     limit=5,
                 )
             except Exception as exc:
                 _logger.debug(
-                    "[summary_field_resolver] Failed to load field metadata for %s: %s",
+                    "[summary_field_resolver] Failed to load field metadata for %s/%s: %s",
                     concept_id,
+                    predicate,
                     exc,
                 )
                 continue
-
-            text_predicates = self._first_config_value(text_rows)
-            relationship_predicates = self._first_config_value(relationship_rows)
-
-            if text_predicates:
-                text_predicates_by_field[field_key] = text_predicates
-                loaded_fields += 1
-            if relationship_predicates:
-                relationship_predicates_by_field[field_key] = relationship_predicates
-                loaded_fields += 1
-
-        self._text_predicates_by_field = text_predicates_by_field
-        self._relationship_predicates_by_field = relationship_predicates_by_field
-        self._cache_loaded_at = time.time()
-
-        if loaded_fields == 0:
-            _logger.debug(
-                "[summary_field_resolver] No Vontology-backed summary field metadata found; using defaults."
-            )
+            values = ConceptSummaryFieldResolver._first_config_value(rows)
+            if values:
+                return values
+        return ()
 
     @staticmethod
     def _first_config_value(rows: list[dict[str, Any]]) -> tuple[str, ...]:
@@ -203,3 +242,13 @@ def get_concept_summary_field_resolver() -> ConceptSummaryFieldResolver:
     if _resolver is None:
         _resolver = ConceptSummaryFieldResolver()
     return _resolver
+
+
+__all__ = [
+    "ConceptSummaryFieldResolver",
+    "SUMMARY_FIELD_DISPLAY_ORDER_PREDICATE",
+    "SUMMARY_RELATIONSHIP_PREDICATE_CONFIG",
+    "SUMMARY_TEXT_PREDICATE_CONFIG",
+    "SUMMARY_TYPE_FIELD_RELATIONSHIP",
+    "get_concept_summary_field_resolver",
+]

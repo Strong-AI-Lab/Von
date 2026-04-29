@@ -1121,6 +1121,7 @@ def create_flask_app(
     _configure_internal_mcp_orchestrator_startup(app, gateway_instance)
     _ensure_db_monitor_started(app)
     _maybe_start_startup_rag_requeue(app)
+    _bootstrap_concept_summary_fields_for_startup(app)
     _configure_durable_workflow_startup(app)
     _log_prompt_concept_health(app)
 
@@ -2248,6 +2249,36 @@ def _maybe_start_startup_rag_requeue(app: Flask) -> None:
             app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
         except Exception:
             pass
+
+
+def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
+    """Best-effort bootstrap of Vontology-backed concept-summary field metadata."""
+
+    if _is_running_under_pytest():
+        return
+    if not _env_bool("VON_CONCEPT_SUMMARY_FIELD_BOOTSTRAP_ENABLE", True):
+        return
+    try:
+        from ..services.concept_summary_field_vontology_service import (
+            bootstrap_canonical_concept_summary_fields,
+        )
+
+        report = bootstrap_canonical_concept_summary_fields()
+        app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = report
+        if not bool(report.get("success", False)):
+            app.logger.warning(
+                "[concept_summary_fields] bootstrap failed: %s",
+                report,
+            )
+    except Exception as exc:
+        app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = {
+            "success": False,
+            "error": str(exc),
+        }
+        app.logger.warning(
+            "[concept_summary_fields] bootstrap error: %s",
+            exc,
+        )
 
 
 def _configure_durable_workflow_startup(app: Flask) -> None:
