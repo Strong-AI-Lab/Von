@@ -623,12 +623,19 @@ def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
         {
           "assignments": [
             {"key": "my_flag", "value": true},
-            {"key": "other_key", "value_from_context": "source_key"}
+            {"key": "other_key", "value_from_context": "source_key"},
+            {
+              "key": "title",
+              "value_from_context_options": ["title", "metadata.title"],
+              "skip_if_unresolved": true
+            }
           ]
         }
 
     Each assignment writes exactly one context key.  ``value`` sets a literal;
-    ``value_from_context`` copies from an existing context key.
+    ``value_from_context`` copies from an existing context key, and
+    ``value_from_context_options`` copies the first present, non-empty value
+    from a list of candidate context paths.
     """
     inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
     assignments = inputs.get("assignments")
@@ -653,20 +660,73 @@ def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
                 error=f"context_set:assignment_{index}_missing_key",
             )
 
-        if "value_from_context" in entry:
+        if _coerce_bool(entry.get("preserve_existing")):
+            found_existing, existing = resolve_context_path(
+                context=request.data,
+                path=key,
+            )
+            if found_existing and _context_value_present(existing):
+                continue
+
+        value_found = True
+        if "value_from_context_options" in entry:
+            options = entry.get("value_from_context_options")
+            if not isinstance(options, (list, tuple)):
+                return WorkflowActionResult(
+                    status="failed",
+                    error=(
+                        f"context_set:assignment_{index}_"
+                        "value_from_context_options_not_sequence"
+                    ),
+                )
+            value_found = False
+            value = None
+            for raw_source_key in options:
+                source_key = str(raw_source_key or "").strip()
+                if not source_key:
+                    continue
+                found, resolved = resolve_context_path(
+                    context=request.data,
+                    path=source_key,
+                )
+                if found and _context_value_present(resolved):
+                    value = resolved
+                    value_found = True
+                    break
+        elif "value_from_context" in entry:
             source_key = str(entry["value_from_context"]).strip()
             found, resolved = resolve_context_path(
                 context=request.data, path=source_key
             )
             value = resolved if found else None
+            value_found = found
         else:
             value = entry.get("value")
+
+        if not value_found and _coerce_bool(entry.get("skip_if_unresolved")):
+            continue
 
         outputs[key] = value
         applied.append(key)
 
     outputs["_context_set_applied_keys"] = applied
     return WorkflowActionResult(status="success", outputs=outputs)
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _context_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return bool(value)
+    return True
 
 
 def register_control_flow_actions(

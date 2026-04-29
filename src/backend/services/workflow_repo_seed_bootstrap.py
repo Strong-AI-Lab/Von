@@ -35,6 +35,83 @@ _REPO_SEED_VERSION_TEXT_PREDICATE = "#V#hasWorkflowRepoSeedVersionJson"
 _REPO_SEED_VERSION_SCHEMA_VERSION = "workflow_repo_seed_version.v1"
 
 
+def _materialise_support_concepts(
+    raw_specs: Any,
+    *,
+    source_tag: str | None,
+    managed_by: str | None,
+) -> dict[str, Any]:
+    """Materialise prerequisite non-workflow concepts declared by a seed bundle."""
+
+    if not isinstance(raw_specs, Sequence) or isinstance(raw_specs, (str, bytes)):
+        return {"created_concept_ids": [], "existing_concept_ids": [], "errors": []}
+
+    created_concept_ids: list[str] = []
+    existing_concept_ids: list[str] = []
+    errors: list[dict[str, Any]] = []
+    for spec in raw_specs:
+        if not isinstance(spec, Mapping):
+            continue
+        concept_id = str(spec.get("concept_id") or "").strip()
+        name = str(spec.get("name") or "").strip()
+        if not concept_id or not name:
+            errors.append(
+                {
+                    "concept_id": concept_id or None,
+                    "reason_code": "support_concept_identity_missing",
+                }
+            )
+            continue
+        try:
+            existing = concept_service.get_concept_by_concept_id_exact(concept_id)
+        except Exception:
+            existing = None
+        if isinstance(existing, Mapping):
+            existing_concept_ids.append(concept_id)
+            continue
+
+        parent_ids = [
+            str(item).strip()
+            for item in (spec.get("parent_concept_ids") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        attributes = dict(spec.get("attributes") or {})
+        if source_tag:
+            attributes.setdefault("repo_seed_source_tag", source_tag)
+        if managed_by:
+            attributes.setdefault("repo_seed_managed_by", managed_by)
+        try:
+            concept_service.create_concept(
+                name=name,
+                concept_id=concept_id,
+                parent_concept_ids=parent_ids,
+                create_as_instance=bool(spec.get("create_as_instance")),
+                description=spec.get("description"),
+                notes=spec.get("notes"),
+                system_tags=[
+                    str(item).strip()
+                    for item in (spec.get("system_tags") or [])
+                    if isinstance(item, str) and str(item).strip()
+                ],
+                attributes=attributes or None,
+            )
+            created_concept_ids.append(concept_id)
+        except Exception as exc:
+            errors.append(
+                {
+                    "concept_id": concept_id,
+                    "reason_code": "support_concept_create_failed",
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "created_concept_ids": created_concept_ids,
+        "existing_concept_ids": existing_concept_ids,
+        "errors": errors,
+    }
+
+
 def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
     metadata = getattr(state, "metadata", None)
     if not isinstance(metadata, dict):
@@ -1225,6 +1302,11 @@ def bootstrap_repo_seed_workflow_bundle(
     managed_by = str(bundle.get("managed_by") or "").strip() or None
     seed_version = _normalise_seed_version(bundle.get("seed_version"))
     source_tag = str(bundle.get("source_tag") or "").strip() or None
+    support_concept_report = _materialise_support_concepts(
+        bundle.get("support_concepts"),
+        source_tag=source_tag,
+        managed_by=managed_by,
+    )
     publication_specs = dict(bundle.get("publication_specs") or {})
     publication_purposes = dict(bundle.get("publication_purposes") or {})
     workflow_type_ids = dict(bundle.get("workflow_type_ids") or {})
@@ -1551,6 +1633,7 @@ def bootstrap_repo_seed_workflow_bundle(
         "publication": publication_report,
         "typed_workflow_ids": typed_workflow_ids,
         "typed_step_ids": typed_step_ids,
+        "support_concepts": support_concept_report,
         "validation_by_workflow_id": validation_by_workflow_id,
     }
 

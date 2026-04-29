@@ -20,6 +20,9 @@ from ..workflows.workflow_repo_seed_export_service import (
     write_repo_seed_workflow_bundle_from_authority,
 )
 
+SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID = (
+    "#V#scholarly_article_metadata_representation_workflow"
+)
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
 ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#arxiv_paper_representation_workflow"
 
@@ -63,6 +66,7 @@ def diff_canonical_paper_representation_workflow_repo_seed_bundle(
 
 __all__ = [
     "ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID",
+    "SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID",
     "bootstrap_canonical_paper_representation_workflows",
     "diff_canonical_paper_representation_workflow_repo_seed_bundle",

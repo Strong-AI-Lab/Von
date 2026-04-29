@@ -268,6 +268,57 @@ def test_context_set_value_from_context_missing_source() -> None:
     assert result.outputs["dest"] is None
 
 
+def test_context_set_coalesces_first_present_context_path() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={
+            "assignments": [
+                {
+                    "key": "title",
+                    "value_from_context_options": [
+                        "title",
+                        "paper_metadata.title",
+                        "metadata.title",
+                    ],
+                    "skip_if_unresolved": True,
+                }
+            ]
+        },
+        context={
+            "title": "",
+            "paper_metadata": {"title": "Composable article metadata"},
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["title"] == "Composable article metadata"
+    assert result.outputs["_context_set_applied_keys"] == ["title"]
+
+
+def test_context_set_can_skip_unresolved_coalesce_assignment() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={
+            "assignments": [
+                {
+                    "key": "title",
+                    "value_from_context_options": ["missing", "metadata.title"],
+                    "skip_if_unresolved": True,
+                }
+            ]
+        },
+        context={"metadata": {}},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert "title" not in result.outputs
+    assert result.outputs["_context_set_applied_keys"] == []
+
+
 def test_context_set_fails_when_assignments_missing() -> None:
     registry = _build_context_set_registry()
     result = registry.execute(

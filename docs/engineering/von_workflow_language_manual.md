@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-25 (Pacific/Auckland)
+Last updated: 2026-04-29 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -98,6 +98,7 @@ Supporting code notes:
 - `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
 - `workflow_prompt_authority_service.py` now provides only generic prompt-concept creation, validation, linking, and rendering support; workflow-governed prompt bodies themselves remain authoritative Vontology text relations rather than Python-authored defaults;
 - `workflow_repo_seed_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity, and bundle/publication-spec mismatches are drift diagnostics rather than an excuse to restore file authority at startup;
+- repo seed bundles MAY declare top-level `support_concepts` for prerequisite non-workflow concepts that the workflow graph needs to execute, such as abstract parent/type concepts. The bootstrapper materialises these as seed support data before publishing or validating the workflow family. This is generic support for Vontology materialisation, not permission to move workflow policy into Python;
 - `paper_representation_workflow_vontology_service.py` is therefore a startup-only seed publication/repair entry point for the current paper workflow family; live routing/execution must rely on the Vontology materialisation, and any repo-seed repair should be surfaced as drift diagnostics rather than treated as normal request-path authority;
 - refresh repo-side workflow bundle snapshots from authoritative Vontology state with `pdm run python scripts/workflow_repo_seed_bundle_export.py export --asset-path <bundle-path>` and inspect drift with the corresponding `diff` command instead of hand-editing bundle JSON;
 - generated review snapshots under `docs/generated/workflow_authority_review_snapshots/` are acceptable because they are explicitly non-authoritative derived artefacts;
@@ -801,7 +802,10 @@ Required inputs:
   - `key` (string, required): the target context key to write.
   - `value` (any, optional): literal value to assign.
   - `value_from_context` (string, optional): context path to copy from (resolved via `resolve_context_path`). If the source path is absent, the target key receives `None`.
-  - Exactly one of `value` or `value_from_context` SHOULD be present. If both are supplied, `value_from_context` takes precedence.
+  - `value_from_context_options` (list of strings, optional): candidate context paths to check in order. The first present, non-empty value is copied.
+  - `skip_if_unresolved` (boolean-like, optional): when true, an unresolved `value_from_context` or `value_from_context_options` assignment is skipped rather than writing `None`.
+  - `preserve_existing` (boolean-like, optional): when true, an existing present target value is left unchanged.
+  - Exactly one of `value`, `value_from_context`, or `value_from_context_options` SHOULD be present. If both `value_from_context_options` and `value_from_context` are supplied, `value_from_context_options` takes precedence. If neither contextual source is supplied, `value` is used.
 
 Outputs:
 
@@ -813,6 +817,7 @@ Error semantics:
 - Missing or non-list `assignments` → `context_set:assignments_missing_or_invalid`.
 - Non-mapping assignment entry → `context_set:assignment_{index}_not_mapping`.
 - Missing or empty `key` → `context_set:assignment_{index}_missing_key`.
+- Non-list `value_from_context_options` → `context_set:assignment_{index}_value_from_context_options_not_sequence`.
 
 Usage pattern:
 
@@ -820,7 +825,7 @@ Usage pattern:
 {
   "invokesAction": "workflow_control.context_set",
   "hasInputMap": [
-    "assignments=[{\"key\":\"my_flag\",\"value\":true},{\"key\":\"derived\",\"value_from_context\":\"source_key\"}]"
+    "assignments=[{\"key\":\"my_flag\",\"value\":true},{\"key\":\"title\",\"value_from_context_options\":[\"title\",\"metadata.title\"],\"skip_if_unresolved\":true}]"
   ]
 }
 ```

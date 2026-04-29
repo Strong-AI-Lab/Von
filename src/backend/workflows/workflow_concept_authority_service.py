@@ -485,6 +485,12 @@ def _normalise_seed_bundle_string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(cleaned))
 
 
+def _normalise_seed_bundle_mapping_tuple(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return ()
+    return tuple(dict(item) for item in value if isinstance(item, Mapping))
+
+
 def _parse_static_input_bindings_payload(
     raw_payload: Any,
 ) -> tuple[tuple[str, Any], ...]:
@@ -866,6 +872,9 @@ def _load_repo_seed_workflow_bundle_cached(
             or _normalise_seed_bundle_text(payload.get("version"))
         ),
         "source_tag": _normalise_seed_bundle_text(payload.get("source_tag")),
+        "support_concepts": _normalise_seed_bundle_mapping_tuple(
+            payload.get("support_concepts")
+        ),
         "supported_action_ids": _normalise_seed_bundle_string_tuple(
             payload.get("supported_action_ids")
         ),

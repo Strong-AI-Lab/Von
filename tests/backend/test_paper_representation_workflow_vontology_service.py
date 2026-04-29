@@ -15,6 +15,7 @@ from src.backend.services.arxiv_ingestion_testing_service import (
 )
 from src.backend.services.paper_representation_workflow_vontology_service import (
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+    SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
     diff_canonical_paper_representation_workflow_repo_seed_bundle,
@@ -347,8 +348,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 2
+    assert counts.get("workflows_published") == 3
     assert counts.get("errors") == 0
+    support_concepts = report.get("support_concepts") or {}
+    assert support_concepts.get("errors") == []
+    assert "#V#scholarly_article" in (
+        support_concepts.get("created_concept_ids") or []
+    )
+
+    metadata_definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert metadata_definition is not None
 
     scholarly_definition = load_workflow_definition_from_vontology(
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -359,6 +370,60 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    metadata_terminal_contract = metadata_definition.metadata.get(
+        "terminal_success_contract"
+    )
+    assert isinstance(metadata_terminal_contract, dict)
+    assert metadata_terminal_contract.get("success_statuses") == ["completed"]
+    metadata_launch_contract = metadata_definition.metadata.get(
+        "launch_input_contract"
+    )
+    assert isinstance(metadata_launch_contract, dict)
+    assert metadata_launch_contract.get("schema_version") == (
+        "workflow_launch_input_contract.v1"
+    )
+    assert metadata_launch_contract.get("required_inputs") == []
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "doi"
+        and item.get("required") is False
+        for item in metadata_launch_contract.get("input_mappings") or []
+    )
+    metadata_exemplars, metadata_exemplars_source = (
+        resolve_workflow_discovery_exemplars(
+            SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+        )
+    )
+    assert metadata_exemplars_source.startswith("text_relation:")
+    assert "represent doi article" in metadata_exemplars.get("keywords", [])
+    normalise_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="normalise_metadata_context",
+    )
+    normalise_metadata_action = metadata_definition.states[
+        normalise_metadata_state_id
+    ].actions[0]
+    assignments = normalise_metadata_action.inputs.get("assignments")
+    assert isinstance(assignments, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("key") == "title"
+        and "paper_metadata.title" in item.get("value_from_context_options", [])
+        for item in assignments
+    )
+    create_article_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="create_article_concept",
+    )
+    create_article_state = metadata_definition.states[create_article_state_id]
+    create_article_action = create_article_state.actions[0]
+    assert create_article_action.action_id == "create_concepts"
+    assert create_article_state.metadata.get("mutation_authority") == {
+        "maximum_level": "additive_vontology",
+        "reason_code": "scholarly_article_metadata_representation_additive_writes",
+        "schema_version": "workflow_step_mutation_authority.v1",
+    }
+
     scholarly_terminal_contract = scholarly_definition.metadata.get(
         "terminal_success_contract"
     )
@@ -455,7 +520,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     delegate_state = arxiv_definition.states[delegate_state_id]
     contract = delegate_state.metadata["subworkflow_contract"]
-    assert contract["workflow_id"] == SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
+    assert contract["workflow_id"] == (
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
     assert "file_copy_concept_id" in contract["provided_inputs"]
     assert "paper_concept_id" in contract["provided_inputs"]
     assert "arxiv_id" in contract["provided_inputs"]
@@ -568,6 +635,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         },
     ]
 
+    scholarly_delegate_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="delegate_to_metadata_workflow",
+    )
+    scholarly_delegate_state = scholarly_definition.states[scholarly_delegate_state_id]
+    scholarly_delegate_contract = scholarly_delegate_state.metadata[
+        "subworkflow_contract"
+    ]
+    assert scholarly_delegate_contract["workflow_id"] == (
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert "file_copy_concept_id" in scholarly_delegate_contract["provided_inputs"]
     scholarly_verify_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="verify_representation",
@@ -612,7 +691,7 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
 ) -> None:
     first_report = bootstrap_canonical_paper_representation_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 2
+    assert first_counts.get("workflows_published") == 3
 
     second_report = bootstrap_canonical_paper_representation_workflows()
     second_authority = second_report.get("authority_contract") or {}
@@ -643,6 +722,76 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
     assert second_report.get("typed_step_ids") == []
+
+
+def test_metadata_workflow_executes_direct_scholarly_article_representation(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_metadata": {
+                "title": "Composable Identity Control for Multi-Character Illustration",
+                "abstract": "A paper about composable identity control.",
+                "authors": ["Zhongsheng Wang", "Ming Lin"],
+                "keywords": ["computer vision", "story illustration"],
+                "doi": "https://doi.org/10.1145/3743093.3770985",
+                "publication_date": "2025-12-01",
+            },
+            "source_uri": "https://dl.acm.org/doi/full/10.1145/3743093.3770985",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state.endswith("_completed")
+    paper_concept_id = result.data.get("paper_concept_id")
+    assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
+
+    paper_doc = concept_service.get_concept_by_concept_id(paper_concept_id)
+    assert paper_doc is not None
+    relationships = paper_doc.get("relationships") or {}
+    assert "#V#scholarly_article" in (relationships.get("is_an_instance_of") or [])
+    assert relationships.get("#V#authored_by")
+    assert relationships.get("#V#about")
+
+    names = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="hasName",
+            limit=20,
+        )
+    ]
+    assert "Composable Identity Control for Multi-Character Illustration" in names
+    assert "https://doi.org/10.1145/3743093.3770985" in names
+    assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in names
+
+    descriptions = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="hasDescription",
+            limit=5,
+        )
+    ]
+    assert "A paper about composable identity control." in descriptions
 
 
 def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stale(
@@ -975,6 +1124,7 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
     )
     assert export_report.get("asset_path") == str(tmp_asset_path.resolve())
     assert export_report.get("workflow_ids") == [
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     ]
