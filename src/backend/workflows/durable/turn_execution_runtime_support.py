@@ -200,6 +200,34 @@ def _missing_required_tools_from_invocations(
     ]
 
 
+def _required_tools_from_workflow_required_effects_contract(
+    contract: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(contract, Mapping):
+        return []
+    required_effects = contract.get("required_effects")
+    if not isinstance(required_effects, Sequence) or isinstance(
+        required_effects, (str, bytes, bytearray)
+    ):
+        return []
+
+    tools: list[str] = []
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        raw_tools = effect.get("required_tools")
+        if not isinstance(raw_tools, Sequence) or isinstance(
+            raw_tools, (str, bytes, bytearray)
+        ):
+            continue
+        tools.extend(
+            str(tool_name).strip()
+            for tool_name in raw_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        )
+    return _dedupe_string_sequence(tools)
+
+
 def _coerce_non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1215,17 +1243,28 @@ def build_turn_execution_selected_workflow_outputs(
     child_allowed_tools = _dedupe_string_sequence(
         child_outputs_map.get("llm_allowed_tools")
     )
+    child_invocation_maps = (
+        [item for item in child_invocations if isinstance(item, Mapping)]
+        if isinstance(child_invocations, list)
+        else []
+    )
     contract_required_tools = _filter_string_sequence_to_allowed(
         resolved_turn_expected_outcome_contract.required_tools,
         child_allowed_tools,
     )
     contract_missing_tools = _missing_required_tools_from_invocations(
         required_tools=contract_required_tools,
-        invocations=(
-            [item for item in child_invocations if isinstance(item, Mapping)]
-            if isinstance(child_invocations, list)
-            else []
+        invocations=child_invocation_maps,
+    )
+    workflow_required_tools = _filter_string_sequence_to_allowed(
+        _required_tools_from_workflow_required_effects_contract(
+            workflow_required_effects_contract_payload
         ),
+        child_allowed_tools,
+    )
+    workflow_missing_tools = _missing_required_tools_from_invocations(
+        required_tools=workflow_required_tools,
+        invocations=child_invocation_maps,
     )
     child_tool_messages = child_outputs_map.get("tool_messages")
     if isinstance(child_tool_messages, list):
@@ -1258,7 +1297,7 @@ def build_turn_execution_selected_workflow_outputs(
         value = child_outputs_map.get(key)
         if isinstance(value, list):
             outputs[key] = list(value)
-    if contract_required_tools:
+    if contract_required_tools or workflow_required_tools:
         existing_required_prompt_tools = outputs.get("required_prompt_tools")
         existing_missing_prompt_tools = outputs.get("missing_prompt_tools")
         if child_allowed_tools:
@@ -1274,24 +1313,33 @@ def build_turn_execution_selected_workflow_outputs(
             [
                 *(existing_required_prompt_tools or []),
                 *contract_required_tools,
+                *workflow_required_tools,
             ]
             if isinstance(existing_required_prompt_tools, list)
-            else contract_required_tools
+            else [*contract_required_tools, *workflow_required_tools]
         )
         derived_missing_prompt_tools = _dedupe_string_sequence(
             [
                 *(existing_missing_prompt_tools or []),
                 *contract_missing_tools,
+                *workflow_missing_tools,
             ]
             if isinstance(existing_missing_prompt_tools, list)
-            else contract_missing_tools
+            else [*contract_missing_tools, *workflow_missing_tools]
         )
         outputs["missing_prompt_tools"] = derived_missing_prompt_tools
         if derived_missing_prompt_tools and not _safe_str(
             outputs.get("missing_tool_call_retry_reason_override")
         ):
+            reason_source = (
+                "workflow required-effect"
+                if workflow_missing_tools and not contract_missing_tools
+                else "turn/workflow contract"
+                if workflow_missing_tools
+                else "turn contract"
+            )
             outputs["missing_tool_call_retry_reason_override"] = (
-                "turn contract required tool(s) not yet invoked successfully: "
+                f"{reason_source} required tool(s) not yet invoked successfully: "
                 + ", ".join(derived_missing_prompt_tools)
             )
         completion_report_map["required_prompt_tools"] = list(
