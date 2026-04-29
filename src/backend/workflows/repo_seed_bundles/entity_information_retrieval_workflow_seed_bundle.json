@@ -2,8 +2,8 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
-  "source_tag": "JVNAUTOSCI-2187",
+  "seed_version": "6",
+  "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "llm.action"
   ],
@@ -120,6 +120,18 @@
                 {
                   "context_key": "org_concept_id",
                   "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

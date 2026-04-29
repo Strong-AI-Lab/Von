@@ -10,6 +10,7 @@ from src.backend.workflows.durable.control_flow_actions import register_control_
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -356,3 +357,93 @@ def test_context_set_fails_on_non_mapping_assignment() -> None:
 
     assert result.status == "failed"
     assert "not_mapping" in (result.error or "")
+
+
+def test_context_template_renders_context_request_and_json_values() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
+        inputs={
+            "assignments": [
+                {
+                    "key": "guidance_envelope",
+                    "template": "workflow={workflow_id}; model={model}; refs={refs}",
+                    "variables": {
+                        "workflow_id": {"value_from_request": "workflow_id"},
+                        "model": {"value_from_environment": "model"},
+                        "refs": {
+                            "value_from_context": "guidance.evidence_refs",
+                            "format": "json",
+                        },
+                    },
+                }
+            ]
+        },
+        context={"guidance": {"evidence_refs": ["request:1", "trace:2"]}},
+        env=WorkflowEnvironment(llm_client=None, model="test-model"),
+        workflow_id="#V#example_workflow",
+    )
+
+    assert result.status == "success"
+    assert result.outputs["guidance_envelope"] == (
+        'workflow=#V#example_workflow; model=test-model; '
+        'refs=["request:1", "trace:2"]'
+    )
+    assert result.outputs["_context_template_applied_keys"] == ["guidance_envelope"]
+
+
+def test_context_template_renders_concept_id_from_template() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
+        inputs={
+            "assignments": [
+                {
+                    "key": "profile_id",
+                    "template": "Workflow LLM experience profile: {workflow} / {model}",
+                    "transform": "concept_id",
+                    "variables": {
+                        "workflow": {"value": "#V#conversation_turn_execution_workflow"},
+                        "model": {"value": "GPT-5.2"},
+                    },
+                }
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["profile_id"] == (
+        "#V#workflow_llm_experience_profile_v_conversation_turn_execution_workflow_gpt_5_2"
+    )
+
+
+def test_context_template_uses_defaults_for_missing_values() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
+        inputs={
+            "assignments": [
+                {
+                    "key": "profile_name",
+                    "template": "{workflow_id} / {model}",
+                    "variables": {
+                        "workflow_id": {
+                            "value_from_context_options": ["missing", "also_missing"],
+                            "default": "unknown_workflow",
+                        },
+                        "model": {
+                            "value_from_environment": "model",
+                            "default": "unknown_model",
+                        },
+                    },
+                }
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["profile_name"] == "unknown_workflow / unknown_model"

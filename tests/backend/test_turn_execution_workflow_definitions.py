@@ -17,6 +17,7 @@ from src.backend.workflows.definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
 )
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
@@ -193,7 +194,15 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     workflow = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
-    assert workflow.initial_state == "expected_outcome_inference"
+    assert workflow.initial_state == "workflow_experience_context_prelude"
+    prelude = workflow.states["workflow_experience_context_prelude"]
+    assert prelude.actions[0].action_id == "workflow_invoke_subworkflow"
+    assert prelude.actions[0].subworkflow_id == (
+        WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+    )
+    assert any(
+        t.to_state == "expected_outcome_inference" for t in prelude.transitions
+    )
     assert "expected_outcome_inference" in workflow.states
     assert "selector_preparation" in workflow.states
     assert "selector_decision" in workflow.states
@@ -212,7 +221,14 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     expected_outcome_action = expected_outcome.actions[0]
     assert expected_outcome_action.action_id == "llm.action"
     assert expected_outcome_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
-    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_policy = expected_outcome_action.validation_policy or {}
+    assert expected_outcome_policy.get("output_format") == "json_value"
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("requested_prompt_concept_ids") == [

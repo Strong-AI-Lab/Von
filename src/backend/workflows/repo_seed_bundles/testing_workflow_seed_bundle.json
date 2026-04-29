@@ -2,8 +2,8 @@
   "family_id": "testing_workflow_seed_bundle",
   "managed_by": "testing_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1579",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "llm.action",
     "testing.prepare_experiment_spec",
@@ -53,7 +53,22 @@
             "effects": [],
             "execution_mode": "llm",
             "invoked_workflow_id": null,
-            "llm_policy": null,
+            "llm_policy": {
+              "context_fields": [
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
+                }
+              ]
+            },
             "mutation_authority": null,
             "next_state": "complete",
             "on_approval_required_state": null,
@@ -620,7 +635,22 @@
             "effects": [],
             "execution_mode": "llm",
             "invoked_workflow_id": null,
-            "llm_policy": null,
+            "llm_policy": {
+              "context_fields": [
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
+                }
+              ]
+            },
             "mutation_authority": null,
             "next_state": "record_candidate_observations",
             "on_approval_required_state": null,

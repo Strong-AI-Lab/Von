@@ -36,6 +36,7 @@ from .definitions import (
     TODO_REFRESH_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from .parent_specificity_workflow_contracts import (
@@ -304,6 +305,7 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
     TOOL_CALLING_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
 
@@ -1808,7 +1810,7 @@ def _build_publication_subworkflow_contract(
             continue
         if key_text.startswith("__") or key_text.startswith("workflow_step_"):
             continue
-        if key_text in {"failure_mode", "__failure_mode"}:
+        if key_text in {"failure_mode", "__failure_mode", "max_transitions"}:
             continue
         if key_text == "workflow_id" and resolved_workflow_id:
             continue

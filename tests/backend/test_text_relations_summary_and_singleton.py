@@ -1,4 +1,7 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from bson.objectid import ObjectId
 
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.db.repositories.text_value_repository import (
@@ -8,6 +11,7 @@ from src.backend.db.repositories.text_value_repository import (
 from src.backend.security.access_control import bypass_access_control
 from src.backend.services.text_value_service import (
     get_text_relations_summary,
+    get_texts_for_concept,
     upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
@@ -137,3 +141,48 @@ def test_upsert_singleton_text_relation_replaces_others_for_language():
         )
     )
     assert len(remaining) == 1
+
+
+def test_get_texts_for_concept_can_return_recent_rows_first():
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#recent_text_test_concept"
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+    older = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    newer = older + timedelta(days=1)
+
+    with bypass_access_control():
+        first = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="older",
+            lang="en-NZ",
+        )
+        second = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="newer",
+            lang="en-NZ",
+        )
+        TextRelationsRepository.update_one(
+            {"_id": ObjectId(first["relation_id"])},
+            {"$set": {"created_at": older, "updated_at": older}},
+        )
+        TextRelationsRepository.update_one(
+            {"_id": ObjectId(second["relation_id"])},
+            {"$set": {"created_at": newer, "updated_at": newer}},
+        )
+
+        rows = get_texts_for_concept(
+            concept_id,
+            predicate="hasDescription",
+            limit=1,
+            recent_first=True,
+        )
+
+    assert [row["text"] for row in rows] == ["newer"]

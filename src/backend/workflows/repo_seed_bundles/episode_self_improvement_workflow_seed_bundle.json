@@ -2,8 +2,8 @@
   "family_id": "episode_self_improvement_workflow_seed_bundle",
   "managed_by": "episode_evaluation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1987",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "episode_critic.load_workflow_improvement_context",
     "episode_critic.submit_workflow_improvement_proposal",
@@ -160,6 +160,18 @@
                 {
                   "context_key": "workflow_authoring_prompt_health",
                   "label": "Workflow authoring prompt health"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -538,6 +550,18 @@
                 {
                   "context_key": "episode_self_improvement_benchmark_summary",
                   "label": "Benchmark summary"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

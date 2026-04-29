@@ -10,6 +10,7 @@ from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
 )
 from src.backend.workflows.llm_step_executor import execute_llm_step
+from src.backend.workflows.llm_step_executor import _compose_llm_prompt
 
 
 def _build_request(*, llm_response: str) -> WorkflowActionRequest:
@@ -25,6 +26,61 @@ def _build_request(*, llm_response: str) -> WorkflowActionRequest:
         },
         validation_policy={"output_format": "json_value"},
     )
+
+
+def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> None:
+    prompt = _compose_llm_prompt(
+        base_prompt="Use the workflow policy.",
+        llm_policy={
+            "context_fields": [
+                {
+                    "context_key": "workflow_success_guidance_history",
+                    "label": (
+                        "Historical successful-run guidance: soft hints from "
+                        "prior successful executions."
+                    ),
+                },
+                {
+                    "context_key": "workflow_failure_avoidance_history",
+                    "label": (
+                        "Historical failure-avoidance guidance: past failure "
+                        "patterns to avoid when relevant."
+                    ),
+                },
+                {
+                    "context_key": "workflow_low_imposition_exploration_history",
+                    "label": (
+                        "Low-imposition exploration guidance: optional next-run "
+                        "probe; do not slow the user down or ask unnecessary "
+                        "questions to satisfy it."
+                    ),
+                },
+            ]
+        },
+        context={
+            "workflow_success_guidance_history": [
+                {"text": "workflow_experience_guidance.v1\nbody:\nReuse evidence."}
+            ],
+            "workflow_failure_avoidance_history": [
+                {"text": "workflow_experience_guidance.v1\nbody:\nAvoid guessing."}
+            ],
+            "workflow_low_imposition_exploration_history": [
+                {
+                    "text": (
+                        "workflow_experience_guidance.v1\nbody:\n"
+                        "Inspect telemetry before asking the user."
+                    )
+                }
+            ],
+        },
+    )
+
+    assert "Historical successful-run guidance: soft hints" in prompt
+    assert "Historical failure-avoidance guidance: past failure patterns" in prompt
+    assert "Low-imposition exploration guidance: optional next-run probe" in prompt
+    assert "Reuse evidence." in prompt
+    assert "Avoid guessing." in prompt
+    assert "Inspect telemetry before asking the user." in prompt
 
 
 def test_execute_llm_step_parses_json_value_output() -> None:
@@ -139,6 +195,73 @@ def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> Non
     assert result.outputs["validated_json"]["required_tools"] == [
         "get_predicate_incidence"
     ]
+
+
+def test_execute_llm_step_applies_json_field_defaults_from_validation_policy() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={},
+        prompt_contract={
+            "prompt_text": "Return the expected-outcome JSON.",
+        },
+        validation_policy={
+            "output_format": "json_value",
+            "json_field_defaults": {
+                "expected_outcome_summary": "Answer from grounded evidence.",
+                "grounding_requirement": "Use authoritative context.",
+                "precision_policy": "State uncertainty when needed.",
+            },
+            "required_json_fields": [
+                "expected_outcome_summary",
+                "grounding_requirement",
+                "precision_policy",
+            ],
+        },
+        workflow_state_id="expected_outcome_inference",
+    )
+    request.environment.llm_client.generate.return_value = "[]"
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"] == {
+        "expected_outcome_summary": "Answer from grounded evidence.",
+        "grounding_requirement": "Use authoritative context.",
+        "precision_policy": "State uncertainty when needed.",
+    }
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["json_object_defaulted_from_non_object"] is True
+    assert envelope["validation"]["json_defaults_applied"] == [
+        "expected_outcome_summary",
+        "grounding_requirement",
+        "precision_policy",
+    ]
+
+
+def test_execute_llm_step_fails_json_value_when_required_fields_missing() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={},
+        prompt_contract={
+            "prompt_text": "Return a JSON object with the required fields.",
+        },
+        validation_policy={
+            "output_format": "json_value",
+            "required_json_fields": ["must_exist"],
+        },
+    )
+    request.environment.llm_client.generate.return_value = '{"other": true}'
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert result.error == "json_required_fields_missing"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["missing_required_fields"] == ["must_exist"]
 
 
 def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:

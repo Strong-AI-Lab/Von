@@ -1288,6 +1288,9 @@ def _get_text_relations(**kwargs):
     predicate = kwargs.get("predicate")
     language = kwargs.get("language")
     limit = kwargs.get("limit", 50)
+    recent_first = kwargs.get("recent_first")
+    if recent_first is None:
+        recent_first = kwargs.get("sort_recent_first")
 
     if not concept_id:
         return make_error_response(
@@ -1303,6 +1306,12 @@ def _get_text_relations(**kwargs):
             predicate=predicate,
             lang=language,
             limit=limit,
+            recent_first=(
+                recent_first
+                if isinstance(recent_first, bool)
+                else str(recent_first or "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            ),
         )
 
         # Add text previews for long content

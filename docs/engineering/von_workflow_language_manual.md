@@ -1389,6 +1389,8 @@ Validation and fail-closed behaviour:
 - planning, enrichment, workflow-gap analysis/test/candidate execution, and analogous workflow-governed prompt consumers MUST fail closed when the authoritative prompt concept is missing or empty;
 - unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
 - `validation_policy.output_format=json_value` means the runtime MUST parse a single JSON object or array from the raw LLM response, expose it as `validated_json`, and fail the step if parsing does not succeed,
+- for `json_value`, `validation_policy.json_field_defaults` MAY declare a map of object field paths to default values. When present, non-object JSON is treated as an empty object for that contract, and missing or blank fields are filled before output mappings run,
+- for `json_value`, `validation_policy.required_json_fields` MAY declare object field paths that must be present after defaults and contract normalisation. Missing fields fail the LLM step with `json_required_fields_missing`,
 - stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,
 - runtime diagnostics are attached to action inputs as `__prompt_resolution_diagnostics`,
 - the compiled action/step contract carries the prompt contract as a first-class field; prompt-bearing steps MUST NOT depend on hidden `__prompt_contract` input passthrough,

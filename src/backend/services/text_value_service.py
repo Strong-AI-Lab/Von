@@ -313,6 +313,7 @@ def get_texts_for_concept(
     predicate: Optional[str] = None,
     lang: Optional[str] = None,
     limit: int = 50,
+    recent_first: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fetch linked TextValues for a concept, optionally filtered by predicate and lang.
 
@@ -324,7 +325,8 @@ def get_texts_for_concept(
     if predicate:
         rel_filter["predicate"] = predicate
 
-    relations = list(TextRelationsRepository.find(rel_filter, limit=limit))
+    sort = [("updated_at", -1), ("created_at", -1)] if recent_first else None
+    relations = list(TextRelationsRepository.find(rel_filter, sort=sort, limit=limit))
     if not relations:
         return []
 

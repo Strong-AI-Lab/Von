@@ -22,6 +22,7 @@ from src.backend.workflows import (
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     workflow_concept_authority_service as authority_service,
 )
 from src.backend.workflows.vontology_loader import (
@@ -218,7 +219,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 5
+    assert counts.get("workflows_published") == 6
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -266,6 +267,50 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
     assert turn_definition is not None
+    prelude_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="workflow_experience_context_prelude",
+    )
+    prelude_action = turn_definition.states[prelude_step_id].actions[0]
+    assert prelude_action.action_id == "workflow_invoke_subworkflow"
+    assert prelude_action.subworkflow_id == WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+    prelude_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+    )
+    assert prelude_definition is not None
+    read_steps = {
+        "read_success_guidance": (
+            "#V#hasWorkflowSuccessfulRunGuidanceText",
+            "workflow_success_guidance_history",
+        ),
+        "read_failure_guidance": (
+            "#V#hasWorkflowFailureAvoidanceGuidanceText",
+            "workflow_failure_avoidance_history",
+        ),
+        "read_exploration_guidance": (
+            "#V#hasWorkflowNextRunExplorationGuidanceText",
+            "workflow_low_imposition_exploration_history",
+        ),
+    }
+    for state_id, (predicate_id, context_key) in read_steps.items():
+        step_id = authority_service._step_concept_id(
+            workflow_id=WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
+            state_id=state_id,
+        )
+        action = prelude_definition.states[step_id].actions[0]
+        assert action.action_id == "get_text_relations"
+        assert action.inputs["predicate"] == predicate_id
+        assert action.inputs["limit"] == 5
+        assert action.inputs["sort_recent_first"] is True
+        mappings = prelude_definition.states[step_id].metadata.get(
+            "tool_output_context_mappings"
+        ) or []
+        assert any(
+            mapping.get("tool_output_field") == "result.relations"
+            and mapping.get("context_key") == context_key
+            for mapping in mappings
+            if isinstance(mapping, dict)
+        )
     expected_outcome_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         state_id="expected_outcome_inference",
@@ -274,7 +319,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         0
     ]
     assert expected_outcome_action.action_id == "llm.action"
-    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_policy = expected_outcome_action.validation_policy or {}
+    assert expected_outcome_policy.get("output_format") == "json_value"
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "expected_outcome_summary" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
@@ -560,11 +612,11 @@ def test_bootstrap_repairs_bundle_snapshot_drift_for_conversation_turn_workflow_
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         state_id="routing",
     )
-    expected_outcome_step_id = authority_service._step_concept_id(
+    prelude_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        state_id="expected_outcome_inference",
+        state_id="workflow_experience_context_prelude",
     )
-    assert definition.initial_state == expected_outcome_step_id
+    assert definition.initial_state == prelude_step_id
 
     workflow_concept = concept_service.get_concept_by_concept_id(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
@@ -614,4 +666,4 @@ def test_bootstrap_repairs_bundle_snapshot_drift_for_conversation_turn_workflow_
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
     assert repaired_definition is not None
-    assert repaired_definition.initial_state == expected_outcome_step_id
+    assert repaired_definition.initial_state == prelude_step_id

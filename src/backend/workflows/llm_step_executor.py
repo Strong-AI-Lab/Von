@@ -544,6 +544,62 @@ def _validation_output_format(validation_policy: Mapping[str, Any]) -> str:
     return ""
 
 
+def _json_path_parts(path: Any) -> list[str]:
+    text = _context_string(path)
+    if not text:
+        return []
+    return [part.strip() for part in text.split(".") if part.strip()]
+
+
+def _json_path_get(payload: Mapping[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in _json_path_parts(path):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current.get(part)
+    return current
+
+
+def _json_path_set(payload: MutableMapping[str, Any], path: str, value: Any) -> None:
+    parts = _json_path_parts(path)
+    if not parts:
+        return
+    current: MutableMapping[str, Any] = payload
+    for part in parts[:-1]:
+        next_value = current.get(part)
+        if not isinstance(next_value, MutableMapping):
+            next_value = {}
+            current[part] = next_value
+        current = next_value
+    current[parts[-1]] = value
+
+
+def _json_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _json_field_defaults(validation_policy: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw_defaults = validation_policy.get("json_field_defaults")
+    return raw_defaults if isinstance(raw_defaults, Mapping) else {}
+
+
+def _json_required_fields(validation_policy: Mapping[str, Any]) -> list[str]:
+    raw_fields = validation_policy.get("required_json_fields") or validation_policy.get(
+        "json_required_fields"
+    )
+    if isinstance(raw_fields, str):
+        return [raw_fields.strip()] if raw_fields.strip() else []
+    if not isinstance(raw_fields, Sequence) or isinstance(
+        raw_fields, (bytes, bytearray)
+    ):
+        return []
+    return [field for raw in raw_fields if (field := _context_string(raw))]
+
+
 def _coerce_spoken_text(text: Any) -> str | None:
     raw = _context_string(text)
     if not raw:
@@ -691,6 +747,7 @@ def _build_validated_json_outputs(
     response_text: str,
     prompt_id: str | None = None,
     workflow_state_id: str | None = None,
+    validation_policy: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from .durable.planning_workflow import _extract_json_payload
 
@@ -705,25 +762,75 @@ def _build_validated_json_outputs(
             },
         )
 
+    validation_policy_map = (
+        validation_policy if isinstance(validation_policy, Mapping) else {}
+    )
+    field_defaults = _json_field_defaults(validation_policy_map)
+    required_fields = _json_required_fields(validation_policy_map)
+    defaultable_object_contract = bool(field_defaults)
+    coerced_non_object = False
+    if not isinstance(parsed_payload, Mapping) and defaultable_object_contract:
+        parsed_payload = {}
+        coerced_non_object = True
+
     normalised_payload = _normalise_validated_json_payload_for_prompt(
         parsed_payload,
         prompt_id=prompt_id,
         workflow_state_id=workflow_state_id,
     )
+    defaults_applied: list[str] = []
+    if isinstance(normalised_payload, Mapping) and field_defaults:
+        normalised_payload = dict(normalised_payload)
+        for raw_key, default_value in field_defaults.items():
+            key = _context_string(raw_key)
+            if not key:
+                continue
+            existing = _json_path_get(normalised_payload, key)
+            if not _json_value_present(existing):
+                _json_path_set(normalised_payload, key, default_value)
+                defaults_applied.append(key)
 
-    return (
-        {
-            "validated_json": normalised_payload,
-            "validated_json_parse_mode": parse_mode,
-            "validated_json_raw_response": response_text,
-            "result": True,
-        },
-        {
-            "status": "success",
-            "output_format": "json_value",
-            "parse_mode": parse_mode,
-        },
+    missing_required_fields = (
+        [
+            field
+            for field in required_fields
+            if not isinstance(normalised_payload, Mapping)
+            or not _json_value_present(_json_path_get(normalised_payload, field))
+        ]
+        if required_fields
+        else []
     )
+    if missing_required_fields:
+        return (
+            {},
+            {
+                "status": "failed",
+                "reason": "json_required_fields_missing",
+                "output_format": "json_value",
+                "parse_mode": parse_mode,
+                "missing_required_fields": missing_required_fields,
+            },
+        )
+
+    validation_summary: dict[str, Any] = {
+        "status": "success",
+        "output_format": "json_value",
+        "parse_mode": parse_mode,
+    }
+    if defaults_applied:
+        validation_summary["json_defaults_applied"] = sorted(defaults_applied)
+    if coerced_non_object:
+        validation_summary["json_object_defaulted_from_non_object"] = True
+
+    outputs = {
+        "validated_json": normalised_payload,
+        "validated_json_parse_mode": parse_mode,
+        "validated_json_raw_response": response_text,
+        "result": True,
+    }
+    if defaults_applied:
+        outputs["validated_json_defaults_applied"] = sorted(defaults_applied)
+    return (outputs, validation_summary)
 
 
 def _apply_validation_policy(
@@ -801,6 +908,7 @@ def _apply_validation_policy(
             response_text=response_text,
             prompt_id=prompt_id,
             workflow_state_id=request.workflow_state_id,
+            validation_policy=validation_policy,
         )
 
     return (
