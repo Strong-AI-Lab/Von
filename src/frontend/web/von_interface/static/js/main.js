@@ -230,13 +230,13 @@ function setupSettingsFrameResizing() {
 
   function computeAvailableHeight(requested) {
     try {
-      const vpH = window.innerHeight;
-      const tabBarH = 60; // fixed tab bar height
-      const footerH = 60; // approximate footer height + padding
-      const margins = 20; // extra spacing
-      const max = vpH - tabBarH - footerH - margins;
+      const footer = document.querySelector('.footer-container');
+      const wrapper = settingsFrame.closest('.settings-frame-wrapper');
+      const frameTop = (wrapper || settingsFrame).getBoundingClientRect().top;
+      const footerTop = footer ? footer.getBoundingClientRect().top : window.innerHeight - 64;
+      const max = Math.max(240, Math.floor(footerTop - frameTop - 8));
       let target = Math.min(requested || max, max);
-      target = Math.max(target, 400); // minimum usable
+      target = Math.max(target, Math.min(320, max));
       return target;
     } catch { return requested || 600; }
   }
@@ -249,7 +249,7 @@ function setupSettingsFrameResizing() {
       const adjusted = computeAvailableHeight(rawHeight);
       if (Math.abs(adjusted - lastAutoHeight) < 5) return;
       settingsFrame.style.height = `${adjusted}px`;
-      settingsFrame.style.minHeight = `${adjusted}px`;
+      settingsFrame.style.minHeight = '0px';
       lastAutoHeight = adjusted;
       // console.debug('Auto-resized settings frame to', adjusted);
     }
@@ -269,7 +269,7 @@ function setupSettingsFrameResizing() {
     const current = parseInt(settingsFrame.style.height || settingsFrame.clientHeight, 10);
     const recomputed = computeAvailableHeight(current);
     settingsFrame.style.height = `${recomputed}px`;
-    settingsFrame.style.minHeight = `${recomputed}px`;
+    settingsFrame.style.minHeight = '0px';
     lastAutoHeight = recomputed;
   });
 }

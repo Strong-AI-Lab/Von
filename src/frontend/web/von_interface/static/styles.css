@@ -4013,6 +4013,12 @@ body[data-active-tab="messagesTab"] .tab-content-area {
     padding-bottom: 0;
 }
 
+@media (min-width: 901px) {
+    body[data-active-tab="messagesTab"] {
+        padding-bottom: 0;
+    }
+}
+
 .messages-layout {
     display: grid;
     grid-template-columns: minmax(286px, 340px) minmax(0, 1fr);
@@ -5839,13 +5845,11 @@ footer {
 .settings-frame-wrapper {
     position: relative;
     width: 100%;
-    /* Allow it to grow and shrink within tab content area */
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 60px - 60px - 20px);
-    /* viewport minus tab bar, footer, small margin */
-    max-height: calc(100vh - 60px - 10px);
-    /* safety cap */
+    height: var(--von-tab-content-available-height, calc(100vh - 160px));
+    max-height: var(--von-tab-content-available-height, calc(100vh - 160px));
+    min-height: 0;
 }
 
 .settings-iframe {
@@ -5857,10 +5861,25 @@ footer {
     overflow: auto;
     resize: vertical;
     /* Allow user to resize vertically */
-    min-height: 400px;
-    /* Reasonable minimum */
+    min-height: 0;
     max-height: 100%;
     box-sizing: border-box;
+}
+
+body[data-active-tab="settingsTab"] .tab-content-area {
+    padding-bottom: 0;
+}
+
+@media (min-width: 901px) {
+    body[data-active-tab="settingsTab"] {
+        padding-bottom: 0;
+    }
+}
+
+@media (max-width: 900px) {
+    body[data-active-tab="settingsTab"] .tab-content-area {
+        padding-bottom: 64px;
+    }
 }
 
 /* When user manually resizes smaller than wrapper, keep scroll functional */
@@ -6181,6 +6200,11 @@ footer {
     margin-right: 0;
     padding-left: 0;
     padding-right: 0;
+}
+
+#globalTasksTab.tab-content,
+#settingsTab.tab-content {
+    min-height: 0 !important;
 }
 
 /* Concept interaction panel: ensure follow-up question wraps and does not overflow */
@@ -10057,10 +10081,10 @@ button.prompt-vontology-cartouche {
 
 .settings-iframe {
     width: 100%;
-    min-height: 600px;
-    height: auto;
+    min-height: 0;
+    height: 100%;
     border: none;
-    overflow: hidden;
+    overflow: auto;
     display: block;
 }
 
