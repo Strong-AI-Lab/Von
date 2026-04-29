@@ -380,6 +380,89 @@ def test_selected_workflow_outputs_derives_missing_tools_from_turn_contract() ->
     ]
 
 
+def test_selected_workflow_outputs_derives_missing_tools_from_workflow_contract() -> (
+    None
+):
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_entity_information_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "fetch_concept",
+                    "get_text_relations_summary",
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                    "list_uncertain_relationship_assertions",
+                ],
+                "required_tools_match": "all",
+                "recovery_strategies": [
+                    {
+                        "strategy_id": "recover_text_relations_for_focal_entity",
+                        "tool": "get_text_relations_summary",
+                        "recovers_tools": ["get_text_relations_summary"],
+                        "target_concept_source": "required_fetch_or_focal_concept",
+                        "target_concept_argument_name": "concept_id",
+                    }
+                ],
+            }
+        ],
+    }
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#entity_information_retrieval_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "No final user answer was produced.",
+            "llm_allowed_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+                "list_uncertain_relationship_assertions",
+            ],
+            "invocations": [
+                {"tool": "fetch_concept", "status": "ok"},
+                {"tool": "get_predicate_incidence", "status": "ok"},
+                {"tool": "find_relations_with_argument", "status": "ok"},
+                {
+                    "tool": "list_uncertain_relationship_assertions",
+                    "status": "ok",
+                },
+            ],
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        rendered_child_response_text="No final user answer was produced.",
+    )
+
+    assert outputs["required_prompt_tools"] == [
+        "fetch_concept",
+        "get_text_relations_summary",
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
+    ]
+    assert outputs["missing_prompt_tools"] == ["get_text_relations_summary"]
+    assert outputs["missing_tool_call_retry_reason_override"] == (
+        "workflow required-effect required tool(s) not yet invoked successfully: "
+        "get_text_relations_summary"
+    )
+    assert outputs["workflow_required_effects_contract"] == (
+        workflow_required_effects_contract
+    )
+    assert outputs["completion_report"]["missing_prompt_tools"] == [
+        "get_text_relations_summary"
+    ]
+    assert outputs["selected_workflow_trace"]["missing_prompt_tools"] == [
+        "get_text_relations_summary"
+    ]
+
+
 def test_selected_workflow_outputs_filters_turn_contract_tools_to_child_allowed_policy() -> (
     None
 ):
