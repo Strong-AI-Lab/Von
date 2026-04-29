@@ -1833,6 +1833,103 @@ def _derive_zero_tool_execution_reason(
     }
 
 
+def _custom_workflow_workflow_execute_equivalent_status(
+    execution_summary: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(execution_summary, Mapping):
+        return None
+    if (_safe_str(execution_summary.get("selected_execution_mode")) or "").lower() != (
+        "custom_workflow"
+    ):
+        return None
+
+    custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    custom_workflow_summary: Mapping[str, Any] = (
+        custom_workflow_execution
+        if isinstance(custom_workflow_execution, Mapping)
+        else {}
+    )
+    dispatch_terminal_status = (
+        _safe_str(execution_summary.get("dispatch_terminal_status")) or ""
+    ).lower()
+    terminal_status = (
+        _safe_str(custom_workflow_summary.get("terminal_status")) or ""
+    ).lower()
+    observed = bool(custom_workflow_summary.get("observed") is True)
+    progress_observed = _custom_workflow_execution_progress_observed(
+        custom_workflow_summary
+    )
+
+    if not (observed or progress_observed or dispatch_terminal_status):
+        return None
+
+    terminal_success_evaluation = custom_workflow_summary.get(
+        "terminal_success_evaluation"
+    )
+    if isinstance(terminal_success_evaluation, Mapping):
+        terminal_success = terminal_success_evaluation.get("success")
+        if terminal_success is False:
+            return "failed"
+        if terminal_success is True:
+            return "satisfied"
+
+    completion_gate_safe = custom_workflow_summary.get(
+        "completion_gate_safe_to_claim_completion"
+    )
+    if completion_gate_safe is False:
+        return "failed"
+    if completion_gate_safe is True:
+        return "satisfied"
+
+    if dispatch_terminal_status == "failed" or terminal_status == "failed":
+        return "failed"
+
+    completed_values = (
+        custom_workflow_summary.get("effective_completed"),
+        custom_workflow_summary.get("completed"),
+        execution_summary.get("dispatch_terminal_completed"),
+    )
+    if any(value is True for value in completed_values):
+        return "satisfied"
+    if terminal_status == "completed" or dispatch_terminal_status == "completed":
+        return "satisfied"
+    if any(value is False for value in completed_values) and (
+        progress_observed or observed or dispatch_terminal_status
+    ):
+        return "failed"
+
+    return None
+
+
+def _append_tool_name_once(values: list[str], tool_name: str) -> None:
+    lowered = tool_name.lower()
+    if all(existing.lower() != lowered for existing in values):
+        values.append(tool_name)
+
+
+def _augment_tool_outcomes_with_execution_surfaces(
+    *,
+    successful_tools: Sequence[str],
+    failed_tools: Sequence[str],
+    execution_summary: Mapping[str, Any] | None,
+) -> tuple[list[str], list[str], list[str]]:
+    augmented_successful_tools = _dedupe_string_sequence(list(successful_tools))
+    augmented_failed_tools = _dedupe_string_sequence(list(failed_tools))
+    observed_equivalent_tools: list[str] = []
+
+    workflow_execute_status = _custom_workflow_workflow_execute_equivalent_status(
+        execution_summary
+    )
+    if workflow_execute_status == "satisfied":
+        _append_tool_name_once(augmented_successful_tools, "workflow_execute")
+        _append_tool_name_once(observed_equivalent_tools, "workflow_execute")
+    elif workflow_execute_status == "failed":
+        _append_tool_name_once(augmented_failed_tools, "workflow_execute")
+        _append_tool_name_once(observed_equivalent_tools, "workflow_execute")
+
+    return augmented_successful_tools, augmented_failed_tools, observed_equivalent_tools
+
+
 def _observed_invocation_tool_names(
     serialised_invocations: Sequence[Mapping[str, Any]],
 ) -> list[str]:
@@ -1858,8 +1955,14 @@ def _required_effect_tool_obligation_summary(
     *,
     required_effects: Sequence[Mapping[str, Any]],
     serialised_invocations: Sequence[Mapping[str, Any]],
+    observed_equivalent_tools: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    observed_tool_names = _observed_invocation_tool_names(serialised_invocations)
+    observed_tool_names = _dedupe_string_sequence(
+        [
+            *_observed_invocation_tool_names(serialised_invocations),
+            *(observed_equivalent_tools or ()),
+        ]
+    )
     observed_lookup = {_tool_requirement_key(tool) for tool in observed_tool_names}
 
     required_tools: list[str] = []
@@ -1919,11 +2022,13 @@ def _apply_required_effect_tool_obligations_to_execution_summary(
     execution_summary: Mapping[str, Any],
     required_effects: Sequence[Mapping[str, Any]],
     serialised_invocations: Sequence[Mapping[str, Any]],
+    observed_equivalent_tools: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     summary = dict(execution_summary)
     obligation_summary = _required_effect_tool_obligation_summary(
         required_effects=required_effects,
         serialised_invocations=serialised_invocations,
+        observed_equivalent_tools=observed_equivalent_tools,
     )
     if obligation_summary["required_effects_required_tool_count"] <= 0:
         return summary
@@ -5897,6 +6002,9 @@ def _build_postcondition_checks(
         effect_id = _safe_str(effect.get("effect_id")) or "effect_1"
         effect_status = _safe_str(effect.get("status")) or "pending"
         effect_type = _safe_str(effect.get("effect_type")) or "kb_mutation"
+        postcondition_strategy = (
+            _safe_str(effect.get("postcondition_strategy")) or ""
+        ).lower()
         if effect_type == "tool_execution":
             if effect_status == "satisfied":
                 check_status = "verified"
@@ -5954,7 +6062,26 @@ def _build_postcondition_checks(
                 evidence = f"{representation_label} verification is inconclusive."
                 verification_mode = "execution_inconclusive"
         else:
-            if effect_status == "satisfied" and successful_write_tools:
+            if postcondition_strategy == "execution_observed":
+                if effect_status == "satisfied":
+                    check_status = "verified"
+                    evidence = (
+                        _safe_str(effect.get("status_reason"))
+                        or "Required effect execution was observed."
+                    )
+                    verification_mode = "execution_observed"
+                elif effect_status in {"not_satisfied", "not_executed"}:
+                    check_status = "not_verified"
+                    evidence = (
+                        _safe_str(effect.get("status_reason"))
+                        or "Required effect execution was not observed."
+                    )
+                    verification_mode = "execution_missing"
+                else:
+                    check_status = "inconclusive"
+                    evidence = "Execution-observed verification is inconclusive."
+                    verification_mode = "execution_inconclusive"
+            elif effect_status == "satisfied" and successful_write_tools:
                 if successful_verification_tools:
                     check_status = "verified"
                     evidence = (
@@ -5991,7 +6118,11 @@ def _build_postcondition_checks(
                         else (
                             "scholarly_representation_observed"
                             if _is_representation_effect_type(effect_type)
-                            else "predicate_exists"
+                            else (
+                                "effect_execution_observed"
+                                if postcondition_strategy == "execution_observed"
+                                else "predicate_exists"
+                            )
                         )
                     )
                 ),
@@ -6446,31 +6577,6 @@ def build_turn_execution_record(
             ),
         ]
     )
-    target_bound_missing_prompt_tools = _target_bound_missing_prompt_tools(
-        required_tools=effective_required_prompt_tools,
-        tool_invocations=tool_invocations,
-    )
-    target_bound_missing_lookup = {
-        _tool_requirement_key(tool_name)
-        for tool_name in target_bound_missing_prompt_tools
-        if isinstance(tool_name, str) and tool_name.strip()
-    }
-    successful_tool_lookup = {
-        _tool_requirement_key(tool_name)
-        for tool_name in successful_tools
-        if isinstance(tool_name, str) and tool_name.strip()
-    }
-    effective_missing_prompt_tools = [
-        tool_name
-        for tool_name in effective_required_prompt_tools
-        if _tool_requirement_key(tool_name) not in successful_tool_lookup
-        or _tool_requirement_key(tool_name) in target_bound_missing_lookup
-    ]
-    prompt_required_successful_tools = [
-        tool_name
-        for tool_name in successful_tools
-        if _tool_requirement_key(tool_name) not in target_bound_missing_lookup
-    ]
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
         turn_execution_diagnostics=(
@@ -6482,6 +6588,75 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
         selected_workflow_trace=selected_workflow_trace_payload,
     )
+    (
+        execution_surface_successful_tools,
+        execution_surface_failed_tools,
+        execution_surface_observed_tools,
+    ) = _augment_tool_outcomes_with_execution_surfaces(
+        successful_tools=successful_tools,
+        failed_tools=failed_tools,
+        execution_summary=execution_summary,
+    )
+    if execution_surface_observed_tools:
+        execution_summary = dict(execution_summary)
+        successful_surface_lookup = {
+            _tool_requirement_key(tool_name)
+            for tool_name in execution_surface_successful_tools
+            if tool_name not in successful_tools
+        }
+        failed_surface_lookup = {
+            _tool_requirement_key(tool_name)
+            for tool_name in execution_surface_failed_tools
+            if tool_name not in failed_tools
+        }
+        execution_summary["execution_surface_observed_tool_names"] = list(
+            execution_surface_observed_tools
+        )
+        execution_summary["execution_surface_successful_tool_names"] = [
+            tool_name
+            for tool_name in execution_surface_observed_tools
+            if _tool_requirement_key(tool_name) in successful_surface_lookup
+        ]
+        execution_summary["execution_surface_failed_tool_names"] = [
+            tool_name
+            for tool_name in execution_surface_observed_tools
+            if _tool_requirement_key(tool_name) in failed_surface_lookup
+        ]
+    effective_successful_write_tools = _dedupe_string_sequence(
+        [
+            *successful_write_tools,
+            *(
+                tool_name
+                for tool_name in execution_surface_successful_tools
+                if _is_write_tool(tool_name)
+            ),
+        ]
+    )
+    target_bound_missing_prompt_tools = _target_bound_missing_prompt_tools(
+        required_tools=effective_required_prompt_tools,
+        tool_invocations=tool_invocations,
+    )
+    target_bound_missing_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in target_bound_missing_prompt_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    successful_tool_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in execution_surface_successful_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    effective_missing_prompt_tools = [
+        tool_name
+        for tool_name in effective_required_prompt_tools
+        if _tool_requirement_key(tool_name) not in successful_tool_lookup
+        or _tool_requirement_key(tool_name) in target_bound_missing_lookup
+    ]
+    prompt_required_successful_tools = [
+        tool_name
+        for tool_name in execution_surface_successful_tools
+        if _tool_requirement_key(tool_name) not in target_bound_missing_lookup
+    ]
     representation_effects_contract = _build_representation_required_effects_contract(
         aux_llm_calls=aux_llm_calls,
     )
@@ -6525,21 +6700,21 @@ def build_turn_execution_record(
     prompt_required_mutation_effects = _materialise_required_effects_from_contract(
         contract=prompt_required_mutation_contract,
         successful_tools=prompt_required_successful_tools,
-        failed_tools=failed_tools,
+        failed_tools=execution_surface_failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
     )
     prompt_required_evidence_effects = _materialise_required_effects_from_contract(
         contract=prompt_required_evidence_contract,
         successful_tools=prompt_required_successful_tools,
-        failed_tools=failed_tools,
+        failed_tools=execution_surface_failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
     )
     workflow_required_effects = _materialise_required_effects_from_contract(
         contract=workflow_required_effects_contract,
-        successful_tools=successful_tools,
-        failed_tools=failed_tools,
+        successful_tools=execution_surface_successful_tools,
+        failed_tools=execution_surface_failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
     )
@@ -6580,6 +6755,7 @@ def build_turn_execution_record(
         execution_summary=execution_summary,
         required_effects=required_effects,
         serialised_invocations=serialised_invocations,
+        observed_equivalent_tools=execution_surface_observed_tools,
     )
     workflow_routing_diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery=workflow_discovery,
@@ -6600,7 +6776,7 @@ def build_turn_execution_record(
 
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,
-        successful_write_tools=successful_write_tools,
+        successful_write_tools=effective_successful_write_tools,
         successful_verification_tools=successful_verification_tools,
     )
     critic_summary = _summarise_check_counts(postcondition_checks)

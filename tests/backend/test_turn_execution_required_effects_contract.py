@@ -1391,6 +1391,171 @@ def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution
     )
 
 
+def test_prompt_required_workflow_execute_is_satisfied_by_custom_workflow_success() -> (
+    None
+):
+    workflow_id = "#V#example_custom_workflow"
+    workflow_summary = {
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": workflow_id,
+        "completed": True,
+        "effective_completed": True,
+        "terminal_status": "completed",
+        "final_state": "#V#workflow_step_example_custom_workflow_completed",
+        "step_result_envelope_count": 3,
+        "action_started_count": 3,
+        "action_completed_count": 3,
+        "action_success_count": 3,
+        "action_failure_count": 0,
+        "action_unknown_count": 0,
+        "terminal_effect_count": 1,
+        "terminal_effects": [],
+        "durable_side_effect_count": 1,
+        "durable_side_effects": [],
+        "terminal_success_evaluation": {"success": True, "failure_codes": []},
+    }
+    record = _build_record(
+        prompt_text="Execute the selected workflow for this request.",
+        response_text="The selected workflow produced the requested result.",
+        workflow_routing={
+            "workflow_id": workflow_id,
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        required_prompt_tools=["workflow_execute"],
+        selected_workflow_trace={
+            "selected_workflow_id": workflow_id,
+            "selected_execution_mode": "custom_workflow",
+            "child_workflow_completed": True,
+            "child_workflow_final_state": (
+                "#V#workflow_step_example_custom_workflow_completed"
+            ),
+            "workflow_execution_summary": workflow_summary,
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_execution",
+                "workflow_id": workflow_id,
+                "completed": True,
+                "execution_summary": workflow_summary,
+            }
+        ],
+        tool_invocations=[],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    workflow_execute_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["workflow_execute"]
+    )
+    assert workflow_execute_effect.get("status") == "satisfied"
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    summary = execution.get("summary")
+    assert isinstance(summary, dict)
+    assert summary.get("execution_surface_successful_tool_names") == [
+        "workflow_execute"
+    ]
+    assert summary.get("required_effects_missing_required_tools") == []
+    assert summary.get("missing_prompt_tools") == []
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+    assert "prompt_required_mutation_workflow_execute_missing" not in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_prompt_required_workflow_execute_fails_closed_on_custom_workflow_failure() -> (
+    None
+):
+    workflow_id = "#V#example_custom_workflow"
+    workflow_summary = {
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": workflow_id,
+        "completed": False,
+        "effective_completed": False,
+        "terminal_status": "failed",
+        "final_state": "#V#workflow_step_example_custom_workflow_failed",
+        "step_result_envelope_count": 2,
+        "action_started_count": 2,
+        "action_completed_count": 2,
+        "action_success_count": 1,
+        "action_failure_count": 1,
+        "action_unknown_count": 0,
+        "first_failing_state_id": "#V#workflow_step_example_custom_workflow_failed",
+        "first_failing_action_id": "example_action",
+        "terminal_effect_count": 0,
+        "terminal_effects": [],
+        "durable_side_effect_count": 0,
+        "durable_side_effects": [],
+        "terminal_success_evaluation": {
+            "success": False,
+            "failure_codes": ["example_terminal_contract_failed"],
+            "decision_reason": "The workflow terminal-success contract failed.",
+        },
+    }
+    record = _build_record(
+        prompt_text="Execute the selected workflow for this request.",
+        response_text="The selected workflow could not complete.",
+        workflow_routing={
+            "workflow_id": workflow_id,
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        required_prompt_tools=["workflow_execute"],
+        selected_workflow_trace={
+            "selected_workflow_id": workflow_id,
+            "selected_execution_mode": "custom_workflow",
+            "child_workflow_completed": False,
+            "child_workflow_final_state": (
+                "#V#workflow_step_example_custom_workflow_failed"
+            ),
+            "child_workflow_error": "example terminal failure",
+            "workflow_execution_summary": workflow_summary,
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_execution",
+                "workflow_id": workflow_id,
+                "completed": False,
+                "execution_summary": workflow_summary,
+            }
+        ],
+        tool_invocations=[],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    workflow_execute_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["workflow_execute"]
+    )
+    assert workflow_execute_effect.get("status") == "not_satisfied"
+    assert workflow_execute_effect.get("failure_code") == (
+        "prompt_required_mutation_workflow_execute_failed"
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    summary = execution.get("summary")
+    assert isinstance(summary, dict)
+    assert summary.get("execution_surface_failed_tool_names") == ["workflow_execute"]
+    assert summary.get("required_effects_missing_required_tools") == []
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_mutation_workflow_execute_failed" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
 def test_prompt_required_mutation_contract_uses_metadata_authority_for_unknown_tool(
     monkeypatch,
 ) -> None:

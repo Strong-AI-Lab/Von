@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "6",
   "workflows": [
     {
       "publication_spec": {
@@ -2083,6 +2083,128 @@
             "invoked_workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
             "llm_policy": null,
             "prompt_concept_ids": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": false,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_user_prompt_to_user_prompt_parameter",
+                "context_key": "user_prompt",
+                "required": false,
+                "tool_param": "user_prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_conversation_session_id_to_conversation_session_id_parameter",
+                "context_key": "conversation_session_id",
+                "required": false,
+                "tool_param": "conversation_session_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_turn_id_to_turn_id_parameter",
+                "context_key": "turn_id",
+                "required": false,
+                "tool_param": "turn_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_user_concept_id_to_user_concept_id_parameter",
+                "context_key": "user_concept_id",
+                "required": false,
+                "tool_param": "user_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_org_concept_id_to_org_concept_id_parameter",
+                "context_key": "org_concept_id",
+                "required": false,
+                "tool_param": "org_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_actor_concept_id_to_actor_concept_id_parameter",
+                "context_key": "actor_concept_id",
+                "required": false,
+                "tool_param": "actor_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_response_text_to_response_text_parameter",
+                "context_key": "response_text",
+                "required": false,
+                "tool_param": "response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_final_response_to_final_response_parameter",
+                "context_key": "final_response",
+                "required": false,
+                "tool_param": "final_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_current_response_to_current_response_parameter",
+                "context_key": "current_response",
+                "required": false,
+                "tool_param": "current_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_workflow_discovery_result_to_workflow_discovery_result_parameter",
+                "context_key": "workflow_discovery_result",
+                "required": false,
+                "tool_param": "workflow_discovery_result"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_workflow_routing_to_workflow_routing_parameter",
+                "context_key": "workflow_routing",
+                "required": false,
+                "tool_param": "workflow_routing"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_turn_execution_diagnostics_to_turn_execution_diagnostics_parameter",
+                "context_key": "turn_execution_diagnostics",
+                "required": false,
+                "tool_param": "turn_execution_diagnostics"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_aux_llm_calls_to_aux_llm_calls_parameter",
+                "context_key": "aux_llm_calls",
+                "required": false,
+                "tool_param": "aux_llm_calls"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_invocations_to_invocations_parameter",
+                "context_key": "invocations",
+                "required": false,
+                "tool_param": "invocations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_selected_workflow_trace_to_selected_workflow_trace_parameter",
+                "context_key": "selected_workflow_trace",
+                "required": false,
+                "tool_param": "selected_workflow_trace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_turn_expected_outcome_contract_state_to_turn_expected_outcome_contract_state_parameter",
+                "context_key": "turn_expected_outcome_contract_state",
+                "required": false,
+                "tool_param": "turn_expected_outcome_contract_state"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_turn_expected_outcome_contract_to_turn_expected_outcome_contract_parameter",
+                "context_key": "turn_expected_outcome_contract",
+                "required": false,
+                "tool_param": "turn_expected_outcome_contract"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_completion_report_to_completion_report_parameter",
+                "context_key": "completion_report",
+                "required": false,
+                "tool_param": "completion_report"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_required_prompt_tools_to_required_prompt_tools_parameter",
+                "context_key": "required_prompt_tools",
+                "required": false,
+                "tool_param": "required_prompt_tools"
+              }
+            ],
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_turn_execution_critic_result_turn_execution_record_to_turn_execution_record",
@@ -2108,9 +2230,39 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_critic_result_critic_verdict_to_critic_verdict",
                 "context_key": "critic_verdict",
                 "tool_output_field": "result.critic_verdict"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_completion_gate_decision_to_completion_gate_decision",
+                "context_key": "completion_gate_decision",
+                "tool_output_field": "result.completion_gate_decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_completion_gate_requires_follow_up_to_completion_gate_requires_follow_up",
+                "context_key": "completion_gate_requires_follow_up",
+                "tool_output_field": "result.completion_gate_requires_follow_up"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_completion_gate_safe_to_claim_completion_to_completion_gate_safe_to_claim_completion",
+                "context_key": "completion_gate_safe_to_claim_completion",
+                "tool_output_field": "result.completion_gate_safe_to_claim_completion"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_turn_execution_critic_evidence_bundle_to_turn_execution_critic_evidence_bundle",
+                "context_key": "turn_execution_critic_evidence_bundle",
+                "tool_output_field": "result.turn_execution_critic_evidence_bundle"
               }
             ],
-            "writes_context_keys": [],
+            "writes_context_keys": [
+              "turn_execution_record",
+              "required_effects",
+              "postcondition_checks",
+              "critic_summary",
+              "critic_verdict",
+              "completion_gate_decision",
+              "completion_gate_requires_follow_up",
+              "completion_gate_safe_to_claim_completion",
+              "turn_execution_critic_evidence_bundle"
+            ],
             "state_id": "critic"
           },
           {
@@ -2151,8 +2303,119 @@
                 "to_state": "completed"
               }
             ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_final_response_to_final_response",
+                "context_key": "final_response",
+                "tool_output_field": "final_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_decision_to_completion_gate_decision",
+                "context_key": "completion_gate_decision",
+                "tool_output_field": "completion_gate_decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_decision_reason_to_completion_gate_decision_reason",
+                "context_key": "completion_gate_decision_reason",
+                "tool_output_field": "completion_gate_decision_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_blocking_effect_ids_to_completion_gate_blocking_effect_ids",
+                "context_key": "completion_gate_blocking_effect_ids",
+                "tool_output_field": "completion_gate_blocking_effect_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_blocking_failure_codes_to_completion_gate_blocking_failure_codes",
+                "context_key": "completion_gate_blocking_failure_codes",
+                "tool_output_field": "completion_gate_blocking_failure_codes"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_safe_to_claim_to_completion_gate_safe_to_claim_completion",
+                "context_key": "completion_gate_safe_to_claim_completion",
+                "tool_output_field": "completion_gate_safe_to_claim_completion"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_requires_follow_up_to_completion_gate_requires_follow_up",
+                "context_key": "completion_gate_requires_follow_up",
+                "tool_output_field": "completion_gate_requires_follow_up"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_repeat_eligible_to_completion_gate_repeat_eligible",
+                "context_key": "completion_gate_repeat_eligible",
+                "tool_output_field": "completion_gate_repeat_eligible"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_unresolved_preconditions_to_completion_gate_unresolved_preconditions",
+                "context_key": "completion_gate_unresolved_preconditions",
+                "tool_output_field": "completion_gate_unresolved_preconditions"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_evidence_payload_to_completion_gate_evidence_payload",
+                "context_key": "completion_gate_evidence_payload",
+                "tool_output_field": "completion_gate_evidence_payload"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_terminal_outcome_to_completion_gate_terminal_outcome",
+                "context_key": "completion_gate_terminal_outcome",
+                "tool_output_field": "completion_gate_terminal_outcome"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_repeat_iteration_to_completion_gate_repeat_iteration",
+                "context_key": "completion_gate_repeat_iteration",
+                "tool_output_field": "completion_gate_repeat_iteration"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_loop_retry_reason_to_completion_gate_loop_retry_reason",
+                "context_key": "completion_gate_loop_retry_reason",
+                "tool_output_field": "completion_gate_loop_retry_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_loop_stop_reason_to_completion_gate_loop_stop_reason",
+                "context_key": "completion_gate_loop_stop_reason",
+                "tool_output_field": "completion_gate_loop_stop_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_loop_attempts_to_completion_gate_loop_attempts",
+                "context_key": "completion_gate_loop_attempts",
+                "tool_output_field": "completion_gate_loop_attempts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_loop_max_attempts_to_completion_gate_loop_max_attempts",
+                "context_key": "completion_gate_loop_max_attempts",
+                "tool_output_field": "completion_gate_loop_max_attempts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_escalation_signal_to_completion_gate_escalation_signal",
+                "context_key": "completion_gate_escalation_signal",
+                "tool_output_field": "completion_gate_escalation_signal"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_escalation_reason_to_completion_gate_escalation_reason",
+                "context_key": "completion_gate_escalation_reason",
+                "tool_output_field": "completion_gate_escalation_reason"
+              }
+            ],
             "state_id": "completion_gate",
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "final_response",
+              "completion_gate_decision",
+              "completion_gate_decision_reason",
+              "completion_gate_blocking_effect_ids",
+              "completion_gate_blocking_failure_codes",
+              "completion_gate_safe_to_claim_completion",
+              "completion_gate_requires_follow_up",
+              "completion_gate_repeat_eligible",
+              "completion_gate_unresolved_preconditions",
+              "completion_gate_evidence_payload",
+              "completion_gate_terminal_outcome",
+              "completion_gate_repeat_iteration",
+              "completion_gate_loop_retry_reason",
+              "completion_gate_loop_stop_reason",
+              "completion_gate_loop_attempts",
+              "completion_gate_loop_max_attempts",
+              "completion_gate_escalation_signal",
+              "completion_gate_escalation_reason"
+            ]
           },
           {
             "action_id": "llm.action",

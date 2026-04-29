@@ -411,6 +411,80 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         and "paper_metadata.title" in item.get("value_from_context_options", [])
         for item in assignments
     )
+    normalise_metadata_transitions = {
+        transition.reason: transition
+        for transition in metadata_definition.states[
+            normalise_metadata_state_id
+        ].transitions
+    }
+    assert normalise_metadata_transitions[
+        "existing_article_concept_supplied"
+    ].condition_spec == {
+        "kind": "all",
+        "conditions": [
+            {
+                "kind": "context_exists",
+                "key": "paper_concept_id",
+                "expected": True,
+            },
+            {
+                "kind": "context_is_null",
+                "key": "paper_concept_id",
+                "expected": False,
+            },
+        ],
+    }
+    resolve_topics_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="resolve_topics",
+    )
+    decide_arxiv_identity_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="decide_arxiv_identity",
+    )
+    attach_arxiv_identity_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="attach_arxiv_identity",
+    )
+    assert any(
+        transition.to_state == decide_arxiv_identity_state_id
+        for transition in metadata_definition.states[
+            resolve_topics_state_id
+        ].transitions
+    )
+    decide_arxiv_transitions = {
+        transition.reason: transition
+        for transition in metadata_definition.states[
+            decide_arxiv_identity_state_id
+        ].transitions
+    }
+    assert decide_arxiv_transitions[
+        "arxiv_id_present"
+    ].to_state == attach_arxiv_identity_state_id
+    assert decide_arxiv_transitions["arxiv_id_present"].condition_spec == {
+        "kind": "all",
+        "conditions": [
+            {
+                "kind": "context_exists",
+                "key": "arxiv_id",
+                "expected": True,
+            },
+            {
+                "kind": "context_is_null",
+                "key": "arxiv_id",
+                "expected": False,
+            },
+        ],
+    }
+    attach_arxiv_action = metadata_definition.states[
+        attach_arxiv_identity_state_id
+    ].actions[0]
+    assert attach_arxiv_action.action_id == "upsert_text_relation"
+    assert attach_arxiv_action.inputs.get("text") == {
+        "$context_key": "arxiv_id",
+        "$mapping_concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_arxiv_identity_arxiv_id_to_text_parameter",
+        "$required": True,
+    }
     create_article_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="create_article_concept",
@@ -792,6 +866,64 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         )
     ]
     assert "A paper about composable identity control." in descriptions
+
+
+def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_concept_id": None,
+            "arxiv_id": "2604.22937",
+            "paper_metadata": {
+                "title": "Null Paper Concept Should Create an Article",
+                "abstract": "The workflow should treat a null identifier as absent.",
+                "authors": ["Ada Lovelace"],
+                "keywords": ["workflow composition"],
+                "publication_date": "2026-04-29",
+            },
+            "source_uri": "https://arxiv.org/abs/2604.22937",
+        },
+    )
+
+    assert result.completed is True, result.error
+    assert result.final_state.endswith("_completed")
+    assert isinstance(result.data.get("create_article_result"), dict)
+    paper_concept_id = result.data.get("paper_concept_id")
+    assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
+
+    paper_doc = concept_service.get_concept_by_concept_id(paper_concept_id)
+    assert paper_doc is not None
+    relationships = paper_doc.get("relationships") or {}
+    assert "#V#scholarly_article" in (relationships.get("is_an_instance_of") or [])
+    names = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="hasName",
+            limit=20,
+        )
+    ]
+    assert "2604.22937" in names
+    assert "https://arxiv.org/abs/2604.22937" in names
 
 
 def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stale(

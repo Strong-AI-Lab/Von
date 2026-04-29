@@ -316,6 +316,32 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     critic = workflow.states["critic"]
     assert critic.actions[0].action_id == "workflow_invoke_subworkflow"
     assert critic.actions[0].subworkflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    critic_inputs = critic.actions[0].inputs
+    for input_key in (
+        "prompt",
+        "response_text",
+        "final_response",
+        "workflow_routing",
+        "selected_workflow_trace",
+        "completion_report",
+        "invocations",
+        "aux_llm_calls",
+    ):
+        assert critic_inputs.get(input_key, {}).get("$context_key") == input_key
+    critic_contract = critic.metadata.get("subworkflow_contract") or {}
+    critic_input_mappings = critic_contract.get("input_mappings") or []
+    assert any(
+        mapping.get("parent_context_key") == "completion_report"
+        and mapping.get("child_input_key") == "completion_report"
+        for mapping in critic_input_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("parent_context_key") == "selected_workflow_trace"
+        and mapping.get("child_input_key") == "selected_workflow_trace"
+        for mapping in critic_input_mappings
+        if isinstance(mapping, dict)
+    )
     critic_mappings = critic.metadata.get("tool_output_context_mappings") or []
     assert any(
         isinstance(mapping, dict)
@@ -329,10 +355,28 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and mapping.get("tool_output_field") == "result.critic_verdict"
         for mapping in critic_mappings
     )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "completion_gate_decision"
+        and mapping.get("tool_output_field") == "result.completion_gate_decision"
+        for mapping in critic_mappings
+    )
     assert any(t.to_state == "completion_gate" for t in critic.transitions)
 
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
+    completion_gate_mappings = (
+        completion_gate.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        mapping.get("context_key") == "completion_gate_evidence_payload"
+        and mapping.get("tool_output_field") == "completion_gate_evidence_payload"
+        for mapping in completion_gate_mappings
+        if isinstance(mapping, dict)
+    )
+    assert "completion_gate_requires_follow_up" in (
+        completion_gate.metadata.get("writes_context_keys") or []
+    )
     assert any(
         t.to_state == "recovery_decision" and t.reason == "follow_up_required"
         for t in completion_gate.transitions
@@ -379,6 +423,7 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and field.get("context_key") == "turn_recovery_tool_batch_execution"
         for field in recovery_context_fields
     )
+
     recovery_mappings = (
         recovery_decision.metadata.get("tool_output_context_mappings") or []
     )
@@ -483,6 +528,157 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         t.to_state == "failed" and t.reason == "recovery_follow_up_ready"
         for t in recovery_follow_up.transitions
     )
+
+
+def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context() -> (
+    None
+):
+    source = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    completion_gate = source.states["completion_gate"]
+    clipped_completion_gate = WorkflowStateSpec(
+        state_id="completion_gate",
+        actions=completion_gate.actions,
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="failed",
+                condition=lambda context: bool(
+                    context.get("completion_gate_requires_follow_up")
+                ),
+                reason="follow_up_required",
+            ),
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda _context: True,
+                reason="decided",
+            ),
+        ),
+        terminal=False,
+        metadata=completion_gate.metadata,
+    )
+    workflow = WorkflowDefinition(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        initial_state="critic",
+        states={
+            "critic": source.states["critic"],
+            "completion_gate": clipped_completion_gate,
+            "completed": WorkflowStateSpec(state_id="completed", terminal=True),
+            "failed": WorkflowStateSpec(state_id="failed", terminal=True),
+        },
+        termination_states=("completed", "failed"),
+    )
+    definitions = {
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: workflow,
+        KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID: (
+            _build_stub_kb_postcondition_critic_definition()
+        ),
+    }
+    registry = ActionRegistry()
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+    register_turn_execution_actions(registry)
+
+    failed_execution_summary = {
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": "#V#arxiv_paper_representation_workflow",
+        "completed": False,
+        "effective_completed": False,
+        "terminal_status": "completed",
+        "final_state": "#V#workflow_step_arxiv_paper_representation_workflow_failed",
+        "terminal_success_contract": {
+            "schema_version": "workflow_terminal_success_contract.v1",
+            "success_statuses": ["completed"],
+            "required_summary_fields": [
+                "workflow_id",
+                "terminal_status",
+                "final_state",
+                "completed",
+            ],
+            "require_terminal_status": True,
+            "require_final_state": True,
+            "require_completed_true": True,
+        },
+        "terminal_success_evaluation": {
+            "schema_version": "workflow_terminal_success_evaluation.v1",
+            "success": False,
+            "terminal_status": "completed",
+            "completed": False,
+            "final_state": "#V#workflow_step_arxiv_paper_representation_workflow_failed",
+            "failure_codes": ["contracted_workflow_completed_flag_false"],
+            "decision_reason": (
+                "Contracted workflow terminal-success contract requirements "
+                "were not met."
+            ),
+        },
+        "step_result_envelope_count": 10,
+        "action_started_count": 10,
+        "action_completed_count": 10,
+        "action_success_count": 10,
+        "action_failure_count": 0,
+        "action_unknown_count": 0,
+        "runtime_event_count": 1,
+        "terminal_effect_count": 0,
+        "terminal_effects": [],
+    }
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        workflow,
+        environment=WorkflowEnvironment(
+            llm_client=object(),
+            user_namespace="#V#user@org",
+        ),
+        data={
+            "prompt": "https://arxiv.org/abs/2604.22937",
+            "user_prompt": "https://arxiv.org/abs/2604.22937",
+            "response_text": "Linked file copy.",
+            "final_response": "Linked file copy.",
+            "current_response": "Linked file copy.",
+            "workflow_routing": {
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+                "source": "selector",
+            },
+            "selected_workflow_trace": {
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "child_workflow_completed": False,
+                "child_workflow_final_state": (
+                    "#V#workflow_step_arxiv_paper_representation_workflow_failed"
+                ),
+                "completion_report_source": "child_completion_report",
+                "workflow_execution_summary": failed_execution_summary,
+            },
+            "completion_report": failed_execution_summary,
+            "invocations": [],
+            "aux_llm_calls": [],
+            "conversation_session_id": "session-critic-join",
+            "turn_id": "req-critic-join",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "failed"
+    assert result.data["completion_gate_decision"] == "failed"
+    assert result.data["completion_gate_requires_follow_up"] is True
+    assert result.data["completion_gate_safe_to_claim_completion"] is False
+    assert result.data["completion_gate_blocking_failure_codes"] == [
+        "contracted_workflow_completed_flag_false"
+    ]
+    gate_evidence = result.data["completion_gate_evidence_payload"]
+    assert gate_evidence["evaluation_basis"] == (
+        "required_effects_postcondition_checks_and_execution_signals"
+    )
+    assert gate_evidence["execution_signal_blocker"]["source"] == (
+        "workflow_terminal_success_contract"
+    )
+    custom_execution = result.data["turn_execution_record"]["execution"]["summary"][
+        "custom_workflow_execution"
+    ]
+    assert custom_execution["terminal_success_evaluation"]["success"] is False
 
 
 def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement() -> None:
@@ -901,13 +1097,56 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
 
         return WorkflowActionResult(
             outputs={
+                "final_response": request.data.get("final_response") or "",
                 "required_effects": required_effects,
                 "completion_gate_decision": (
                     "escalation_required" if unresolved else "completed"
                 ),
+                "completion_gate_decision_reason": (
+                    "Synthetic prompt targets remain unresolved."
+                    if unresolved
+                    else "All synthetic prompt targets were satisfied."
+                ),
+                "completion_gate_blocking_effect_ids": [
+                    effect["effect_id"]
+                    for effect in required_effects
+                    if effect["status"] != "satisfied"
+                ],
+                "completion_gate_blocking_failure_codes": (
+                    ["required_effects_unresolved"] if unresolved else []
+                ),
                 "completion_gate_requires_follow_up": unresolved,
                 "completion_gate_safe_to_claim_completion": not unresolved,
                 "completion_gate_repeat_eligible": unresolved,
+                "completion_gate_unresolved_preconditions": [
+                    effect
+                    for effect in required_effects
+                    if effect["status"] != "satisfied"
+                ],
+                "completion_gate_evidence_payload": {
+                    "required_effects": required_effects,
+                    "synthetic_gate": True,
+                },
+                "completion_gate_terminal_outcome": (
+                    "retrying" if unresolved else "completed"
+                ),
+                "completion_gate_repeat_iteration": unresolved,
+                "completion_gate_loop_retry_reason": (
+                    "Synthetic prompt targets remain unresolved."
+                    if unresolved
+                    else None
+                ),
+                "completion_gate_loop_stop_reason": None,
+                "completion_gate_loop_attempts": (
+                    int(request.data.get("completion_gate_loop_attempts") or 0) + 1
+                    if unresolved
+                    else int(request.data.get("completion_gate_loop_attempts") or 0)
+                ),
+                "completion_gate_loop_max_attempts": int(
+                    request.data.get("completion_gate_loop_max_attempts") or 1
+                ),
+                "completion_gate_escalation_signal": False,
+                "completion_gate_escalation_reason": None,
             }
         )
 

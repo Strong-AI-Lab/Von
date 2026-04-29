@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "3",
   "source_tag": "JVNAUTOSCI-2186",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
@@ -303,9 +303,19 @@
                 "to_state": "attach_metadata",
                 "reason": "existing_article_concept_supplied",
                 "condition_spec": {
-                  "kind": "context_exists",
-                  "key": "paper_concept_id",
-                  "expected": true
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "paper_concept_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "paper_concept_id",
+                      "expected": false
+                    }
+                  ]
                 }
               }
             ]
@@ -487,7 +497,7 @@
                 "tool_param": "topic_labels"
               }
             ],
-            "next_state": "decide_doi_identity",
+            "next_state": "decide_arxiv_identity",
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
@@ -498,6 +508,94 @@
             ],
             "writes_context_keys": [
               "topic_concept_ids"
+            ]
+          },
+          {
+            "state_id": "decide_arxiv_identity",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "identity_gate",
+                    "value": "arxiv_id"
+                  }
+                ]
+              }
+            ],
+            "next_state": "decide_doi_identity",
+            "conditional_transitions": [
+              {
+                "to_state": "attach_arxiv_identity",
+                "reason": "arxiv_id_present",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "arxiv_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "arxiv_id",
+                      "expected": false
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "attach_arxiv_identity",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "scholarly_article_metadata_representation_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "hasName"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "name_type": "CODE",
+                  "source": "scholarly_article_metadata_workflow",
+                  "identity_kind": "arxiv_id"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_arxiv_identity_paper_concept_id_to_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_arxiv_identity_arxiv_id_to_text_parameter",
+                "context_key": "arxiv_id",
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "next_state": "decide_doi_identity",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_attach_arxiv_identity_result_to_arxiv_identity_write_result",
+                "context_key": "arxiv_identity_write_result",
+                "tool_output_field": "result"
+              }
+            ],
+            "writes_context_keys": [
+              "arxiv_identity_write_result"
             ]
           },
           {
