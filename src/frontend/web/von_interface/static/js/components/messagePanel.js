@@ -28,6 +28,17 @@ let _newMessageSendFailureState = null;
 const COMPOSE_SCOPE_REPLY = 'reply';
 const COMPOSE_SCOPE_NEW_MESSAGE = 'newMessage';
 
+const MESSAGE_PANEL_ICONS = Object.freeze({
+    chat: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.2A7.8 7.8 0 0 1 5 4.8 8 8 0 0 1 13 4a8 8 0 0 1 8 8Z"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>',
+    compose: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+    mail: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.3 7.6L4 10"/><path d="M5.8 15A7 7 0 0 0 17.7 16.4L20 14"/></svg>',
+});
+
+function renderMessagePanelIcon(name) {
+    return MESSAGE_PANEL_ICONS[name] || '';
+}
+
 /**
  * Initialize the messages panel.
  * Call this once on page load to set up the panel element.
@@ -58,10 +69,29 @@ export async function showMessagesTab() {
 
     // Render the messages panel UI
     renderMessagesTabContent();
+    resetMessagesViewportPosition();
 
     // Load messages/threads
     await loadMessageThreads();
     await loadUnreadCount();
+}
+
+function resetMessagesViewportPosition() {
+    try {
+        if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+            window.scrollTo(0, 0);
+        }
+    } catch (_) {
+        // Some test/browser shells expose scrollTo but do not implement it.
+    }
+
+    const messagesTab = document.getElementById('messagesTab');
+    if (messagesTab) {
+        messagesTab.scrollTop = 0;
+    }
+    if (_messagesContainer) {
+        _messagesContainer.scrollTop = 0;
+    }
 }
 
 /**
@@ -74,8 +104,16 @@ function renderMessagesTabContent() {
         <div class="messages-layout">
             <div class="messages-sidebar">
                 <div class="messages-sidebar-header">
-                    <h3>Conversations</h3>
-                    <button id="newMessageBtn" class="new-message-btn" title="New message">✏️</button>
+                    <div class="messages-sidebar-header-main">
+                        <span class="messages-sidebar-glyph" aria-hidden="true">${renderMessagePanelIcon('chat')}</span>
+                        <div>
+                            <h3>Conversations</h3>
+                            <div class="messages-sidebar-kicker">Direct messages</div>
+                        </div>
+                    </div>
+                    <button id="newMessageBtn" class="new-message-btn" type="button" title="New message" aria-label="New message">
+                        ${renderMessagePanelIcon('compose')}
+                    </button>
                 </div>
                 <div id="messageThreadList" class="message-thread-list">
                     <div class="loading">Loading conversations...</div>
@@ -84,12 +122,14 @@ function renderMessagesTabContent() {
             <div class="messages-main">
                 <div id="messageViewHeader" class="message-view-header hidden">
                     <span id="conversationTitle" class="conversation-title">Select a conversation</span>
-                    <button id="refreshMessagesBtn" class="message-refresh-btn" title="Refresh">🔄</button>
+                    <button id="refreshMessagesBtn" class="message-refresh-btn" type="button" title="Refresh" aria-label="Refresh messages">
+                        ${renderMessagePanelIcon('refresh')}
+                    </button>
                 </div>
                 <div id="messageViewContent" class="message-view-content">
-                    <div class="message-empty-state">
-                        <span class="message-empty-icon">✉️</span>
-                        <p>Select a conversation to view messages</p>
+                    <div class="message-empty-state" role="status" aria-live="polite">
+                        <span class="message-empty-icon">${renderMessagePanelIcon('mail')}</span>
+                        <p class="message-empty-title">Select a conversation</p>
                         <p class="message-empty-hint">Or start a new conversation</p>
                     </div>
                 </div>
@@ -312,8 +352,8 @@ function renderThreadList() {
 
         // Get last message preview
         const lastContent = lastMessage.concept_data?.content_fallback || '';
-        const preview = lastContent.length > 50
-            ? lastContent.substring(0, 50) + '...'
+        const preview = lastContent.length > 72
+            ? lastContent.substring(0, 72) + '...'
             : lastContent;
 
         // Format time
@@ -333,7 +373,7 @@ function renderThreadList() {
                 </div>
                 <div class="thread-meta">
                     <span class="thread-time">${lastTime}</span>
-                    <span class="thread-count">${messageCount}</span>
+                    <span class="thread-count" aria-label="${messageCount} messages">${messageCount}</span>
                 </div>
             </div>
         `;
@@ -655,9 +695,9 @@ async function renderMessages() {
 
     if (_currentMessages.length === 0) {
         contentEl.innerHTML = `
-            <div class="message-empty-state">
-                <span class="message-empty-icon">💬</span>
-                <p>No messages yet</p>
+            <div class="message-empty-state" role="status" aria-live="polite">
+                <span class="message-empty-icon">${renderMessagePanelIcon('chat')}</span>
+                <p class="message-empty-title">No messages yet</p>
                 <p class="message-empty-hint">Send the first message!</p>
             </div>
         `;
@@ -1104,6 +1144,10 @@ function updateUnreadBadge() {
  */
 export function getUnreadCount() {
     return _unreadCount;
+}
+
+export function __testOnly_resetMessagesViewportPosition() {
+    resetMessagesViewportPosition();
 }
 
 // Utility functions

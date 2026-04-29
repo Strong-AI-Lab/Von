@@ -82,6 +82,10 @@ export function activateTab(tabId) {
     console.error(`activateTab: Button element with data-tab '${tabId}' not found.`);
   }
 
+  if (document.body) {
+    document.body.dataset.activeTab = tabId;
+  }
+
   if (history.replaceState) {
     history.replaceState(null, '', `#${tabId}`);
   } else {
@@ -259,6 +263,12 @@ export async function loadTabData(tabId) {
       {
         const { showGlobalTasks } = await import('./components/taskPanel.js');
         await showGlobalTasks();
+      }
+      break;
+    case 'messagesTab':
+      {
+        const { showMessagesTab } = await import('./components/messagePanel.js');
+        await showMessagesTab();
       }
       break;
     case 'chatTab':

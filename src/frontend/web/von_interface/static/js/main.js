@@ -586,13 +586,19 @@ function setupDynamicLayout() {
       const footerSpace = 64; // Footer overlap space
       const totalTopSpace = contentTop + 20; // content margin + padding
       tabContentArea.style.minHeight = `calc(100vh - ${totalTopSpace + footerSpace}px)`;
+      tabContentArea.style.setProperty('--von-tab-content-available-height', `calc(100vh - ${contentTop + footerSpace}px)`);
       tabContentArea.style.removeProperty('height');
       tabContentArea.style.overflowY = 'visible';
     }
 
-    // Position individual content areas below tabs (fallback for any not in main container)
+    // Position standalone content areas below tabs. Content already inside the
+    // tab-content-area inherits that offset from the parent and must not stack it.
     contentAreas.forEach(area => {
-      area.style.marginTop = `${contentTop}px`;
+      if (tabContentArea && tabContentArea.contains(area)) {
+        area.style.marginTop = '0px';
+      } else {
+        area.style.marginTop = `${contentTop}px`;
+      }
     });
   }
 
