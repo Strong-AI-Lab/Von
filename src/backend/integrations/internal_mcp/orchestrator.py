@@ -12039,6 +12039,8 @@ class InternalMCPChatOrchestrator:
         allow_unknown = mcp_schema.get("allow_unknown")
         aliases = mcp_schema.get("aliases")
         batch_propagated_fields = mcp_schema.get("batch_propagated_fields")
+        enum_values = mcp_schema.get("enum_values")
+        scalar_source_fields = mcp_schema.get("scalar_source_fields")
         description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
@@ -12048,24 +12050,48 @@ class InternalMCPChatOrchestrator:
         if isinstance(required_fields, dict):
             for field_name, field_type in required_fields.items():
                 properties[field_name] = expected_to_json_schema(field_type)
+                if isinstance(enum_values, Mapping):
+                    values = enum_values.get(field_name)
+                    if isinstance(values, Sequence) and not isinstance(
+                        values, (str, bytes, bytearray)
+                    ):
+                        properties[field_name]["enum"] = list(values)
                 required_list.append(field_name)
         elif isinstance(required_fields, list):
             for field_name in required_fields:
                 if not isinstance(field_name, str):
                     continue
                 properties[field_name] = {"type": "string"}
+                if isinstance(enum_values, Mapping):
+                    values = enum_values.get(field_name)
+                    if isinstance(values, Sequence) and not isinstance(
+                        values, (str, bytes, bytearray)
+                    ):
+                        properties[field_name]["enum"] = list(values)
                 required_list.append(field_name)
 
         # Process optional fields (accept dict or list)
         if isinstance(optional_fields, dict):
             for field_name, field_type in optional_fields.items():
                 properties[field_name] = expected_to_json_schema(field_type)
+                if isinstance(enum_values, Mapping):
+                    values = enum_values.get(field_name)
+                    if isinstance(values, Sequence) and not isinstance(
+                        values, (str, bytes, bytearray)
+                    ):
+                        properties[field_name]["enum"] = list(values)
         elif isinstance(optional_fields, list):
             for field_name in optional_fields:
                 if not isinstance(field_name, str):
                     continue
                 if field_name not in properties:
                     properties[field_name] = {"type": "string"}
+                if isinstance(enum_values, Mapping):
+                    values = enum_values.get(field_name)
+                    if isinstance(values, Sequence) and not isinstance(
+                        values, (str, bytes, bytearray)
+                    ):
+                        properties[field_name]["enum"] = list(values)
 
         json_schema = {
             "type": "object",
@@ -12096,6 +12122,19 @@ class InternalMCPChatOrchestrator:
                 for field_name in batch_propagated_fields
                 if isinstance(field_name, str) and field_name.strip()
             ]
+        if isinstance(scalar_source_fields, Mapping) and scalar_source_fields:
+            json_schema["x-von-scalar-source-fields"] = {
+                str(field_name).strip(): [
+                    source_field.strip()
+                    for source_field in source_fields
+                    if isinstance(source_field, str) and source_field.strip()
+                ]
+                for field_name, source_fields in scalar_source_fields.items()
+                if isinstance(field_name, str)
+                and field_name.strip()
+                and isinstance(source_fields, Sequence)
+                and not isinstance(source_fields, (str, bytes, bytearray))
+            }
 
         return json_schema
 
@@ -18442,6 +18481,7 @@ class InternalMCPChatOrchestrator:
             }
             required_fields: dict[str, Any] = {}
             optional_fields: dict[str, Any] = {}
+            enum_values: dict[str, Sequence[Any]] = {}
             for field_name, field_schema in properties.items():
                 if not isinstance(field_name, str) or not field_name.strip():
                     continue
@@ -18450,6 +18490,12 @@ class InternalMCPChatOrchestrator:
                     if isinstance(field_schema, Mapping)
                     else object
                 )
+                if isinstance(field_schema, Mapping):
+                    raw_enum = field_schema.get("enum")
+                    if isinstance(raw_enum, Sequence) and not isinstance(
+                        raw_enum, (str, bytes, bytearray)
+                    ):
+                        enum_values[field_name] = tuple(raw_enum)
                 if field_name in required_names:
                     required_fields[field_name] = expected
                 else:
@@ -18495,6 +18541,28 @@ class InternalMCPChatOrchestrator:
                     (str, bytes, bytearray),
                 )
                 else (),
+                enum_values=enum_values,
+                scalar_source_fields=(
+                    {
+                        str(field_name).strip(): tuple(
+                            str(source_field).strip()
+                            for source_field in source_fields
+                            if isinstance(source_field, str)
+                            and source_field.strip()
+                        )
+                        for field_name, source_fields in raw_json_schema.get(
+                            "x-von-scalar-source-fields", {}
+                        ).items()
+                        if isinstance(field_name, str)
+                        and field_name.strip()
+                        and isinstance(source_fields, Sequence)
+                        and not isinstance(source_fields, (str, bytes, bytearray))
+                    }
+                    if isinstance(
+                        raw_json_schema.get("x-von-scalar-source-fields"), Mapping
+                    )
+                    else {}
+                ),
             )
 
         get_definition = getattr(self._gateway, "get_method_definition", None)
@@ -18561,6 +18629,38 @@ class InternalMCPChatOrchestrator:
                 (str, bytes, bytearray),
             )
             else (),
+            enum_values=(
+                {
+                    str(field_name).strip(): tuple(values)
+                    for field_name, values in raw_schema.get(
+                        "enum_values", {}
+                    ).items()
+                    if isinstance(field_name, str)
+                    and field_name.strip()
+                    and isinstance(values, Sequence)
+                    and not isinstance(values, (str, bytes, bytearray))
+                }
+                if isinstance(raw_schema.get("enum_values"), Mapping)
+                else {}
+            ),
+            scalar_source_fields=(
+                {
+                    str(field_name).strip(): tuple(
+                        str(source_field).strip()
+                        for source_field in source_fields
+                        if isinstance(source_field, str) and source_field.strip()
+                    )
+                    for field_name, source_fields in raw_schema.get(
+                        "scalar_source_fields", {}
+                    ).items()
+                    if isinstance(field_name, str)
+                    and field_name.strip()
+                    and isinstance(source_fields, Sequence)
+                    and not isinstance(source_fields, (str, bytes, bytearray))
+                }
+                if isinstance(raw_schema.get("scalar_source_fields"), Mapping)
+                else {}
+            ),
         )
 
     def _preflight_tool_calls(

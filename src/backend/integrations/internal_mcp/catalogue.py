@@ -29459,6 +29459,12 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
 
 
 def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefinition]:
+    task_id_scalar_sources = (
+        "task_concept_id",
+        "concept_id",
+        "task_id",
+        "id",
+    )
     task_create_output_schema = _task_generic_output_schema("create")
     task_get_output_schema = _task_generic_output_schema("get")
     task_list_output_schema = _task_generic_output_schema("list")
@@ -29538,6 +29544,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "reference_code": (str, type(None)),
                 },
                 allow_unknown=True,
+                enum_values={
+                    "priority": ("low", "medium", "high", "critical"),
+                },
                 description="Create a new task in Vontology.",
             ),
             output_schema=task_create_output_schema,
@@ -29560,6 +29569,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "task_id": (str,),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description="Get a task by its concept_id.",
             ),
             output_schema=task_get_output_schema,
@@ -29727,6 +29740,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description=(
                     "Update multiple task fields in one operation. "
                     "Supported fields: status, assignee_concept_id, created_by_concept_id, "
@@ -29755,6 +29772,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "task_id": (str,),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description="List available transitions for the task's current status.",
             ),
             output_schema=task_get_transitions_output_schema,
@@ -29778,6 +29799,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description=(
                     "Transition a task by transition_id or directly by to_status."
                 ),
@@ -29799,6 +29824,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "task_id": (str,),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description="Unassign all current assignees from a task.",
             ),
             output_schema=task_unassign_output_schema,
@@ -29818,6 +29847,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "parent_task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description=(
                     "Set or clear parent task relationship for hierarchy management."
                 ),
@@ -29852,6 +29886,12 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "organisation_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
+                enum_values={
+                    "priority": ("low", "medium", "high", "critical"),
+                },
+                scalar_source_fields={
+                    "parent_task_concept_id": task_id_scalar_sources,
+                },
                 description="Create a task and attach it as a subtask of a parent task.",
             ),
             output_schema=task_create_subtask_output_schema,
@@ -29871,6 +29911,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "task_id": (str,),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description="Update a task's status.",
             ),
             output_schema=task_update_status_output_schema,
@@ -29892,6 +29936,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "assignee_id": (str,),
                 },
                 allow_unknown=True,
+                scalar_source_fields={
+                    "task_concept_id": task_id_scalar_sources,
+                    "task_id": task_id_scalar_sources,
+                },
                 description="Assign a task to a user.",
             ),
             output_schema=task_assign_output_schema,

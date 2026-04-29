@@ -142,6 +142,8 @@ class Schema:
     description: str | None = None
     aliases: Mapping[str, str] = field(default_factory=dict)
     batch_propagated_fields: Sequence[str] = field(default_factory=tuple)
+    enum_values: Mapping[str, Sequence[Any]] = field(default_factory=dict)
+    scalar_source_fields: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     def expect(self, key: str) -> JsonCompatibleType | None:
         if key in self.required:
@@ -216,11 +218,17 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
 
     for field_name, expected in schema.required.items():
         properties[field_name] = expected_to_json_schema(expected)
+        enum_values = schema.enum_values.get(field_name)
+        if enum_values:
+            properties[field_name]["enum"] = list(enum_values)
         required_names.append(field_name)
 
     for field_name, expected in schema.optional.items():
         if field_name not in properties:
             properties[field_name] = expected_to_json_schema(expected)
+        enum_values = schema.enum_values.get(field_name)
+        if enum_values:
+            properties[field_name]["enum"] = list(enum_values)
 
     payload: Dict[str, Any] = {
         "type": "object",
@@ -238,6 +246,16 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
             for field_name in schema.batch_propagated_fields
             if isinstance(field_name, str) and field_name.strip()
         ]
+    if schema.scalar_source_fields:
+        payload["x-von-scalar-source-fields"] = {
+            field_name: [
+                source_field
+                for source_field in source_fields
+                if isinstance(source_field, str) and source_field.strip()
+            ]
+            for field_name, source_fields in schema.scalar_source_fields.items()
+            if isinstance(field_name, str) and field_name.strip()
+        }
     return payload
 
 
@@ -304,6 +322,13 @@ def validate_payload(
             errors.append(
                 f"Field '{key}' expected type {typ_names} but received {type(value).__name__}."
             )
+            continue
+        enum_values = schema.enum_values.get(key)
+        if enum_values and value is not None and value not in enum_values:
+            allowed_values = ", ".join(repr(item) for item in enum_values)
+            errors.append(
+                f"Field '{key}' expected one of {allowed_values} but received {value!r}."
+            )
 
     if not schema.allow_unknown:
         known_keys = set(schema.required.keys()) | set(schema.optional.keys())
@@ -326,6 +351,13 @@ def validate_payload(
             typ_names = ", ".join(sorted({t.__name__ for t in allowed}))
             errors.append(
                 f"Optional field '{key}' expected type {typ_names} but received {type(value).__name__}."
+            )
+            continue
+        enum_values = schema.enum_values.get(key)
+        if enum_values and value is not None and value not in enum_values:
+            allowed_values = ", ".join(repr(item) for item in enum_values)
+            errors.append(
+                f"Optional field '{key}' expected one of {allowed_values} but received {value!r}."
             )
 
     return not errors, errors
@@ -361,6 +393,19 @@ def coerce_payload_types(
 
         if value is None:
             return value
+
+        if isinstance(value, Mapping):
+            source_fields = schema.scalar_source_fields.get(key) or ()
+            if str in allowed and source_fields:
+                for source_field in source_fields:
+                    if not isinstance(source_field, str) or not source_field.strip():
+                        continue
+                    source_value = value.get(source_field.strip())
+                    if isinstance(source_value, str) and source_value.strip():
+                        warnings.append(
+                            f"Extracted scalar field '{key}' from object field '{source_field.strip()}'."
+                        )
+                        return source_value.strip()
 
         if isinstance(value, str):
             raw = value.strip()

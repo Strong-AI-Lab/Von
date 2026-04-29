@@ -6,6 +6,7 @@ import json
 from typing import Any, cast
 from types import SimpleNamespace
 
+from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
@@ -135,6 +136,91 @@ def test_gateway_invoke_coerces_numeric_strings_without_mutating_caller_payload(
     assert result.payload["top_k"] == 10
 
 
+def test_coerce_declared_scalar_from_object_payload() -> None:
+    schema = Schema(
+        required={},
+        optional={"task_id": str},
+        scalar_source_fields={
+            "task_id": ("task_concept_id", "concept_id"),
+        },
+    )
+    payload = {
+        "task_id": {
+            "success": True,
+            "task_concept_id": "#V#task_contact_tsinghua",
+        }
+    }
+
+    coerced, warnings = coerce_payload_types(schema, payload)
+
+    assert coerced["task_id"] == "#V#task_contact_tsinghua"
+    assert any("Extracted scalar field 'task_id'" in warning for warning in warnings)
+    ok, errors = validate_payload(schema, coerced)
+    assert ok is True
+    assert errors == []
+
+
+def test_schema_enum_values_are_validated() -> None:
+    schema = Schema(
+        required={"title": str},
+        optional={"priority": str},
+        enum_values={"priority": ("low", "medium", "high", "critical")},
+    )
+
+    ok, errors = validate_payload(
+        schema,
+        {"title": "Contact professors", "priority": "normal"},
+    )
+
+    assert ok is False
+    assert errors == [
+        "Optional field 'priority' expected one of 'low', 'medium', 'high', 'critical' but received 'normal'."
+    ]
+
+
+def test_gateway_invoke_extracts_declared_scalar_from_object_payload() -> None:
+    observed: dict[str, object] = {}
+
+    def _handler(*, task_id: str) -> dict[str, object]:
+        observed["task_id"] = task_id
+        return {"success": True, "task_id": task_id}
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="task_proxy",
+            handler=_handler,
+            input_schema=Schema(
+                required={"task_id": str},
+                scalar_source_fields={
+                    "task_id": ("task_concept_id", "concept_id"),
+                },
+            ),
+            output_schema=Schema(
+                required={"success": bool, "task_id": str},
+                allow_unknown=False,
+            ),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    caller_payload = {
+        "task_id": {
+            "success": True,
+            "task_concept_id": "#V#task_contact_tsinghua",
+        }
+    }
+
+    result = gateway.invoke("task_proxy", caller_payload)
+
+    assert caller_payload["task_id"]["task_concept_id"] == "#V#task_contact_tsinghua"
+    assert observed["task_id"] == "#V#task_contact_tsinghua"
+    assert result.payload["task_id"] == "#V#task_contact_tsinghua"
+
+
 def test_schema_aliases_are_normalised_without_mutating_unrelated_fields() -> None:
     schema = Schema(
         required={"profile": str},
@@ -160,12 +246,19 @@ def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
         optional={"query": str},
         aliases={"identity": "profile"},
         batch_propagated_fields=("profile",),
+        enum_values={"profile": ("zhan-gmail", "lab-gmail")},
+        scalar_source_fields={"query": ("search_query",)},
     )
 
     json_schema = schema_to_json_schema(schema)
 
     assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
+    assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
+    assert json_schema["properties"]["profile"]["enum"] == [
+        "zhan-gmail",
+        "lab-gmail",
+    ]
 
 
 def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> None:
@@ -178,12 +271,19 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
             "description": "List records.",
             "aliases": {"identity": "profile"},
             "batch_propagated_fields": ["profile"],
+            "enum_values": {"profile": ["zhan-gmail", "lab-gmail"]},
+            "scalar_source_fields": {"query": ["search_query"]},
         }
     )
 
     assert json_schema["description"] == "List records."
     assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
+    assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
+    assert json_schema["properties"]["profile"]["enum"] == [
+        "zhan-gmail",
+        "lab-gmail",
+    ]
 
 
 def test_preflight_emits_contract_validation_diagnostics() -> None:
@@ -318,6 +418,9 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
                         "description": "Grounded current-user paper lookup.",
                         "x-von-argument-aliases": {"user_id": "user_concept_id"},
                         "x-von-batch-propagated-fields": ["user_concept_id"],
+                        "x-von-scalar-source-fields": {
+                            "user_concept_id": ["concept_id"]
+                        },
                     }
                 }
             }
@@ -335,6 +438,7 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
     assert schema.optional["top_k"] is int
     assert schema.aliases == {"user_id": "user_concept_id"}
     assert tuple(schema.batch_propagated_fields) == ("user_concept_id",)
+    assert tuple(schema.scalar_source_fields["user_concept_id"]) == ("concept_id",)
     ok, errors = validate_payload(
         schema,
         {"user_concept_id": "#V#test_user", "top_k": 3},
@@ -382,6 +486,93 @@ def test_tool_call_preflight_applies_generic_aliases_and_batch_hints() -> None:
     assert [dict(call["payload"]) for call in tool_calls] == [
         {"workspace_id": "lab", "query": "workflow"},
         {"workspace_id": "lab", "query": "telemetry", "limit": 5},
+    ]
+
+
+def test_task_contracts_expose_priority_enum_and_task_id_scalar_projection() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    catalogue = gateway.describe_methods()
+
+    task_create_schema = orchestrator._tool_schema_for_name("task_create", catalogue)
+    task_assign_schema = orchestrator._tool_schema_for_name("task_assign", catalogue)
+
+    assert task_create_schema is not None
+    assert tuple(task_create_schema.enum_values["priority"]) == (
+        "low",
+        "medium",
+        "high",
+        "critical",
+    )
+    assert task_assign_schema is not None
+    assert "task_concept_id" in task_assign_schema.scalar_source_fields["task_id"]
+
+
+def test_tool_call_preflight_extracts_task_id_from_prior_task_payload() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    tool_calls = [
+        {
+            "action": "call_tool",
+            "tool": "task_assign",
+            "payload": {
+                "task_id": {
+                    "success": True,
+                    "task_concept_id": "#V#task_contact_tsinghua",
+                },
+                "assignee_concept_id": "#V#michael_witbrock",
+            },
+        }
+    ]
+
+    preflight = orchestrator._preflight_tool_calls(
+        cast(Any, tool_calls),
+        gateway.describe_methods(),
+        allowed_tool_names=None,
+        user_namespace="#V#lu_yunli@the_lu_witbrock_household",
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == []
+    assert tool_calls[0]["payload"]["task_id"] == "#V#task_contact_tsinghua"
+
+
+def test_tool_call_preflight_rejects_invalid_task_priority_before_invoke() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+
+    preflight = orchestrator._preflight_tool_calls(
+        [
+            {
+                "action": "call_tool",
+                "tool": "task_create",
+                "payload": {
+                    "title": "Contact professors",
+                    "description": "Contact Tsinghua professors.",
+                    "priority": "normal",
+                },
+            }
+        ],
+        gateway.describe_methods(),
+        allowed_tool_names=None,
+        user_namespace="#V#lu_yunli@the_lu_witbrock_household",
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == [
+        "task_create: Optional field 'priority' expected one of 'low', 'medium', 'high', 'critical' but received 'normal'."
     ]
 
 

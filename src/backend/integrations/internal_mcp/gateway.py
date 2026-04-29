@@ -97,6 +97,20 @@ class MethodCatalogue:
                 for field_name in schema.batch_propagated_fields
                 if isinstance(field_name, str) and field_name
             ],
+            "enum_values": {
+                field_name: list(values)
+                for field_name, values in schema.enum_values.items()
+                if isinstance(field_name, str) and field_name
+            },
+            "scalar_source_fields": {
+                field_name: [
+                    source_field
+                    for source_field in source_fields
+                    if isinstance(source_field, str) and source_field
+                ]
+                for field_name, source_fields in schema.scalar_source_fields.items()
+                if isinstance(field_name, str) and field_name
+            },
         }
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
