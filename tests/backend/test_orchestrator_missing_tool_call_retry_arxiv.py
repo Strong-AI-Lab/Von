@@ -274,6 +274,115 @@ def test_missing_tool_call_retry_chains_text_relation_summary_after_search_conce
     ]
 
 
+def test_missing_tool_call_retry_uses_workflow_recovery_contract_binding():
+    orchestrator = _build_orchestrator_stub()
+    contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_entity_information_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": ["get_text_relations_summary"],
+                "recovery_strategies": [
+                    {
+                        "strategy_id": "recover_text_relations_for_focal_entity",
+                        "tool": "get_text_relations_summary",
+                        "recovers_tools": ["get_text_relations_summary"],
+                        "target_concept_source": "required_fetch_or_focal_concept",
+                        "target_concept_argument_name": "concept_id",
+                    }
+                ],
+            }
+        ],
+    }
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Who am I?",
+        turn_expected_outcome_contract={
+            "target_concept_ids": ["#V#michael_witbrock"],
+        },
+        workflow_required_effects_contract=contract,
+        workflow_required_effects_contract_source="definition_metadata",
+        missing_required_tools=["get_text_relations_summary"],
+        missing_required_fetch_concept_ids=["#V#michael_witbrock"],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "workflow_recovery_contract",
+            "_retry_target_concept_source": "required_fetch_or_focal_concept",
+            "_retry_recovery_contract_id": (
+                "grounded_entity_information_retrieval_evidence"
+            ),
+            "_retry_recovery_contract_source": "definition_metadata",
+            "_retry_recovery_effect_id": "grounded_entity_information_evidence",
+            "_retry_recovery_strategy_id": (
+                "recover_text_relations_for_focal_entity"
+            ),
+        }
+    ]
+    assert orchestrator._summarise_retry_tool_call_binding_sources(
+        cast(list[Mapping[str, Any]], forced)
+    ) == [
+        {
+            "tool": "get_text_relations_summary",
+            "binding_source": "workflow_recovery_contract",
+            "target_concept_source": "required_fetch_or_focal_concept",
+            "recovery_contract_id": (
+                "grounded_entity_information_retrieval_evidence"
+            ),
+            "recovery_contract_source": "definition_metadata",
+            "recovery_effect_id": "grounded_entity_information_evidence",
+            "recovery_strategy_id": "recover_text_relations_for_focal_entity",
+        }
+    ]
+
+
+def test_workflow_recovery_contract_blocks_legacy_follow_up_without_strategy():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What predicates are salient to SAIL students?",
+        workflow_required_effects_contract={
+            "schema_version": "workflow_required_effects_contract.v1",
+            "contract_id": "grounded_entity_information_retrieval_evidence",
+            "required_effects": [
+                {
+                    "effect_id": "grounded_entity_information_evidence",
+                    "effect_type": "grounded_evidence",
+                    "required_tools": ["get_text_relations_summary"],
+                }
+            ],
+        },
+        workflow_required_effects_contract_source="definition_metadata",
+        missing_required_tools=["get_text_relations_summary"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#sail_student_group",
+                            "name": "SAIL Student Group",
+                            "relevance_score": 98.0,
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced is None
+
+
 def test_missing_tool_call_retry_chains_related_concepts_after_search_concepts():
     orchestrator = _build_orchestrator_stub()
 

@@ -1369,6 +1369,10 @@ class _ToolCallRequest(TypedDict):
     _call_id: NotRequired[str]
     _retry_binding_source: NotRequired[str]
     _retry_target_concept_source: NotRequired[str]
+    _retry_recovery_contract_id: NotRequired[str]
+    _retry_recovery_contract_source: NotRequired[str]
+    _retry_recovery_effect_id: NotRequired[str]
+    _retry_recovery_strategy_id: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -5244,6 +5248,17 @@ class InternalMCPChatOrchestrator:
             retry_context,
             user_prompt=data.get("user_prompt"),
             turn_expected_outcome_contract=turn_expected_outcome_contract,
+            workflow_required_effects_contract=(
+                data.get("workflow_required_effects_contract")
+                if isinstance(data.get("workflow_required_effects_contract"), Mapping)
+                else None
+            ),
+            workflow_required_effects_contract_source=(
+                str(data.get("workflow_required_effects_contract_source")).strip()
+                if isinstance(data.get("workflow_required_effects_contract_source"), str)
+                and str(data.get("workflow_required_effects_contract_source")).strip()
+                else None
+            ),
             missing_required_tools=missing_required_tools,
             missing_required_fetch_concept_ids=missing_required_fetch_concept_ids,
             missing_required_read_file_copy_ids=missing_required_read_file_copy_ids,
@@ -7957,6 +7972,23 @@ class InternalMCPChatOrchestrator:
                     turn_expected_outcome_contract=(
                         self._build_turn_expected_outcome_contract(data)
                     ),
+                    workflow_required_effects_contract=(
+                        data.get("workflow_required_effects_contract")
+                        if isinstance(
+                            data.get("workflow_required_effects_contract"), Mapping
+                        )
+                        else None
+                    ),
+                    workflow_required_effects_contract_source=(
+                        str(data.get("workflow_required_effects_contract_source")).strip()
+                        if isinstance(
+                            data.get("workflow_required_effects_contract_source"), str
+                        )
+                        and str(
+                            data.get("workflow_required_effects_contract_source")
+                        ).strip()
+                        else None
+                    ),
                     missing_required_tools=(
                         list(data.get("missing_prompt_tools"))
                         if isinstance(data.get("missing_prompt_tools"), list)
@@ -8014,12 +8046,22 @@ class InternalMCPChatOrchestrator:
                 if parent_forced_tool_calls:
                     import json
 
-                    tool_calls = parent_forced_tool_calls
+                    public_parent_forced_tool_calls = (
+                        self._strip_retry_tool_call_internal_metadata(
+                            parent_forced_tool_calls
+                        )
+                    )
+                    retry_binding_sources = (
+                        self._summarise_retry_tool_call_binding_sources(
+                            parent_forced_tool_calls
+                        )
+                    )
+                    tool_calls = public_parent_forced_tool_calls
                     tool_call_parse_error = None
                     response = (
-                        json.dumps(parent_forced_tool_calls[0])
-                        if len(parent_forced_tool_calls) == 1
-                        else json.dumps(parent_forced_tool_calls)
+                        json.dumps(public_parent_forced_tool_calls[0])
+                        if len(public_parent_forced_tool_calls) == 1
+                        else json.dumps(public_parent_forced_tool_calls)
                     )
                     missing_tool_call_retry_suppressed = False
                     missing_tool_call_retry_stop_reason = None
@@ -8047,6 +8089,7 @@ class InternalMCPChatOrchestrator:
                                             if isinstance(response, str)
                                             else str(response)[:800]
                                         ),
+                                        "retry_binding_sources": retry_binding_sources,
                                     },
                                     stage="missing_tool_recovery",
                                     component="internal_mcp_orchestrator",
@@ -9960,6 +10003,29 @@ class InternalMCPChatOrchestrator:
                             turn_expected_outcome_contract=(
                                 self._build_turn_expected_outcome_contract(data)
                             ),
+                            workflow_required_effects_contract=(
+                                data.get("workflow_required_effects_contract")
+                                if isinstance(
+                                    data.get("workflow_required_effects_contract"),
+                                    Mapping,
+                                )
+                                else None
+                            ),
+                            workflow_required_effects_contract_source=(
+                                str(
+                                    data.get("workflow_required_effects_contract_source")
+                                ).strip()
+                                if isinstance(
+                                    data.get(
+                                        "workflow_required_effects_contract_source"
+                                    ),
+                                    str,
+                                )
+                                and str(
+                                    data.get("workflow_required_effects_contract_source")
+                                ).strip()
+                                else None
+                            ),
                             missing_required_tools=missing_prompt_tools,
                             missing_required_fetch_concept_ids=(
                                 missing_prompt_fetch_concept_ids
@@ -9991,10 +10057,20 @@ class InternalMCPChatOrchestrator:
                     if parent_forced_tool_calls:
                         import json
 
+                        public_parent_forced_tool_calls = (
+                            self._strip_retry_tool_call_internal_metadata(
+                                parent_forced_tool_calls
+                            )
+                        )
+                        retry_binding_sources = (
+                            self._summarise_retry_tool_call_binding_sources(
+                                parent_forced_tool_calls
+                            )
+                        )
                         current_response = (
-                            json.dumps(parent_forced_tool_calls[0])
-                            if len(parent_forced_tool_calls) == 1
-                            else json.dumps(parent_forced_tool_calls)
+                            json.dumps(public_parent_forced_tool_calls[0])
+                            if len(public_parent_forced_tool_calls) == 1
+                            else json.dumps(public_parent_forced_tool_calls)
                         )
                         missing_tool_call_retry_suppressed = False
                         missing_tool_call_retry_stop_reason = None
@@ -10017,6 +10093,7 @@ class InternalMCPChatOrchestrator:
                                                 or ""
                                             ),
                                             "response_preview": current_response[:800],
+                                            "retry_binding_sources": retry_binding_sources,
                                         },
                                         stage="missing_tool_recovery",
                                         component="internal_mcp_orchestrator",
@@ -10035,7 +10112,7 @@ class InternalMCPChatOrchestrator:
                                 "more_tool_calls": True,
                                 "tool_calls_present": True,
                                 "tool_calls_validated": False,
-                                "tool_calls": parent_forced_tool_calls,
+                                "tool_calls": public_parent_forced_tool_calls,
                                 "current_response": current_response,
                                 "remaining_tool_calls": [],
                                 "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
@@ -10173,6 +10250,27 @@ class InternalMCPChatOrchestrator:
                         turn_expected_outcome_contract=(
                             self._build_turn_expected_outcome_contract(data)
                         ),
+                        workflow_required_effects_contract=(
+                            data.get("workflow_required_effects_contract")
+                            if isinstance(
+                                data.get("workflow_required_effects_contract"),
+                                Mapping,
+                            )
+                            else None
+                        ),
+                        workflow_required_effects_contract_source=(
+                            str(
+                                data.get("workflow_required_effects_contract_source")
+                            ).strip()
+                            if isinstance(
+                                data.get("workflow_required_effects_contract_source"),
+                                str,
+                            )
+                            and str(
+                                data.get("workflow_required_effects_contract_source")
+                            ).strip()
+                            else None
+                        ),
                         missing_required_tools=missing_prompt_tools,
                         missing_required_fetch_concept_ids=(
                             missing_prompt_fetch_concept_ids
@@ -10204,10 +10302,20 @@ class InternalMCPChatOrchestrator:
                 if parent_forced_tool_calls:
                     import json
 
+                    public_parent_forced_tool_calls = (
+                        self._strip_retry_tool_call_internal_metadata(
+                            parent_forced_tool_calls
+                        )
+                    )
+                    retry_binding_sources = (
+                        self._summarise_retry_tool_call_binding_sources(
+                            parent_forced_tool_calls
+                        )
+                    )
                     current_response = (
-                        json.dumps(parent_forced_tool_calls[0])
-                        if len(parent_forced_tool_calls) == 1
-                        else json.dumps(parent_forced_tool_calls)
+                        json.dumps(public_parent_forced_tool_calls[0])
+                        if len(public_parent_forced_tool_calls) == 1
+                        else json.dumps(public_parent_forced_tool_calls)
                     )
                     missing_tool_call_retry_suppressed = False
                     missing_tool_call_retry_stop_reason = None
@@ -10228,6 +10336,7 @@ class InternalMCPChatOrchestrator:
                                             or ""
                                         ),
                                         "response_preview": current_response[:800],
+                                        "retry_binding_sources": retry_binding_sources,
                                     },
                                     stage="missing_tool_recovery",
                                     component="internal_mcp_orchestrator",
@@ -10246,7 +10355,7 @@ class InternalMCPChatOrchestrator:
                             "more_tool_calls": True,
                             "tool_calls_present": True,
                             "tool_calls_validated": False,
-                            "tool_calls": parent_forced_tool_calls,
+                            "tool_calls": public_parent_forced_tool_calls,
                             "current_response": current_response,
                             "remaining_tool_calls": [],
                             "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
@@ -25636,6 +25745,196 @@ class InternalMCPChatOrchestrator:
         return forced_calls or None
 
     @staticmethod
+    def _coerce_retry_strategy_max_count(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                parsed = int(stripped)
+                return parsed if parsed > 0 else None
+        return None
+
+    @classmethod
+    def _iter_workflow_required_effect_recovery_strategies(
+        cls,
+        *,
+        contract: Mapping[str, Any] | None,
+        missing_required_tools: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(contract, Mapping):
+            return []
+        missing_lookup = {
+            str(item).strip().lower()
+            for item in (missing_required_tools or ())
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not missing_lookup:
+            return []
+
+        required_effects = contract.get("required_effects")
+        if not isinstance(required_effects, Sequence) or isinstance(
+            required_effects, (str, bytes, bytearray)
+        ):
+            return []
+
+        contract_id = str(contract.get("contract_id") or "").strip()
+        strategies: list[dict[str, Any]] = []
+        for effect in required_effects:
+            if not isinstance(effect, Mapping):
+                continue
+            effect_id = str(effect.get("effect_id") or "").strip()
+            raw_strategies = effect.get("recovery_strategies")
+            if not isinstance(raw_strategies, Sequence) or isinstance(
+                raw_strategies, (str, bytes, bytearray)
+            ):
+                continue
+            for raw_strategy in raw_strategies:
+                if not isinstance(raw_strategy, Mapping):
+                    continue
+                tool_name = str(raw_strategy.get("tool") or "").strip()
+                if not tool_name:
+                    continue
+                raw_recovers = raw_strategy.get("recovers_tools")
+                recovers_tools = [
+                    str(item).strip()
+                    for item in (
+                        raw_recovers
+                        if isinstance(raw_recovers, Sequence)
+                        and not isinstance(raw_recovers, (str, bytes, bytearray))
+                        else (tool_name,)
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                if not (
+                    {item.lower() for item in recovers_tools}
+                    & set(missing_lookup)
+                ):
+                    continue
+                strategy = dict(raw_strategy)
+                strategy["tool"] = tool_name
+                strategy["recovers_tools"] = recovers_tools
+                if effect_id:
+                    strategy["_effect_id"] = effect_id
+                if contract_id:
+                    strategy["_contract_id"] = contract_id
+                strategies.append(strategy)
+        return strategies
+
+    @classmethod
+    def _infer_contract_bound_required_retry_tool_calls(
+        cls,
+        *,
+        workflow_required_effects_contract: Mapping[str, Any] | None,
+        workflow_required_effects_contract_source: str | None,
+        missing_required_tools: Sequence[str],
+        target_concept_sources: Mapping[str, Sequence[str]],
+    ) -> list[_ToolCallRequest] | None:
+        strategies = cls._iter_workflow_required_effect_recovery_strategies(
+            contract=workflow_required_effects_contract,
+            missing_required_tools=missing_required_tools,
+        )
+        if not strategies:
+            return None
+
+        forced_calls: list[_ToolCallRequest] = []
+        for strategy in strategies:
+            tool_name = str(strategy.get("tool") or "").strip()
+            if not tool_name:
+                continue
+            metadata_binding = get_tool_target_concept_binding_metadata(tool_name)
+            target_argument_name = str(
+                strategy.get("target_concept_argument_name")
+                or (
+                    metadata_binding.target_concept_argument_name
+                    if metadata_binding is not None
+                    else ""
+                )
+                or ""
+            ).strip()
+            target_source = str(
+                strategy.get("target_concept_source")
+                or (
+                    metadata_binding.target_concept_source
+                    if metadata_binding is not None
+                    else ""
+                )
+                or ""
+            ).strip()
+            default_payload: MutableMapping[str, Any] = {}
+            if metadata_binding is not None:
+                default_payload.update(dict(metadata_binding.default_payload))
+            strategy_payload = strategy.get("default_payload")
+            if isinstance(strategy_payload, Mapping):
+                default_payload.update(
+                    {str(key): value for key, value in strategy_payload.items()}
+                )
+
+            target_ids: list[str] = []
+            if target_argument_name:
+                target_ids = cls._resolve_retry_binding_target_concept_ids(
+                    target_concept_source=target_source or "focal_concept",
+                    target_concept_sources=target_concept_sources,
+                )
+                max_count = cls._coerce_retry_strategy_max_count(
+                    strategy.get("target_concept_max_count")
+                )
+                if max_count is None and metadata_binding is not None:
+                    max_count = metadata_binding.target_concept_max_count
+                if max_count is not None:
+                    target_ids = target_ids[:max_count]
+                if not target_ids:
+                    continue
+            else:
+                target_ids = [""]
+
+            for target_id in target_ids:
+                payload: MutableMapping[str, Any] = dict(default_payload)
+                if target_argument_name:
+                    payload[target_argument_name] = target_id
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": payload,
+                        "_retry_binding_source": "workflow_recovery_contract",
+                        "_retry_target_concept_source": target_source
+                        or (
+                            metadata_binding.target_concept_source
+                            if metadata_binding is not None
+                            else ""
+                        ),
+                        "_retry_recovery_contract_id": str(
+                            strategy.get("_contract_id") or ""
+                        ).strip(),
+                        "_retry_recovery_contract_source": str(
+                            workflow_required_effects_contract_source or ""
+                        ).strip(),
+                        "_retry_recovery_effect_id": str(
+                            strategy.get("_effect_id") or ""
+                        ).strip(),
+                        "_retry_recovery_strategy_id": str(
+                            strategy.get("strategy_id") or ""
+                        ).strip(),
+                    }
+                )
+        return forced_calls or None
+
+    @staticmethod
+    def _has_authoritative_workflow_required_effects_contract(
+        contract: Mapping[str, Any] | None,
+    ) -> bool:
+        if not isinstance(contract, Mapping):
+            return False
+        required_effects = contract.get("required_effects")
+        return isinstance(required_effects, Sequence) and not isinstance(
+            required_effects,
+            (str, bytes, bytearray),
+        )
+
+    @staticmethod
     def _strip_retry_tool_call_internal_metadata(
         tool_calls: Sequence[_ToolCallRequest],
     ) -> list[_ToolCallRequest]:
@@ -25673,6 +25972,18 @@ class InternalMCPChatOrchestrator:
             target_source = tool_call.get("_retry_target_concept_source")
             if isinstance(target_source, str) and target_source.strip():
                 entry["target_concept_source"] = target_source.strip()
+            contract_id = tool_call.get("_retry_recovery_contract_id")
+            if isinstance(contract_id, str) and contract_id.strip():
+                entry["recovery_contract_id"] = contract_id.strip()
+            contract_source = tool_call.get("_retry_recovery_contract_source")
+            if isinstance(contract_source, str) and contract_source.strip():
+                entry["recovery_contract_source"] = contract_source.strip()
+            effect_id = tool_call.get("_retry_recovery_effect_id")
+            if isinstance(effect_id, str) and effect_id.strip():
+                entry["recovery_effect_id"] = effect_id.strip()
+            strategy_id = tool_call.get("_retry_recovery_strategy_id")
+            if isinstance(strategy_id, str) and strategy_id.strip():
+                entry["recovery_strategy_id"] = strategy_id.strip()
             summaries.append(entry)
         return summaries
 
@@ -25886,6 +26197,8 @@ class InternalMCPChatOrchestrator:
         ) = None,
         required_create_type_name: str | None = None,
         required_url_extraction_url: str | None = None,
+        workflow_required_effects_contract: Mapping[str, Any] | None = None,
+        workflow_required_effects_contract_source: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Replay only structured retry payloads for explicit required tools."""
 
@@ -26034,12 +26347,28 @@ class InternalMCPChatOrchestrator:
         }
 
         forced_calls: list[_ToolCallRequest] = []
+        contract_bound_calls = self._infer_contract_bound_required_retry_tool_calls(
+            workflow_required_effects_contract=workflow_required_effects_contract,
+            workflow_required_effects_contract_source=(
+                workflow_required_effects_contract_source
+            ),
+            missing_required_tools=missing_required_tools,
+            target_concept_sources=target_concept_sources,
+        )
+        if contract_bound_calls:
+            forced_calls.extend(contract_bound_calls)
+
         metadata_follow_up_calls = self._extract_tool_follow_up_retry_tool_calls(
             missing_required_tools=missing_required_tools,
             tool_invocations=tool_invocations,
         )
         if metadata_follow_up_calls:
             forced_calls.extend(metadata_follow_up_calls)
+
+        if self._has_authoritative_workflow_required_effects_contract(
+            workflow_required_effects_contract
+        ):
+            return forced_calls or None
 
         for tool_name in missing_required_tools:
             name = str(tool_name).strip()
@@ -26056,6 +26385,7 @@ class InternalMCPChatOrchestrator:
                 ontology_follow_up_predicate_ids
                 or predicate_incidence_follow_up_predicate_ids
             )
+            has_prior_retry_invocations = bool(tool_invocations)
             only_actor_target_is_available = bool(retry_actor_concept_id) and not (
                 contract_target_concept_ids
                 or missing_required_fetch_concept_ids
@@ -26063,6 +26393,18 @@ class InternalMCPChatOrchestrator:
                 or ontology_follow_up_concept_ids
             )
             skip_metadata_binding = (
+                pure_ontology_follow_up
+                and has_prior_retry_invocations
+                and name
+                in {
+                    "fetch_concept",
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                    "get_text_relations_summary",
+                    "get_related_concepts",
+                    "list_uncertain_relationship_assertions",
+                }
+            ) or (
                 name in {"get_predicate_incidence", "find_relations_with_argument"}
                 and pure_ontology_follow_up
                 and only_actor_target_is_available
@@ -27018,25 +27360,6 @@ class InternalMCPChatOrchestrator:
         }
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_tools:
-            if tool_name in {
-                "get_predicate_incidence",
-                "find_relations_with_argument",
-                "fetch_concept",
-                "list_uncertain_relationship_assertions",
-            }:
-                if tool_name == "find_relations_with_argument" and (
-                    concept_ids_are_predicate_only
-                ):
-                    continue
-                metadata_bound_calls = (
-                    cls._infer_metadata_bound_required_retry_tool_calls(
-                        tool_name=tool_name,
-                        target_concept_sources=target_concept_sources,
-                    )
-                )
-                if metadata_bound_calls:
-                    forced_calls.extend(metadata_bound_calls)
-                    continue
             if tool_name == "get_predicate_incidence":
                 forced_calls.append(
                     {
@@ -27151,6 +27474,8 @@ class InternalMCPChatOrchestrator:
         augmented_context: Sequence[Mapping[str, Any]],
         user_prompt: Any | None = None,
         turn_expected_outcome_contract: Mapping[str, Any] | None = None,
+        workflow_required_effects_contract: Mapping[str, Any] | None = None,
+        workflow_required_effects_contract_source: str | None = None,
         missing_required_tools: Sequence[str] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
@@ -27231,7 +27556,16 @@ class InternalMCPChatOrchestrator:
                 and str(required_url_extraction_url).strip()
                 else None
             ),
+            workflow_required_effects_contract=workflow_required_effects_contract,
+            workflow_required_effects_contract_source=(
+                workflow_required_effects_contract_source
+            ),
         )
+        if self._has_authoritative_workflow_required_effects_contract(
+            workflow_required_effects_contract
+        ):
+            return required_forced
+
         ontology_follow_up = self._infer_ontology_follow_up_retry_tool_calls(
             user_text=last_user_text,
             missing_required_tools=(

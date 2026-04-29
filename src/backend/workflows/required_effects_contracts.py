@@ -45,6 +45,85 @@ def _normalise_match_mode(value: Any, *, default: str) -> str:
     return default
 
 
+def _normalise_optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _normalise_optional_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items() if str(key)}
+
+
+def _normalise_recovery_strategy(
+    raw_strategy: Any,
+    *,
+    effect_id: str,
+    index: int,
+) -> dict[str, Any]:
+    if not isinstance(raw_strategy, Mapping):
+        raise ValueError(f"{effect_id}_recovery_strategy_{index}_not_object")
+
+    tool_name = _normalise_text(
+        raw_strategy.get("tool")
+        or raw_strategy.get("tool_name")
+        or raw_strategy.get("recover_tool")
+    )
+    if not tool_name:
+        raise ValueError(f"{effect_id}_recovery_strategy_{index}_tool_missing")
+
+    strategy_id = _normalise_text(
+        raw_strategy.get("strategy_id")
+        or raw_strategy.get("id")
+        or f"{effect_id}_recovery_{index}"
+    )
+    if not strategy_id:
+        raise ValueError(f"{effect_id}_recovery_strategy_{index}_id_missing")
+
+    recover_tools = _normalise_string_list(
+        raw_strategy.get("recovers_tools")
+        if "recovers_tools" in raw_strategy
+        else raw_strategy.get("missing_tools") or raw_strategy.get("applies_to_tools")
+    )
+    if not recover_tools:
+        recover_tools = [tool_name]
+
+    normalised: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "tool": tool_name,
+        "recovers_tools": recover_tools,
+        "description": _normalise_text(raw_strategy.get("description")),
+        "target_concept_source": _normalise_text(
+            raw_strategy.get("target_concept_source")
+            or raw_strategy.get("bind_target_concept_from")
+        ),
+        "target_concept_argument_name": _normalise_text(
+            raw_strategy.get("target_concept_argument_name")
+            or raw_strategy.get("target_argument")
+        ),
+        "target_concept_max_count": _normalise_optional_positive_int(
+            raw_strategy.get("target_concept_max_count")
+        ),
+        "default_payload": _normalise_optional_mapping(
+            raw_strategy.get("default_payload")
+        ),
+    }
+    return {
+        key: value
+        for key, value in normalised.items()
+        if value not in ("", [], {}, None)
+    }
+
+
 def _normalise_required_effect_template(
     raw_effect: Any,
     *,
@@ -117,6 +196,24 @@ def _normalise_required_effect_template(
             raw_effect.get("not_satisfied_reason") or raw_effect.get("failed_reason")
         ),
     }
+    raw_recovery_strategies = (
+        raw_effect.get("recovery_strategies")
+        or raw_effect.get("recovery")
+        or raw_effect.get("tool_recovery_strategies")
+    )
+    if raw_recovery_strategies is not None:
+        if not isinstance(raw_recovery_strategies, list):
+            raise ValueError(f"{effect_id}_recovery_strategies_not_list")
+        recovery_strategies = [
+            _normalise_recovery_strategy(
+                raw_strategy,
+                effect_id=effect_id,
+                index=strategy_index + 1,
+            )
+            for strategy_index, raw_strategy in enumerate(raw_recovery_strategies)
+        ]
+        if recovery_strategies:
+            normalised["recovery_strategies"] = recovery_strategies
     targets = _normalise_string_list(raw_effect.get("targets"))
     if targets:
         normalised["targets"] = targets
