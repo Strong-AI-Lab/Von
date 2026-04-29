@@ -183,8 +183,9 @@ _apply_dotenv_overrides(
         "GITHUB_VON_TOKEN",
         "GITHUB_TOKEN",
         "GH_TOKEN",
-        # Default model overrides — allow .env to control which models are
-        # used when no user/org settings specify a preference.
+        # OpenAI credentials and default model overrides — allow .env to
+        # override stale inherited shell values after a local restart.
+        "OPENAI_API_KEY",
         "VON_DEFAULT_OLLAMA_MODEL",
         "VON_DEFAULT_OPENAI_MODEL",
         "VON_DEFAULT_GEMINI_MODEL",

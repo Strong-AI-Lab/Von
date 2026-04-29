@@ -28,6 +28,14 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
+INTERNAL_MCP_DOTENV_OVERRIDE_KEYS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "VON_DEFAULT_OPENAI_MODEL",
+        "VON_DEFAULT_OLLAMA_MODEL",
+        "VON_DEFAULT_GEMINI_MODEL",
+    }
+)
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -124,11 +132,28 @@ def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _apply_internal_mcp_dotenv_overrides(
+    apply_overrides: Callable[[Sequence[str]], Mapping[str, str]] | None = None,
+) -> Mapping[str, str]:
+    """Apply repo-root .env values needed before backend imports resolve models."""
+
+    if apply_overrides is None:
+        try:
+            from src.backend.utils.runtime_env import apply_repo_dotenv_overrides
+        except Exception:
+            return {}
+        apply_overrides = apply_repo_dotenv_overrides
+
+    return apply_overrides(tuple(sorted(INTERNAL_MCP_DOTENV_OVERRIDE_KEYS)))
+
+
 def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     pdm_returncode = _maybe_delegate_via_pdm(effective_argv)
     if pdm_returncode is not None:
         return pdm_returncode
+
+    _apply_internal_mcp_dotenv_overrides()
 
     parser = argparse.ArgumentParser(
         description="Invoke a Von internal MCP tool via InternalMCPGateway.",
