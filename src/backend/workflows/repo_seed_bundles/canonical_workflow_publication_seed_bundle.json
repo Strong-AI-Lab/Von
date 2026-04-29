@@ -1472,6 +1472,16 @@
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
           "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"conversation_diagnostics_required_evidence\",\"required_effects\":[{\"effect_id\":\"conversation_locator\",\"effect_type\":\"diagnostic_evidence\",\"required_tools\":[\"conversation_telemetry_get_locator\"],\"activation_required_tools\":[\"conversation_telemetry_get_locator\",\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"conversation_locator_missing\",\"failed_failure_code\":\"conversation_locator_failed\"},{\"effect_id\":\"conversation_history\",\"effect_type\":\"diagnostic_evidence\",\"required_tools\":[\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"required_tools_match\":\"any\",\"activation_required_tools\":[\"conversation_telemetry_get_locator\",\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"conversation_history_missing\",\"failed_failure_code\":\"conversation_history_failed\"}]}",
           "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"generic vontology write tools\",\"create concept and add content\",\"add supplied metadata to represented concept\",\"pasted scholarly metadata\",\"non-arxiv scholarly article metadata\",\"doi article representation\",\"create missing predicate concept\"],\"examples\":[\"Create a represented scholarly article from pasted DOI, title, authors, venue, abstract, and keywords when no specialised metadata workflow is eligible.\",\"How about with this too: pasted ACM article metadata after a previous paper-representation discussion.\",\"Add this supplied metadata to an existing Vontology concept using canonical predicates.\",\"Create any missing predicates as predicate concepts, then write the supplied metadata as verified relations or text.\"],\"routing_notes\":[\"Use this workflow as the generic Vontology write-tool route only when no more specific executable authoring workflow is eligible.\",\"Do not treat this as permission for plan-only answers; write turns require tool execution and read-back before success is claimed.\"]}",
+          "lang": "en-NZ"
         }
       ],
       "workflow_id": "#V#tool_calling_workflow"
