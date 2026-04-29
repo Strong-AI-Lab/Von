@@ -8,6 +8,7 @@ JVNAUTOSCI-1311:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Callable, Dict, Mapping, Sequence
 
@@ -24,6 +25,7 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
     WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -713,6 +715,208 @@ def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _request_lookup_context(request: WorkflowActionRequest) -> dict[str, Any]:
+    env = request.environment
+    return {
+        "action_id": request.action_id,
+        "workflow_id": request.workflow_id,
+        "workflow_state_id": request.workflow_state_id,
+        "action_target_id": request.action_target_id,
+        "contract_concept_id": request.contract_concept_id,
+        "execution_mode": request.execution_mode,
+        "environment": {
+            "model": env.model,
+            "user_namespace": env.user_namespace,
+            "user_concept_id": env.user_concept_id,
+            "org_concept_id": env.org_concept_id,
+            "default_gmail_profile": env.default_gmail_profile,
+        },
+    }
+
+
+def _resolve_context_template_source(
+    *,
+    request: WorkflowActionRequest,
+    entry: Mapping[str, Any],
+) -> tuple[bool, Any]:
+    if "value" in entry:
+        return True, entry.get("value")
+
+    if "value_from_context_options" in entry:
+        options = entry.get("value_from_context_options")
+        if not isinstance(options, (list, tuple)):
+            return False, None
+        for raw_path in options:
+            path = str(raw_path or "").strip()
+            if not path:
+                continue
+            found, value = resolve_context_path(context=request.data, path=path)
+            if found and _context_value_present(value):
+                return True, value
+
+    if "value_from_context" in entry:
+        path = str(entry.get("value_from_context") or "").strip()
+        if path:
+            found, value = resolve_context_path(context=request.data, path=path)
+            if found and _context_value_present(value):
+                return True, value
+
+    if "value_from_request" in entry:
+        path = str(entry.get("value_from_request") or "").strip()
+        if path:
+            found, value = resolve_context_path(
+                context=_request_lookup_context(request),
+                path=path,
+            )
+            if found and _context_value_present(value):
+                return True, value
+
+    if "value_from_environment" in entry:
+        attr = str(entry.get("value_from_environment") or "").strip()
+        if attr:
+            value = getattr(request.environment, attr, None)
+            if _context_value_present(value):
+                return True, value
+
+    if "default" in entry:
+        return True, entry.get("default")
+
+    return False, None
+
+
+def _format_context_template_value(value: Any, transform: str) -> str:
+    mode = str(transform or "string").strip().lower()
+    if mode == "json":
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    if mode == "concept_id":
+        from ...utils.concept_id_utils import canonicalise_vontology_concept_id
+
+        return canonicalise_vontology_concept_id(str(value or "")) or ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return "" if value is None else str(value)
+
+
+def _handle_context_template(request: WorkflowActionRequest) -> WorkflowActionResult:
+    """Render context-derived strings into workflow context.
+
+    Input schema::
+
+        {
+          "assignments": [
+            {
+              "key": "rendered_key",
+              "template": "Profile: {workflow_id} / {model_ref}",
+              "variables": {
+                "workflow_id": {"value_from_request": "workflow_id"},
+                "model_ref": {
+                  "value_from_environment": "model",
+                  "default": "unknown_model"
+                }
+              }
+            }
+          ]
+        }
+
+    Variables support literal ``value``, context paths, request paths,
+    environment attributes, defaults, and compact ``json`` / ``concept_id``
+    rendering. The action is deliberately generic and contains no workflow-
+    specific policy.
+    """
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    assignments = inputs.get("assignments")
+    if not isinstance(assignments, (list, tuple)):
+        return WorkflowActionResult(
+            status="failed",
+            error="context_template:assignments_missing_or_invalid",
+        )
+
+    outputs: dict[str, Any] = {}
+    applied: list[str] = []
+    for index, entry in enumerate(assignments):
+        if not isinstance(entry, Mapping):
+            return WorkflowActionResult(
+                status="failed",
+                error=f"context_template:assignment_{index}_not_mapping",
+            )
+
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"context_template:assignment_{index}_missing_key",
+            )
+
+        if _coerce_bool(entry.get("preserve_existing")):
+            found_existing, existing = resolve_context_path(
+                context=request.data,
+                path=key,
+            )
+            if found_existing and _context_value_present(existing):
+                continue
+
+        template = entry.get("template")
+        if not isinstance(template, str) or not template:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"context_template:assignment_{index}_missing_template",
+            )
+
+        raw_variables = entry.get("variables")
+        variables = raw_variables if isinstance(raw_variables, Mapping) else {}
+        rendered_variables: dict[str, str] = {}
+        unresolved: list[str] = []
+        for raw_name, raw_spec in variables.items():
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            spec = raw_spec if isinstance(raw_spec, Mapping) else {"value": raw_spec}
+            found, value = _resolve_context_template_source(
+                request=request,
+                entry=spec,
+            )
+            if not found:
+                unresolved.append(name)
+                continue
+            transform = str(spec.get("transform") or spec.get("format") or "string")
+            rendered_variables[name] = _format_context_template_value(
+                value,
+                transform,
+            )
+
+        if unresolved:
+            if _coerce_bool(entry.get("skip_if_unresolved")):
+                continue
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    f"context_template:assignment_{index}_"
+                    f"unresolved_variables:{','.join(unresolved)}"
+                ),
+            )
+
+        try:
+            rendered = template.format_map(rendered_variables)
+        except KeyError as exc:
+            if _coerce_bool(entry.get("skip_if_unresolved")):
+                continue
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    f"context_template:assignment_{index}_"
+                    f"unresolved_template_variable:{exc.args[0]}"
+                ),
+            )
+
+        transform = str(entry.get("transform") or "string")
+        outputs[key] = _format_context_template_value(rendered, transform)
+        applied.append(key)
+
+    outputs["_context_template_applied_keys"] = applied
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -746,6 +950,17 @@ def register_control_flow_actions(
                 "Accepts an ``assignments`` list of dicts, each with ``key`` "
                 "and one of ``value`` (literal) or ``value_from_context`` "
                 "(copy from another context key)."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
+            handler=_handle_context_template,
+            description=(
+                "Declaratively render workflow context/request/environment "
+                "values into string context keys. Supports JSON and concept-id "
+                "rendering as generic VWL template support."
             ),
         )
     )

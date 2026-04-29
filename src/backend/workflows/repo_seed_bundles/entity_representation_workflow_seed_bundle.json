@@ -2,8 +2,8 @@
   "family_id": "entity_representation_workflow_seed_bundle",
   "managed_by": "entity_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1704",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "workflow_authoring.emit_marker",
     "workflow_authoring.discover_existing_workflows",
@@ -227,6 +227,18 @@
                 {
                   "context_key": "workflow_authoring_candidate_workflows",
                   "label": "Candidate workflows"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },

@@ -14,6 +14,8 @@ from .episode_evaluation_workflow_contracts import (
     EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
     EPISODE_GROUNDED_HELPFULNESS_PROMPT_LINK_PREDICATE,
     EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
+    EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
+    EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_LINK_PREDICATE,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_LINK_PREDICATE,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
@@ -66,6 +68,12 @@ _GROUNDED_HELPFULNESS_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "episode_grounded_helpfulness_prompt_seed.md"
 )
+_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "episode_workflow_experience_guidance_prompt_seed.md"
+)
 _SELF_IMPROVEMENT_PROPOSAL_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -101,6 +109,17 @@ _PROMPT_CONFIGS = (
             "Canonical LLM prompt for scoring grounded helpfulness and "
             "evidence-answer consistency from the shared episode evidence "
             "bundle."
+        ),
+    },
+    {
+        "concept_id": EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_CONCEPT_ID,
+        "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
+        "predicate": EPISODE_WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_LINK_PREDICATE,
+        "asset_path": _WORKFLOW_EXPERIENCE_GUIDANCE_PROMPT_SEED_ASSET_PATH,
+        "name": "Episode workflow experience guidance prompt",
+        "description": (
+            "Canonical LLM prompt for inducing bounded workflow experience "
+            "guidance from post-run critic evidence."
         ),
     },
     {

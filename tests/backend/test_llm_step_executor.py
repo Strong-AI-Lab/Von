@@ -10,6 +10,7 @@ from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
 )
 from src.backend.workflows.llm_step_executor import execute_llm_step
+from src.backend.workflows.llm_step_executor import _compose_llm_prompt
 
 
 def _build_request(*, llm_response: str) -> WorkflowActionRequest:
@@ -25,6 +26,61 @@ def _build_request(*, llm_response: str) -> WorkflowActionRequest:
         },
         validation_policy={"output_format": "json_value"},
     )
+
+
+def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> None:
+    prompt = _compose_llm_prompt(
+        base_prompt="Use the workflow policy.",
+        llm_policy={
+            "context_fields": [
+                {
+                    "context_key": "workflow_success_guidance_history",
+                    "label": (
+                        "Historical successful-run guidance: soft hints from "
+                        "prior successful executions."
+                    ),
+                },
+                {
+                    "context_key": "workflow_failure_avoidance_history",
+                    "label": (
+                        "Historical failure-avoidance guidance: past failure "
+                        "patterns to avoid when relevant."
+                    ),
+                },
+                {
+                    "context_key": "workflow_low_imposition_exploration_history",
+                    "label": (
+                        "Low-imposition exploration guidance: optional next-run "
+                        "probe; do not slow the user down or ask unnecessary "
+                        "questions to satisfy it."
+                    ),
+                },
+            ]
+        },
+        context={
+            "workflow_success_guidance_history": [
+                {"text": "workflow_experience_guidance.v1\nbody:\nReuse evidence."}
+            ],
+            "workflow_failure_avoidance_history": [
+                {"text": "workflow_experience_guidance.v1\nbody:\nAvoid guessing."}
+            ],
+            "workflow_low_imposition_exploration_history": [
+                {
+                    "text": (
+                        "workflow_experience_guidance.v1\nbody:\n"
+                        "Inspect telemetry before asking the user."
+                    )
+                }
+            ],
+        },
+    )
+
+    assert "Historical successful-run guidance: soft hints" in prompt
+    assert "Historical failure-avoidance guidance: past failure patterns" in prompt
+    assert "Low-imposition exploration guidance: optional next-run probe" in prompt
+    assert "Reuse evidence." in prompt
+    assert "Avoid guessing." in prompt
+    assert "Inspect telemetry before asking the user." in prompt
 
 
 def test_execute_llm_step_parses_json_value_output() -> None:

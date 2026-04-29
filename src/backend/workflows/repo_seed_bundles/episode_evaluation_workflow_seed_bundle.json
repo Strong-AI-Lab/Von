@@ -2,14 +2,19 @@
   "family_id": "episode_evaluation_workflow_seed_bundle",
   "managed_by": "episode_evaluation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1605",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "episode_critic.build_evidence_bundle",
     "llm.action",
     "episode_critic.persist_memory",
     "workflow_create_instance",
-    "workflow_invoke_subworkflow"
+    "workflow_invoke_subworkflow",
+    "workflow_control.context_template",
+    "create_concepts",
+    "add_relationship",
+    "upsert_text_relation",
+    "get_text_relations"
   ],
   "workflows": [
     {
@@ -268,6 +273,18 @@
                 {
                   "context_key": "grounded_helpfulness_assessment",
                   "label": "Grounded helpfulness assessment"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -312,13 +329,13 @@
             "invoked_workflow_id": null,
             "llm_policy": null,
             "mutation_authority": null,
-            "next_state": null,
+            "next_state": "prepare_workflow_experience_profile",
             "on_approval_required_state": null,
             "on_break_state": null,
             "on_continue_state": null,
             "on_failure_state": "failed",
-            "on_false_state": "complete",
-            "on_true_state": "launch_maintenance_follow_up",
+            "on_false_state": null,
+            "on_true_state": null,
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "persist_assessment",
@@ -388,6 +405,769 @@
               "maintenance_launch_event_idempotency_key",
               "maintenance_follow_up_requested",
               "maintenance_follow_up_reason"
+            ]
+          },
+          {
+            "state_id": "prepare_workflow_experience_profile",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "workflow_experience_model_ref",
+                    "template": "{model_ref}",
+                    "variables": {
+                      "model_ref": {
+                        "value_from_context_options": [
+                          "observed_evidence.selected_llm_debug.model",
+                          "requested_model"
+                        ],
+                        "default": "unknown_model"
+                      }
+                    }
+                  },
+                  {
+                    "key": "workflow_experience_stage_id",
+                    "template": "{stage_id}",
+                    "variables": {
+                      "stage_id": {
+                        "value_from_context_options": [
+                          "observed_evidence.selected_llm_debug.turn_execution_diagnostics.workflow_stage_path.path.0.stage_id",
+                          "observed_evidence.selected_llm_debug.workflow_stage_model.stage_id",
+                          "observed_evidence.selected_llm_debug.workflow_stage_path"
+                        ],
+                        "default": "unknown_stage"
+                      }
+                    }
+                  },
+                  {
+                    "key": "workflow_experience_target_workflow_id",
+                    "template": "{workflow_id}",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      }
+                    }
+                  },
+                  {
+                    "key": "workflow_experience_profile_name",
+                    "template": "Workflow LLM experience profile: {workflow_id} / {model_ref}",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      },
+                      "model_ref": {
+                        "value_from_context_options": [
+                          "observed_evidence.selected_llm_debug.model",
+                          "requested_model"
+                        ],
+                        "default": "unknown_model"
+                      }
+                    }
+                  },
+                  {
+                    "key": "workflow_experience_profile_concept_id",
+                    "template": "Workflow LLM experience profile: {workflow_id} / {model_ref}",
+                    "transform": "concept_id",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      },
+                      "model_ref": {
+                        "value_from_context_options": [
+                          "observed_evidence.selected_llm_debug.model",
+                          "requested_model"
+                        ],
+                        "default": "unknown_model"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_prepare_workflow_experience_profile_model_ref_to_workflow_experience_model_ref",
+                "context_key": "workflow_experience_model_ref",
+                "tool_output_field": "workflow_experience_model_ref"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_prepare_workflow_experience_profile_stage_id_to_workflow_experience_stage_id",
+                "context_key": "workflow_experience_stage_id",
+                "tool_output_field": "workflow_experience_stage_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_prepare_workflow_experience_profile_target_workflow_to_workflow_experience_target_workflow_id",
+                "context_key": "workflow_experience_target_workflow_id",
+                "tool_output_field": "workflow_experience_target_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_prepare_workflow_experience_profile_name_to_workflow_experience_profile_name",
+                "context_key": "workflow_experience_profile_name",
+                "tool_output_field": "workflow_experience_profile_name"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_prepare_workflow_experience_profile_id_to_workflow_experience_profile_concept_id",
+                "context_key": "workflow_experience_profile_concept_id",
+                "tool_output_field": "workflow_experience_profile_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_experience_model_ref",
+              "workflow_experience_stage_id",
+              "workflow_experience_target_workflow_id",
+              "workflow_experience_profile_name",
+              "workflow_experience_profile_concept_id"
+            ],
+            "next_state": "ensure_workflow_experience_profile",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "ensure_workflow_experience_profile",
+            "action_id": "create_concepts",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "parent_id",
+                "value": "#V#workflow_llm_experience_profile"
+              },
+              {
+                "key": "allow_duplicate_instances",
+                "value": false
+              },
+              {
+                "key": "concepts",
+                "value": [
+                  {
+                    "name": {
+                      "$context_key": "workflow_experience_profile_name"
+                    },
+                    "kind": "instance",
+                    "description": "Workflow+LLM experience profile for additive post-run guidance memories."
+                  }
+                ]
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_ensure_workflow_experience_profile_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_ensure_workflow_experience_profile_result_to_workflow_experience_profile_create_result",
+                "context_key": "workflow_experience_profile_create_result",
+                "tool_output_field": "result"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_ensure_workflow_experience_profile_result_concept_id_to_workflow_experience_profile_concept_id",
+                "context_key": "workflow_experience_profile_concept_id",
+                "tool_output_field": "result.results.0.concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_experience_profile_create_result",
+              "workflow_experience_profile_concept_id"
+            ],
+            "next_state": "link_workflow_experience_profile_workflow",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "link_workflow_experience_profile_workflow",
+            "action_id": "add_relationship",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#experienceProfileForWorkflow"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_link_workflow_experience_profile_source_to_source_id_parameter",
+                "context_key": "workflow_experience_profile_concept_id",
+                "required": true,
+                "tool_param": "source_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_link_workflow_experience_profile_target_to_target_parameter",
+                "context_key": "workflow_experience_target_workflow_id",
+                "required": true,
+                "tool_param": "target"
+              }
+            ],
+            "next_state": "record_workflow_experience_profile_model_ref",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "record_workflow_experience_profile_model_ref",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#hasExperienceProfileModelRefText"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "schema_version": "workflow_experience_profile.v1",
+                  "source": "episode_evaluation_workflow",
+                  "jira": "JVNAUTOSCI-2192"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_record_workflow_experience_profile_model_ref_profile_to_concept_id_parameter",
+                "context_key": "workflow_experience_profile_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_record_workflow_experience_profile_model_ref_text_to_text_parameter",
+                "context_key": "workflow_experience_model_ref",
+                "required": true,
+                "tool_param": "text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_record_workflow_experience_profile_model_ref_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "next_state": "induce_workflow_experience_guidance",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "induce_workflow_experience_guidance",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys schema_version, successful_run_guidance, failure_avoidance_guidance, and next_run_exploration_guidance.",
+              "context_fields": [
+                {
+                  "context_key": "episode_locator",
+                  "label": "Episode locator"
+                },
+                {
+                  "context_key": "expected_context",
+                  "label": "Expected behaviour context"
+                },
+                {
+                  "context_key": "observed_evidence",
+                  "label": "Observed evidence"
+                },
+                {
+                  "context_key": "grounded_helpfulness_assessment",
+                  "label": "Grounded helpfulness assessment"
+                },
+                {
+                  "context_key": "critic_assessment",
+                  "label": "Critic assessment"
+                },
+                {
+                  "context_key": "episode_critique_memory_id",
+                  "label": "Episode critique memory id"
+                },
+                {
+                  "context_key": "workflow_experience_target_workflow_id",
+                  "label": "Target workflow id"
+                },
+                {
+                  "context_key": "workflow_experience_model_ref",
+                  "label": "Target LLM model reference"
+                },
+                {
+                  "context_key": "workflow_experience_stage_id",
+                  "label": "Target workflow stage id"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
+                }
+              ]
+            },
+            "prompt_concept_ids": [
+              "#V#episode_workflow_experience_guidance_prompt"
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_induce_workflow_experience_guidance_validated_json_to_workflow_experience_guidance",
+                "context_key": "workflow_experience_guidance",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "workflow_experience_guidance"
+            ],
+            "next_state": "render_success_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_success_guidance_relation",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "workflow_success_guidance_relation_text",
+                    "template": "workflow_experience_guidance.v1\nguidance_kind: successful_run\nworkflow_id: {workflow_id}\nmodel_ref: {model_ref}\nstage_id: {stage_id}\nrequest_id: {request_id}\nworkflow_instance_id: {workflow_instance_id}\nepisode_critique_memory_id: {episode_critique_memory_id}\nproduced_at_utc: {produced_at_utc}\nevidence_refs: {evidence_refs}\nconfidence: {confidence}\nbody:\n{body}",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      },
+                      "model_ref": {
+                        "value_from_context": "workflow_experience_model_ref",
+                        "default": "unknown_model"
+                      },
+                      "stage_id": {
+                        "value_from_context": "workflow_experience_stage_id",
+                        "default": "unknown_stage"
+                      },
+                      "request_id": {
+                        "value_from_context": "request_id",
+                        "default": "unknown_request"
+                      },
+                      "workflow_instance_id": {
+                        "value_from_context": "instance_id",
+                        "default": "unknown_instance"
+                      },
+                      "episode_critique_memory_id": {
+                        "value_from_context": "episode_critique_memory_id",
+                        "default": "unknown_episode_critique_memory"
+                      },
+                      "produced_at_utc": {
+                        "value_from_context": "episode_critique_memory_upsert.state.updated_at_utc",
+                        "default": "unknown_time"
+                      },
+                      "evidence_refs": {
+                        "value_from_context": "workflow_experience_guidance.successful_run_guidance.evidence_refs",
+                        "default": [],
+                        "format": "json"
+                      },
+                      "confidence": {
+                        "value_from_context": "workflow_experience_guidance.successful_run_guidance.confidence",
+                        "default": 0
+                      },
+                      "body": {
+                        "value_from_context": "workflow_experience_guidance.successful_run_guidance.body",
+                        "default": "No durable lesson beyond normal workflow requirements was evidenced in this invocation."
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_render_success_guidance_relation_workflow_success_guidance_relation_text_to_workflow_success_guidance_relation_text",
+                "context_key": "workflow_success_guidance_relation_text",
+                "tool_output_field": "workflow_success_guidance_relation_text"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_success_guidance_relation_text"
+            ],
+            "next_state": "write_success_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_success_guidance_relation",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#hasWorkflowSuccessfulRunGuidanceText"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "schema_version": "workflow_experience_guidance_write.v1",
+                  "source": "episode_evaluation_workflow",
+                  "jira": "JVNAUTOSCI-2192"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_success_guidance_relation_profile_to_concept_id_parameter",
+                "context_key": "workflow_experience_profile_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_success_guidance_relation_workflow_success_guidance_relation_text_to_text_parameter",
+                "context_key": "workflow_success_guidance_relation_text",
+                "required": true,
+                "tool_param": "text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_success_guidance_relation_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "next_state": "render_failure_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_failure_guidance_relation",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "workflow_failure_avoidance_relation_text",
+                    "template": "workflow_experience_guidance.v1\nguidance_kind: failure_avoidance\nworkflow_id: {workflow_id}\nmodel_ref: {model_ref}\nstage_id: {stage_id}\nrequest_id: {request_id}\nworkflow_instance_id: {workflow_instance_id}\nepisode_critique_memory_id: {episode_critique_memory_id}\nproduced_at_utc: {produced_at_utc}\nevidence_refs: {evidence_refs}\nconfidence: {confidence}\nbody:\n{body}",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      },
+                      "model_ref": {
+                        "value_from_context": "workflow_experience_model_ref",
+                        "default": "unknown_model"
+                      },
+                      "stage_id": {
+                        "value_from_context": "workflow_experience_stage_id",
+                        "default": "unknown_stage"
+                      },
+                      "request_id": {
+                        "value_from_context": "request_id",
+                        "default": "unknown_request"
+                      },
+                      "workflow_instance_id": {
+                        "value_from_context": "instance_id",
+                        "default": "unknown_instance"
+                      },
+                      "episode_critique_memory_id": {
+                        "value_from_context": "episode_critique_memory_id",
+                        "default": "unknown_episode_critique_memory"
+                      },
+                      "produced_at_utc": {
+                        "value_from_context": "episode_critique_memory_upsert.state.updated_at_utc",
+                        "default": "unknown_time"
+                      },
+                      "evidence_refs": {
+                        "value_from_context": "workflow_experience_guidance.failure_avoidance_guidance.evidence_refs",
+                        "default": [],
+                        "format": "json"
+                      },
+                      "confidence": {
+                        "value_from_context": "workflow_experience_guidance.failure_avoidance_guidance.confidence",
+                        "default": 0
+                      },
+                      "body": {
+                        "value_from_context": "workflow_experience_guidance.failure_avoidance_guidance.body",
+                        "default": "No durable lesson beyond normal workflow requirements was evidenced in this invocation."
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_render_failure_guidance_relation_workflow_failure_avoidance_relation_text_to_workflow_failure_avoidance_relation_text",
+                "context_key": "workflow_failure_avoidance_relation_text",
+                "tool_output_field": "workflow_failure_avoidance_relation_text"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_failure_avoidance_relation_text"
+            ],
+            "next_state": "write_failure_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_failure_guidance_relation",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#hasWorkflowFailureAvoidanceGuidanceText"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "schema_version": "workflow_experience_guidance_write.v1",
+                  "source": "episode_evaluation_workflow",
+                  "jira": "JVNAUTOSCI-2192"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_failure_guidance_relation_profile_to_concept_id_parameter",
+                "context_key": "workflow_experience_profile_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_failure_guidance_relation_workflow_failure_avoidance_relation_text_to_text_parameter",
+                "context_key": "workflow_failure_avoidance_relation_text",
+                "required": true,
+                "tool_param": "text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_failure_guidance_relation_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "next_state": "render_exploration_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_exploration_guidance_relation",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "workflow_next_run_exploration_relation_text",
+                    "template": "workflow_experience_guidance.v1\nguidance_kind: next_run_exploration\nworkflow_id: {workflow_id}\nmodel_ref: {model_ref}\nstage_id: {stage_id}\nrequest_id: {request_id}\nworkflow_instance_id: {workflow_instance_id}\nepisode_critique_memory_id: {episode_critique_memory_id}\nproduced_at_utc: {produced_at_utc}\nevidence_refs: {evidence_refs}\nconfidence: {confidence}\nbody:\n{body}",
+                    "variables": {
+                      "workflow_id": {
+                        "value_from_context_options": [
+                          "selected_workflow_id",
+                          "episode_locator.workflow_id"
+                        ],
+                        "default": "unknown_workflow"
+                      },
+                      "model_ref": {
+                        "value_from_context": "workflow_experience_model_ref",
+                        "default": "unknown_model"
+                      },
+                      "stage_id": {
+                        "value_from_context": "workflow_experience_stage_id",
+                        "default": "unknown_stage"
+                      },
+                      "request_id": {
+                        "value_from_context": "request_id",
+                        "default": "unknown_request"
+                      },
+                      "workflow_instance_id": {
+                        "value_from_context": "instance_id",
+                        "default": "unknown_instance"
+                      },
+                      "episode_critique_memory_id": {
+                        "value_from_context": "episode_critique_memory_id",
+                        "default": "unknown_episode_critique_memory"
+                      },
+                      "produced_at_utc": {
+                        "value_from_context": "episode_critique_memory_upsert.state.updated_at_utc",
+                        "default": "unknown_time"
+                      },
+                      "evidence_refs": {
+                        "value_from_context": "workflow_experience_guidance.next_run_exploration_guidance.evidence_refs",
+                        "default": [],
+                        "format": "json"
+                      },
+                      "confidence": {
+                        "value_from_context": "workflow_experience_guidance.next_run_exploration_guidance.confidence",
+                        "default": 0
+                      },
+                      "body": {
+                        "value_from_context": "workflow_experience_guidance.next_run_exploration_guidance.body",
+                        "default": "No durable lesson beyond normal workflow requirements was evidenced in this invocation."
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_render_exploration_guidance_relation_workflow_next_run_exploration_relation_text_to_workflow_next_run_exploration_relation_text",
+                "context_key": "workflow_next_run_exploration_relation_text",
+                "tool_output_field": "workflow_next_run_exploration_relation_text"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_next_run_exploration_relation_text"
+            ],
+            "next_state": "write_exploration_guidance_relation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "write_exploration_guidance_relation",
+            "action_id": "upsert_text_relation",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "workflow_experience_memory_additive_writes"
+            },
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "#V#hasWorkflowNextRunExplorationGuidanceText"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "context",
+                "value": {
+                  "schema_version": "workflow_experience_guidance_write.v1",
+                  "source": "episode_evaluation_workflow",
+                  "jira": "JVNAUTOSCI-2192"
+                }
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_exploration_guidance_relation_profile_to_concept_id_parameter",
+                "context_key": "workflow_experience_profile_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_exploration_guidance_relation_workflow_next_run_exploration_relation_text_to_text_parameter",
+                "context_key": "workflow_next_run_exploration_relation_text",
+                "required": true,
+                "tool_param": "text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_write_exploration_guidance_relation_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "next_state": "decide_maintenance_follow_up",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "decide_maintenance_follow_up",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "workflow_experience_memory_written",
+                    "value": true
+                  }
+                ]
+              }
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "launch_maintenance_follow_up",
+                "reason": "maintenance_follow_up_requested",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "maintenance_follow_up_requested",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "complete",
+                "reason": "no_maintenance_follow_up_requested",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_decide_maintenance_follow_up_workflow_experience_memory_written_to_workflow_experience_memory_written",
+                "context_key": "workflow_experience_memory_written",
+                "tool_output_field": "workflow_experience_memory_written"
+              }
+            ],
+            "writes_context_keys": [
+              "workflow_experience_memory_written"
             ]
           },
           {
@@ -594,6 +1374,18 @@
                 {
                   "context_key": "fail_closed_reason_codes",
                   "label": "Fail-closed reason codes"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ]
             },
@@ -684,6 +1476,95 @@
           }
         ]
       }
+    }
+  ],
+  "support_concepts": [
+    {
+      "concept_id": "#V#workflow_llm_experience_profile",
+      "name": "Workflow LLM Experience Profile",
+      "parent_concept_ids": [
+        "#V#artifact"
+      ],
+      "description": "Type for a durable workflow and LLM model experience-memory profile.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "type"
+      ]
+    },
+    {
+      "concept_id": "#V#experienceProfileForWorkflow",
+      "name": "Experience profile for workflow",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate linking a workflow LLM experience profile to the workflow it describes.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "predicate"
+      ]
+    },
+    {
+      "concept_id": "#V#hasExperienceProfileModelRefText",
+      "name": "Has experience profile model reference text",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Text predicate recording the LLM model reference for a workflow experience profile.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "predicate",
+        "text_relation"
+      ]
+    },
+    {
+      "concept_id": "#V#hasWorkflowSuccessfulRunGuidanceText",
+      "name": "Has workflow successful-run guidance text",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Additive text predicate for evidence-grounded hints about what has helped a workflow run successfully.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "predicate",
+        "text_relation"
+      ]
+    },
+    {
+      "concept_id": "#V#hasWorkflowFailureAvoidanceGuidanceText",
+      "name": "Has workflow failure-avoidance guidance text",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Additive text predicate for generalised workflow failure patterns to avoid.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "predicate",
+        "text_relation"
+      ]
+    },
+    {
+      "concept_id": "#V#hasWorkflowNextRunExplorationGuidanceText",
+      "name": "Has workflow next-run exploration guidance text",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Additive text predicate for low-imposition next-run probes that improve future workflow experience memory.",
+      "system_tags": [
+        "workflow_experience_memory",
+        "ontology",
+        "predicate",
+        "text_relation"
+      ]
     }
   ]
 }

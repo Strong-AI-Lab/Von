@@ -40,6 +40,11 @@ RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 # workflow owns the post-response completion_gate that, on a missing
 # user-facing response, must route to recovery_decision.
 CONVERSATION_TURN_WORKFLOW_ID = "#V#conversation_turn_execution_workflow"
+WORKFLOW_EXPERIENCE_GUIDANCE_CONTEXT_KEYS = {
+    "workflow_success_guidance_history",
+    "workflow_failure_avoidance_history",
+    "workflow_low_imposition_exploration_history",
+}
 
 
 def _all_seed_bundles() -> list[Path]:
@@ -199,6 +204,45 @@ def test_workflow_state_transitions_reference_existing_states(
 
     assert failures == [], (
         f"{bundle_path.name}: dangling state transitions: {failures}"
+    )
+
+
+@pytest.mark.parametrize("bundle_path", _workflow_bundles(), ids=lambda p: p.name)
+def test_llm_steps_expose_workflow_experience_guidance_context(
+    bundle_path: Path,
+) -> None:
+    """Prompt-bearing workflow steps must receive bounded experience-memory hints."""
+
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    failures: list[str] = []
+    for workflow in payload.get("workflows", []) or []:
+        if not isinstance(workflow, dict):
+            continue
+        workflow_id = str(workflow.get("workflow_id") or "<unknown-workflow>")
+        spec = workflow.get("publication_spec") or {}
+        if not isinstance(spec, dict):
+            continue
+        for step in spec.get("steps") or []:
+            if not isinstance(step, dict) or step.get("action_id") != "llm.action":
+                continue
+            llm_policy = step.get("llm_policy") or {}
+            context_fields = (
+                llm_policy.get("context_fields") if isinstance(llm_policy, dict) else []
+            )
+            context_keys = {
+                field.get("context_key")
+                for field in context_fields or []
+                if isinstance(field, dict)
+            }
+            missing = WORKFLOW_EXPERIENCE_GUIDANCE_CONTEXT_KEYS - context_keys
+            if missing:
+                failures.append(
+                    f"{workflow_id}:{step.get('state_id')}: missing {sorted(missing)}"
+                )
+
+    assert failures == [], (
+        f"{bundle_path.name}: LLM steps missing experience guidance context: "
+        f"{failures}"
     )
 
 
