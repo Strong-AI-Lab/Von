@@ -639,12 +639,6 @@ def _resolve_candidate_string_list(
     return []
 
 
-def _prompt_appears_first_person(prompt: str) -> bool:
-    if not isinstance(prompt, str) or not prompt.strip():
-        return False
-    return bool(re.search(r"\b(i|me|my|mine|myself|our|ours|us)\b", prompt, re.IGNORECASE))
-
-
 def _build_workflow_gap_prefetch_tool_invocation(
     *,
     tool_name: str,
@@ -753,356 +747,10 @@ def _build_authenticated_concept_grounding_text(payload: Mapping[str, Any]) -> s
     return "\n".join(lines)
 
 
-def _join_human_list(items: Sequence[str]) -> str:
-    cleaned = [item.strip() for item in items if isinstance(item, str) and item.strip()]
-    if not cleaned:
-        return ""
-    if len(cleaned) == 1:
-        return cleaned[0]
-    if len(cleaned) == 2:
-        return f"{cleaned[0]} and {cleaned[1]}"
-    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
-
-
-def _iter_prefetched_relation_rows(
-    payload: Mapping[str, Any],
-) -> list[Mapping[str, Any]]:
-    relations_payload = payload.get("relations")
-    relation_rows = (
-        list(relations_payload.get("relations") or [])
-        if isinstance(relations_payload, Mapping)
-        else []
-    )
-    return [row for row in relation_rows if isinstance(row, Mapping)]
-
-
-def _extract_prefetched_text_values(
-    payload: Mapping[str, Any],
-    *,
-    predicate_ids: Sequence[str],
-    max_items: int = 4,
-) -> list[str]:
-    target_predicates = {
-        _clean_text(predicate_id).lower()
-        for predicate_id in predicate_ids
-        if _clean_text(predicate_id)
-    }
-    if not target_predicates:
-        return []
-
-    values: list[str] = []
-    seen: set[str] = set()
-    for relation in _iter_prefetched_relation_rows(payload):
-        predicate_id = _clean_text(relation.get("predicate_id")).lower()
-        relation_kind = _clean_text(relation.get("relation_kind")).lower()
-        if predicate_id not in target_predicates or relation_kind != "text":
-            continue
-        text_value = relation.get("text_value")
-        text = (
-            _clean_text(text_value.get("text"))
-            if isinstance(text_value, Mapping)
-            else ""
-        )
-        lowered = text.lower()
-        if not text or lowered in seen:
-            continue
-        seen.add(lowered)
-        values.append(text)
-        if len(values) >= max_items:
-            return values
-    return values
-
-
-def _prefetched_preview_looks_like_person(preview: Mapping[str, Any]) -> bool:
-    if _clean_text(preview.get("kind")).lower() != "individual":
-        return False
-
-    name = _clean_text(preview.get("name"))
-    concept_id = _clean_text(preview.get("concept_id"))
-    lowered_blob = f"{name} {concept_id}".lower()
-    if any(
-        token in lowered_blob
-        for token in (
-            "diary",
-            "todo",
-            "proposal",
-            "workflow",
-            "team",
-            "lab",
-            "university",
-            "household",
-            "paper",
-            "profile",
-            "platform",
-            "event",
-            "panel",
-            "evaluation",
-            "form",
-            "file",
-            "copy",
-        )
-    ):
-        return False
-
-    name_tokens = [token for token in re.split(r"[^A-Za-z]+", name) if token]
-    if len(name_tokens) < 2 or len(name_tokens) > 4:
-        return False
-    return all(token[:1].isupper() for token in name_tokens if token[:1])
-
-
-def _extract_prefetched_relation_target_names(
-    payload: Mapping[str, Any],
-    *,
-    predicate_ids: Sequence[str],
-    max_items: int = 4,
-    require_individual_targets: bool = False,
-    require_person_targets: bool = False,
-    exclude_name_tokens: Sequence[str] = (),
-) -> list[str]:
-    target_predicates = {
-        _clean_text(predicate_id).lower()
-        for predicate_id in predicate_ids
-        if _clean_text(predicate_id)
-    }
-    if not target_predicates:
-        return []
-
-    excluded_tokens = {
-        token.strip().lower() for token in exclude_name_tokens if token.strip()
-    }
-    names: list[str] = []
-    seen: set[str] = set()
-    for relation in _iter_prefetched_relation_rows(payload):
-        predicate_id = _clean_text(relation.get("predicate_id")).lower()
-        if predicate_id not in target_predicates:
-            continue
-        target_previews = (
-            relation.get("target_previews")
-            if isinstance(relation.get("target_previews"), Mapping)
-            else {}
-        )
-        if not isinstance(target_previews, Mapping):
-            continue
-        for preview in target_previews.values():
-            if not isinstance(preview, Mapping):
-                continue
-            if require_individual_targets and (
-                _clean_text(preview.get("kind")).lower() != "individual"
-            ):
-                continue
-            if require_person_targets and not _prefetched_preview_looks_like_person(
-                preview
-            ):
-                continue
-            display_name = _clean_text(preview.get("name"))
-            lowered_name = display_name.lower()
-            if (
-                not display_name
-                or lowered_name in seen
-                or any(token in lowered_name for token in excluded_tokens)
-            ):
-                continue
-            seen.add(lowered_name)
-            names.append(display_name)
-            if len(names) >= max_items:
-                return names
-    return names
-
-
-def _extract_prefetched_relation_mentions(
-    payload: Mapping[str, Any],
-    *,
-    relation_specs: Sequence[tuple[str, str]],
-    max_items: int = 4,
-    require_person_targets: bool = False,
-) -> list[str]:
-    mentions: list[str] = []
-    seen: set[str] = set()
-    for predicate_id, relation_label in relation_specs:
-        names = _extract_prefetched_relation_target_names(
-            payload,
-            predicate_ids=(predicate_id,),
-            max_items=max_items,
-            require_individual_targets=True,
-            require_person_targets=require_person_targets,
-            exclude_name_tokens=("diary", "todo", "household"),
-        )
-        for name in names:
-            mention = f"{name} ({relation_label})"
-            lowered = mention.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            mentions.append(mention)
-            if len(mentions) >= max_items:
-                return mentions
-    return mentions
-
-
-def _extract_prefetched_interest_terms(
-    payload: Mapping[str, Any],
-    *,
-    max_items: int = 6,
-) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for raw_profile in _extract_prefetched_text_values(
-        payload,
-        predicate_ids=("#V#has_paper_matching_profile_json",),
-        max_items=2,
-    ):
-        try:
-            parsed = json.loads(raw_profile)
-        except Exception:
-            continue
-        if not isinstance(parsed, Mapping):
-            continue
-        for raw_term in parsed.get("stated_interest_terms") or []:
-            term = _clean_text(raw_term)
-            lowered = term.lower()
-            if not term or lowered in seen:
-                continue
-            seen.add(lowered)
-            terms.append(term)
-            if len(terms) >= max_items:
-                return terms
-    return terms
-
-
-def _extract_prefetched_description_snippets(
-    payload: Mapping[str, Any],
-    *,
-    max_items: int = 1,
-    max_chars: int = 240,
-) -> list[str]:
-    snippets: list[str] = []
-    seen: set[str] = set()
-    for raw_text in _extract_prefetched_text_values(
-        payload,
-        predicate_ids=("hasDescription",),
-        max_items=max_items,
-    ):
-        compact = re.sub(r"[#*_`]+", " ", raw_text)
-        compact = re.sub(r"\s+", " ", compact).strip()
-        if not compact:
-            continue
-        sentence_candidates = re.split(r"(?<=[.!?])\s+", compact)
-        snippet = next(
-            (candidate.strip() for candidate in sentence_candidates if candidate.strip()),
-            compact,
-        )
-        snippet = snippet[:max_chars].rstrip(" ,;:")
-        lowered = snippet.lower()
-        if not snippet or lowered in seen:
-            continue
-        seen.add(lowered)
-        snippets.append(snippet)
-        if len(snippets) >= max_items:
-            return snippets
-    return snippets
-
-
-def _render_authenticated_concept_prefetched_response(
-    *,
-    request_text: str,
-    payload: Mapping[str, Any] | None,
-) -> str:
-    if not isinstance(payload, Mapping):
-        return ""
-
-    display_name = _clean_text(payload.get("name")) or _clean_text(
-        payload.get("concept_id")
-    )
-    if not display_name:
-        return ""
-
-    prompt_lower = _clean_text(request_text).lower()
-    interest_terms = _extract_prefetched_interest_terms(payload, max_items=6)
-    description_snippets = _extract_prefetched_description_snippets(
-        payload,
-        max_items=1,
-    )
-    authored_titles = _extract_prefetched_relation_target_names(
-        payload,
-        predicate_ids=("#V#author_of",),
-        max_items=3,
-        exclude_name_tokens=("diary", "todo"),
-    )
-    affiliations = _extract_prefetched_relation_target_names(
-        payload,
-        predicate_ids=(
-            "#V#member_of_organisation",
-            "#V#member_of_faculty",
-            "#V#homeresearchorganisation",
-        ),
-        max_items=4,
-        exclude_name_tokens=("household",),
-    )
-    collaborator_mentions = _extract_prefetched_relation_mentions(
-        payload,
-        relation_specs=(
-            ("#V#supervises_phd_student", "supervises PhD student"),
-            ("related_to", "related to"),
-        ),
-        max_items=4,
-        require_person_targets=True,
-    )
-    scholar_profiles = _extract_prefetched_relation_target_names(
-        payload,
-        predicate_ids=("#V#has_google_scholar_profile",),
-        max_items=1,
-    )
-
-    lines: list[str]
-    if interest_terms:
-        lines = [
-            (
-                f"Represented research-interest evidence for {display_name} includes "
-                f"{_join_human_list(interest_terms)}."
-            )
-        ]
-    elif description_snippets:
-        lines = [f"Represented profile evidence for {display_name} includes:"]
-    else:
-        lines = [f"The represented evidence I can ground directly for {display_name} is:"]
-
-    if description_snippets:
-        lines.append(f"- Profile description: {description_snippets[0]}")
-    if authored_titles:
-        lines.append(f"- Authored works: {_join_human_list(authored_titles)}.")
-    if affiliations:
-        lines.append(f"- Affiliations and organisations: {_join_human_list(affiliations)}.")
-    if collaborator_mentions:
-        lines.append(
-            f"- Explicit related people: {_join_human_list(collaborator_mentions)}."
-        )
-    if scholar_profiles:
-        lines.append(
-            f"- Scholarly-profile evidence: {_join_human_list(scholar_profiles)}."
-        )
-
-    if "collaborat" in prompt_lower:
-        if collaborator_mentions:
-            lines.append(
-                "The grounded collaborator links above are explicit relationship "
-                "evidence. The current graph does not label a separate research "
-                "theme for each collaborator, so any finer per-collaborator theme "
-                "mapping would be inference rather than direct representation."
-            )
-        else:
-            lines.append(
-                "I do not currently see explicit collaborator relations beyond the "
-                "affiliation and artefact evidence above."
-            )
-
-    return "\n".join(lines)
-
-
 def _prefetch_candidate_grounding(
     *,
     request: WorkflowActionRequest,
     inputs: Mapping[str, Any],
-    request_text: str,
     user_concept_id: str,
 ) -> tuple[
     str,
@@ -1116,7 +764,7 @@ def _prefetch_candidate_grounding(
     ).lower()
     if profile != "authenticated_concept_relations":
         return "", [], None, None
-    if not user_concept_id or not _prompt_appears_first_person(request_text):
+    if not user_concept_id:
         return "", [], {
             "profile": profile,
             "executed": False,
@@ -1728,43 +1376,24 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         grounding_text,
         prefetched_tool_invocations,
         prefetch_diagnostics,
-        prefetched_concept_payload,
+        _,
     ) = (
         _prefetch_candidate_grounding(
             request=request,
             inputs=inputs,
-            request_text=request_text,
             user_concept_id=resolved_user_concept_id,
         )
     )
     if grounding_text:
         combined_auxiliary_prompt = (
             f"{combined_auxiliary_prompt}\n\n"
-            "Authoritative represented evidence pre-fetched for this workflow:\n"
-            f"{grounding_text}\n\n"
-            "Treat the evidence above as grounded represented context. Distinguish "
-            "explicit represented evidence from broader inference, and do not claim "
-            "that no represented data exists while this evidence is present."
+            "Prefetched represented evidence for the authored workflow:\n"
+            f"{grounding_text}"
         )
-    prefetch_profile = (
-        _clean_text(inputs.get("workflow_gap_prefetch_profile"))
-        or _clean_text(request.data.get("workflow_gap_prefetch_profile"))
-    ).lower()
-    prefer_direct_grounded_response = bool(grounding_text) and (
-        prefetch_profile == "authenticated_concept_relations"
-    )
-    if prefer_direct_grounded_response:
-        combined_auxiliary_prompt = (
-            f"{combined_auxiliary_prompt}\n\n"
-            "Because authoritative represented evidence is already present for the "
-            "authenticated concept, answer directly from that evidence. Do not claim "
-            "that retrieval could not be completed while this evidence is available."
-        )
-
     from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 
     max_tool_invocations = (
-        0 if (dry_run or prefer_direct_grounded_response) else configured_max_tool_invocations
+        0 if dry_run else configured_max_tool_invocations
     )
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -1788,14 +1417,6 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         org_concept_id=resolved_org_concept_id or None,
     )
     response_text = _clean_text(nested_result.response_text)
-    prefetched_response_text = ""
-    if prefer_direct_grounded_response:
-        prefetched_response_text = _render_authenticated_concept_prefetched_response(
-            request_text=request_text,
-            payload=prefetched_concept_payload,
-        )
-    if prefetched_response_text:
-        response_text = prefetched_response_text
     return WorkflowActionResult(
         status="success",
         outputs={
@@ -1824,7 +1445,8 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
             "workflow_gap_dry_run": dry_run,
             "workflow_gap_prefetch_diagnostics": prefetch_diagnostics,
             "workflow_gap_prefetched_grounding_present": bool(grounding_text),
-            "workflow_gap_prefetched_response_used": bool(prefetched_response_text),
+            "workflow_gap_prefetched_response_used": False,
+            "workflow_gap_prefetched_response_source": None,
         },
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -422,12 +423,17 @@ def test_execute_candidate_prefetches_authenticated_grounding_when_authored(
 
     assert result.status == "success"
     assert captured["prefetch_tool_name"] == "fetch_concept"
-    assert captured["max_tool_invocations"] == 0
+    assert (
+        captured["max_tool_invocations"]
+        == mod.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    )
     run_kwargs = cast(dict[str, Any], captured["run_kwargs"])
     auxiliary_prompt = cast(str, run_kwargs["auxiliary_system_prompt"])
-    assert "Authoritative represented evidence pre-fetched for this workflow" in auxiliary_prompt
+    assert "Prefetched represented evidence for the authored workflow" in auxiliary_prompt
     assert "Research interests include automated reasoning and context modelling." in auxiliary_prompt
     assert "Timothy Pistotti" in auxiliary_prompt
+    assert "Distinguish explicit represented evidence" not in auxiliary_prompt
+    assert "Because authoritative represented evidence is already present" not in auxiliary_prompt
     tool_invocations = cast(list[dict[str, Any]], result.outputs["tool_invocations"])
     assert tool_invocations[0]["tool"] == "fetch_concept"
     assert tool_invocations[0]["source"] == "workflow_gap_prefetch"
@@ -436,12 +442,15 @@ def test_execute_candidate_prefetches_authenticated_grounding_when_authored(
     assert result.outputs["workflow_gap_prefetch_diagnostics"]["profile"] == (
         "authenticated_concept_relations"
     )
+    assert result.outputs["workflow_gap_prefetched_response_used"] is False
 
 
-def test_execute_candidate_uses_prefetched_authenticated_summary_when_available(
+def test_execute_candidate_does_not_render_prefetched_authenticated_summary(
     monkeypatch,
 ) -> None:
     import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    captured: dict[str, object] = {}
 
     class _FakeGateway:
         enabled = True
@@ -556,7 +565,8 @@ def test_execute_candidate_uses_prefetched_authenticated_summary_when_available(
             max_tool_invocations,
             default_gmail_profile=None,
         ) -> None:
-            del gateway, max_tool_invocations, default_gmail_profile
+            captured["max_tool_invocations"] = max_tool_invocations
+            del gateway, default_gmail_profile
 
         def run(self, **_kwargs):
             return OrchestratorResult(
@@ -601,16 +611,25 @@ def test_execute_candidate_uses_prefetched_authenticated_summary_when_available(
 
     assert result.status == "success"
     response_text = cast(str, result.outputs["response_text"])
-    assert "Represented research-interest evidence for Michael Witbrock includes" in response_text
-    assert "context modelling" in response_text
-    assert "Profile description:" in response_text
-    assert "Concept Creation Agentic Workflow Design" in response_text
-    assert "University Of Auckland Strong Ai Lab" in response_text
-    assert "Timothy Pistotti (supervises PhD student)" in response_text
-    assert "Lu Yunli (related to)" in response_text
-    assert "Eugpai Evaluation Proposal Preparation" not in response_text
-    assert "I do not currently have" not in response_text
-    assert result.outputs["workflow_gap_prefetched_response_used"] is True
+    assert response_text == "I do not know who you are unless you tell me."
+    assert (
+        captured["max_tool_invocations"]
+        == mod.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    )
+    assert result.outputs["workflow_gap_prefetched_grounding_present"] is True
+    assert result.outputs["workflow_gap_prefetched_response_used"] is False
+    assert result.outputs["workflow_gap_prefetched_response_source"] is None
+
+
+def test_workflow_gap_recovery_has_no_python_self_profile_answer_renderer() -> None:
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    source = inspect.getsource(mod)
+
+    assert "_render_authenticated_concept_prefetched_response" not in source
+    assert "Represented research-interest evidence" not in source
+    assert "collaborat" not in source
+    assert "max_tool_invocations = (\n        0 if (dry_run or" not in source
 
 
 def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
