@@ -265,7 +265,72 @@ quarantine that service and rewrite the task notes before proceeding. A
 domain-specific workflow may still be appropriate, but it should be authored as
 workflow/Vontology/prompt policy and should reuse generic support primitives.
 
-### 10.3 Warning comments at drift-prone seams
+### 10.3 Domain-handler-first repairs
+
+A related drift pattern is `domain-handler-first repair`. This is when a task
+is correctly understood as workflow-authoritative in principle, but the first
+substantial implementation step happens inside the nearest domain-specific
+Python workflow handler, verifier, service, or registry.
+
+That path is tempting because it has a strong local success gradient:
+
+1. The failed turn or Jira task names a concrete source path or object, such as
+   an arXiv paper, DOI article, PDF, meeting note, calendar item, or Jira issue.
+2. Code search lands on an existing handler that already manipulates similar
+   data and already has nearby tests.
+3. A small local patch appears faster than changing a Vontology workflow graph,
+   workflow-language primitive, launch contract, prompt/profile artefact, or
+   seed materialisation pathway.
+4. The direct handler test turns green, making the handler look like the
+   canonical implementation surface.
+5. A missing VWL affordance is interpreted as justification for domain Python
+   rather than as evidence that the reusable workflow/tool language needs one
+   more primitive.
+
+This is how policy migrates into Python without anyone explicitly deciding to
+put it there. The agent is often trying to be pragmatic; the problem is that it
+optimises for the nearest executable seam instead of the correct authority
+surface.
+
+The countermeasure is a mandatory early pause. If the first meaningful edit for
+a workflow/prompt/KB-authoritative task is in a domain handler or verifier,
+stop and answer these questions before continuing:
+
+- what represented artefact would own this behaviour if Von already supported
+  it cleanly?
+- can the current workflow express the behaviour using existing actions, MCP
+  tools, context mappings, launch contracts, prompt/profile text, or Vontology
+  predicates?
+- if not, what is the smallest generic VWL/runtime/tooling primitive that would
+  unlock it?
+- will the acceptance test enter through the workflow path, or is it only
+  blessing the handler patch?
+- would the Python diff still make sense for another workflow family with the
+  same structural need?
+
+Good outcomes look like:
+
+- adding generic context coalescing rather than hard-coding metadata aliases in
+  one paper handler;
+- adding generic seed-bundle support-concept materialisation rather than
+  special-casing one ontology parent in a workflow action;
+- adding reusable validation, read-back, telemetry, or tool-bridge support
+  rather than embedding source-specific completion criteria in a verifier.
+
+Poor outcomes look like:
+
+- extending a monolithic domain handler because it already has the needed
+  inputs in scope;
+- writing tests that exercise the handler directly while the authored workflow
+  remains unable to express the behaviour;
+- declaring a Python policy "temporary" without first creating the represented
+  replacement path and a removal task.
+
+The early warning sign is simple: if a workflow-authoritative task has more
+substantive diff in a domain handler than in the workflow/prompt/Vontology
+artefact or generic VWL support surface, reassess before continuing.
+
+### 10.4 Warning comments at drift-prone seams
 
 Warning comments can help, but only when they are placed at precise seams where
 future agents are likely to mistake legacy support code for policy authority.

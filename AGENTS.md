@@ -98,6 +98,8 @@ For frontend/browser user-view validation practice, also see
 35. New user-controllable modes, flags, preferences, or display options must reach the LLM stage that should branch on them by appearing in that stage's authored context (workflow `context_fields`, prompt template, profile artefact). The Python question is "how does this value reach the workflow context unchanged", not "where in Python do I branch on it".
 36. If a task or failed turn names a domain object but the failure class is generic, fix the generic support surface or represented authority path first. Do not let the proper noun in the prompt, Jira title, or nearby code become permission to add a domain-specific Python service.
 37. If the user challenges a change as "Python hackery", "not Von", "backsliding", or similar authority drift, stop extending the patch. Do a short drift incident review, remove or quarantine speculative policy code, update Jira/task wording if it encoded the wrong fix direction, and resume only with a named authority surface plus support-only Python scope.
+38. Domain-handler-first implementation is a warning sign, not a plan. If the first substantial edit for a workflow/prompt/KB-authoritative task is inside a domain-specific Python workflow handler, service, registry entry, fallback table, or verifier, pause before continuing and write down why the behaviour cannot be expressed by an existing or newly added generic VWL/Vontology/tool-language surface. If that explanation is "the workflow language is missing a small reusable capability", add that capability first and then express the behaviour in the workflow.
+39. Do not use a legacy Python workflow handler as a temporary staging area for authored behaviour while intending to "move it to workflow later". That pattern usually becomes the implementation. Prototype or materialise the workflow/prompt/Vontology artefact first; add Python only for the named reusable primitive, validation, telemetry, or canonical tool bridge that the artefact needs.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -136,6 +138,7 @@ Pause and rethink if you are about to introduce:
 - Python branches keyed on a new user-controllable mode/flag/preference whose effect is user-facing semantics rather than wiring
 - domain-specific Python services or tools whose main job is to orchestrate Vontology mutations that a workflow/prompt could plan from represented predicates and tool metadata
 - treating an existing legacy Python registry, default-metadata table, or branch table as precedent for adding one more case-specific policy path
+- starting a workflow-authoritative task by extending a domain-specific workflow handler or verifier before proving the represented workflow/tool-language surface cannot own the behaviour
 
 ### 4.2.1 Recognising the Python-hackery temptation
 
@@ -149,6 +152,8 @@ Most authority-drift incidents in Von do not start with a deliberate decision to
 6. **What evidence would make a future agent confident this is the canonical fix?** Before merging, the canonical artefacts should explain themselves: the workflow definition shows the new transition or context field, the prompt content shows the new rule, telemetry shows the workflow context the model actually saw. If the only evidence of the fix is the Python diff, the fix is in the wrong place.
 7. **Is the task wording stale or too domain-specific for the actual failure?** If the recent evidence points to a generic support-surface gap, rewrite the task notes or Jira description before implementing. Do not implement the stale wording first and rely on later review to recover the architecture.
 8. **Are you near a legacy registry, fallback table, or catalogue with existing domain examples?** Treat it as a drift-prone support seam. Add only generic wiring, validation, telemetry, or tool exposure there; put domain policy in represented artefacts. If a short warning comment would prevent future misuse of the seam, add one.
+9. **Did the implementation start in the nearest Python handler because it was easy to test?** Treat that as a process failure signal. Stop and identify the smallest represented artefact change or generic VWL/runtime primitive that would make the workflow itself express the behaviour. Tests should then exercise the real workflow path, not bless the intermediate handler patch.
+10. **Are you relying on "I'll move it out of Python after it works"?** Do not proceed. In Von, getting the domain-specific Python version working first is usually how hidden policy becomes durable. Build the represented workflow/prompt/KB path first, then add only the reusable support surface it proves is missing.
 
 When the temptation feels strongest — the Python change is small, the existing fallback looks like the obvious extension point, the new flag is already in scope — that is exactly when this checklist matters. Run it anyway.
 
