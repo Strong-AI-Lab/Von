@@ -406,4 +406,145 @@ describe('task panel ontology-backed groups', () => {
             'created_by_concept_id=%23V%23group_user',
         );
     });
+
+    test('loads side-panel user tasks with hidden bulk collections excluded by default', async () => {
+        document.body.innerHTML = `
+            <div id="taskPanel" class="hidden">
+                <button id="closeTaskPanel"></button>
+                <button id="createTaskBtn"></button>
+                <select id="taskStatusFilter"></select>
+                <select id="taskPriorityFilter"></select>
+                <select id="taskViewMode"></select>
+                <input id="taskQueryFilter" />
+                <button id="refreshTasksBtn"></button>
+                <div id="taskBulkTaskVisibilityControl" class="hidden"></div>
+                <div id="taskGroupFilterRow" class="hidden"></div>
+                <div id="taskList"></div>
+            </div>
+            <span id="taskCountBadge" class="hidden"></span>
+            <span id="globalTaskCountBadge" class="hidden"></span>
+        `;
+
+        const { getJson } = require(apiServiceModulePath);
+        const taskUrls = [];
+        const bulkSummary = {
+            collection_id: '#V#jira_task_migration_bulk_collection',
+            label: 'Jira migration backlog',
+            kind: 'jira_migration',
+            hidden_by_default: true,
+            count: 1,
+        };
+        const nativeTask = {
+            task_concept_id: '#V#task_native',
+            title: 'Native task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        };
+        const migratedTask = {
+            task_concept_id: '#V#task_migrated',
+            title: 'Migrated backlog task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#jira_imported_task_source',
+            hidden_by_default_bulk_task_collections: [bulkSummary],
+        };
+
+        getJson.mockImplementation((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/my?')) {
+                taskUrls.push(url);
+                if (url.includes('bulk_visibility=include')) {
+                    return Promise.resolve({
+                        tasks: [nativeTask, migratedTask],
+                        hidden_bulk_task_total: 1,
+                        hidden_bulk_task_collections: [bulkSummary],
+                    });
+                }
+                return Promise.resolve({
+                    tasks: [nativeTask],
+                    hidden_bulk_task_total: 1,
+                    hidden_bulk_task_collections: [bulkSummary],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { initializeTaskPanel, showTaskPanel } = require(taskPanelModulePath);
+        initializeTaskPanel();
+        showTaskPanel();
+        await flushRenderQueue();
+
+        expect(taskUrls[0]).toContain('include_created=true');
+        expect(taskUrls[0]).toContain('limit=500');
+        expect(taskUrls[0]).toContain('bulk_visibility=exclude');
+        let visibleTitles = Array.from(
+            document.querySelectorAll('.task-item .task-title'),
+        ).map((el) => (el.textContent || '').trim());
+        expect(visibleTitles).toEqual(['Native task']);
+
+        const control = document.querySelector('#taskBulkTaskVisibilityControl');
+        expect(control).toBeTruthy();
+        expect(control.textContent).toContain('1 hidden-by-default bulk tasks');
+        const showButton = Array.from(control.querySelectorAll('button'))
+            .find((button) => (button.textContent || '').includes('Show hidden'));
+        expect(showButton).toBeTruthy();
+        showButton.click();
+        await flushRenderQueue();
+
+        expect(taskUrls.some((url) => url.includes('bulk_visibility=include'))).toBe(true);
+        visibleTitles = Array.from(
+            document.querySelectorAll('.task-item .task-title'),
+        ).map((el) => (el.textContent || '').trim());
+        expect(visibleTitles).toEqual(expect.arrayContaining([
+            'Native task',
+            'Migrated backlog task',
+        ]));
+    });
+
+    test('opens side panel for an active session without first loading all user tasks', async () => {
+        document.body.innerHTML = `
+            <div id="taskPanel" class="hidden">
+                <button id="closeTaskPanel"></button>
+                <button id="createTaskBtn"></button>
+                <select id="taskStatusFilter"></select>
+                <select id="taskPriorityFilter"></select>
+                <select id="taskViewMode"></select>
+                <input id="taskQueryFilter" />
+                <button id="refreshTasksBtn"></button>
+                <div id="taskBulkTaskVisibilityControl" class="hidden"></div>
+                <div id="taskGroupFilterRow" class="hidden"></div>
+                <div id="taskList"></div>
+            </div>
+            <span id="taskCountBadge" class="hidden"></span>
+            <span id="globalTaskCountBadge" class="hidden"></span>
+        `;
+
+        const { getJson } = require(apiServiceModulePath);
+        const taskUrls = [];
+        getJson.mockImplementation((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/tasks')) {
+                taskUrls.push(url);
+                return Promise.resolve({
+                    tasks: [],
+                    hidden_bulk_task_total: 0,
+                    hidden_bulk_task_collections: [],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { initializeTaskPanel, toggleTaskPanel } = require(taskPanelModulePath);
+        initializeTaskPanel();
+        toggleTaskPanel({ sessionId: 'session-123' });
+        await flushRenderQueue();
+
+        expect(taskUrls.some((url) => url.startsWith('/api/tasks/my'))).toBe(false);
+        expect(taskUrls[0]).toContain('session_id=session-123');
+        expect(taskUrls[0]).toContain('limit=500');
+        expect(taskUrls[0]).toContain('bulk_visibility=exclude');
+    });
 });

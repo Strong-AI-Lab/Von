@@ -5,7 +5,7 @@ import { initializeConceptAutocomplete } from './components/conceptAutocomplete.
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
-import { initializeTaskPanel, isTaskPanelVisible, loadTasks, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
+import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
@@ -24485,11 +24485,10 @@ export function initializeChatTab() {
     const taskPanelToggleBtn = document.getElementById('taskPanelToggleBtn');
     if (taskPanelToggleBtn) {
         taskPanelToggleBtn.addEventListener('click', () => {
-            toggleTaskPanel();
-            // Load tasks when panel is opened
-            if (isTaskPanelVisible()) {
-                setTaskPanelSession(activeChatSessionId);
-                loadTasks(activeChatSessionId);
+            if (!isTaskPanelVisible()) {
+                toggleTaskPanel({ sessionId: activeChatSessionId });
+            } else {
+                toggleTaskPanel();
             }
         });
     }

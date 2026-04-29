@@ -28,8 +28,8 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
-let _globalBulkTaskVisibility = 'exclude';
-let _globalBulkTaskCollectionId = '';
+let _bulkTaskVisibility = 'exclude';
+let _bulkTaskCollectionId = '';
 let _hiddenBulkTaskTotal = 0;
 let _hiddenBulkTaskCollections = [];
 let _taskTaxonomy = {
@@ -44,6 +44,7 @@ const _taskGroupDisplayNameCache = new Map();
 const _taskGroupNameFetchInFlight = new Set();
 
 const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
+const TASK_LIST_LIMIT = '500';
 
 // Constants
 const TASK_STATUS_OPTIONS = [
@@ -177,10 +178,10 @@ function setBulkTaskVisibilitySummary(response) {
 
 function buildGlobalTasksUrl() {
     const params = new URLSearchParams();
-    params.set('limit', '500');
-    params.set('bulk_visibility', _globalBulkTaskVisibility || 'exclude');
-    if (_globalBulkTaskVisibility === 'only' && _globalBulkTaskCollectionId) {
-        params.set('bulk_collection_id', _globalBulkTaskCollectionId);
+    params.set('limit', TASK_LIST_LIMIT);
+    params.set('bulk_visibility', _bulkTaskVisibility || 'exclude');
+    if (_bulkTaskVisibility === 'only' && _bulkTaskCollectionId) {
+        params.set('bulk_collection_id', _bulkTaskCollectionId);
     }
     const currentUserId = getCurrentUserConceptId();
     if (_globalTaskScope === 'assigned_to_me' && currentUserId) {
@@ -189,6 +190,20 @@ function buildGlobalTasksUrl() {
         params.set('created_by_concept_id', currentUserId);
     }
     return `/api/tasks/?${params.toString()}`;
+}
+
+function buildMyTasksUrl(statusFilter = null) {
+    const params = new URLSearchParams();
+    params.set('include_created', 'true');
+    params.set('limit', TASK_LIST_LIMIT);
+    params.set('bulk_visibility', _bulkTaskVisibility || 'exclude');
+    if (_bulkTaskVisibility === 'only' && _bulkTaskCollectionId) {
+        params.set('bulk_collection_id', _bulkTaskCollectionId);
+    }
+    if (statusFilter && statusFilter !== 'all') {
+        params.set('status', statusFilter);
+    }
+    return `/api/tasks/my?${params.toString()}`;
 }
 
 async function ensureTaskTaxonomyLoaded() {
@@ -339,7 +354,8 @@ export function initializeTaskPanel() {
 /**
  * Show the task panel.
  */
-export function showTaskPanel() {
+export function showTaskPanel(options = {}) {
+    applyPanelOpenOptions(options);
     if (_panelEl) {
         loadTaskGroupSelectionFromStorage();
         _isGlobalTabMode = false;
@@ -349,6 +365,13 @@ export function showTaskPanel() {
         _isVisible = true;
         // Auto-refresh tasks when panel becomes visible
         refreshTasks();
+    }
+}
+
+function applyPanelOpenOptions(options = {}) {
+    if (!options || typeof options !== 'object') return;
+    if (Object.prototype.hasOwnProperty.call(options, 'sessionId')) {
+        _currentSessionId = options.sessionId || null;
     }
 }
 
@@ -366,11 +389,11 @@ export function hideTaskPanel() {
 /**
  * Toggle task panel visibility.
  */
-export function toggleTaskPanel() {
+export function toggleTaskPanel(options = {}) {
     if (_isVisible) {
         hideTaskPanel();
     } else {
-        showTaskPanel();
+        showTaskPanel(options);
     }
 }
 
@@ -574,7 +597,7 @@ function renderGlobalTasksTabContent() {
     _taskListEl = _globalTasksContainer.querySelector('#globalTaskList');
     renderTaskGroupFilterControls();
     renderGlobalTaskSummary();
-    renderGlobalBulkTaskVisibilityControl();
+    renderBulkTaskVisibilityControls();
     renderGlobalTaskInspector();
 }
 
@@ -666,18 +689,23 @@ export async function loadTasks(sessionId = null) {
             // Load tasks for a specific conversation session
             url = '/api/tasks/';
             params.set('session_id', sessionId);
+            params.set('limit', TASK_LIST_LIMIT);
+            params.set('bulk_visibility', _bulkTaskVisibility || 'exclude');
+            if (_bulkTaskVisibility === 'only' && _bulkTaskCollectionId) {
+                params.set('bulk_collection_id', _bulkTaskCollectionId);
+            }
         } else {
             // Load current user's tasks via /my endpoint
-            url = '/api/tasks/my';
-            params.set('include_created', 'true');
+            url = buildMyTasksUrl();
         }
 
-        if (params.toString()) {
+        if (params.toString() && sessionId) {
             url += '?' + params.toString();
         }
 
         const response = await getJson(url);
         _tasks = response.tasks || [];
+        setBulkTaskVisibilitySummary(response);
         pruneTaskDetailState();
         refreshTaskGroupOptions();
         renderTaskList();
@@ -703,20 +731,10 @@ export async function loadMyTasks(statusFilter = null) {
     updateLoadingState(true);
 
     try {
-        let url = '/api/tasks/my';
-        const params = new URLSearchParams();
-
-        if (statusFilter && statusFilter !== 'all') {
-            params.set('status', statusFilter);
-        }
-        params.set('include_created', 'true');
-
-        if (params.toString()) {
-            url += '?' + params.toString();
-        }
-
+        const url = buildMyTasksUrl(statusFilter);
         const response = await getJson(url);
         _tasks = response.tasks || [];
+        setBulkTaskVisibilitySummary(response);
         pruneTaskDetailState();
         refreshTaskGroupOptions();
         renderTaskList();
@@ -862,25 +880,34 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
     `;
 }
 
-function renderGlobalBulkTaskVisibilityControl() {
-    const controlEl = _globalTasksContainer?.querySelector('#globalBulkTaskVisibilityControl');
-    if (!controlEl) return;
+function getBulkTaskVisibilityControlElements() {
+    return [
+        document.getElementById('taskBulkTaskVisibilityControl'),
+        _globalTasksContainer?.querySelector('#globalBulkTaskVisibilityControl'),
+    ].filter(Boolean);
+}
+
+function renderBulkTaskVisibilityControls() {
+    const controlElements = getBulkTaskVisibilityControlElements();
+    if (controlElements.length === 0) return;
 
     if (_hiddenBulkTaskTotal <= 0 && _hiddenBulkTaskCollections.length === 0) {
-        controlEl.classList.add('hidden');
-        controlEl.innerHTML = '';
+        controlElements.forEach((controlEl) => {
+            controlEl.classList.add('hidden');
+            controlEl.innerHTML = '';
+        });
         return;
     }
 
     const selectedCollection = _hiddenBulkTaskCollections.find(
-        (collection) => collection.collection_id === _globalBulkTaskCollectionId,
+        (collection) => collection.collection_id === _bulkTaskCollectionId,
     );
-    const modeLabel = _globalBulkTaskVisibility === 'only'
+    const modeLabel = _bulkTaskVisibility === 'only'
         ? `Showing ${selectedCollection?.label || 'bulk collection'} only`
-        : (_globalBulkTaskVisibility === 'include' ? 'Bulk collections shown' : 'Bulk collections hidden');
+        : (_bulkTaskVisibility === 'include' ? 'Bulk collections shown' : 'Bulk collections hidden');
     const collectionButtons = _hiddenBulkTaskCollections.map((collection) => `
         <button type="button"
-            class="bulk-task-visibility-btn ${_globalBulkTaskVisibility === 'only' && _globalBulkTaskCollectionId === collection.collection_id ? 'active' : ''}"
+            class="bulk-task-visibility-btn ${_bulkTaskVisibility === 'only' && _bulkTaskCollectionId === collection.collection_id ? 'active' : ''}"
             data-bulk-action="only"
             data-bulk-collection-id="${escapeHtml(collection.collection_id)}"
             title="Show only ${escapeHtml(collection.label)}">
@@ -888,40 +915,46 @@ function renderGlobalBulkTaskVisibilityControl() {
             <span class="task-group-filter-count">${collection.count}</span>
         </button>
     `).join('');
-    const primaryAction = _globalBulkTaskVisibility === 'exclude'
+    const primaryAction = _bulkTaskVisibility === 'exclude'
         ? '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="include">Show hidden</button>'
         : '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="exclude">Hide bulk</button>';
-    const showAllAction = _globalBulkTaskVisibility === 'only'
+    const showAllAction = _bulkTaskVisibility === 'only'
         ? '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="include">Show all visible</button>'
         : '';
 
-    controlEl.classList.remove('hidden');
-    controlEl.innerHTML = `
-        <span class="bulk-task-visibility-summary">
-            <strong>${_hiddenBulkTaskTotal}</strong> hidden-by-default bulk tasks
-            <span>${escapeHtml(modeLabel)}</span>
-        </span>
-        <div class="bulk-task-visibility-actions">
-            ${primaryAction}
-            ${showAllAction}
-            ${collectionButtons}
-        </div>
-    `;
+    controlElements.forEach((controlEl) => {
+        controlEl.classList.remove('hidden');
+        controlEl.innerHTML = `
+            <span class="bulk-task-visibility-summary">
+                <strong>${_hiddenBulkTaskTotal}</strong> hidden-by-default bulk tasks
+                <span>${escapeHtml(modeLabel)}</span>
+            </span>
+            <div class="bulk-task-visibility-actions">
+                ${primaryAction}
+                ${showAllAction}
+                ${collectionButtons}
+            </div>
+        `;
 
-    controlEl.querySelectorAll('[data-bulk-action]').forEach((button) => {
-        button.addEventListener('click', async (event) => {
-            const action = event.currentTarget?.dataset?.bulkAction || 'exclude';
-            if (action === 'only') {
-                _globalBulkTaskVisibility = 'only';
-                _globalBulkTaskCollectionId = event.currentTarget?.dataset?.bulkCollectionId || '';
-            } else if (action === 'include') {
-                _globalBulkTaskVisibility = 'include';
-                _globalBulkTaskCollectionId = '';
-            } else {
-                _globalBulkTaskVisibility = 'exclude';
-                _globalBulkTaskCollectionId = '';
-            }
-            await loadGlobalTasks();
+        controlEl.querySelectorAll('[data-bulk-action]').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                const action = event.currentTarget?.dataset?.bulkAction || 'exclude';
+                if (action === 'only') {
+                    _bulkTaskVisibility = 'only';
+                    _bulkTaskCollectionId = event.currentTarget?.dataset?.bulkCollectionId || '';
+                } else if (action === 'include') {
+                    _bulkTaskVisibility = 'include';
+                    _bulkTaskCollectionId = '';
+                } else {
+                    _bulkTaskVisibility = 'exclude';
+                    _bulkTaskCollectionId = '';
+                }
+                if (_isGlobalTabMode) {
+                    await loadGlobalTasks();
+                } else {
+                    await loadTasks(_currentSessionId);
+                }
+            });
         });
     });
 }
@@ -935,12 +968,12 @@ function renderTaskList() {
     const filteredTasks = getFilteredTasks();
     ensureSelectedTaskStillValid(filteredTasks);
     renderGlobalTaskSummary(filteredTasks);
-    renderGlobalBulkTaskVisibilityControl();
+    renderBulkTaskVisibilityControls();
 
     if (filteredTasks.length === 0) {
         const hasGroupFilter = _selectedTaskGroupIds.size > 0;
         const hasHiddenBulkTasks = _isGlobalTabMode
-            && _globalBulkTaskVisibility === 'exclude'
+            && _bulkTaskVisibility === 'exclude'
             && _hiddenBulkTaskTotal > 0;
         const emptyHint = hasHiddenBulkTasks
             ? 'Show hidden bulk collections to include Jira migration tasks'

@@ -15,7 +15,6 @@ from ...services.task_management_service import (
     get_task,
     get_task_taxonomy,
     update_task_fields,
-    get_tasks_for_user,
     get_tasks_for_conversation,
     list_tasks_with_visibility,
     search_tasks,
@@ -500,15 +499,42 @@ def my_tasks_route() -> ResponseReturnValue:
 
         status_filter = request.args.get("status")
         include_created = request.args.get("include_created", "false").lower() == "true"
+        priority_filter = request.args.get("priority")
+        task_type_ids = (
+            request.args.getlist("task_type_id")
+            or request.args.getlist("task_type_ids")
+            or _parse_csv_param(request.args.get("task_type_ids"))
+        )
+        task_source_ids = (
+            request.args.getlist("task_source_id")
+            or request.args.getlist("task_source_ids")
+            or _parse_csv_param(request.args.get("task_source_ids"))
+        )
+        limit = max(1, _parse_int_param(request.args.get("limit"), 50))
+        offset = max(0, _parse_int_param(request.args.get("offset"), 0))
+        bulk_visibility = request.args.get("bulk_visibility") or request.args.get(
+            "bulk_task_visibility"
+        )
+        bulk_collection_ids = _parse_bulk_collection_ids()
 
-        tasks = get_tasks_for_user(
+        payload = list_tasks_with_visibility(
             user_concept_id=user_concept_id,
             status_filter=status_filter,
             include_created=include_created,
+            priority_filter=priority_filter,
+            task_type_ids=task_type_ids,
+            task_source_ids=task_source_ids,
+            bulk_visibility=bulk_visibility,
+            bulk_collection_ids=bulk_collection_ids,
+            limit=limit,
+            offset=offset,
         )
+        payload["total_matching_count"] = payload["total"]
 
-        return jsonify({"tasks": tasks, "count": len(tasks)}), 200
+        return jsonify(payload), 200
 
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Unexpected error listing my tasks: {e}")
         return jsonify({"error": "Internal server error"}), 500

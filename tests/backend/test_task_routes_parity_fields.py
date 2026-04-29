@@ -252,6 +252,66 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
     assert captured["offset"] == 5
 
 
+def test_my_tasks_route_uses_visibility_listing(monkeypatch):
+    client = _build_client()
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes._get_current_user_concept_id",
+        lambda: "#V#user_alice",
+    )
+
+    def _fake_list_tasks_with_visibility(**kwargs):
+        captured.update(kwargs)
+        return {
+            "tasks": [{"task_concept_id": "#V#task_visible", "title": "Visible"}],
+            "count": 1,
+            "total": 7,
+            "offset": kwargs["offset"],
+            "limit": kwargs["limit"],
+            "bulk_visibility": kwargs["bulk_visibility"],
+            "bulk_collection_ids": ["#V#jira_task_migration_bulk_collection"],
+            "hidden_bulk_task_total": 42,
+            "hidden_bulk_task_collections": [
+                {
+                    "collection_id": "#V#jira_task_migration_bulk_collection",
+                    "label": "Jira migration backlog",
+                    "count": 42,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.list_tasks_with_visibility",
+        _fake_list_tasks_with_visibility,
+    )
+
+    response = client.get(
+        "/api/tasks/my?include_created=true&status=pending&priority=high"
+        "&task_type_ids=%23V%23delegated_task_specification"
+        "&task_source_id=%23V%23jira_imported_task_source"
+        "&bulk_visibility=exclude&limit=25&offset=10"
+        "&bulk_collection_id=%23V%23jira_task_migration_bulk_collection"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["count"] == 1
+    assert payload["total"] == 7
+    assert payload["total_matching_count"] == 7
+    assert payload["hidden_bulk_task_total"] == 42
+    assert captured["user_concept_id"] == "#V#user_alice"
+    assert captured["include_created"] is True
+    assert captured["status_filter"] == "pending"
+    assert captured["priority_filter"] == "high"
+    assert captured["task_type_ids"] == ["#V#delegated_task_specification"]
+    assert captured["task_source_ids"] == ["#V#jira_imported_task_source"]
+    assert captured["bulk_visibility"] == "exclude"
+    assert captured["bulk_collection_ids"] == ["#V#jira_task_migration_bulk_collection"]
+    assert captured["limit"] == 25
+    assert captured["offset"] == 10
+
+
 def test_jira_migration_bulk_backfill_route_defaults_to_dry_run(monkeypatch):
     client = _build_client()
     captured: dict = {}
