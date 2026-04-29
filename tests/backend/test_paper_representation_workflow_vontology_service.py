@@ -76,6 +76,36 @@ _LIVE_ARXIV_ACCEPTANCE_NAMESPACE = (
 )
 
 
+class _EvidenceSummaryLLM:
+    def generate(self, prompt: str, context=None, model=None) -> str:
+        assert "scholarly article representation workflow" in prompt.lower()
+        return json.dumps(
+            {
+                "response_text": (
+                    "Created the paper concept and read back the supplied "
+                    "metadata evidence."
+                ),
+                "observations": [
+                    {
+                        "label": "paper_metadata_readback",
+                        "verdict": "pass",
+                        "expected_outcome": "paper concept metadata read-back",
+                        "observed_outcome": "workflow context includes article read-back",
+                    }
+                ],
+                "metadata_verification": {
+                    "paper_concept_id": "from_context",
+                    "author_concept_ids": "from_context",
+                    "doi": "from_context",
+                    "source_uri": "from_context",
+                    "readback_present": True,
+                },
+                "verification_passed": True,
+                "reasoning": "The workflow context contains read-back evidence.",
+            }
+        )
+
+
 def _upsert_workflow_json_text(
     *,
     workflow_id: str,
@@ -355,6 +385,31 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "#V#scholarly_article" in (
         support_concepts.get("created_concept_ids") or []
     )
+    assert "#V#has_doi" in (support_concepts.get("created_concept_ids") or [])
+    assert "#V#has_source_uri" in (
+        support_concepts.get("created_concept_ids") or []
+    )
+    source_uri_predicate = concept_service.get_concept_by_concept_id(
+        "#V#has_source_uri"
+    )
+    assert "#V#predicate" in (
+        (source_uri_predicate.get("relationships") or {}).get("is_an_instance_of")
+        or []
+    )
+    prompt_support = report.get("prompt_support") or {}
+    assert prompt_support.get("success") is True
+    metadata_prompt_rows = get_texts_for_concept(
+        "#V#prompt_scholarly_article_metadata_extraction",
+        predicate="hasContent",
+        limit=2,
+    )
+    assert metadata_prompt_rows
+    evidence_prompt_rows = get_texts_for_concept(
+        "#V#prompt_scholarly_article_representation_evidence_summary",
+        predicate="hasContent",
+        limit=2,
+    )
+    assert evidence_prompt_rows
 
     metadata_definition = load_workflow_definition_from_vontology(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
@@ -396,6 +451,48 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert metadata_exemplars_source.startswith("text_relation:")
     assert "represent doi article" in metadata_exemplars.get("keywords", [])
+    metadata_exemplar_text = json.dumps(metadata_exemplars, sort_keys=True).lower()
+    assert "dl.acm.org/doi/full" in metadata_exemplar_text
+    assert "paper concept authors doi" in metadata_exemplar_text
+    assert "scholarly article source url" in metadata_exemplar_text
+    assert "workflow_execute scholarly metadata" in metadata_exemplar_text
+    assert metadata_definition.initial_state.endswith("_decide_metadata_extraction")
+    decide_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="decide_metadata_extraction",
+    )
+    extract_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="extract_metadata_from_prompt",
+    )
+    decide_metadata_transitions = {
+        transition.reason: transition
+        for transition in metadata_definition.states[
+            decide_metadata_state_id
+        ].transitions
+    }
+    assert decide_metadata_transitions[
+        "prompt_text_available"
+    ].to_state == extract_metadata_state_id
+    extract_metadata_action = metadata_definition.states[
+        extract_metadata_state_id
+    ].actions[0]
+    assert extract_metadata_action.action_id == "llm.action"
+    assert extract_metadata_action.execution_mode == "llm"
+    assert extract_metadata_action.prompt_contract["requested_prompt_concept_ids"] == [
+        "#V#prompt_scholarly_article_metadata_extraction"
+    ]
+    extract_mappings = (
+        metadata_definition.states[
+            extract_metadata_state_id
+        ].metadata.get("tool_output_context_mappings")
+        or []
+    )
+    assert any(
+        mapping.get("tool_output_field") == "validated_json.author_names"
+        and mapping.get("context_key") == "extracted_author_names"
+        for mapping in extract_mappings
+    )
     normalise_metadata_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="normalise_metadata_context",
@@ -409,6 +506,8 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         isinstance(item, dict)
         and item.get("key") == "title"
         and "paper_metadata.title" in item.get("value_from_context_options", [])
+        and "extracted_title" in item.get("value_from_context_options", [])
+        and "source_uri" in item.get("value_from_context_options", [])
         for item in assignments
     )
     normalise_metadata_transitions = {
@@ -485,6 +584,24 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "$mapping_concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_attach_arxiv_identity_arxiv_id_to_text_parameter",
         "$required": True,
     }
+    attach_doi_identity_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="attach_doi_identity",
+    )
+    attach_source_uri_identity_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="attach_source_uri_identity",
+    )
+    attach_doi_action = metadata_definition.states[
+        attach_doi_identity_state_id
+    ].actions[0]
+    assert attach_doi_action.action_id == "upsert_text_relation"
+    assert attach_doi_action.inputs.get("predicate") == "#V#has_doi"
+    attach_source_uri_action = metadata_definition.states[
+        attach_source_uri_identity_state_id
+    ].actions[0]
+    assert attach_source_uri_action.action_id == "upsert_text_relation"
+    assert attach_source_uri_action.inputs.get("predicate") == "#V#has_source_uri"
     create_article_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="create_article_concept",
@@ -497,6 +614,61 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "reason_code": "scholarly_article_metadata_representation_additive_writes",
         "schema_version": "workflow_step_mutation_authority.v1",
     }
+    read_back_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="read_back_article",
+    )
+    read_back_text_relations_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="read_back_article_text_relations",
+    )
+    summary_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="summarise_representation_evidence",
+    )
+    read_back_transitions = metadata_definition.states[read_back_state_id].transitions
+    assert any(
+        transition.to_state == read_back_text_relations_state_id
+        for transition in read_back_transitions
+    )
+    read_back_text_relations_action = metadata_definition.states[
+        read_back_text_relations_state_id
+    ].actions[0]
+    assert read_back_text_relations_action.action_id == "get_text_relations_summary"
+    assert read_back_text_relations_action.inputs.get("predicates") == [
+        "hasName",
+        "hasDescription",
+        "#V#has_doi",
+        "#V#has_source_uri",
+    ]
+    assert any(
+        transition.to_state == summary_state_id
+        for transition in metadata_definition.states[
+            read_back_text_relations_state_id
+        ].transitions
+    )
+    summary_action = metadata_definition.states[summary_state_id].actions[0]
+    assert summary_action.action_id == "llm.action"
+    assert summary_action.execution_mode == "llm"
+    assert summary_action.prompt_contract["requested_prompt_concept_ids"] == [
+        "#V#prompt_scholarly_article_representation_evidence_summary"
+    ]
+    summary_mappings = (
+        metadata_definition.states[
+            summary_state_id
+        ].metadata.get("tool_output_context_mappings")
+        or []
+    )
+    assert any(
+        mapping.get("tool_output_field") == "validated_json.observations"
+        and mapping.get("context_key") == "observations"
+        for mapping in summary_mappings
+    )
+    assert any(
+        mapping.get("tool_output_field") == "validated_json.response_text"
+        and mapping.get("context_key") == "response_text"
+        for mapping in summary_mappings
+    )
 
     scholarly_terminal_contract = scholarly_definition.metadata.get(
         "terminal_success_contract"
@@ -815,7 +987,7 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     ).run(
         definition,
         environment=WorkflowEnvironment(
-            llm_client=None,
+            llm_client=_EvidenceSummaryLLM(),
             user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
             user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
             org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
@@ -837,6 +1009,11 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     assert result.final_state.endswith("_completed")
     paper_concept_id = result.data.get("paper_concept_id")
     assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
+    assert result.data.get("verification_passed") is True
+    assert result.data.get("response_text")
+    observations = result.data.get("observations")
+    assert isinstance(observations, list)
+    assert observations[0]["label"] == "paper_metadata_readback"
 
     paper_doc = concept_service.get_concept_by_concept_id(paper_concept_id)
     assert paper_doc is not None
@@ -854,8 +1031,35 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         )
     ]
     assert "Composable Identity Control for Multi-Character Illustration" in names
-    assert "https://doi.org/10.1145/3743093.3770985" in names
-    assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in names
+    doi_values = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="#V#has_doi",
+            limit=5,
+        )
+    ]
+    assert "https://doi.org/10.1145/3743093.3770985" in doi_values
+    source_uri_values = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="#V#has_source_uri",
+            limit=5,
+        )
+    ]
+    assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in (
+        source_uri_values
+    )
+    text_relation_summary = result.data.get("article_text_relations_summary")
+    assert isinstance(text_relation_summary, dict)
+    summary_predicates = {
+        group.get("predicate")
+        for group in (text_relation_summary.get("groups") or [])
+        if isinstance(group, dict)
+    }
+    assert "#V#has_doi" in summary_predicates
+    assert "#V#has_source_uri" in summary_predicates
 
     descriptions = [
         row.get("text")
@@ -866,6 +1070,61 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
         )
     ]
     assert "A paper about composable identity control." in descriptions
+
+
+def test_metadata_workflow_represents_sparse_source_uri_without_title(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    source_uri = "https://dl.acm.org/doi/full/10.1145/3743093.3770985"
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=_EvidenceSummaryLLM(),
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={"source_uri": source_uri},
+    )
+
+    assert result.completed is True
+    paper_concept_id = result.data.get("paper_concept_id")
+    assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
+
+    paper_doc = concept_service.get_concept_by_concept_id(paper_concept_id)
+    assert paper_doc is not None
+    assert paper_doc.get("name")
+    relationships = paper_doc.get("relationships") or {}
+    assert "#V#scholarly_article" in (relationships.get("is_an_instance_of") or [])
+    names = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="hasName",
+            limit=20,
+        )
+    ]
+    assert source_uri in names
+    source_uri_values = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="#V#has_source_uri",
+            limit=5,
+        )
+    ]
+    assert source_uri in source_uri_values
 
 
 def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
@@ -885,7 +1144,7 @@ def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
     ).run(
         definition,
         environment=WorkflowEnvironment(
-            llm_client=None,
+            llm_client=_EvidenceSummaryLLM(),
             user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
             user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
             org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
@@ -923,7 +1182,15 @@ def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
         )
     ]
     assert "2604.22937" in names
-    assert "https://arxiv.org/abs/2604.22937" in names
+    source_uri_values = [
+        row.get("text")
+        for row in get_texts_for_concept(
+            paper_concept_id,
+            predicate="#V#has_source_uri",
+            limit=5,
+        )
+    ]
+    assert "https://arxiv.org/abs/2604.22937" in source_uri_values
 
 
 def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stale(

@@ -29,14 +29,8 @@ def test_expected_outcome_prompt_recognises_pasted_scholarly_metadata() -> None:
     assert "#v#scholarly_article" in lowered
     assert "create it as a predicate concept" in lowered
     assert "do not create title/field concepts as individuals" in lowered
-    for tool_name in (
-        "vontology_concept_search",
-        "create_concepts",
-        "add_relationship",
-        "upsert_singleton_text_relation",
-        "fetch_concept",
-    ):
-        assert tool_name in prompt_text
+    assert "bare non-arXiv scholarly article URLs" in prompt_text
+    assert "workflow_execute" in prompt_text
 
 
 def test_selector_prompt_treats_scholarly_metadata_continuations_as_authoring() -> None:
@@ -50,6 +44,7 @@ def test_selector_prompt_treats_scholarly_metadata_continuations_as_authoring() 
     assert "abstract" in lowered
     assert "how about with this too" in lowered
     assert "authoring intent" in lowered
+    assert "specialised executable scholarly-metadata representation workflow" in lowered
     assert "#V#tool_calling_workflow" in prompt_text
 
 

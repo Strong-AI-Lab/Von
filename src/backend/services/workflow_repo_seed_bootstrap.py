@@ -1365,6 +1365,11 @@ def bootstrap_repo_seed_workflow_bundle(
         for workflow_id, status in repo_seed_version_status_by_id.items()
         if bool(status.get("blocked")) and not force_republish
     )
+    repo_seed_version_refresh_ids = tuple(
+        workflow_id
+        for workflow_id, status in repo_seed_version_status_by_id.items()
+        if status.get("comparison") == 1 and not force_republish
+    )
     already_current, existing_validation_by_workflow_id, materialisation_preflight = (
         _validate_existing_materialisation(
             target_workflow_ids=target_workflow_ids,
@@ -1386,24 +1391,30 @@ def bootstrap_repo_seed_workflow_bundle(
         "seed_version": seed_version,
         "version_marker_predicate": _REPO_SEED_VERSION_TEXT_PREDICATE,
         "blocked_workflow_ids": list(repo_seed_version_blocked_ids),
+        "refresh_workflow_ids": list(repo_seed_version_refresh_ids),
         "status_by_workflow_id": repo_seed_version_status_by_id,
         "forced_republish": bool(force_republish),
     }
+    skip_publication = (
+        already_current
+        and not force_republish
+        and not repo_seed_version_refresh_ids
+    )
     no_op_version_blocked_ids = (
-        repo_seed_version_blocked_ids if already_current and not force_republish else ()
+        repo_seed_version_blocked_ids if skip_publication else ()
     )
 
     typed_workflow_ids: list[str] = []
     typed_step_ids: list[str] = []
     seed_version_marker_updates: list[dict[str, Any]] = []
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
-    if already_current and not force_republish:
+    if skip_publication:
         validation_by_workflow_id.update(existing_validation_by_workflow_id)
 
     context_manager_factory = publish_context_manager_factory or nullcontext
     with context_manager_factory():
         publication_report: dict[str, Any]
-        if already_current and not force_republish:
+        if skip_publication:
             publication_report = {
                 "counts": {
                     "workflows_targeted": len(target_workflow_ids),
@@ -1435,12 +1446,17 @@ def bootstrap_repo_seed_workflow_bundle(
             publication_report["forced_republish"] = bool(force_republish)
         publication_report["materialisation_status"] = (
             "current"
-            if already_current and not force_republish
+            if skip_publication
             else (
                 "forced_republish"
                 if force_republish
                 and not materialisation_preflight.get("drift_detected")
-                else "repaired_from_repo_seed"
+                else (
+                    "repo_seed_version_refresh"
+                    if repo_seed_version_refresh_ids
+                    and not materialisation_preflight.get("drift_detected")
+                    else "repaired_from_repo_seed"
+                )
             )
         )
         publication_report["drift_detected"] = bool(
@@ -1475,13 +1491,14 @@ def bootstrap_repo_seed_workflow_bundle(
         publication_report["repo_seed_version_gate"] = materialisation_preflight[
             "repo_seed_version_gate"
         ]
+        publication_report["repo_seed_version_refresh_workflow_ids"] = list(
+            repo_seed_version_refresh_ids
+        )
         publication_report["skipped_due_to_seed_version_not_newer"] = list(
             no_op_version_blocked_ids
         )
 
-        should_apply_seed_bundle_mutations = not (
-            already_current and not force_republish
-        )
+        should_apply_seed_bundle_mutations = not skip_publication
         if should_apply_seed_bundle_mutations:
             for workflow_id, spec in publication_specs.items():
                 type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
@@ -1550,7 +1567,7 @@ def bootstrap_repo_seed_workflow_bundle(
 
         for workflow_id, spec in publication_specs.items():
             validation = validation_by_workflow_id.get(workflow_id)
-            if already_current and not force_republish:
+            if skip_publication:
                 if not isinstance(validation, dict):
                     raise RuntimeError(
                         "repo_seed_workflow_validation_missing_after_short_circuit:"

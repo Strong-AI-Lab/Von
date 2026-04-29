@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "3",
-  "source_tag": "JVNAUTOSCI-2186",
+  "seed_version": "7",
+  "source_tag": "JVNAUTOSCI-2189",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -20,6 +20,7 @@
     "create_concepts",
     "upsert_text_relation",
     "fetch_concept_content",
+    "get_text_relations_summary",
     "scholarly_paper.ensure_paper_concept",
     "scholarly_paper.link_file_copy",
     "scholarly_paper.attach_metadata",
@@ -30,12 +31,12 @@
     {
       "workflow_id": "#V#scholarly_article_metadata_representation_workflow",
       "display_name": "Scholarly Article Metadata Representation Workflow",
-      "description": "Canonical compositional workflow for representing scholarly article metadata without requiring a source-specific PDF, arXiv identifier, or file copy.",
-      "content": "Represent a scholarly article from normalised metadata by coalescing metadata fields, creating or reusing an article concept through generic Vontology write tools, attaching text metadata, resolving authors/topics, attaching source identifiers, optionally linking a file copy, and reading back the materialised concept.",
+      "description": "Canonical compositional workflow for representing non-arXiv scholarly article metadata, DOI/source URLs, ACM/DOI pages, and pasted bibliographic metadata without requiring a source-specific PDF, arXiv identifier, or file copy.",
+      "content": "Represent a scholarly article from a DOI URL, source URL, pasted bibliographic text, or normalised metadata by extracting/coalescing metadata fields, creating or reusing a #V#scholarly_article concept through generic Vontology write tools, attaching text metadata, resolving authors/topics, attaching DOI and source identifiers, optionally linking a file copy, and reading back the materialised concept. Sparse URL-only inputs may create a provisional article representation named by DOI/source URI while preserving provenance. This workflow is the preferred execution surface for non-arXiv article representation requests before falling back to the generic tool-calling write path.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Represent this ACM article metadata with its DOI, title, authors, abstract, and venue.\", \"Create a scholarly article representation from this DOI and abstract without downloading the PDF.\", \"How about with this too: title, authors, venue, date, abstract, and source URL.\", \"Represent this non-arXiv scholarly article from pasted metadata.\"], \"keywords\": [\"scholarly article metadata\", \"represent article metadata\", \"represent doi article\", \"acm article metadata\", \"non arxiv paper metadata\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\": [\"https://dl.acm.org/doi/full/10.1145/3743093.3770985\", \"Title: Example paper title. Authors: Ada Lovelace; Grace Hopper. DOI: https://doi.org/10.example/example. Create the paper concept and author links.\", \"Represent this ACM article metadata with its DOI, title, authors, abstract, and venue.\", \"Create a scholarly article representation from this DOI and abstract without downloading the PDF.\", \"How about with this too: title, authors, venue, date, abstract, and source URL.\", \"Represent this non-ArXiv scholarly article from pasted metadata.\", \"Create or update a #V#scholarly_article from DOI/source URL metadata and read it back.\"], \"keywords\": [\"scholarly article metadata\", \"scholarly article source url\", \"scholarly doi url\", \"dl.acm.org doi full\", \"doi.org article\", \"title authors doi abstract\", \"paper concept authors doi\", \"create paper concept author links\", \"pasted article metadata authors\", \"represent scholarly article authors\", \"represent article metadata\", \"represent doi article\", \"acm article metadata\", \"non-arxiv paper metadata\", \"pasted bibliographic metadata\", \"workflow_execute scholarly metadata\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -164,8 +165,138 @@
         ]
       },
       "publication_spec": {
-        "initial_state": "normalise_metadata_context",
+        "initial_state": "decide_metadata_extraction",
         "steps": [
+          {
+            "state_id": "decide_metadata_extraction",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "metadata_extraction_gate",
+                    "value": "prompt_or_context"
+                  }
+                ]
+              }
+            ],
+            "next_state": "normalise_metadata_context",
+            "conditional_transitions": [
+              {
+                "to_state": "extract_metadata_from_prompt",
+                "reason": "prompt_text_available",
+                "condition_spec": {
+                  "kind": "any",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "user_prompt",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "prompt",
+                      "expected": true
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "extract_metadata_from_prompt",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_scholarly_article_metadata_extraction"
+            ],
+            "llm_policy": {
+              "policy_stage": "scholarly_metadata_extraction",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys paper_metadata, title, summary, author_names, topic_labels, doi, source_uri, publication_date, and reasoning. Use null or [] for unavailable fields.",
+              "context_fields": [
+                {
+                  "context_key": "user_prompt",
+                  "label": "User prompt"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Prompt"
+                },
+                {
+                  "context_key": "source_uri",
+                  "label": "Source URI"
+                },
+                {
+                  "context_key": "turn_expected_outcome_summary",
+                  "label": "Expected outcome summary"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Grounding requirement"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "next_state": "normalise_metadata_context",
+            "on_failure_state": "normalise_metadata_context",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_paper_metadata_to_extracted_paper_metadata",
+                "context_key": "extracted_paper_metadata",
+                "tool_output_field": "validated_json.paper_metadata"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_title_to_extracted_title",
+                "context_key": "extracted_title",
+                "tool_output_field": "validated_json.title"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_summary_to_extracted_summary",
+                "context_key": "extracted_summary",
+                "tool_output_field": "validated_json.summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_author_names_to_extracted_author_names",
+                "context_key": "extracted_author_names",
+                "tool_output_field": "validated_json.author_names"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_topic_labels_to_extracted_topic_labels",
+                "context_key": "extracted_topic_labels",
+                "tool_output_field": "validated_json.topic_labels"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_doi_to_extracted_doi",
+                "context_key": "extracted_doi",
+                "tool_output_field": "validated_json.doi"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_source_uri_to_extracted_source_uri",
+                "context_key": "extracted_source_uri",
+                "tool_output_field": "validated_json.source_uri"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_extract_metadata_publication_date_to_extracted_publication_date",
+                "context_key": "extracted_publication_date",
+                "tool_output_field": "validated_json.publication_date"
+              }
+            ],
+            "writes_context_keys": [
+              "extracted_paper_metadata",
+              "extracted_title",
+              "extracted_summary",
+              "extracted_author_names",
+              "extracted_topic_labels",
+              "extracted_doi",
+              "extracted_source_uri",
+              "extracted_publication_date"
+            ]
+          },
           {
             "state_id": "normalise_metadata_context",
             "action_id": "workflow_control.context_set",
@@ -202,7 +333,8 @@
                     "value_from_context_options": [
                       "paper_metadata",
                       "metadata",
-                      "scholarly_metadata"
+                      "scholarly_metadata",
+                      "extracted_paper_metadata"
                     ],
                     "skip_if_unresolved": true
                   },
@@ -210,11 +342,17 @@
                     "key": "title",
                     "value_from_context_options": [
                       "title",
+                      "extracted_title",
                       "paper_title",
                       "paper_metadata.title",
                       "metadata.title",
                       "scholarly_metadata.title",
-                      "paper_metadata.name"
+                      "paper_metadata.name",
+                      "extracted_doi",
+                      "doi",
+                      "extracted_source_uri",
+                      "source_uri",
+                      "url"
                     ],
                     "skip_if_unresolved": true
                   },
@@ -222,6 +360,7 @@
                     "key": "summary",
                     "value_from_context_options": [
                       "summary",
+                      "extracted_summary",
                       "abstract",
                       "paper_metadata.summary",
                       "paper_metadata.abstract",
@@ -235,6 +374,7 @@
                     "key": "publication_date",
                     "value_from_context_options": [
                       "publication_date",
+                      "extracted_publication_date",
                       "published",
                       "paper_metadata.publication_date",
                       "paper_metadata.published",
@@ -247,6 +387,7 @@
                     "key": "author_names",
                     "value_from_context_options": [
                       "author_names",
+                      "extracted_author_names",
                       "authors",
                       "paper_metadata.author_names",
                       "paper_metadata.authors",
@@ -259,6 +400,7 @@
                     "key": "topic_labels",
                     "value_from_context_options": [
                       "topic_labels",
+                      "extracted_topic_labels",
                       "keywords",
                       "categories",
                       "paper_metadata.topic_labels",
@@ -274,6 +416,7 @@
                     "key": "doi",
                     "value_from_context_options": [
                       "doi",
+                      "extracted_doi",
                       "paper_metadata.doi",
                       "paper_metadata.DOI",
                       "metadata.doi",
@@ -285,6 +428,7 @@
                     "key": "source_uri",
                     "value_from_context_options": [
                       "source_uri",
+                      "extracted_source_uri",
                       "url",
                       "paper_metadata.source_uri",
                       "paper_metadata.url",
@@ -638,7 +782,7 @@
             "static_input_bindings": [
               {
                 "key": "predicate",
-                "value": "hasName"
+                "value": "#V#has_doi"
               },
               {
                 "key": "context",
@@ -716,7 +860,7 @@
             "static_input_bindings": [
               {
                 "key": "predicate",
-                "value": "hasName"
+                "value": "#V#has_source_uri"
               },
               {
                 "key": "context",
@@ -831,7 +975,7 @@
                 "tool_param": "concept_id"
               }
             ],
-            "next_state": "completed",
+            "next_state": "read_back_article_text_relations",
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
@@ -842,6 +986,134 @@
             ],
             "writes_context_keys": [
               "article_readback"
+            ]
+          },
+          {
+            "state_id": "read_back_article_text_relations",
+            "action_id": "get_text_relations_summary",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "predicates",
+                "value": [
+                  "hasName",
+                  "hasDescription",
+                  "#V#has_doi",
+                  "#V#has_source_uri"
+                ]
+              },
+              {
+                "key": "max_relation_ids_per_group",
+                "value": 5
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_read_back_article_text_relations_paper_concept_id_to_concept_id_parameter",
+                "context_key": "paper_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
+            ],
+            "next_state": "summarise_representation_evidence",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_read_back_article_text_relations_result_to_article_text_relations_summary",
+                "context_key": "article_text_relations_summary",
+                "tool_output_field": "result"
+              }
+            ],
+            "writes_context_keys": [
+              "article_text_relations_summary"
+            ]
+          },
+          {
+            "state_id": "summarise_representation_evidence",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_scholarly_article_representation_evidence_summary"
+            ],
+            "llm_policy": {
+              "policy_stage": "scholarly_representation_evidence_summary",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys response_text, observations, metadata_verification, verification_passed, and reasoning. Use only the supplied workflow context and read-back evidence.",
+              "context_fields": [
+                {
+                  "context_key": "title",
+                  "label": "Article title"
+                },
+                {
+                  "context_key": "paper_concept_id",
+                  "label": "Paper concept ID"
+                },
+                {
+                  "context_key": "author_names",
+                  "label": "Supplied author names"
+                },
+                {
+                  "context_key": "author_concept_ids",
+                  "label": "Resolved author concept IDs"
+                },
+                {
+                  "context_key": "doi",
+                  "label": "DOI"
+                },
+                {
+                  "context_key": "source_uri",
+                  "label": "Source URI"
+                },
+                {
+                  "context_key": "article_readback",
+                  "label": "Article read-back"
+                },
+                {
+                  "context_key": "article_text_relations_summary",
+                  "label": "Article text-relation read-back summary"
+                },
+                {
+                  "context_key": "doi_identity_write_result",
+                  "label": "DOI text-relation write result"
+                },
+                {
+                  "context_key": "source_uri_identity_write_result",
+                  "label": "Source URI text-relation write result"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_evidence_summary_response_text_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "validated_json.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_evidence_summary_observations_to_observations",
+                "context_key": "observations",
+                "tool_output_field": "validated_json.observations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_evidence_summary_metadata_verification_to_metadata_verification",
+                "context_key": "metadata_verification",
+                "tool_output_field": "validated_json.metadata_verification"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_scholarly_article_metadata_representation_workflow_evidence_summary_verification_passed_to_verification_passed",
+                "context_key": "verification_passed",
+                "tool_output_field": "validated_json.verification_passed"
+              }
+            ],
+            "writes_context_keys": [
+              "response_text",
+              "observations",
+              "metadata_verification",
+              "verification_passed"
             ]
           },
           {
@@ -1763,6 +2035,36 @@
       "system_tags": [
         "scholarly",
         "article",
+        "workflow-support"
+      ]
+    },
+    {
+      "concept_id": "#V#has_doi",
+      "name": "Has DOI",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate for a DOI text relation that records the authoritative Digital Object Identifier supplied for a scholarly work.",
+      "system_tags": [
+        "ontology",
+        "predicate",
+        "scholarly_metadata",
+        "workflow-support"
+      ]
+    },
+    {
+      "concept_id": "#V#has_source_uri",
+      "name": "Has Source URI",
+      "parent_concept_ids": [
+        "#V#predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate for a source URI text relation that records the authoritative external source URL used to represent a scholarly work or other sourced artefact.",
+      "system_tags": [
+        "ontology",
+        "predicate",
+        "scholarly_metadata",
         "workflow-support"
       ]
     }

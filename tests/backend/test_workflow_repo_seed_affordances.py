@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.backend.services import workflow_repo_seed_bootstrap as seed_bootstrap
 from src.backend.workflows import workflow_concept_authority_service as authority_service
@@ -130,7 +131,7 @@ def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishi
     assert invalidations == []
 
 
-def test_repo_seed_newer_version_records_marker_without_republishing_current_materialisation(
+def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
     monkeypatch,
 ) -> None:
     bundle = {
@@ -140,15 +141,21 @@ def test_repo_seed_newer_version_records_marker_without_republishing_current_mat
         "seed_version": "2",
         "source_tag": "test-source",
         "supported_action_ids": (),
-        "publication_specs": {"#V#test_workflow": object()},
+        "publication_specs": {"#V#test_workflow": SimpleNamespace(steps=())},
         "publication_purposes": {},
         "workflow_type_ids": {},
-        "workflow_text_relations": {},
+        "workflow_text_relations": {
+            "#V#test_workflow": [
+                {"predicate": "#V#hasWorkflowDescription", "text": "new routing text"}
+            ]
+        },
         "workflow_launch_input_contracts": {},
         "step_text_relations": {},
     }
     marker_updates: list[dict] = []
     invalidations: list[bool] = []
+    publications: list[dict] = []
+    text_updates: list[dict] = []
 
     monkeypatch.setattr(
         authority_service,
@@ -185,9 +192,46 @@ def test_repo_seed_newer_version_records_marker_without_republishing_current_mat
     monkeypatch.setattr(
         authority_service,
         "publish_canonical_chat_workflow_graphs",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("current materialisation should not republish")
-        ),
+        lambda **kwargs: publications.append(kwargs)
+        or {
+            "counts": {
+                "workflows_targeted": 1,
+                "workflows_published": 1,
+                "workflows_skipped_missing_registration": 0,
+                "workflows_skipped_missing_concept": 0,
+                "step_concepts_created": 0,
+                "action_concepts_created": 0,
+                "mapping_concepts_created": 0,
+                "validation_failures": 0,
+                "errors": 0,
+            },
+            "published_workflow_ids": ["#V#test_workflow"],
+        },
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "_build_definition_map_from_publication_specs",
+        lambda _specs: {"#V#test_workflow": object()},
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "upsert_seed_bundle_text_relations",
+        lambda **kwargs: text_updates.append(kwargs),
+    )
+    monkeypatch.setattr(
+        seed_bootstrap,
+        "build_workflow_process_graph",
+        lambda _workflow_id: ({}, []),
+    )
+    monkeypatch.setattr(
+        seed_bootstrap,
+        "load_workflow_definition_from_vontology",
+        lambda _workflow_id: object(),
+    )
+    monkeypatch.setattr(
+        seed_bootstrap,
+        "validate_workflow_definition_contract",
+        lambda **_kwargs: {"valid": True, "errors": []},
     )
     monkeypatch.setattr(
         seed_bootstrap,
@@ -205,8 +249,19 @@ def test_repo_seed_newer_version_records_marker_without_republishing_current_mat
         asset_path="seed_bundle.json"
     )
 
-    assert result["publication"]["skip_reason"] == "existing_materialisation_valid"
-    assert result["publication"]["counts"]["workflows_published"] == 0
+    assert result["publication"].get("skip_reason") is None
+    assert result["publication"]["materialisation_status"] == "repo_seed_version_refresh"
+    assert result["publication"]["counts"]["workflows_published"] == 1
+    assert result["publication"]["repo_seed_version_refresh_workflow_ids"] == [
+        "#V#test_workflow"
+    ]
+    assert result["repo_seed_version_gate"]["refresh_workflow_ids"] == [
+        "#V#test_workflow"
+    ]
+    assert publications
+    assert text_updates and text_updates[0]["relation_specs"] == tuple(
+        bundle["workflow_text_relations"]["#V#test_workflow"]
+    )
     assert marker_updates == [
         {
             "workflow_id": "#V#test_workflow",
@@ -217,4 +272,4 @@ def test_repo_seed_newer_version_records_marker_without_republishing_current_mat
             "asset_path": "seed_bundle.json",
         }
     ]
-    assert invalidations == []
+    assert invalidations == [True]
