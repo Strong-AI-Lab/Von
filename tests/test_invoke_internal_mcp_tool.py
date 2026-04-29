@@ -86,3 +86,20 @@ def test_internal_mcp_helper_pdm_delegation_can_be_disabled():
     )
 
     assert returncode is None
+
+
+def test_internal_mcp_helper_applies_openai_dotenv_override_keys():
+    module = _load_module()
+    captured: dict[str, object] = {}
+
+    def fake_apply(keys: Sequence[str]) -> dict[str, str]:
+        captured["keys"] = tuple(keys)
+        return {"OPENAI_API_KEY": "sk-test"}
+
+    applied = module._apply_internal_mcp_dotenv_overrides(fake_apply)
+
+    assert applied == {"OPENAI_API_KEY": "sk-test"}
+    keys = captured["keys"]
+    assert isinstance(keys, tuple)
+    assert "OPENAI_API_KEY" in keys
+    assert "VON_DEFAULT_OPENAI_MODEL" in keys
