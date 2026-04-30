@@ -41,6 +41,9 @@ from .workflow_authoring_service import collect_transient_execution_input_issues
 from .write_tool_policy import (
     normalise_workflow_step_mutation_authority_spec,
 )
+from .workflow_mcp_tool_actions import (
+    validate_workflow_mcp_invocation_contract,
+)
 
 WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
 WORKFLOW_DEFINITION_IDENTITY_VERSION = 1
@@ -758,6 +761,7 @@ def validate_workflow_definition_contract(
             "terminal_success_contract_issues": [],
             "required_effects_contract_issues": [],
             "prompt_contract_issues": [],
+            "workflow_mcp_tool_invocation_issues": [],
             "transient_execution_input_issues": [],
         }
 
@@ -797,6 +801,7 @@ def validate_workflow_definition_contract(
     terminal_success_contract_issues: list[dict[str, Any]] = []
     required_effects_contract_issues: list[dict[str, Any]] = []
     prompt_contract_issues: list[dict[str, Any]] = []
+    workflow_mcp_tool_invocation_issues: list[dict[str, Any]] = []
     transient_execution_input_issues = collect_transient_execution_input_issues(
         definition
     )
@@ -1092,6 +1097,14 @@ def validate_workflow_definition_contract(
                         "severity": "warning",
                     }
                 )
+            workflow_mcp_tool_invocation_issues.extend(
+                validate_workflow_mcp_invocation_contract(
+                    state_id=state_id,
+                    action_id=action_id,
+                    action_inputs=action_inputs,
+                    state_metadata=metadata,
+                )
+            )
             if action_id in WORKFLOW_CONTROL_BREAK_ACTION_IDS:
                 action_scope = str(
                     action_inputs.get("loop_scope_id")
@@ -1517,6 +1530,15 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    workflow_mcp_tool_invocation_issues = sorted(
+        workflow_mcp_tool_invocation_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("tool_name") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
     transient_execution_input_issues = sorted(
         transient_execution_input_issues,
         key=lambda item: (
@@ -1573,6 +1595,8 @@ def validate_workflow_definition_contract(
         errors.append("workflow_prompt_contract_invalid")
     if transient_execution_input_issues:
         errors.append("workflow_transient_execution_input_invalid")
+    if workflow_mcp_tool_invocation_issues:
+        errors.append("workflow_mcp_tool_invocation_invalid")
     if subworkflow_contract_issues:
         unresolved_reason_codes = {
             "subworkflow_workflow_not_found",
@@ -1623,6 +1647,7 @@ def validate_workflow_definition_contract(
         "terminal_success_contract_issues": terminal_success_contract_issues,
         "required_effects_contract_issues": required_effects_contract_issues,
         "prompt_contract_issues": prompt_contract_issues,
+        "workflow_mcp_tool_invocation_issues": workflow_mcp_tool_invocation_issues,
         "transient_execution_input_issues": transient_execution_input_issues,
     }
 

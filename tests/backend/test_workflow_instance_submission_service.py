@@ -1036,7 +1036,10 @@ def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_po
         manager.create_instance_for_event.call_args.kwargs["namespace"]
         == "#V#user_alice@org_nao"
     )
-    mock_verify.assert_called_once_with("#V#candidate_workflow")
+    mock_verify.assert_called_once_with(
+        "#V#candidate_workflow",
+        action_registry_override=None,
+    )
 
 
 def test_submit_verified_workflow_instance_rejects_unresolvable_namespace() -> None:

@@ -1197,6 +1197,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .workflow_introspection_maintenance_workflow import (
         register_workflow_introspection_maintenance_actions,
     )
+    from ..workflow_mcp_tool_actions import register_workflow_mcp_tool_actions
 
     register_context_bundle_actions(registry)
     register_rag_sync_actions(registry)
@@ -1227,6 +1228,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_skill_interop_actions(registry)
     register_synthesiser_context_prep_actions(registry)
     register_tool_result_hint_actions(registry)
+    register_workflow_mcp_tool_actions(registry)
     register_turn_execution_actions(registry)
 
 

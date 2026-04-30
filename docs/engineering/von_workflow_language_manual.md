@@ -185,6 +185,35 @@ Runtime rule:
 - the loader MUST resolve the concept-backed target to its underlying executable `action_id`;
 - the original concept target MUST remain available as the step's contract concept for introspection, validation, and publication repair.
 
+### 3.4a Bounded Internal MCP Tool Invocation
+
+VWL workflows may invoke internal MCP tools through the generic durable action:
+
+- `workflow_mcp.invoke_tool`
+
+Required input:
+
+- `tool_name`: the static internal MCP method name to invoke.
+
+Optional input:
+
+- `tool_arguments`: object payload passed to the internal MCP gateway.
+
+Runtime semantics:
+
+- workflow context bindings inside `tool_arguments` are resolved by the normal action-input resolver before invocation;
+- authenticated namespace context is propagated into the MCP payload as `namespace` when available;
+- the action returns the full structured MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
+- `tool_output_context_mappings` should map fields from `result.<field>` or `mcp_result.<field>` into workflow context for downstream steps and subworkflows.
+
+Validation semantics:
+
+- `tool_name` MUST be statically declared, or the step MUST fail Workflow Studio contract validation;
+- the named tool MUST resolve to a registered internal MCP method;
+- read-only tools may be published without write metadata;
+- write or destructive tools MUST declare an explicit represented write policy such as step `mutation_authority` or `workflow_execution_side_effect_policy`;
+- domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
+
 ## 4. VWL Program Model
 
 A VWL program is a workflow concept graph:
