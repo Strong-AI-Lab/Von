@@ -333,6 +333,96 @@ def test_selected_workflow_outputs_merge_parent_and_child_telemetry() -> None:
     assert outputs["aux_llm_calls"] == [*parent_aux, *child_aux]
 
 
+def test_selected_workflow_outputs_promote_child_workflow_episode_trace_ref() -> None:
+    parent_aux = [
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_handoff",
+            "status": "started",
+            "selected_workflow_id": "#V#example_child_workflow",
+        },
+        {
+            "type": "workflow_use_episode",
+            "workflow_id": "#V#example_child_workflow",
+            "source": "conversation_turn_selected_workflow",
+            "episode_id": "episode-selected",
+            "workflow_instance_id": "wf-instance-selected",
+            "completed": False,
+            "terminal_stage": "#V#workflow_step_selected_failed",
+            "final_state": "#V#workflow_step_selected_failed",
+            "termination_reason": {
+                "code": "failed_terminal_state",
+                "detail": "selected_tool_bridge_failed",
+            },
+        },
+    ]
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#example_child_workflow",
+        child_completed=False,
+        final_state="#V#workflow_step_selected_failed",
+        failure_detail="selected_tool_bridge_failed",
+        child_outputs={
+            "workflow_execution_summary": {
+                "schema_version": "workflow_execution_summary.v1",
+                "workflow_id": "#V#example_child_workflow",
+                "completed": False,
+                "final_state": "#V#workflow_step_selected_failed",
+            }
+        },
+        parent_aux_llm_calls=parent_aux,
+    )
+
+    trace = outputs["selected_workflow_trace"]
+    assert trace["trace_role"] == "selected_workflow"
+    assert trace["workflow_id"] == "#V#example_child_workflow"
+    assert trace["workflow_instance_id"] == "wf-instance-selected"
+    assert trace["instance_id"] == "wf-instance-selected"
+    assert trace["episode_id"] == "episode-selected"
+    assert trace["selected_child_trace_source"] == "workflow_use_episode"
+    assert outputs["completion_report"]["instance_id"] == "wf-instance-selected"
+
+
+def test_selected_workflow_outputs_emit_pre_trace_failure_without_trace_ref() -> None:
+    parent_aux = [
+        {
+            "type": "workflow_instance_submission",
+            "status": "submission_failed",
+            "reason_code": "workflow_definition_not_runnable",
+            "workflow_id": "#V#example_selected_workflow",
+            "source": "conversation_turn_selected_workflow",
+            "error": "Verified durable workflow submission failed",
+        }
+    ]
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#example_selected_workflow",
+        child_completed=False,
+        final_state="selected_workflow_execution_exception",
+        failure_detail="workflow_definition_not_runnable",
+        child_outputs={},
+        parent_aux_llm_calls=parent_aux,
+    )
+
+    trace = outputs["selected_workflow_trace"]
+    assert trace["trace_role"] == "selected_workflow"
+    assert trace["workflow_id"] == "#V#example_selected_workflow"
+    assert trace["trace_unavailable"] is True
+    assert trace["trace_unavailable_reason"] == "workflow_definition_not_runnable"
+    assert trace["dispatch_failure_code"] == "workflow_definition_not_runnable"
+    assert trace["selected_workflow_pre_trace_failure"] == {
+        "source": "workflow_instance_submission",
+        "status": "submission_failed",
+        "failure_code": "workflow_definition_not_runnable",
+        "failure_detail": "Verified durable workflow submission failed",
+        "workflow_id": "#V#example_selected_workflow",
+    }
+    assert (
+        outputs["completion_report"]["trace_unavailable_reason"]
+        == "workflow_definition_not_runnable"
+    )
+
+
 def test_selected_workflow_outputs_derives_missing_tools_from_turn_contract() -> None:
     outputs = build_turn_execution_selected_workflow_outputs(
         selected_workflow_id="#V#tool_calling_workflow",

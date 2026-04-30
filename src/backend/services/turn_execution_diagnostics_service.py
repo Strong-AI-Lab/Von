@@ -286,6 +286,36 @@ def build_workflow_execution_trace_mcp_access_refs(
             or _safe_str(raw_entry.get("workflow_instance_concept_id"))
         )
         if not execution_id and not instance_id:
+            if not selected_hint:
+                return
+            trace_unavailable = raw_entry.get("trace_unavailable") is True
+            pre_trace_failure = raw_entry.get("selected_workflow_pre_trace_failure")
+            if not trace_unavailable and not isinstance(pre_trace_failure, Mapping):
+                return
+            trace_workflow_id = (
+                _safe_str(raw_entry.get("workflow_id"))
+                or _safe_str(raw_entry.get("selected_workflow_id"))
+                or _safe_str(raw_entry.get("dispatch_workflow_id"))
+                or selected_workflow_id
+            )
+            traces.append(
+                {
+                    "execution_id": None,
+                    "instance_id": None,
+                    "workflow_id": trace_workflow_id,
+                    "trace_role": "selected_workflow",
+                    "trace_unavailable": True,
+                    "trace_unavailable_reason": _safe_str(
+                        raw_entry.get("trace_unavailable_reason")
+                    )
+                    or "selected_workflow_trace_ref_missing",
+                    "selected_workflow_pre_trace_failure": (
+                        dict(pre_trace_failure)
+                        if isinstance(pre_trace_failure, Mapping)
+                        else None
+                    ),
+                }
+            )
             return
         trace_key = (execution_id, instance_id)
         if trace_key in seen_pairs:

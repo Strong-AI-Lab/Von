@@ -145,6 +145,253 @@ def _merge_mapping_sequences(
     return merged
 
 
+def _entry_workflow_id(entry: Mapping[str, Any]) -> str | None:
+    return (
+        _safe_str(entry.get("workflow_id"))
+        or _safe_str(entry.get("selected_workflow_id"))
+        or _safe_str(entry.get("dispatch_workflow_id"))
+    )
+
+
+def _entry_matches_selected_workflow(
+    entry: Mapping[str, Any],
+    *,
+    selected_workflow_id: str | None,
+) -> bool:
+    selected = _safe_str(selected_workflow_id)
+    if not selected:
+        return False
+    selected_lower = selected.lower()
+    for key in ("workflow_id", "selected_workflow_id", "dispatch_workflow_id"):
+        candidate = _safe_str(entry.get(key))
+        if candidate and candidate.lower() == selected_lower:
+            return True
+    return False
+
+
+def _trace_identifier_fields(entry: Mapping[str, Any]) -> dict[str, str]:
+    execution_id = _safe_str(entry.get("execution_id")) or _safe_str(
+        entry.get("execution_trace_id")
+    )
+    instance_id = (
+        _safe_str(entry.get("instance_id"))
+        or _safe_str(entry.get("workflow_instance_id"))
+        or _safe_str(entry.get("workflow_instance_concept_id"))
+    )
+    fields: dict[str, str] = {}
+    if execution_id:
+        fields["execution_id"] = execution_id
+    if instance_id:
+        fields["instance_id"] = instance_id
+        fields["workflow_instance_id"] = instance_id
+    return fields
+
+
+def _selected_child_trace_failure_code(entry: Mapping[str, Any]) -> str | None:
+    for key in (
+        "reason_code",
+        "dispatch_failure_code",
+        "error_code",
+        "status",
+        "final_state",
+    ):
+        value = _safe_str(entry.get(key))
+        if value:
+            return value.split(":", 1)[0].strip() or value
+
+    termination_reason = entry.get("termination_reason")
+    if isinstance(termination_reason, Mapping):
+        code = _safe_str(termination_reason.get("code"))
+        if code:
+            return code
+    return None
+
+
+def _selected_child_trace_failure_detail(entry: Mapping[str, Any]) -> str | None:
+    for key in (
+        "dispatch_terminal_failure_detail",
+        "error",
+        "message",
+        "detail",
+        "final_state",
+    ):
+        value = _safe_str(entry.get(key))
+        if value:
+            return value
+
+    termination_reason = entry.get("termination_reason")
+    if isinstance(termination_reason, Mapping):
+        detail = _safe_str(termination_reason.get("detail"))
+        if detail:
+            return detail
+    return None
+
+
+def _build_selected_child_trace_bridge_from_entry(
+    entry: Mapping[str, Any],
+    *,
+    selected_workflow_id: str | None,
+    source: str,
+) -> dict[str, Any]:
+    workflow_id = _entry_workflow_id(entry) or _safe_str(selected_workflow_id)
+    bridge: dict[str, Any] = {
+        "trace_role": "selected_workflow",
+        "selected_child_trace_source": source,
+    }
+    if workflow_id:
+        bridge["workflow_id"] = workflow_id
+    bridge.update(_trace_identifier_fields(entry))
+
+    for key in (
+        "episode_id",
+        "workflow_instance_created_new",
+        "source",
+        "session_id",
+        "turn_id",
+        "completed",
+        "terminal_stage",
+        "final_state",
+        "workflow_definition_identity",
+    ):
+        value = entry.get(key)
+        if value is not None:
+            bridge[key] = value
+
+    termination_reason = entry.get("termination_reason")
+    if isinstance(termination_reason, Mapping):
+        bridge["termination_reason"] = {
+            str(key): value
+            for key, value in termination_reason.items()
+            if isinstance(key, str)
+        }
+
+    if bridge.get("execution_id") or bridge.get("instance_id"):
+        return bridge
+
+    failure_code = _selected_child_trace_failure_code(entry)
+    failure_detail = _selected_child_trace_failure_detail(entry)
+    bridge["trace_unavailable"] = True
+    bridge["trace_unavailable_reason"] = (
+        failure_code or "selected_workflow_trace_ref_missing"
+    )
+    bridge["selected_workflow_pre_trace_failure"] = {
+        "source": source,
+        "status": _safe_str(entry.get("status")),
+        "failure_code": failure_code,
+        "failure_detail": failure_detail,
+        "workflow_id": workflow_id,
+    }
+    if failure_code:
+        bridge["dispatch_failure_code"] = failure_code
+    if failure_detail:
+        bridge["dispatch_failure_detail"] = failure_detail
+    return bridge
+
+
+def _selected_child_trace_bridge_from_aux_entries(
+    *,
+    selected_workflow_id: str | None,
+    aux_entries: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not _is_mapping_sequence(aux_entries):
+        return None
+    matching_without_trace: dict[str, Any] | None = None
+    relevant_types = {
+        "workflow_execution_trace",
+        "workflow_use_episode",
+        "workflow_instance_submission",
+        "workflow_dispatch_boundary",
+    }
+    for entry in reversed(_copy_mapping_sequence(aux_entries)):
+        entry_type = _safe_str(entry.get("type"))
+        if entry_type not in relevant_types:
+            continue
+        if not _entry_matches_selected_workflow(
+            entry,
+            selected_workflow_id=selected_workflow_id,
+        ):
+            continue
+        bridge = _build_selected_child_trace_bridge_from_entry(
+            entry,
+            selected_workflow_id=selected_workflow_id,
+            source=entry_type or "aux_llm_calls",
+        )
+        if bridge.get("execution_id") or bridge.get("instance_id"):
+            return bridge
+        if matching_without_trace is None:
+            matching_without_trace = bridge
+    return matching_without_trace
+
+
+def _merge_selected_child_trace_bridge(
+    *,
+    selected_workflow_trace_payload: dict[str, Any],
+    selected_workflow_trace_map: dict[str, Any],
+    completion_report_map: dict[str, Any],
+    selected_workflow_id: str | None,
+    child_completed: bool,
+    final_state: str | None,
+    failure_detail: str | None,
+    aux_entries: Sequence[Mapping[str, Any]] | None,
+) -> None:
+    existing_ids = _trace_identifier_fields(selected_workflow_trace_map)
+    bridge = _selected_child_trace_bridge_from_aux_entries(
+        selected_workflow_id=selected_workflow_id,
+        aux_entries=aux_entries,
+    )
+
+    if (
+        bridge is None
+        and selected_workflow_id
+        and not child_completed
+        and not existing_ids
+    ):
+        reason = (
+            _safe_str(failure_detail)
+            or _safe_str(final_state)
+            or "selected_workflow_failed_without_durable_trace"
+        )
+        bridge = {
+            "trace_role": "selected_workflow",
+            "workflow_id": selected_workflow_id,
+            "trace_unavailable": True,
+            "trace_unavailable_reason": reason.split(":", 1)[0].strip() or reason,
+            "selected_child_trace_source": "selected_workflow_trace",
+            "selected_workflow_pre_trace_failure": {
+                "source": "selected_workflow_trace",
+                "status": "failed",
+                "failure_code": reason.split(":", 1)[0].strip() or reason,
+                "failure_detail": reason,
+                "workflow_id": selected_workflow_id,
+            },
+        }
+
+    if not isinstance(bridge, Mapping):
+        return
+    if existing_ids and not (bridge.get("execution_id") or bridge.get("instance_id")):
+        return
+
+    for key, value in bridge.items():
+        if value is None:
+            continue
+        if key in {"execution_id", "instance_id", "workflow_instance_id"}:
+            if not selected_workflow_trace_map.get(key):
+                selected_workflow_trace_map[key] = value
+            if not selected_workflow_trace_payload.get(key):
+                selected_workflow_trace_payload[key] = value
+            if not completion_report_map.get(key):
+                completion_report_map[key] = value
+            continue
+        selected_workflow_trace_map.setdefault(key, value)
+        selected_workflow_trace_payload.setdefault(key, value)
+        if key in {
+            "trace_unavailable",
+            "trace_unavailable_reason",
+            "selected_workflow_pre_trace_failure",
+        }:
+            completion_report_map.setdefault(key, value)
+
+
 def _tool_invocation_completed_successfully(invocation: Mapping[str, Any]) -> bool:
     if bool(invocation.get("blocked")):
         return False
@@ -1276,6 +1523,22 @@ def build_turn_execution_selected_workflow_outputs(
         outputs["aux_llm_calls"] = _merge_mapping_sequences(
             parent_aux_llm_calls,
             child_aux_llm_calls,
+        )
+    selected_workflow_trace_map = outputs.get("selected_workflow_trace")
+    if isinstance(selected_workflow_trace_map, dict):
+        _merge_selected_child_trace_bridge(
+            selected_workflow_trace_payload=selected_workflow_trace_payload,
+            selected_workflow_trace_map=selected_workflow_trace_map,
+            completion_report_map=completion_report_map,
+            selected_workflow_id=clean_selected_workflow_id,
+            child_completed=bool(child_completed),
+            final_state=_safe_str(final_state),
+            failure_detail=_safe_str(failure_detail),
+            aux_entries=(
+                outputs.get("aux_llm_calls")
+                if _is_mapping_sequence(outputs.get("aux_llm_calls"))
+                else _merge_mapping_sequences(parent_aux_llm_calls, child_aux_llm_calls)
+            ),
         )
     child_llm_calls = child_outputs_map.get("llm_calls")
     if _is_mapping_sequence(parent_llm_calls) or _is_mapping_sequence(child_llm_calls):
