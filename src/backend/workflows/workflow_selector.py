@@ -265,13 +265,31 @@ class WorkflowSelector:
         routing-eligible, executable, policy-safe specialised workflow.
         """
 
+        eligible_specialised_candidates = (
+            self._eligible_specialised_candidate_summaries(
+                candidate_workflow_ids=candidate_workflow_ids,
+                candidate_entries=candidate_entries,
+            )
+        )
+        if len(eligible_specialised_candidates) != 1:
+            return None
+        return next(iter(eligible_specialised_candidates.values()))
+
+    def _eligible_specialised_candidate_summaries(
+        self,
+        *,
+        candidate_workflow_ids: Sequence[str],
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, dict[str, str]]:
+        """Return non-default candidates that are already eligible for routing."""
+
         candidate_lookup = {
             str(workflow_id).strip().lower(): str(workflow_id).strip()
             for workflow_id in candidate_workflow_ids
             if isinstance(workflow_id, str) and str(workflow_id).strip()
         }
         if not candidate_lookup:
-            return None
+            return {}
 
         eligible_specialised_candidates: dict[str, dict[str, str]] = {}
         for entry in candidate_entries or ():
@@ -301,9 +319,41 @@ class WorkflowSelector:
                 "candidate_source": str(entry.get("candidate_source") or "").strip(),
             }
 
-        if len(eligible_specialised_candidates) != 1:
+        return eligible_specialised_candidates
+
+    def _generic_default_candidate_review_payload(
+        self,
+        *,
+        selected_workflow_id: str,
+        candidate_workflow_ids: Sequence[str],
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """Describe eligible discovered candidates left behind by a generic route."""
+
+        entry_lookup = self._candidate_entry_lookup(candidate_entries)
+        selected_entry = entry_lookup.get(selected_workflow_id)
+        if not isinstance(selected_entry, Mapping):
             return None
-        return next(iter(eligible_specialised_candidates.values()))
+        if not self._is_selector_default_candidate(selected_entry):
+            return None
+
+        eligible_specialised_candidates = (
+            self._eligible_specialised_candidate_summaries(
+                candidate_workflow_ids=candidate_workflow_ids,
+                candidate_entries=candidate_entries,
+            )
+        )
+        if not eligible_specialised_candidates:
+            return None
+
+        candidate_ids = [
+            item["workflow_id"] for item in eligible_specialised_candidates.values()
+        ]
+        return {
+            "generic_builtin_selection_has_eligible_discovered_candidates": True,
+            "eligible_specialised_candidate_count": len(candidate_ids),
+            "eligible_specialised_candidate_ids": candidate_ids,
+        }
 
     @classmethod
     def _derive_disqualifying_reason_for_generic_selection(
@@ -931,6 +981,13 @@ class WorkflowSelector:
             selection_metadata["reasoning_override_workflow_id"] = reasoning_candidate
             workflow_id = reasoning_candidate
             verdict = "rag_selected"
+        generic_candidate_review = self._generic_default_candidate_review_payload(
+            selected_workflow_id=workflow_id,
+            candidate_workflow_ids=candidate_ids,
+            candidate_entries=candidate_entries,
+        )
+        if generic_candidate_review:
+            selection_metadata.update(generic_candidate_review)
         recovered_candidate = None
         if verdict == "rag_default":
             recovered_candidate = self._resolve_single_specialised_candidate_recovery(

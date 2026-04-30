@@ -1514,6 +1514,178 @@ def test_turn_execution_route_recovers_single_discovered_execution_workflow_afte
     )
 
 
+def test_turn_execution_route_recovers_workflow_execute_contract_from_generic_selection(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    selected_workflow_id = "#V#grounded_artifact_representation_workflow"
+    aux_llm_calls: list[dict[str, Any]] = []
+    prompt_text = "Represent the most recent grounded artefact."
+    discovery_query_input = (
+        "Represent the most recent grounded artefact.\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Required tools: gmail_get_message, workflow_execute"
+    )
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_custom"),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "execution",
+                        "explicit_workflow_context_required": False,
+                    }
+                },
+            ),
+            purpose=(
+                "Represent a grounded artefact by running the appropriate "
+                "represented workflow."
+            ),
+            source="test",
+        )
+    )
+
+    llm = SimpleNamespace(
+        generate=lambda prompt, context=None, model=None: (
+            '{"workflow_id":"#V#tool_calling_workflow",'
+            '"confidence":0.9,'
+            '"reasoning":"This needs tools, so choose the generic tool route."}'
+        )
+    )
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": prompt_text,
+                "turn_expected_outcome_contract": {
+                    "required_tools": ["gmail_get_message", "workflow_execute"],
+                    "success_target": (
+                        "Run the represented artefact workflow and read back "
+                        "confirmation."
+                    ),
+                },
+                "workflow_discovery_result": {
+                    "requested_query": prompt_text,
+                    "query": discovery_query_input,
+                    "discovery_query_input": discovery_query_input,
+                    "query_enrichment_applied": True,
+                    "query_enrichment_source": "turn_expected_outcome_contract",
+                    "matches": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Grounded Artefact Representation Workflow",
+                            "description": (
+                                "Represent a grounded artefact through represented "
+                                "workflow authority."
+                            ),
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "turn_launchable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Grounded Artefact Representation Workflow",
+                            "description": (
+                                "Represent a grounded artefact through represented "
+                                "workflow authority."
+                            ),
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "turn_launchable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                        }
+                    ],
+                    "routing_matches": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Grounded Artefact Representation Workflow",
+                            "description": (
+                                "Represent a grounded artefact through represented "
+                                "workflow authority."
+                            ),
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "turn_launchable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=llm,
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == selected_workflow_id
+    assert result.outputs["workflow_routing"]["workflow_id"] == selected_workflow_id
+    assert result.outputs["workflow_routing"]["source"] == "selector_override"
+    selector_override = result.outputs["selected_workflow_trace"]["selector_override"]
+    assert (
+        selector_override["reason"]
+        == "workflow_execute_contract_recovered_to_single_discovered_workflow"
+    )
+    assert (
+        selector_override["prior_selected_workflow_id"] == "#V#tool_calling_workflow"
+    )
+    workflow_execute_review = result.outputs["selected_workflow_trace"][
+        "workflow_execute_candidate_review"
+    ]
+    assert workflow_execute_review["status"] == "single_candidate"
+    assert workflow_execute_review["eligible_workflow_execute_candidate_ids"] == [
+        selected_workflow_id
+    ]
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_execute_candidate_review"
+        and entry.get("status") == "single_candidate"
+        for entry in aux_llm_calls
+    )
+
+
 def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     monkeypatch,
 ) -> None:

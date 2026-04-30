@@ -2816,6 +2816,86 @@ def _build_selector_single_discovered_execution_recovery_payload(
     }
 
 
+def _workflow_execute_required(required_tools: Sequence[str] | None) -> bool:
+    return any(
+        isinstance(tool_name, str)
+        and tool_name.strip().lower() == "workflow_execute"
+        for tool_name in (required_tools or ())
+    )
+
+
+def _eligible_discovered_workflow_execute_candidates(
+    discovered_matches: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return discovered workflows safe to use as explicit workflow_execute targets."""
+
+    candidates: list[dict[str, Any]] = []
+    for candidate in discovered_matches or ():
+        if not isinstance(candidate, Mapping):
+            continue
+        concept_id = str(candidate.get("concept_id") or "").strip()
+        if not concept_id or concept_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+            continue
+        if candidate.get("routing_eligible") is False:
+            continue
+        if candidate.get("is_executable") is False:
+            continue
+        if candidate.get("is_policy_safe") is False:
+            continue
+        if candidate.get("turn_launchable") is False:
+            continue
+        role = _normalise_selector_candidate_role(candidate)
+        if role not in {None, "", "execution", "authoring"}:
+            continue
+        candidates.append(
+            {
+                "workflow_id": concept_id,
+                "name": str(candidate.get("name") or "").strip() or concept_id,
+                "role": role or "execution",
+            }
+        )
+    return candidates
+
+
+def _build_workflow_execute_candidate_review_payload(
+    *,
+    selected_workflow_id: str | None,
+    required_tools: Sequence[str] | None,
+    discovered_matches: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Describe whether a generic route can recover required workflow execution."""
+
+    selected_workflow_id_text = (
+        str(selected_workflow_id).strip()
+        if isinstance(selected_workflow_id, str) and str(selected_workflow_id).strip()
+        else None
+    )
+    if selected_workflow_id_text not in _SELECTOR_GENERIC_WORKFLOW_IDS:
+        return None
+    if not _workflow_execute_required(required_tools):
+        return None
+
+    candidates = _eligible_discovered_workflow_execute_candidates(discovered_matches)
+    if not candidates:
+        return None
+
+    status = "single_candidate" if len(candidates) == 1 else "ambiguous_candidates"
+    return {
+        "status": status,
+        "selected_workflow_id": selected_workflow_id_text,
+        "required_tools": [
+            tool_name
+            for tool_name in (required_tools or ())
+            if isinstance(tool_name, str) and tool_name.strip()
+        ],
+        "eligible_workflow_execute_candidate_count": len(candidates),
+        "eligible_workflow_execute_candidate_ids": [
+            candidate["workflow_id"] for candidate in candidates
+        ],
+        "eligible_workflow_execute_candidates": candidates,
+    }
+
+
 def _describe_tool_pipeline_override_reason(reason: str) -> str:
     clean_reason = str(reason or "").strip()
     if clean_reason == "selector_unmatched_candidate_requires_safe_general_fallback":
@@ -5312,6 +5392,44 @@ class InternalMCPChatOrchestrator:
                 data.get("user_concept_id")
                 if isinstance(data.get("user_concept_id"), str)
                 else getattr(request.environment, "user_concept_id", None)
+            ),
+            workflow_discovery_result=(
+                data.get("workflow_discovery_result")
+                if isinstance(data.get("workflow_discovery_result"), Mapping)
+                else None
+            ),
+            workflow_execute_inputs=self._build_turn_launchability_probe_inputs(
+                prompt_text=str(
+                    data.get("user_prompt") or data.get("prompt") or ""
+                ).strip(),
+                augmented_context=retry_context,
+                workflow_discovery_result=(
+                    data.get("workflow_discovery_result")
+                    if isinstance(data.get("workflow_discovery_result"), Mapping)
+                    else None
+                ),
+                continuation_context=(
+                    data.get("continuation_context")
+                    if isinstance(data.get("continuation_context"), Mapping)
+                    else None
+                ),
+                user_namespace=getattr(request.environment, "user_namespace", None),
+                user_concept_id=(
+                    data.get("user_concept_id")
+                    if isinstance(data.get("user_concept_id"), str)
+                    else getattr(request.environment, "user_concept_id", None)
+                ),
+                org_concept_id=(
+                    data.get("org_concept_id")
+                    if isinstance(data.get("org_concept_id"), str)
+                    else getattr(request.environment, "org_concept_id", None)
+                ),
+                gmail_profile=(
+                    data.get("gmail_profile")
+                    if isinstance(data.get("gmail_profile"), str)
+                    else None
+                ),
+                base_data=data if isinstance(data, Mapping) else None,
             ),
         )
         if forced:
@@ -8095,6 +8213,49 @@ class InternalMCPChatOrchestrator:
                         if isinstance(data.get("tool_argument_defaults"), Mapping)
                         else None
                     ),
+                    workflow_discovery_result=(
+                        data.get("workflow_discovery_result")
+                        if isinstance(data.get("workflow_discovery_result"), Mapping)
+                        else None
+                    ),
+                    workflow_execute_inputs=self._build_turn_launchability_probe_inputs(
+                        prompt_text=str(
+                            data.get("user_prompt") or data.get("prompt") or ""
+                        ).strip(),
+                        augmented_context=tool_plan_context,
+                        workflow_discovery_result=(
+                            data.get("workflow_discovery_result")
+                            if isinstance(
+                                data.get("workflow_discovery_result"), Mapping
+                            )
+                            else None
+                        ),
+                        continuation_context=(
+                            data.get("continuation_context")
+                            if isinstance(data.get("continuation_context"), Mapping)
+                            else None
+                        ),
+                        user_namespace=getattr(env, "user_namespace", None),
+                        user_concept_id=(
+                            str(data.get("user_concept_id")).strip()
+                            if isinstance(data.get("user_concept_id"), str)
+                            and str(data.get("user_concept_id")).strip()
+                            else None
+                        ),
+                        org_concept_id=(
+                            str(data.get("org_concept_id")).strip()
+                            if isinstance(data.get("org_concept_id"), str)
+                            and str(data.get("org_concept_id")).strip()
+                            else None
+                        ),
+                        gmail_profile=(
+                            str(data.get("gmail_profile")).strip()
+                            if isinstance(data.get("gmail_profile"), str)
+                            and str(data.get("gmail_profile")).strip()
+                            else None
+                        ),
+                        base_data=data if isinstance(data, Mapping) else None,
+                    ),
                 )
                 if parent_forced_tool_calls:
                     import json
@@ -10114,6 +10275,55 @@ class InternalMCPChatOrchestrator:
                                 and str(data.get("user_concept_id")).strip()
                                 else None
                             ),
+                            workflow_discovery_result=(
+                                data.get("workflow_discovery_result")
+                                if isinstance(
+                                    data.get("workflow_discovery_result"), Mapping
+                                )
+                                else None
+                            ),
+                            workflow_execute_inputs=self._build_turn_launchability_probe_inputs(
+                                prompt_text=str(
+                                    data.get("user_prompt")
+                                    or data.get("prompt")
+                                    or ""
+                                ).strip(),
+                                augmented_context=follow_up_context,
+                                workflow_discovery_result=(
+                                    data.get("workflow_discovery_result")
+                                    if isinstance(
+                                        data.get("workflow_discovery_result"), Mapping
+                                    )
+                                    else None
+                                ),
+                                continuation_context=(
+                                    data.get("continuation_context")
+                                    if isinstance(
+                                        data.get("continuation_context"), Mapping
+                                    )
+                                    else None
+                                ),
+                                user_namespace=getattr(env, "user_namespace", None),
+                                user_concept_id=(
+                                    str(data.get("user_concept_id")).strip()
+                                    if isinstance(data.get("user_concept_id"), str)
+                                    and str(data.get("user_concept_id")).strip()
+                                    else None
+                                ),
+                                org_concept_id=(
+                                    str(data.get("org_concept_id")).strip()
+                                    if isinstance(data.get("org_concept_id"), str)
+                                    and str(data.get("org_concept_id")).strip()
+                                    else None
+                                ),
+                                gmail_profile=(
+                                    str(data.get("gmail_profile")).strip()
+                                    if isinstance(data.get("gmail_profile"), str)
+                                    and str(data.get("gmail_profile")).strip()
+                                    else None
+                                ),
+                                base_data=data if isinstance(data, Mapping) else None,
+                            ),
                         )
                     )
                     if parent_forced_tool_calls:
@@ -10363,6 +10573,53 @@ class InternalMCPChatOrchestrator:
                             if isinstance(data.get("user_concept_id"), str)
                             and str(data.get("user_concept_id")).strip()
                             else None
+                        ),
+                        workflow_discovery_result=(
+                            data.get("workflow_discovery_result")
+                            if isinstance(
+                                data.get("workflow_discovery_result"), Mapping
+                            )
+                            else None
+                        ),
+                        workflow_execute_inputs=self._build_turn_launchability_probe_inputs(
+                            prompt_text=str(
+                                data.get("user_prompt") or data.get("prompt") or ""
+                            ).strip(),
+                            augmented_context=follow_up_context,
+                            workflow_discovery_result=(
+                                data.get("workflow_discovery_result")
+                                if isinstance(
+                                    data.get("workflow_discovery_result"), Mapping
+                                )
+                                else None
+                            ),
+                            continuation_context=(
+                                data.get("continuation_context")
+                                if isinstance(
+                                    data.get("continuation_context"), Mapping
+                                )
+                                else None
+                            ),
+                            user_namespace=getattr(env, "user_namespace", None),
+                            user_concept_id=(
+                                str(data.get("user_concept_id")).strip()
+                                if isinstance(data.get("user_concept_id"), str)
+                                and str(data.get("user_concept_id")).strip()
+                                else None
+                            ),
+                            org_concept_id=(
+                                str(data.get("org_concept_id")).strip()
+                                if isinstance(data.get("org_concept_id"), str)
+                                and str(data.get("org_concept_id")).strip()
+                                else None
+                            ),
+                            gmail_profile=(
+                                str(data.get("gmail_profile")).strip()
+                                if isinstance(data.get("gmail_profile"), str)
+                                and str(data.get("gmail_profile")).strip()
+                                else None
+                            ),
+                            base_data=data if isinstance(data, Mapping) else None,
                         ),
                     )
                 )
@@ -26569,6 +26826,8 @@ class InternalMCPChatOrchestrator:
         required_url_extraction_url: str | None = None,
         workflow_required_effects_contract: Mapping[str, Any] | None = None,
         workflow_required_effects_contract_source: str | None = None,
+        workflow_discovery_result: Mapping[str, Any] | None = None,
+        workflow_execute_inputs: Mapping[str, Any] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Replay only structured retry payloads for explicit required tools."""
 
@@ -26763,6 +27022,56 @@ class InternalMCPChatOrchestrator:
         )
         if metadata_follow_up_calls:
             forced_calls.extend(metadata_follow_up_calls)
+
+        workflow_execute_candidate_review = (
+            _build_workflow_execute_candidate_review_payload(
+                selected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                required_tools=missing_required_tools,
+                discovered_matches=(
+                    self._extract_discovery_candidates(workflow_discovery_result)
+                    if isinstance(workflow_discovery_result, Mapping)
+                    else ()
+                ),
+            )
+        )
+        if (
+            isinstance(workflow_execute_candidate_review, Mapping)
+            and workflow_execute_candidate_review.get("status") == "single_candidate"
+        ):
+            candidate_ids = workflow_execute_candidate_review.get(
+                "eligible_workflow_execute_candidate_ids"
+            )
+            workflow_id = (
+                str(candidate_ids[0]).strip()
+                if isinstance(candidate_ids, list)
+                and candidate_ids
+                and isinstance(candidate_ids[0], str)
+                and candidate_ids[0].strip()
+                else ""
+            )
+            if workflow_id:
+                payload: MutableMapping[str, Any] = {"workflow_id": workflow_id}
+                if isinstance(workflow_execute_inputs, Mapping):
+                    payload["inputs"] = {
+                        str(key): value
+                        for key, value in workflow_execute_inputs.items()
+                        if isinstance(key, str) and key.strip()
+                    }
+                payload.setdefault("await_terminal", True)
+                payload.setdefault("include_trace", True)
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": "workflow_execute",
+                        "payload": payload,
+                        "_retry_binding_source": (
+                            "workflow_discovery_single_eligible_execution_candidate"
+                        ),
+                        "_retry_recovery_strategy_id": (
+                            "recover_workflow_execute_from_single_discovered_candidate"
+                        ),
+                    }
+                )
 
         if self._has_authoritative_workflow_required_effects_contract(
             workflow_required_effects_contract
@@ -27976,6 +28285,8 @@ class InternalMCPChatOrchestrator:
         tool_argument_defaults: Mapping[str, Any] | None = None,
         invoked_tool_names: Sequence[str] | None = None,
         user_concept_id: str | None = None,
+        workflow_discovery_result: Mapping[str, Any] | None = None,
+        workflow_execute_inputs: Mapping[str, Any] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Replay only structurally explicit retry calls.
 
@@ -28052,6 +28363,16 @@ class InternalMCPChatOrchestrator:
             tool_argument_defaults=(
                 tool_argument_defaults
                 if isinstance(tool_argument_defaults, Mapping)
+                else None
+            ),
+            workflow_discovery_result=(
+                workflow_discovery_result
+                if isinstance(workflow_discovery_result, Mapping)
+                else None
+            ),
+            workflow_execute_inputs=(
+                workflow_execute_inputs
+                if isinstance(workflow_execute_inputs, Mapping)
                 else None
             ),
         )
@@ -32548,6 +32869,109 @@ class InternalMCPChatOrchestrator:
                 source="default",
             )
 
+        selected_workflow_trace_contract = (
+            self._build_turn_expected_outcome_contract_object(data)
+        )
+        workflow_execute_candidate_review_payload = (
+            _build_workflow_execute_candidate_review_payload(
+                selected_workflow_id=selected_workflow_id,
+                required_tools=selected_workflow_trace_contract.required_tools,
+                discovered_matches=discovered_matches,
+            )
+        )
+        if isinstance(workflow_execute_candidate_review_payload, Mapping):
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    {
+                        "type": "workflow_execute_candidate_review",
+                        "stage": "workflow_dispatch",
+                        **dict(workflow_execute_candidate_review_payload),
+                    },
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_action_turn_execution_route",
+                    decision_class="workflow_execute_candidate_review",
+                    decision_source="turn_expected_outcome_contract",
+                    changed_outcome=(
+                        workflow_execute_candidate_review_payload.get("status")
+                        == "single_candidate"
+                    ),
+                    reason_code=str(
+                        workflow_execute_candidate_review_payload.get("status")
+                        or "not_evaluated"
+                    ),
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
+            if workflow_execute_candidate_review_payload.get("status") == (
+                "single_candidate"
+            ):
+                candidate_ids = workflow_execute_candidate_review_payload.get(
+                    "eligible_workflow_execute_candidate_ids"
+                )
+                recovery_workflow_id = (
+                    str(candidate_ids[0]).strip()
+                    if isinstance(candidate_ids, list)
+                    and candidate_ids
+                    and isinstance(candidate_ids[0], str)
+                    and candidate_ids[0].strip()
+                    else ""
+                )
+                if recovery_workflow_id:
+                    prior_selected_workflow_id = selected_workflow_id
+                    selected_workflow_id = recovery_workflow_id
+                    selector_reasoning = (
+                        "The turn contract required workflow execution and the "
+                        "generic selector route left one eligible discovered "
+                        "workflow target, so dispatch selected that workflow "
+                        "instead of the generic tool route."
+                    )
+                    selector_override_trace = {
+                        "type": "workflow_selector_override",
+                        "reason": (
+                            "workflow_execute_contract_recovered_to_single_discovered_workflow"
+                        ),
+                        "selected_workflow_id": selected_workflow_id,
+                        "prior_selected_workflow_id": prior_selected_workflow_id,
+                        "prior_selector_verdict": routing_info.verdict,
+                        **dict(workflow_execute_candidate_review_payload),
+                    }
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            selector_override_trace,
+                            stage="workflow_dispatch",
+                            component="internal_mcp_orchestrator",
+                            function="_action_turn_execution_route",
+                            decision_class="workflow_selector_override",
+                            decision_source="turn_expected_outcome_contract",
+                            changed_outcome=True,
+                            reason_code=(
+                                "workflow_execute_contract_recovered_to_single_discovered_workflow"
+                            ),
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
+                    routing_info = WorkflowRoutingInfo(
+                        workflow_id=selected_workflow_id,
+                        verdict="rag_selected",
+                        prompt_id=routing_info.prompt_id,
+                        discovered_workflow_ids=(
+                            routing_info.discovered_workflow_ids
+                        ),
+                        source="selector_override",
+                        confidence_score=routing_info.confidence_score,
+                        reasoning=selector_reasoning,
+                        selection_rationale=_derive_workflow_selection_rationale(
+                            selected_workflow_id=selected_workflow_id,
+                            selector_verdict="rag_selected",
+                            selector_source="selector_override",
+                            candidate_workflow_ids=(
+                                routing_info.discovered_workflow_ids
+                            ),
+                            explicit_reasoning=selector_reasoning,
+                        ),
+                    )
+
         if not selected_workflow_id:
             return WorkflowActionResult(
                 status="failed",
@@ -32558,9 +32982,6 @@ class InternalMCPChatOrchestrator:
                 },
             )
 
-        selected_workflow_trace_contract = (
-            self._build_turn_expected_outcome_contract_object(data)
-        )
         selected_workflow_trace_contract_payload = (
             selected_workflow_trace_contract.to_dict()
         )
@@ -32582,6 +33003,18 @@ class InternalMCPChatOrchestrator:
                     "selector_selection_metadata": (
                         dict(selector_selection_metadata)
                         if isinstance(selector_selection_metadata, Mapping)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "workflow_execute_candidate_review": dict(
+                                workflow_execute_candidate_review_payload
+                            )
+                        }
+                        if isinstance(
+                            workflow_execute_candidate_review_payload,
+                            Mapping,
+                        )
                         else {}
                     ),
                     "selector_candidate_ids": [
@@ -40728,6 +41161,96 @@ class InternalMCPChatOrchestrator:
                 )
             )
 
+        workflow_execute_candidate_review_payload = (
+            _build_workflow_execute_candidate_review_payload(
+                selected_workflow_id=dispatch_selection_state.selected_workflow_id_text,
+                required_tools=routing_contract_required_tools,
+                discovered_matches=discovered_matches,
+            )
+        )
+        if isinstance(workflow_execute_candidate_review_payload, Mapping):
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    {
+                        "type": "workflow_execute_candidate_review",
+                        "stage": "workflow_dispatch",
+                        **dict(workflow_execute_candidate_review_payload),
+                    },
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_workflow_execute_candidate_review",
+                    decision_class="workflow_execute_candidate_review",
+                    decision_source="turn_expected_outcome_contract",
+                    changed_outcome=(
+                        workflow_execute_candidate_review_payload.get("status")
+                        == "single_candidate"
+                    ),
+                    reason_code=str(
+                        workflow_execute_candidate_review_payload.get("status")
+                        or "not_evaluated"
+                    ),
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
+            if workflow_execute_candidate_review_payload.get("status") == (
+                "single_candidate"
+            ):
+                candidate_ids = workflow_execute_candidate_review_payload.get(
+                    "eligible_workflow_execute_candidate_ids"
+                )
+                recovery_workflow_id = (
+                    str(candidate_ids[0]).strip()
+                    if isinstance(candidate_ids, list)
+                    and candidate_ids
+                    and isinstance(candidate_ids[0], str)
+                    and candidate_ids[0].strip()
+                    else ""
+                )
+                if recovery_workflow_id:
+                    try:
+                        recovery_probe = custom_workflow_dispatch_support.get_cached_custom_workflow_launchability_probe(
+                            recovery_workflow_id
+                        )
+                    except Exception as exc:
+                        custom_workflow_dispatch_support.record_custom_workflow_launchability_override_failure(
+                            reason=(
+                                "workflow_execute_single_candidate_recovery_probe_failed"
+                            ),
+                            error=exc,
+                            selected_workflow_id=selected_workflow_id_text,
+                        )
+                    else:
+                        custom_workflow_dispatch_support.promote_selected_workflow_to_custom_dispatch(
+                            dispatch_selection_state,
+                            replacement_probe=recovery_probe,
+                            reason=(
+                                "workflow_execute_contract_recovered_to_single_discovered_workflow"
+                            ),
+                            verdict="rag_selected",
+                            reasoning=(
+                                "The turn contract required workflow execution and "
+                                "the generic selector route left one eligible "
+                                "discovered workflow target, so dispatch selected "
+                                "that workflow instead of asking the tool planner "
+                                "to infer the target."
+                            ),
+                            prior_selected_workflow_id=selected_workflow_id_text,
+                            prior_selector_verdict=selector_verdict or None,
+                            extra_payload=workflow_execute_candidate_review_payload,
+                            decision_source="turn_expected_outcome_contract",
+                            dispatch_prepare_step_id=(
+                                "workflow_execute_single_candidate_recovery"
+                            ),
+                            dispatch_prepare_step_label=(
+                                "Recover workflow_execute target"
+                            ),
+                            dispatch_prepare_result_summary=(
+                                "Required workflow execution had a single eligible "
+                                "discovered workflow target; selecting it directly."
+                            ),
+                        )
+                        _sync_selected_workflow_locals_from_state()
+
         custom_workflow_dispatch_support.apply_turn_contract_dispatch_preflight(
             dispatch_selection_state,
             turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
@@ -41501,8 +42024,12 @@ class InternalMCPChatOrchestrator:
                                 **custom_failure_extra,
                                 "continued_to_tool_pipeline": True,
                                 "fallback_tool_workflow_id": fallback_tool_workflow_id,
-                                "reason": continue_to_tool_pipeline_reason,
+                                "handoff_reason": continue_to_tool_pipeline_reason,
                             }
+                            custom_failure_extra.setdefault(
+                                "reason",
+                                continue_to_tool_pipeline_reason,
+                            )
                             if missing_required_prompt_tools:
                                 custom_failure_extra["missing_required_tools"] = list(
                                     missing_required_prompt_tools

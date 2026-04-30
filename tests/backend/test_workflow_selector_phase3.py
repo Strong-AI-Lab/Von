@@ -573,6 +573,70 @@ class TestSelectionConfidenceReasoning:
             == "generic_fallback_disqualification"
         )
 
+    def test_generic_builtin_selection_marks_unresolved_eligible_discovered_candidates(
+        self,
+    ):
+        selector = _build_selector()
+        first_workflow_id = "#V#first_grounded_representation_workflow"
+        second_workflow_id = "#V#second_grounded_representation_workflow"
+
+        result = selector.resolve_selection(
+            raw_response=json.dumps(
+                {
+                    "workflow_id": _TOOL_WORKFLOW,
+                    "confidence": 0.91,
+                    "reasoning": (
+                        "The request needs tools, so choose the generic tool "
+                        "workflow."
+                    ),
+                }
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[
+                first_workflow_id,
+                second_workflow_id,
+                _TOOL_WORKFLOW,
+            ],
+            candidate_entries=[
+                {
+                    "concept_id": first_workflow_id,
+                    "name": "First Grounded Representation Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "turn_launchable": True,
+                },
+                {
+                    "concept_id": second_workflow_id,
+                    "name": "Second Grounded Representation Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "turn_launchable": True,
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert result.workflow_id == _TOOL_WORKFLOW
+        assert result.verdict == "rag_selected"
+        assert result.selection_metadata.get(
+            "generic_builtin_selection_has_eligible_discovered_candidates"
+        ) is True
+        assert result.selection_metadata.get("eligible_specialised_candidate_count") == 2
+        assert result.selection_metadata.get("eligible_specialised_candidate_ids") == [
+            first_workflow_id,
+            second_workflow_id,
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Enhanced prompt format

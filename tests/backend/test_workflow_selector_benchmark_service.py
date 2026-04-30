@@ -83,6 +83,55 @@ def test_build_selector_routing_benchmark_report_supports_prompt_failure_cases()
     assert replay_case["overall_outcome"] == "abstain_escalate_no_safe_route"
 
 
+def test_selector_benchmark_preserves_candidate_metadata_for_generic_review() -> None:
+    result = build_selector_routing_benchmark_report(
+        cases=[
+            {
+                "case_id": "generic_workflow_execute_candidate_review",
+                "turn_text": "Represent the most recent grounded artefact.",
+                "candidate_workflows": [
+                    {
+                        "concept_id": "#V#grounded_artifact_representation_workflow",
+                        "name": "Grounded artefact representation workflow",
+                        "description": "Represents a grounded artefact.",
+                        "candidate_source": "workflow_discovery",
+                        "routing_eligible": True,
+                        "is_executable": True,
+                        "is_policy_safe": True,
+                        "turn_launchable": True,
+                    },
+                    {
+                        "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                        "name": "Tool calling workflow",
+                        "description": "Generic tool workflow.",
+                        "candidate_source": "selector_default",
+                        "candidate_reason": "builtin_selector_candidate",
+                    },
+                ],
+                "expected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                "baseline_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                "selector_response": {
+                    "workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "confidence": 0.91,
+                    "reasoning": "The request needs tools.",
+                },
+            }
+        ]
+    )
+
+    replay_case = result["replay_cases"][0]
+    assert replay_case["candidate_workflows"][0]["candidate_source"] == (
+        "workflow_discovery"
+    )
+    assert replay_case["candidate_workflows"][0]["turn_launchable"] is True
+    assert replay_case["selection_metadata"].get(
+        "generic_builtin_selection_has_eligible_discovered_candidates"
+    ) is True
+    assert replay_case["selection_metadata"].get(
+        "eligible_specialised_candidate_ids"
+    ) == ["#V#grounded_artifact_representation_workflow"]
+
+
 def test_load_selector_routing_benchmark_cases_supports_entity_representation_case_set() -> None:
     result = load_selector_routing_benchmark_cases(
         case_set="entity_representation_generalisation"

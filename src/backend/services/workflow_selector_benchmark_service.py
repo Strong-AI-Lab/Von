@@ -117,13 +117,11 @@ def _normalise_candidate_workflows(raw_items: Any) -> tuple[dict[str, Any], ...]
         )
         if not workflow_id:
             continue
-        rows.append(
-            {
-                "concept_id": workflow_id,
-                "name": _safe_str(raw.get("name")) or workflow_id,
-                "description": _safe_str(raw.get("description")),
-            }
-        )
+        row = {str(key): value for key, value in raw.items() if isinstance(key, str)}
+        row["concept_id"] = workflow_id
+        row["name"] = _safe_str(raw.get("name")) or workflow_id
+        row["description"] = _safe_str(raw.get("description"))
+        rows.append(row)
     return tuple(rows)
 
 
@@ -334,6 +332,7 @@ def _evaluate_selector_case(
         "selected_workflow_id": selection.workflow_id,
         "verdict": selection.verdict,
         "selection_source": selection.selection_source,
+        "selection_metadata": dict(selection.selection_metadata),
         "confidence_score": round(float(selection.confidence_score), 6),
         "reasoning": selection.reasoning,
         "matched_expected_route": matched_expected_route,

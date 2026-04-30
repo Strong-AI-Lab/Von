@@ -379,6 +379,106 @@ def test_workflow_recovery_contract_blocks_legacy_follow_up_without_strategy():
     assert forced is None
 
 
+def test_missing_workflow_execute_retry_uses_single_eligible_discovered_workflow():
+    orchestrator = _build_orchestrator_stub()
+    workflow_id = "#V#grounded_artifact_representation_workflow"
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Represent the most recent grounded artefact.",
+        missing_required_tools=["workflow_execute"],
+        workflow_discovery_result={
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Grounded Artefact Representation Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "turn_launchable": True,
+                    "routing_profile": {"role": "execution"},
+                },
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "candidate_source": "selector_default",
+                },
+            ]
+        },
+        workflow_execute_inputs={
+            "prompt": "Represent the most recent grounded artefact.",
+            "gmail_profile": "research-mail",
+        },
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "workflow_execute",
+            "payload": {
+                "workflow_id": workflow_id,
+                "inputs": {
+                    "prompt": "Represent the most recent grounded artefact.",
+                    "gmail_profile": "research-mail",
+                },
+                "await_terminal": True,
+                "include_trace": True,
+            },
+            "_retry_binding_source": (
+                "workflow_discovery_single_eligible_execution_candidate"
+            ),
+            "_retry_recovery_strategy_id": (
+                "recover_workflow_execute_from_single_discovered_candidate"
+            ),
+        }
+    ]
+    assert orchestrator._summarise_retry_tool_call_binding_sources(
+        cast(list[Mapping[str, Any]], forced)
+    ) == [
+        {
+            "tool": "workflow_execute",
+            "binding_source": (
+                "workflow_discovery_single_eligible_execution_candidate"
+            ),
+            "recovery_strategy_id": (
+                "recover_workflow_execute_from_single_discovered_candidate"
+            ),
+        }
+    ]
+
+
+def test_missing_workflow_execute_retry_does_not_choose_between_multiple_candidates():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Represent the most recent grounded artefact.",
+        missing_required_tools=["workflow_execute"],
+        workflow_discovery_result={
+            "candidates": [
+                {
+                    "concept_id": "#V#first_representation_workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "turn_launchable": True,
+                },
+                {
+                    "concept_id": "#V#second_representation_workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "turn_launchable": True,
+                },
+            ]
+        },
+    )
+
+    assert forced is None
+
+
 def test_missing_tool_call_retry_chains_related_concepts_after_search_concepts():
     orchestrator = _build_orchestrator_stub()
 

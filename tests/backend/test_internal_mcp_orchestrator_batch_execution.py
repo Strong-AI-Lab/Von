@@ -17,7 +17,7 @@ class _CapturingGateway:
         self.invocations = []
 
     def describe_methods(self):
-        return {}
+        return {"dummy": {"category": "read"}}
 
     def invoke(self, tool_name, payload=None):
         self.invocations.append({"tool": tool_name, "payload": payload})
