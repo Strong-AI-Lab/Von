@@ -7,6 +7,9 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
 - Broad tool metadata/write/evidence authority: `JVNAUTOSCI-1985`.
 - Workflow-purity prompt-source/repo-seed drift: `JVNAUTOSCI-2080`.
 - Broad buttonify prose-extraction heuristics: completed `JVNAUTOSCI-1971`.
+- Regex-heavy person/company/meeting file-copy inference: completed
+  `JVNAUTOSCI-1952`; current issue is downstream materialisation contracts,
+  now tracked by `JVNAUTOSCI-2216`.
 
 ## Inspected, Not Filed On 2026-04-30
 
@@ -19,6 +22,18 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   evidence of durable semantic/display-profile authority.
 - `workflow_override_policy_service.py` and `workflow_continuation_service.py`:
   watch areas; file only if they override represented workflow/routing policy.
+- `workflow_launch_input_contracts.py` arXiv ID extraction: covered by
+  `JVNAUTOSCI-2212` as deterministic launch-input support. File only if the
+  extractor registry grows into phrase-specific or domain launch policy.
+
+## Inspected, Not Filed On 2026-05-01
+
+- `tool_result_hint_actions.py`: generic action support for Vontology-authored
+  signal/follow-up hints. File only if integration-specific hint text or
+  selection policy appears in Python.
+- `workflow_mcp_tool_actions.py`: generic static MCP invocation support with
+  namespace and write guardrails. File only if tool choice or domain process
+  policy is added there rather than represented workflow metadata.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

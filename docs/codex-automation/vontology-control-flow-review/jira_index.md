@@ -22,6 +22,13 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-2195` - onboarding route/stub launch policy.
 - `JVNAUTOSCI-2196` - deterministic workflow-description policy.
 - `JVNAUTOSCI-2197` - buttonify prompt quality-gate suffix.
+- `JVNAUTOSCI-2216` - file-copy entity materialisation contracts and
+  field-to-predicate bindings.
+
+## 2026-05-01 Drift Tasks
+
+- `JVNAUTOSCI-2219` - PhD-student workflow-authoring policy, profile fields,
+  domain action ids, and relationship/postcondition handling in Python.
 
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to

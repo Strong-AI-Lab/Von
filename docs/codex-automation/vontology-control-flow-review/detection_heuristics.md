@@ -17,6 +17,14 @@ represented authority before filing Jira work.
 - Prompt text appended to Vontology-rendered prompts in Python.
 - Python-generated Vontology descriptions containing domain labels, capability
   wording, cost, maturity, or success-likelihood claims.
+- After prompt-backed interpretation migrations, inspect the downstream
+  materialisation contract separately: Python candidate schemas,
+  field-to-predicate mappings, note text, and success criteria can remain
+  hidden policy even when extraction/inference is prompt-owned.
+- In generic workflow-authoring surfaces, domain action ids such as
+  `workflow_authoring.resolve_<domain>`, hard-coded type/predicate defaults,
+  domain profile fields, and tests asserting those action ids are strong
+  represented-authority drift signals.
 
 ## 2026-04-30 Examples
 
@@ -25,3 +33,6 @@ represented authority before filing Jira work.
 - Onboarding launch/process policy: `JVNAUTOSCI-2195`.
 - Deterministic workflow-description authoring: `JVNAUTOSCI-2196`.
 - Buttonify prompt suffix: `JVNAUTOSCI-2197`.
+- File-copy entity materialisation contract bindings: `JVNAUTOSCI-2216`.
+- PhD-student workflow-authoring action contracts and handlers:
+  `JVNAUTOSCI-2219`.
