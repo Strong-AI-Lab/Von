@@ -152,6 +152,26 @@ def test_agent_helpers_are_ignored_by_default(tmp_path: Path) -> None:
     assert result.ignored_agent_helpers == 1
 
 
+def test_von_mcp_stdio_server_is_ignored_by_default(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    result = assess_workspace_idle(
+        [
+            _proc(
+                106,
+                name="python.exe",
+                cmdline=(
+                    f"{workspace}\\.venv\\Scripts\\python.exe",
+                    f"{workspace}\\src\\backend\\mcp_server\\mcp_stdio_server.py",
+                ),
+            )
+        ],
+        workspace_root=workspace,
+    )
+
+    assert result.answer == "YES"
+    assert result.ignored_agent_helpers == 1
+
+
 def test_recent_repo_activity_marks_not_idle(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     activity = RepoActivityAssessment(

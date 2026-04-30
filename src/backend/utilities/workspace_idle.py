@@ -22,6 +22,7 @@ _SERVICE_FRAGMENTS: tuple[str, ...] = (
 
 _AGENT_HELPER_FRAGMENTS: tuple[str, ...] = (
     "@playwright/mcp",
+    "mcp_stdio_server.py",
     "node_repl.exe",
     "playwright-mcp",
     "rag_mcp_stdio_server.py",
