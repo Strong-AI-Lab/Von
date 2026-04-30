@@ -483,6 +483,420 @@ See:
 
 - `docs/engineering/github_internal_mcp_runbook.md`
 
+### 6.6a Non-sandbox Git/GitHub publication handoff: JVNAUTOSCI-2208
+
+This note preserves the exact operational pattern that allowed
+`JVNAUTOSCI-2208` to be published from a normal Codex desktop agent after a
+previous Codex automation sandbox implemented and validated the patch but could
+not push it.
+
+Use this as a runbook when an automation handoff says a patch exists locally
+but Git/GitHub operations failed in the sandbox. The successful fix was not a
+code change to Git tooling. It was to run the final Git operations from the
+normal non-sandbox desktop agent environment, where the real worktree `.git`
+metadata and host credential store were available.
+
+#### Identity and account context
+
+The successful non-sandbox agent session ran in:
+
+```powershell
+$env:USERNAME; whoami
+```
+
+Observed output:
+
+```text
+mwit860
+uoa\mwit860
+```
+
+The Git author/committer identity was:
+
+```powershell
+git config --get user.name
+git config --get user.email
+git log -1 --pretty=fuller
+```
+
+Observed output after the successful commit:
+
+```text
+Michael Witbrock
+witbrock@gmail.com
+
+commit e7c9a9dc18f992f27b4bc0ec559c0aaa9494c4a6
+Author:     Michael Witbrock <witbrock@gmail.com>
+AuthorDate: Thu Apr 30 20:15:59 2026 +1200
+Commit:     Michael Witbrock <witbrock@gmail.com>
+CommitDate: Thu Apr 30 20:15:59 2026 +1200
+
+    JVNAUTOSCI-2208 Surface selected child workflow traces
+```
+
+The Jira/Atlassian connector identity used for issue comments and transition
+was `Michael Witbrock <m.witbrock@auckland.ac.nz>`.
+
+The GitHub CLI identity available in the non-sandbox environment was:
+
+```powershell
+gh auth status
+```
+
+Observed output, with the token redacted:
+
+```text
+github.com
+  ✓ Logged in to github.com account witbrock (keyring)
+  - Active account: true
+  - Git operations protocol: https
+  - Token: gho_************************************
+  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+```
+
+The actual push path used by `git push` was HTTPS through Git Credential
+Manager, not the GitHub connector and not SSH:
+
+```powershell
+git remote -v
+git config --show-origin --get-all credential.helper
+```
+
+Observed output:
+
+```text
+origin  https://github.com/Strong-AI-Lab/Von.git (fetch)
+origin  https://github.com/Strong-AI-Lab/Von.git (push)
+file:C:/Program Files/Git/etc/gitconfig manager
+```
+
+#### What was broken in the automation sandbox
+
+The previous automation run recorded the blocker in Jira comments `34956`,
+`34957`, and `34958`.
+
+The important failure facts were:
+
+- the primary repo `.git` directory was ACL-locked for the sandbox user, so
+  normal branch and commit operations against the main worktree Git metadata
+  failed with lock/ref permission errors;
+- local HTTPS `git push` could not complete under the sandbox's available
+  credential helper;
+- with prompts disabled, the sandbox recorded this exact Git error:
+
+```text
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+- `gh` authentication in that sandbox was invalid, recorded as:
+
+```text
+HTTP 401
+token invalid
+```
+
+- the GitHub connector could create branches and small blobs, but the sandbox
+  transcript/tooling path truncated the larger normalised file-content payloads
+  needed to upload the four-file patch safely through connector blob/tree APIs.
+
+The automation run also recorded an alternate local Git object store:
+
+```text
+C:\Users\mwit860\.codex\automations\jira-task-review-and-initiation\git-JVNAUTOSCI-2208.git
+```
+
+and corrected the alternate local commit SHA to:
+
+```text
+5d546eede4f8777f441f4bd070de907ef100a895
+```
+
+The full lock/ref error text from the sandbox ACL failure was not preserved in
+the Jira comments. Future agents should not invent that output. Treat the
+preserved fact as: the automation sandbox could not write the primary `.git`
+metadata, while the normal non-sandbox desktop agent could.
+
+#### What permissions or metadata had to be fixed
+
+No repository metadata or filesystem ACLs were changed in the successful
+non-sandbox session.
+
+The fix was environmental:
+
+- run from the normal worktree at
+  `C:\Users\mwit860\Programming\Strong-AI-Lab\Von`;
+- use the primary `.git` directory that the desktop user can write;
+- use the host Git Credential Manager and keyring-backed GitHub credentials;
+- avoid trying to push through the locked automation sandbox or through a
+  transcript-sized connector blob upload.
+
+The non-sandbox session proved the `.git` metadata was writable by creating a
+branch, staging four files, creating commit
+`e7c9a9dc18f992f27b4bc0ec559c0aaa9494c4a6`, fast-forwarding local `main`, and
+pushing `main` to GitHub.
+
+#### Successful command sequence
+
+All commands were run from:
+
+```powershell
+Set-Location C:\Users\mwit860\Programming\Strong-AI-Lab\Von
+```
+
+Check the initial state and preserve the handoff patch as untracked:
+
+```powershell
+git status --short --branch
+git fetch origin main
+git rev-list --left-right --count main...origin/main
+git apply --reverse --check JVNAUTOSCI-2208-selected-child-workflow-traces.patch
+```
+
+Relevant observed output:
+
+```text
+## main...origin/main
+ M src/backend/services/turn_execution_diagnostics_service.py
+ M src/backend/workflows/durable/turn_execution_runtime_support.py
+ M tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py
+ M tests/backend/test_turn_execution_selected_workflow_output_propagation.py
+?? JVNAUTOSCI-2208-selected-child-workflow-traces.patch
+
+0       0
+```
+
+`git apply --reverse --check` returned exit code `0` with no stdout, meaning
+the patch was already applied in the worktree.
+
+Create the task branch:
+
+```powershell
+git switch -c codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+```
+
+Observed output:
+
+```text
+Switched to a new branch 'codex/JVNAUTOSCI-2208-selected-child-workflow-traces'
+```
+
+Validate before committing:
+
+```powershell
+python -m pytest tests/backend/test_turn_execution_selected_workflow_output_propagation.py tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py tests/backend/test_turn_execution_record_service_execution_summary.py::test_custom_workflow_summary_uses_selected_workflow_trace_when_dispatch_events_missing tests/backend/test_turn_execution_record_service_execution_summary.py::test_custom_workflow_summary_uses_trace_execution_summary_when_aux_entry_missing tests/backend/test_rag_turn_execution_records_mcp_read_tools.py::test_turn_execution_get_diagnostics_reconstructs_from_projection -q --tb=short
+
+python -m py_compile src/backend/workflows/durable/turn_execution_runtime_support.py src/backend/services/turn_execution_diagnostics_service.py
+
+pdm run pyright src/backend/workflows/durable/turn_execution_runtime_support.py src/backend/services/turn_execution_diagnostics_service.py tests/backend/test_turn_execution_selected_workflow_output_propagation.py tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py
+
+pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal
+
+pdm run pytest tests/backend/test_mcp_stdio_server_exposes_turn_execution_diagnostics_tool.py tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py tests/backend/test_turn_execution_selected_workflow_output_propagation.py -q
+```
+
+Observed validation outcomes:
+
+```text
+21 passed, 1 warning in 7.09s
+
+0 errors, 0 warnings, 0 informations
+
+20 passed in 73.20s (0:01:13)
+workflow_capability_index_background_build_failed: inherits_chat_default_but_no_chat_default_is_available
+```
+
+The `workflow_capability_index_background_build_failed` line was emitted after
+the direct-target test run but did not fail the tests.
+
+Stage only the real implementation/test files, not the patch handoff:
+
+```powershell
+git add -- src/backend/workflows/durable/turn_execution_runtime_support.py src/backend/services/turn_execution_diagnostics_service.py tests/backend/test_turn_execution_selected_workflow_output_propagation.py tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py
+git status --short
+git diff --cached --name-only
+git diff --cached --stat
+```
+
+Observed staged files:
+
+```text
+src/backend/services/turn_execution_diagnostics_service.py
+src/backend/workflows/durable/turn_execution_runtime_support.py
+tests/backend/test_turn_execution_diagnostics_workflow_trace_refs.py
+tests/backend/test_turn_execution_selected_workflow_output_propagation.py
+```
+
+Commit:
+
+```powershell
+git commit -m "JVNAUTOSCI-2208 Surface selected child workflow traces"
+```
+
+Observed output:
+
+```text
+[codex/JVNAUTOSCI-2208-selected-child-workflow-traces e7c9a9dc] JVNAUTOSCI-2208 Surface selected child workflow traces
+ 4 files changed, 427 insertions(+), 3 deletions(-)
+```
+
+Push the task branch:
+
+```powershell
+git push -u origin codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+```
+
+Observed output:
+
+```text
+branch 'codex/JVNAUTOSCI-2208-selected-child-workflow-traces' set up to track 'origin/codex/JVNAUTOSCI-2208-selected-child-workflow-traces'.
+remote:
+remote: Create a pull request for 'codex/JVNAUTOSCI-2208-selected-child-workflow-traces' on GitHub by visiting:
+remote:      https://github.com/Strong-AI-Lab/Von/pull/new/codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+remote:
+To https://github.com/Strong-AI-Lab/Von.git
+ * [new branch]        codex/JVNAUTOSCI-2208-selected-child-workflow-traces -> codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+```
+
+Fast-forward merge to local `main` and push `main`:
+
+```powershell
+git fetch origin main
+git switch main
+git merge --ff-only codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+git push origin main
+```
+
+Observed output:
+
+```text
+From https://github.com/Strong-AI-Lab/Von
+ * branch              main       -> FETCH_HEAD
+
+Your branch is up to date with 'origin/main'.
+Switched to branch 'main'
+
+Updating 69add526..e7c9a9dc
+Fast-forward
+ .../services/turn_execution_diagnostics_service.py |  30 +++
+ .../durable/turn_execution_runtime_support.py      | 263 +++++++++++++++++++++
+ ...rn_execution_diagnostics_workflow_trace_refs.py |  47 +++-
+ ...ecution_selected_workflow_output_propagation.py |  90 +++++++
+ 4 files changed, 427 insertions(+), 3 deletions(-)
+
+To https://github.com/Strong-AI-Lab/Von.git
+   69add526..e7c9a9dc  main -> main
+```
+
+Verify `origin/main` contains the commit:
+
+```powershell
+git fetch origin main
+git log origin/main -1 --oneline
+git branch -r --contains e7c9a9dc
+git ls-remote origin HEAD
+```
+
+Observed output:
+
+```text
+e7c9a9dc JVNAUTOSCI-2208 Surface selected child workflow traces
+
+  origin/HEAD -> origin/main
+  origin/main
+
+e7c9a9dc18f992f27b4bc0ec559c0aaa9494c4a6        HEAD
+```
+
+Clean up the merged task branch:
+
+```powershell
+git branch -d codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+git push origin --delete codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+git ls-remote origin refs/heads/codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+```
+
+Observed output:
+
+```text
+Deleted branch codex/JVNAUTOSCI-2208-selected-child-workflow-traces (was e7c9a9dc).
+
+To https://github.com/Strong-AI-Lab/Von.git
+ - [deleted]           codex/JVNAUTOSCI-2208-selected-child-workflow-traces
+```
+
+`git ls-remote` returned no output for the deleted task branch.
+
+The final local state after the task remained:
+
+```powershell
+git status --short --branch
+```
+
+```text
+## main...origin/main
+?? JVNAUTOSCI-2208-selected-child-workflow-traces.patch
+```
+
+The patch file was intentionally left untracked as a handoff artefact and was
+not committed.
+
+#### Verify credentials before a real push
+
+Before attempting a real push from a future non-sandbox agent, verify both Git
+remote access and push authentication without changing the remote:
+
+```powershell
+git status --short --branch
+git remote -v
+git config --show-origin --get-all credential.helper
+gh auth status
+git ls-remote origin HEAD
+git push --dry-run origin main
+```
+
+Known-good output from this non-sandbox session included:
+
+```text
+origin  https://github.com/Strong-AI-Lab/Von.git (fetch)
+origin  https://github.com/Strong-AI-Lab/Von.git (push)
+file:C:/Program Files/Git/etc/gitconfig manager
+
+github.com
+  ✓ Logged in to github.com account witbrock (keyring)
+  - Active account: true
+  - Git operations protocol: https
+  - Token: gho_************************************
+  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+
+e7c9a9dc18f992f27b4bc0ec559c0aaa9494c4a6        HEAD
+
+Everything up-to-date
+```
+
+If `git push --dry-run origin main` prompts, hangs, or emits
+`fatal: could not read Username for 'https://github.com': terminal prompts
+disabled`, do not proceed with a real push. Fix the host Git Credential Manager
+or switch to an explicitly authorised GitHub authentication path first.
+
+#### Caveats for future agents
+
+- Normal Codex desktop agents and Codex automation sandboxes may not share the
+  same filesystem permissions, `.git` writability, GitHub credential helper, or
+  `gh` token state.
+- A successful local test run in an automation sandbox does not prove that the
+  sandbox can commit or push through the primary repo `.git` directory.
+- If the sandbox uses an alternate Git dir, verify whether that commit exists
+  only in the alternate object store before assuming it can be pushed from the
+  primary worktree.
+- Prefer the normal repo Git path when publishing already-reviewed handoff
+  patches. Do not use connector blob/tree APIs as a substitute for Git unless
+  the connector can ingest local file contents safely and without transcript
+  truncation.
+- Always stage only intended files. For handoff patches, keep the patch file
+  untracked unless the user explicitly asks to preserve it in the repo.
+- After merging to `main`, delete merged task branches unless there is a
+  recorded reason to keep them.
+
 ### 6.7 Vontology and MCP field notes
 
 - Prefer `upsert_singleton_text_relation` for canonical singleton text
