@@ -724,6 +724,24 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert any(
         isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression")
+        == "inputs.turn_expected_outcome_contract.summary"
+        and item.get("extractor") == "arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression")
+        == "inputs.workflow_discovery_result.discovery_query_input"
+        and item.get("extractor") == "arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
         and item.get("target_context_key") == "source_uri"
         and item.get("source_expression") == "inputs.source_uri"
         and item.get("required") is False

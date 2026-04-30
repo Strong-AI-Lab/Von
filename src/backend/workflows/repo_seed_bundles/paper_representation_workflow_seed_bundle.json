@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
-  "source_tag": "JVNAUTOSCI-2192",
+  "seed_version": "9",
+  "source_tag": "JVNAUTOSCI-2211",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -1545,6 +1545,27 @@
             "extractor": "identity",
             "required": false,
             "source_expression": "inputs.arxiv_id",
+            "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve an arXiv identifier from the turn expected-outcome contract when the current request is deictic but routing has already grounded the target paper.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.turn_expected_outcome_contract.summary",
+            "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve an arXiv identifier from the state-form expected-outcome contract when the current request is deictic but routing has already grounded the target paper.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.turn_expected_outcome_contract_state.fields.summary",
+            "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve an arXiv identifier from the enriched discovery query used to select this workflow.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.workflow_discovery_result.discovery_query_input",
             "target_context_key": "arxiv_id"
           },
           {

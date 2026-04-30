@@ -9020,6 +9020,121 @@ def test_custom_workflow_dispatch_projects_launch_inputs_from_applied_continuati
     ]
 
 
+def test_custom_workflow_dispatch_resolves_deictic_arxiv_target_from_discovery_context(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="normalise_arxiv_source",
+                states={
+                    "normalise_arxiv_source": WorkflowStateSpec(
+                        state_id="normalise_arxiv_source",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="arxiv.normalise_source"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["prompt"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "prompt",
+                                "source_expression": "inputs.prompt",
+                                "required": True,
+                            },
+                            {
+                                "target_context_key": "arxiv_id",
+                                "source_expression": "inputs.arxiv_id",
+                            },
+                            {
+                                "target_context_key": "arxiv_id",
+                                "source_expression": (
+                                    "inputs.workflow_discovery_result.discovery_query_input"
+                                ),
+                                "extractor": "arxiv_id",
+                            },
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose="Deictic arXiv workflow dispatch test.",
+            source="test",
+        )
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
+        captured_data.update(dict(data))
+        return SimpleNamespace(
+            completed=True,
+            final_state="normalise_arxiv_source",
+            error=None,
+            data={"response_text": "Prepared from grounded discovery context."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="represent the first one",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-deictic-arxiv",
+        workflow_discovery_result={
+            "discovery_query_input": (
+                "represent the first one\n\n"
+                "Success target: Represent the first arXiv paper from the "
+                "immediately preceding list, i.e. arXiv:2604.04604."
+            ),
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a grounded target.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a grounded target.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.response_text == "Prepared from grounded discovery context."
+    assert captured_data["selected_workflow_id"] == selected_workflow_id
+    assert captured_data["arxiv_id"] == "2604.04604"
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("status") == "resolved"
+    assert launch_resolution.get("resolved_inputs") == ["arxiv_id", "prompt"]
+
+
 def test_custom_workflow_dispatch_preserves_plural_launch_inputs_from_continuation_context(
     monkeypatch,
 ):

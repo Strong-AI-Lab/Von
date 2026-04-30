@@ -151,6 +151,56 @@ def test_arxiv_store_downloaded_pdf_waits_for_async_cache_settlement(
     assert attempts["count"] >= 3
 
 
+def test_arxiv_store_downloaded_pdf_directly_reacquires_when_server_omits_path(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import arxiv_proxy_mcp as mod
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    data = b"%PDF-1.4\n%direct-fallback\n"
+    requests: list[tuple[str, float]] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return data
+
+    def _fake_urlopen(request, timeout=0):
+        requests.append((request.full_url, timeout))
+        return _Response()
+
+    monkeypatch.setattr(mod, "urlopen", _fake_urlopen, raising=False)
+
+    proxy = mod.ArxivMCPProxy(mod.ArxivProxyConfig(storage_path=cache_dir))
+
+    stored = proxy._store_downloaded_pdf(
+        result={"success": True, "message": "Paper downloaded"},
+        arxiv_id="2603.26499",
+        download_started_at=mod.time.time(),
+    )
+
+    expected_path = cache_dir / "2603.26499.pdf"
+    assert stored["success"] is True
+    assert stored["file_path"] == str(expected_path)
+    assert expected_path.read_bytes() == data
+    assert stored["direct_pdf_fallback"] is True
+    assert stored["direct_pdf_source_url"] == "https://arxiv.org/pdf/2603.26499.pdf"
+    assert stored["size_bytes"] == len(data)
+    assert stored["sha256"] == hashlib.sha256(data).hexdigest()
+    assert stored["storage"]["key"].endswith("arxiv/papers/2603.26499.pdf")
+    assert requests == [("https://arxiv.org/pdf/2603.26499.pdf", 30.0)]
+
+
 def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_path):
     import asyncio
 

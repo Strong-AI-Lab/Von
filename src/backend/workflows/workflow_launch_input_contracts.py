@@ -17,10 +17,12 @@ WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION = "workflow_launch_input_contract.
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY = "identity"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT = "first_quoted_text"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST = "workflow_id_list"
+WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID = "arxiv_id"
 _ALLOWED_EXTRACTORS: Tuple[str, ...] = (
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST,
+    WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID,
 )
 
 _QUOTED_TEXT_PATTERN = re.compile(
@@ -134,6 +136,21 @@ def _extract_workflow_id_list(value: Any) -> tuple[bool, list[str] | None]:
     return True, workflow_ids
 
 
+def _extract_arxiv_id(value: Any) -> tuple[bool, str | None]:
+    try:
+        from src.backend.services.arxiv_paper_link_service import (
+            extract_arxiv_id_candidates,
+        )
+    except Exception:
+        return False, None
+
+    candidates = extract_arxiv_id_candidates(value)
+    if not candidates:
+        return False, None
+    arxiv_id = _normalise_text(candidates[0])
+    return bool(arxiv_id), arxiv_id or None
+
+
 def _apply_extractor(
     *,
     extractor: str,
@@ -156,6 +173,9 @@ def _apply_extractor(
     if extractor_name == WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST:
         found, extracted = _extract_workflow_id_list(value)
         return found, extracted, "resolved" if found else "workflow_id_list_empty"
+    if extractor_name == WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID:
+        found, extracted = _extract_arxiv_id(value)
+        return found, extracted, "resolved" if found else "arxiv_id_not_found"
     return False, None, "extractor_invalid"
 
 
@@ -177,7 +197,7 @@ def normalise_workflow_launch_input_contract(
 
     explicit_required_inputs = set(_normalise_string_list(value.get("required_inputs")))
     mappings: List[Dict[str, Any]] = []
-    seen_targets: set[str] = set()
+    seen_mappings: set[tuple[str, str, str]] = set()
 
     for item in raw_mappings:
         if not isinstance(item, Mapping):
@@ -202,9 +222,10 @@ def normalise_workflow_launch_input_contract(
             continue
         if extractor not in _ALLOWED_EXTRACTORS:
             return None, "workflow_launch_input_mapping_extractor_invalid"
-        if target_context_key in seen_targets:
+        mapping_signature = (target_context_key, source_expression, extractor)
+        if mapping_signature in seen_mappings:
             continue
-        seen_targets.add(target_context_key)
+        seen_mappings.add(mapping_signature)
         required = _coerce_bool(
             item.get("required"),
             default=target_context_key in explicit_required_inputs,
@@ -285,6 +306,9 @@ def resolve_workflow_launch_inputs(
     unresolved_required_inputs: list[str] = []
     unresolved_optional_inputs: list[str] = []
     mapping_diagnostics: list[Dict[str, Any]] = []
+    mapping_targets: set[str] = set()
+    required_targets: set[str] = set(required_inputs)
+    unresolved_optional_targets: set[str] = set()
 
     for mapping in normalised_contract.get("input_mappings", []):
         if not isinstance(mapping, Mapping):
@@ -296,6 +320,10 @@ def resolve_workflow_launch_inputs(
             or WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY
         )
         required = bool(mapping.get("required")) or target_context_key in required_inputs
+        if target_context_key:
+            mapping_targets.add(target_context_key)
+        if required and target_context_key:
+            required_targets.add(target_context_key)
         source_found, source_value = _resolve_source_expression(
             source_expression,
             inputs=inputs,
@@ -307,13 +335,16 @@ def resolve_workflow_launch_inputs(
             "required": required,
             "source_found": source_found,
         }
+        if target_context_key in resolved_inputs:
+            mapping_entry["resolved"] = True
+            mapping_entry["resolution_reason"] = "target_already_resolved"
+            mapping_diagnostics.append(mapping_entry)
+            continue
         if not source_found:
             mapping_entry["resolved"] = False
             mapping_entry["resolution_reason"] = "source_missing"
-            if required:
-                unresolved_required_inputs.append(target_context_key)
-            else:
-                unresolved_optional_inputs.append(target_context_key)
+            if not required and target_context_key:
+                unresolved_optional_targets.add(target_context_key)
             mapping_diagnostics.append(mapping_entry)
             continue
 
@@ -326,11 +357,22 @@ def resolve_workflow_launch_inputs(
         if resolved:
             resolved_inputs[target_context_key] = extracted_value
         else:
-            if required:
-                unresolved_required_inputs.append(target_context_key)
-            else:
-                unresolved_optional_inputs.append(target_context_key)
+            if not required and target_context_key:
+                unresolved_optional_targets.add(target_context_key)
         mapping_diagnostics.append(mapping_entry)
+
+    unresolved_required_inputs = [
+        target
+        for target in sorted(required_targets)
+        if target and target not in resolved_inputs
+    ]
+    unresolved_optional_inputs = [
+        target
+        for target in sorted(
+            unresolved_optional_targets | (mapping_targets - required_targets)
+        )
+        if target and target not in resolved_inputs
+    ]
 
     diagnostics = {
         "schema_version": "workflow_launch_input_resolution.v1",
@@ -360,6 +402,7 @@ __all__ = [
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST",
+    "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID",
     "WorkflowLaunchInputResolution",
     "normalise_workflow_launch_input_contract",
     "resolve_workflow_launch_inputs",
