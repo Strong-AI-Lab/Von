@@ -71,6 +71,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only assess running processes; ignore recent file and Git activity.",
     )
     parser.add_argument(
+        "--full-process-scan",
+        action="store_true",
+        help=(
+            "After the fast process snapshot finds no blockers, run the slower "
+            "psutil process scan for extra certainty. Disabled by default so "
+            "automation pre-flight checks stay quick."
+        ),
+    )
+    parser.add_argument(
         "--max-command-chars",
         type=int,
         default=220,
@@ -176,8 +185,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if args.no_fail else 1
 
         process_now = time.time()
+        fast_processes = iter_fast_local_processes()
         assessment = assess_workspace_idle(
-            iter_fast_local_processes(),
+            fast_processes,
             workspace_root=workspace,
             exclude_pids=current_lineage_pids(),
             include_services=bool(args.include_services),
@@ -199,20 +209,36 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0 if args.no_fail else 1
 
-        assessment = assess_workspace_idle(
-            iter_local_processes(),
-            workspace_root=workspace,
-            exclude_pids=current_lineage_pids(),
-            include_services=bool(args.include_services),
-            include_agent_helpers=bool(args.include_agent_helpers),
-            recent_repo_activity=recent_activity,
-            recent_window_seconds=(
-                None
-                if args.ignore_recent_repo_activity
-                else float(args.recent_seconds)
-            ),
-            now=time.time(),
-        )
+        if args.full_process_scan or not fast_processes:
+            try:
+                full_processes = iter_local_processes()
+            except RuntimeError:
+                if fast_processes:
+                    _print_assessment(
+                        assessment,
+                        json_output=bool(args.json),
+                        verbose=bool(args.verbose),
+                        max_command_chars=int(args.max_command_chars),
+                    )
+                    if args.no_fail or assessment.idle:
+                        return 0
+                    return 1
+                raise
+
+            assessment = assess_workspace_idle(
+                full_processes,
+                workspace_root=workspace,
+                exclude_pids=current_lineage_pids(),
+                include_services=bool(args.include_services),
+                include_agent_helpers=bool(args.include_agent_helpers),
+                recent_repo_activity=recent_activity,
+                recent_window_seconds=(
+                    None
+                    if args.ignore_recent_repo_activity
+                    else float(args.recent_seconds)
+                ),
+                now=time.time(),
+            )
     except Exception as exc:
         # Fail closed: if the host process list cannot be inspected, do not
         # claim the workspace is idle.

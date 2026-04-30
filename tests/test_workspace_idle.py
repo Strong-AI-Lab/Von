@@ -9,6 +9,8 @@ from src.backend.utilities.workspace_idle import (
     _parse_git_status_porcelain_z,
     _parse_windows_process_csv,
     assess_workspace_idle,
+    configured_excluded_pids,
+    current_lineage_pids,
     detect_recent_repo_activity,
 )
 
@@ -124,6 +126,13 @@ def test_current_checker_lineage_is_excluded(tmp_path: Path) -> None:
 
     assert result.answer == "YES"
     assert not result.blockers
+
+
+def test_configured_excluded_pids_are_added_to_lineage(monkeypatch) -> None:
+    monkeypatch.setenv("VON_WORKSPACE_IDLE_EXCLUDE_PIDS", "17, bad; 23 17")
+
+    assert configured_excluded_pids() == {17, 23}
+    assert {17, 23}.issubset(current_lineage_pids())
 
 
 def test_agent_helpers_are_ignored_by_default(tmp_path: Path) -> None:

@@ -63,6 +63,8 @@ _INTERACTIVE_SHELL_NAMES: set[str] = {
     "sh.exe",
 }
 
+_EXCLUDED_PIDS_ENV = "VON_WORKSPACE_IDLE_EXCLUDE_PIDS"
+
 
 @dataclass(frozen=True)
 class ProcessSnapshot:
@@ -126,6 +128,28 @@ def _cmdline_text(cmdline: Sequence[str]) -> str:
 def _command_contains_any(command: str, fragments: Sequence[str]) -> bool:
     normalised = _normalise_fragment(command)
     return any(_normalise_fragment(fragment) in normalised for fragment in fragments)
+
+
+def _parse_pid_set(raw_value: str | None) -> set[int]:
+    pids: set[int] = set()
+    for raw_part in re.split(r"[,\s;]+", str(raw_value or "")):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            pid = int(part)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.add(pid)
+    return pids
+
+
+def configured_excluded_pids(env: Mapping[str, str] | None = None) -> set[int]:
+    """Return wrapper-supplied process IDs that should not count as blockers."""
+
+    source = os.environ if env is None else env
+    return _parse_pid_set(source.get(_EXCLUDED_PIDS_ENV))
 
 
 def _is_workspace_process(process: ProcessSnapshot, workspace_root: str) -> bool:
@@ -541,7 +565,7 @@ def iter_fast_local_processes(*, timeout_seconds: float = 3.0) -> list[ProcessSn
 def current_lineage_pids() -> set[int]:
     """Return current process and parent PIDs so the checker does not count itself."""
 
-    pids = {os.getpid()}
+    pids = {os.getpid(), *configured_excluded_pids()}
     try:
         import psutil
 
