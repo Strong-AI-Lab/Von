@@ -988,6 +988,103 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
     assert second_report.get("typed_step_ids") == []
 
 
+def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    old_launch_contract = {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": ["prompt"],
+        "input_mappings": [
+            {
+                "target_context_key": "prompt",
+                "source_expression": "inputs.prompt",
+                "extractor": "identity",
+                "required": True,
+            },
+            {
+                "target_context_key": "arxiv_id",
+                "source_expression": "inputs.arxiv_id",
+                "extractor": "identity",
+                "required": False,
+            },
+        ],
+    }
+    _upsert_workflow_json_text(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLaunchInputContractJson",
+        payload=old_launch_contract,
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        text=json.dumps(
+            {
+                "schema_version": "workflow_repo_seed_version.v1",
+                "seed_version": "8",
+                "family_id": "paper_representation_workflow_seed_bundle",
+                "source_tag": "JVNAUTOSCI-2192",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        lang="en-NZ",
+        context={"source": "test_seed_version_refresh"},
+        garbage_collect=True,
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    repair_report = bootstrap_canonical_paper_representation_workflows()
+    preflight = repair_report.get("materialisation_preflight") or {}
+    publication = repair_report.get("publication") or {}
+    version_gate = publication.get("repo_seed_version_gate") or {}
+
+    assert publication.get("materialisation_status") == "repo_seed_version_refresh"
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        publication.get("repo_seed_version_refresh_workflow_ids") or []
+    )
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        version_gate.get("refresh_workflow_ids") or []
+    )
+    status = (
+        (preflight.get("repo_seed_version_gate") or {})
+        .get("status_by_workflow_id", {})
+        .get(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
+        or {}
+    )
+    assert status.get("reason") == "repo_seed_version_newer"
+
+    refreshed_launch_contract, refreshed_launch_source = (
+        resolve_workflow_launch_input_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
+    )
+    assert refreshed_launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    assert isinstance(refreshed_launch_contract, dict)
+    arxiv_sources = {
+        mapping.get("source_expression")
+        for mapping in refreshed_launch_contract.get("input_mappings") or []
+        if mapping.get("target_context_key") == "arxiv_id"
+    }
+    assert {
+        "inputs.arxiv_id",
+        "inputs.turn_expected_outcome_contract.summary",
+        "inputs.turn_expected_outcome_contract_state.fields.summary",
+        "inputs.workflow_discovery_result.discovery_query_input",
+    }.issubset(arxiv_sources)
+
+    marker_rows = get_texts_for_concept(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRepoSeedVersionJson",
+        limit=5,
+    )
+    marker_payloads = [
+        json.loads(row.get("text") or "{}")
+        for row in marker_rows
+        if isinstance(row.get("text"), str)
+    ]
+    assert any(payload.get("seed_version") == "9" for payload in marker_payloads)
+
+
 def test_metadata_workflow_executes_direct_scholarly_article_representation(
     _reset_mock_db: Any,
 ) -> None:

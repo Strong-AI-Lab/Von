@@ -9135,6 +9135,116 @@ def test_custom_workflow_dispatch_resolves_deictic_arxiv_target_from_discovery_c
     assert launch_resolution.get("resolved_inputs") == ["arxiv_id", "prompt"]
 
 
+def test_authoritative_arxiv_workflow_dispatch_resolves_deictic_grounded_target(
+    _reset_mock_db: Any,
+    monkeypatch,
+):
+    bootstrap_canonical_paper_representation_workflows()
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+
+    authoritative_definition = load_workflow_definition_from_vontology(
+        selected_workflow_id
+    )
+    assert authoritative_definition is not None
+    launch_contract = authoritative_definition.metadata.get("launch_input_contract")
+    assert isinstance(launch_contract, dict)
+    arxiv_launch_sources = {
+        mapping.get("source_expression")
+        for mapping in launch_contract.get("input_mappings") or []
+        if mapping.get("target_context_key") == "arxiv_id"
+    }
+    assert "inputs.workflow_discovery_result.discovery_query_input" in (
+        arxiv_launch_sources
+    )
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=authoritative_definition,
+            purpose="Authoritative deictic arXiv workflow dispatch test.",
+            source="authoritative_vontology_test",
+        )
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
+        captured_data.update(dict(data))
+        return SimpleNamespace(
+            completed=True,
+            final_state="normalise_arxiv_source",
+            error=None,
+            data={
+                "response_text": (
+                    "Prepared from authoritative grounded discovery context."
+                )
+            },
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="represent the first one",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-authoritative-deictic-arxiv",
+        workflow_discovery_result={
+            "discovery_query_input": (
+                "represent the first one\n\n"
+                "Turn-intent routing guidance:\n"
+                "- Success target: Represent the first arXiv paper from the "
+                "immediately preceding Zhan-email arXiv list, i.e. arXiv:2604.04604."
+            ),
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a grounded target.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a grounded target.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.response_text == (
+        "Prepared from authoritative grounded discovery context."
+    )
+    assert captured_data["selected_workflow_id"] == selected_workflow_id
+    assert captured_data["arxiv_id"] == "2604.04604"
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("contract_source") == (
+        "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    )
+    assert launch_resolution.get("status") == "resolved"
+    assert launch_resolution.get("resolved_inputs") == ["arxiv_id", "prompt"]
+    assert any(
+        mapping.get("target_context_key") == "arxiv_id"
+        and mapping.get("source_expression")
+        == "inputs.workflow_discovery_result.discovery_query_input"
+        and mapping.get("resolved") is True
+        for mapping in launch_resolution.get("mappings") or []
+    )
+
+
 def test_custom_workflow_dispatch_preserves_plural_launch_inputs_from_continuation_context(
     monkeypatch,
 ):
