@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import time
+
+import pytest
 
 from src.backend.utilities.workspace_idle import (
     ProcessSnapshot,
@@ -13,6 +19,10 @@ from src.backend.utilities.workspace_idle import (
     current_lineage_pids,
     detect_recent_repo_activity,
 )
+from tests.powershell_test_utils import POWERSHELL_EXE
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _workspace(tmp_path: Path) -> str:
@@ -241,3 +251,51 @@ def test_parse_windows_process_csv_builds_snapshots() -> None:
             create_time=1000.0,
         )
     ]
+
+
+@pytest.mark.skipif(not POWERSHELL_EXE, reason="PowerShell is required")
+def test_powershell_wrapper_falls_back_after_broken_python_candidate(
+    tmp_path: Path,
+) -> None:
+    assert POWERSHELL_EXE is not None
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copyfile(
+        REPO_ROOT / "scripts" / "check_workspace_idle.ps1",
+        scripts_dir / "check_workspace_idle.ps1",
+    )
+    (scripts_dir / "check_workspace_idle.py").write_text(
+        "print('YES')\n",
+        encoding="utf-8",
+    )
+    broken_venv_scripts = tmp_path / "broken_venv" / "Scripts"
+    broken_venv_scripts.mkdir(parents=True)
+    (broken_venv_scripts / "python.exe").write_text(
+        "not an executable",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(tmp_path / "broken_venv")
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+
+    completed = subprocess.run(
+        [
+            POWERSHELL_EXE,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(scripts_dir / "check_workspace_idle.ps1"),
+            "--no-fail",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["YES"]
+    assert completed.stderr == ""
