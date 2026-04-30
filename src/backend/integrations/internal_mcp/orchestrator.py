@@ -90,6 +90,9 @@ from ...workflows.execution_contracts import (
     derive_workflow_terminal_status,
 )
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
+from ...workflows.workflow_side_effect_guardrails import (
+    enforce_workflow_mcp_write_guardrails,
+)
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -148,6 +151,7 @@ from src.backend.workflows.write_tool_policy import (
     classify_write_tool_risk,
     compute_allowed_write_tools,
     required_mutation_authority_level_for_risk,
+    resolve_workflow_execution_side_effect_policy,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...services.llm_exchange_blob_writer import (
@@ -4162,10 +4166,15 @@ class InternalMCPChatOrchestrator:
             schema = None
 
         tool_category = ""
+        method_definition = None
         if isinstance(method_catalogue, Mapping):
             tool_meta = method_catalogue.get(tool_name)
             if isinstance(tool_meta, Mapping):
                 tool_category = str(tool_meta.get("category") or "").strip().lower()
+        try:
+            method_definition = gateway.get_method_definition(tool_name)
+        except Exception:
+            method_definition = None
 
         self._apply_payload_defaults(
             tool_name,
@@ -4177,7 +4186,31 @@ class InternalMCPChatOrchestrator:
             turn_id=request.data.get("turn_id"),
         )
 
+        workflow_execution_policy_authorised = False
         if tool_category == "write":
+            execution_side_effect_policy = (
+                resolve_workflow_execution_side_effect_policy(
+                    workflow_context=(
+                        request.data if isinstance(request.data, Mapping) else None
+                    ),
+                    workflow_state_metadata=(
+                        request.workflow_state_metadata
+                        if isinstance(request.workflow_state_metadata, Mapping)
+                        else None
+                    ),
+                )
+            )
+            if execution_side_effect_policy is not None:
+                blocked_result = enforce_workflow_mcp_write_guardrails(
+                    request=request,
+                    resolved_tool_name=tool_name,
+                    method_definition=method_definition,
+                )
+                if blocked_result is not None:
+                    return blocked_result
+                workflow_execution_policy_authorised = True
+
+        if tool_category == "write" and not workflow_execution_policy_authorised:
             resolved_write_policy = self._resolve_allowed_write_tools(
                 prompt=(
                     str(request.data.get("prompt") or "").strip()

@@ -15,6 +15,9 @@ from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.write_tool_policy import (
+    WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+)
 
 
 _WORKFLOW_ID = "#V#jira_task_migration_workflow"
@@ -222,6 +225,13 @@ def test_workflow_defined_jira_migration_executes_via_mcp_gateway(monkeypatch):
         environment=environment,
         data={
             "jira_query": "project = JVNAUTOSCI ORDER BY created DESC",
+            "workflow_execution_side_effect_policy": {
+                "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+                "mode": "theory_bounded",
+                "testing_theory_id": "#V#jira_task_migration_workflow_test",
+                "allowed_write_tools": ["task_import_jira_issues"],
+                "audit_label": "dry-run Jira migration gateway test",
+            },
         },
     )
 

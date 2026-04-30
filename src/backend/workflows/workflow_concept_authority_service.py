@@ -2463,7 +2463,12 @@ def resolve_authoritative_workflow_publication_spec(
     workflow_id_text = str(workflow_id or "").strip()
     if not workflow_id_text:
         return None
-    authoritative_definition = load_workflow_definition_from_vontology(workflow_id_text)
+    try:
+        authoritative_definition = load_workflow_definition_from_vontology(
+            workflow_id_text
+        )
+    except Exception:
+        authoritative_definition = None
     definition = authoritative_definition or fallback_definition
     if definition is None:
         return None
@@ -2749,7 +2754,12 @@ def publish_canonical_chat_workflow_graphs(
         candidate_id = str(candidate_workflow_id or "").strip()
         if not candidate_id:
             return None
-        authoritative_definition = load_workflow_definition_from_vontology(candidate_id)
+        try:
+            authoritative_definition = load_workflow_definition_from_vontology(
+                candidate_id
+            )
+        except Exception:
+            authoritative_definition = None
         if authoritative_definition is not None:
             return authoritative_definition
         explicit_definition = explicit_publication_definitions.get(candidate_id)
@@ -3326,7 +3336,21 @@ def publish_canonical_chat_workflow_graphs(
             # example when bootstrapping an action-less graph to executable form).
             if registration_source == "vontology" and not supported_action_ids:
                 enforce_supported_actions = False
-            published_definition = load_workflow_definition_from_vontology(workflow_id)
+            try:
+                published_definition = load_workflow_definition_from_vontology(
+                    workflow_id
+                )
+            except Exception as exc:
+                errors_by_workflow_id[workflow_id] = (
+                    "publication_validation_failed:definition_load_exception:"
+                    f"{type(exc).__name__}:{exc}"
+                )
+                validation_failures_by_workflow_id[workflow_id] = {
+                    "errors": ["workflow_definition_load_exception"],
+                    "error": f"{type(exc).__name__}:{exc}",
+                    "supported_action_ids": list(supported_action_ids),
+                }
+                continue
             if published_definition is None:
                 errors_by_workflow_id[workflow_id] = (
                     "publication_validation_failed:definition_not_loadable"
@@ -3344,7 +3368,19 @@ def publish_canonical_chat_workflow_graphs(
                 known_workflow_ids=known_workflow_ids,
                 workflow_definition_loader=_resolve_workflow_definition_for_validation,
             )
-            _graph, graph_warnings = build_workflow_process_graph(workflow_id)
+            try:
+                _graph, graph_warnings = build_workflow_process_graph(workflow_id)
+            except Exception as exc:
+                errors_by_workflow_id[workflow_id] = (
+                    "publication_validation_failed:graph_load_exception:"
+                    f"{type(exc).__name__}:{exc}"
+                )
+                validation_failures_by_workflow_id[workflow_id] = {
+                    "errors": ["workflow_graph_load_exception"],
+                    "error": f"{type(exc).__name__}:{exc}",
+                    "supported_action_ids": list(supported_action_ids),
+                }
+                continue
             warning_items = [
                 str(item).strip()
                 for item in (graph_warnings or [])

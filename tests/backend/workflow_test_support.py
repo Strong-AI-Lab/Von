@@ -404,6 +404,12 @@ def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
 
 
 def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
+    from src.backend.services.entity_identity_resolution_workflow_vontology_service import (
+        bootstrap_canonical_entity_identity_resolution_workflow,
+    )
+
+    bootstrap_canonical_entity_identity_resolution_workflow()
+
     registry = WorkflowRegistry()
     for registration in (
         build_rag_text_relation_sync_workflow_test_registration(),

@@ -289,8 +289,15 @@ def _build_expected_authoritative_workflow_report(
 
     resolved_workflow_ids: list[str] = []
     missing_workflow_ids: list[str] = []
+    load_errors_by_workflow_id: dict[str, str] = {}
     for workflow_id in workflow_ids:
-        definition = load_workflow_definition_from_vontology(workflow_id)
+        try:
+            definition = load_workflow_definition_from_vontology(workflow_id)
+        except Exception as exc:
+            definition = None
+            load_errors_by_workflow_id[workflow_id] = (
+                f"{type(exc).__name__}:{exc}"
+            )
         if definition is None:
             missing_workflow_ids.append(workflow_id)
         else:
@@ -302,10 +309,12 @@ def _build_expected_authoritative_workflow_report(
         "workflow_ids": list(workflow_ids),
         "resolved_workflow_ids": resolved_workflow_ids,
         "missing_workflow_ids": missing_workflow_ids,
+        "load_errors_by_workflow_id": load_errors_by_workflow_id,
         "counts": {
             "required": len(workflow_ids),
             "resolved": len(resolved_workflow_ids),
             "missing": len(missing_workflow_ids),
+            "load_errors": len(load_errors_by_workflow_id),
         },
     }
 

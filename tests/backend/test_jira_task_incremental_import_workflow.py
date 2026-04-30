@@ -59,7 +59,13 @@ def test_registry_factory_registers_incremental_import_workflow(monkeypatch) -> 
         bootstrap_authoritative_support_maintenance_workflows,
     )
 
-    bootstrap_authoritative_support_maintenance_workflows()
+    bootstrap_report = bootstrap_authoritative_support_maintenance_workflows()
+    graph_publication = bootstrap_report.get("graph_publication") or {}
+    assert (
+        mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID
+        in graph_publication.get("published_workflow_ids", [])
+    )
+    assert not (graph_publication.get("errors_by_workflow_id") or {})
     monkeypatch.setattr(
         factory,
         "discover_workflow_ids",

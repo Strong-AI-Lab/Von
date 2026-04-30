@@ -480,6 +480,30 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     assert "#V#file_copy_upload_handler_workflow" in file_copy.get("workflow_ids", [])
 
 
+def test_expected_authoritative_workflow_report_records_load_errors(monkeypatch):
+    def _fake_load(workflow_id: str):
+        if workflow_id == "#V#broken_workflow":
+            raise ValueError("workflow_prompt_contract_invalid:#V#broken_workflow")
+        return _build_definition(workflow_id, "loadable workflow")
+
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        _fake_load,
+    )
+
+    report = registry_factory._build_expected_authoritative_workflow_report(
+        workflow_ids=("#V#broken_workflow", "#V#loadable_workflow")
+    )
+
+    assert report["resolved_workflow_ids"] == ["#V#loadable_workflow"]
+    assert report["missing_workflow_ids"] == ["#V#broken_workflow"]
+    assert report["counts"]["load_errors"] == 1
+    assert "workflow_prompt_contract_invalid" in (
+        report["load_errors_by_workflow_id"]["#V#broken_workflow"]
+    )
+
+
 def test_get_or_build_inventory_snapshot_returns_pending_when_sync_build_disabled(
     monkeypatch,
 ):
