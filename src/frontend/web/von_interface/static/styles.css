@@ -1532,6 +1532,135 @@ body {
     color: #14532d;
 }
 
+.task-load-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #0f172a;
+    font-size: 0.84rem;
+}
+
+.task-load-progress.complete {
+    border-color: #bfdbfe;
+    background: #eff6ff;
+}
+
+.task-load-progress.error {
+    border-color: #fecaca;
+    background: #fef2f2;
+    color: #7f1d1d;
+}
+
+.task-load-progress-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.task-load-progress-dot {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: #2563eb;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+    animation: task-load-pulse 1.2s ease-in-out infinite;
+}
+
+.task-load-progress.complete .task-load-progress-dot {
+    animation: none;
+    background: #16a34a;
+    box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.12);
+}
+
+.task-load-progress.error .task-load-progress-dot {
+    animation: none;
+    background: #dc2626;
+    box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.12);
+}
+
+.task-load-progress-body {
+    min-width: 0;
+}
+
+.task-load-progress-title {
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.task-load-progress-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 3px;
+    color: #475569;
+    font-size: 0.76rem;
+    line-height: 1.35;
+}
+
+.task-load-debug {
+    color: #334155;
+    font-size: 0.76rem;
+}
+
+.task-load-debug summary {
+    cursor: pointer;
+    width: max-content;
+    max-width: 100%;
+}
+
+.task-load-stage-list {
+    display: grid;
+    gap: 4px;
+    margin-top: 6px;
+    max-width: 560px;
+}
+
+.task-load-debug-heading {
+    margin-top: 4px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.task-load-stage-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: baseline;
+}
+
+.task-load-stage-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.task-load-stage-time {
+    color: #0f172a;
+    font-variant-numeric: tabular-nums;
+}
+
+@keyframes task-load-pulse {
+    0% {
+        transform: scale(0.9);
+        opacity: 0.65;
+    }
+    50% {
+        transform: scale(1.1);
+        opacity: 1;
+    }
+    100% {
+        transform: scale(0.9);
+        opacity: 0.65;
+    }
+}
+
 /* Task list */
 .task-list {
     display: flex;

@@ -250,6 +250,44 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
     assert captured["bulk_collection_ids"] == ["#V#jira_task_migration_bulk_collection"]
     assert captured["limit"] == 10
     assert captured["offset"] == 5
+    telemetry = payload["load_telemetry"]
+    assert telemetry["schema_version"] == "task_list_load_telemetry.v1"
+    assert telemetry["source"] == "task_routes.list_tasks_route"
+    assert telemetry["mode"] == "task_listing"
+    assert telemetry["request"]["bulk_visibility"] == "exclude"
+    assert telemetry["request"]["bulk_collection_count"] == 1
+    assert any(
+        stage["stage"] == "list_tasks_with_visibility"
+        for stage in telemetry["stages"]
+    )
+
+
+def test_list_tasks_route_telemetry_handles_missing_bulk_collection_ids(monkeypatch):
+    client = _build_client()
+
+    def _fake_list_tasks_with_visibility(**kwargs):
+        return {
+            "tasks": [],
+            "count": 0,
+            "total": 0,
+            "offset": kwargs["offset"],
+            "limit": kwargs["limit"],
+            "bulk_visibility": kwargs["bulk_visibility"],
+            "bulk_collection_ids": [],
+            "hidden_bulk_task_total": 0,
+            "hidden_bulk_task_collections": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.list_tasks_with_visibility",
+        _fake_list_tasks_with_visibility,
+    )
+
+    response = client.get("/api/tasks/?limit=10&bulk_visibility=exclude")
+
+    assert response.status_code == 200
+    telemetry = response.get_json()["load_telemetry"]
+    assert telemetry["request"]["bulk_collection_count"] == 0
 
 
 def test_my_tasks_route_uses_visibility_listing(monkeypatch):

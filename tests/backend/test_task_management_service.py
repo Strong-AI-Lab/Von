@@ -666,6 +666,15 @@ class TestBulkTaskCollections:
         assert result["hidden_bulk_task_collections"][0]["collection_id"] == (
             JIRA_MIGRATION_BULK_COLLECTION_ID
         )
+        telemetry = result["load_telemetry"]
+        assert telemetry["schema_version"] == "task_list_load_telemetry.v1"
+        assert telemetry["source"] == "task_management.list_tasks_with_visibility"
+        assert telemetry["request"]["bulk_visibility"] == "exclude"
+        assert telemetry["request"]["requires_post_filter"] is False
+        assert any(
+            stage["stage"] == "repository_find_page"
+            for stage in telemetry["stages"]
+        )
         assert mock_get_texts.call_count == 1
         visible_query = mock_repo.find.call_args_list[1].args[0]
         assert "$nor" in visible_query["$and"][-1]

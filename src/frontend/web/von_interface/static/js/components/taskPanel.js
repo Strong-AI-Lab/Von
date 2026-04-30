@@ -32,6 +32,7 @@ let _bulkTaskVisibility = 'exclude';
 let _bulkTaskCollectionId = '';
 let _hiddenBulkTaskTotal = 0;
 let _hiddenBulkTaskCollections = [];
+let _lastTaskLoadTelemetry = null;
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -45,6 +46,7 @@ const _taskGroupNameFetchInFlight = new Set();
 
 const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
 const TASK_LIST_LIMIT = '500';
+const TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION = 'task_panel_load_telemetry.v1';
 
 // Constants
 const TASK_STATUS_OPTIONS = [
@@ -174,6 +176,193 @@ function setBulkTaskVisibilitySummary(response) {
             .map(normaliseBulkTaskCollectionSummary)
             .filter(Boolean)
         : [];
+}
+
+function getTaskPanelNow() {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        return performance.now();
+    }
+    return Date.now();
+}
+
+function roundTimingMs(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return 0;
+    return Math.round(Math.max(0, numericValue) * 100) / 100;
+}
+
+function normaliseTelemetryMetadata(metadata = {}) {
+    if (!metadata || typeof metadata !== 'object') return {};
+    return Object.entries(metadata).reduce((payload, [key, value]) => {
+        if (
+            value === null
+            || typeof value === 'string'
+            || typeof value === 'number'
+            || typeof value === 'boolean'
+        ) {
+            payload[key] = value;
+        }
+        return payload;
+    }, {});
+}
+
+function createTaskLoadTelemetry(loadKind) {
+    const nowMs = getTaskPanelNow();
+    return {
+        schema_version: TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION,
+        load_kind: loadKind || 'global_tasks',
+        status: 'loading',
+        started_at: new Date().toISOString(),
+        started_ms: nowMs,
+        last_ms: nowMs,
+        total_ms: 0,
+        current_label: 'Preparing task load',
+        stages: [],
+        backend: null,
+    };
+}
+
+function markTaskLoadStage(telemetry, stage, label, metadata = {}) {
+    if (!telemetry || typeof telemetry !== 'object') return telemetry;
+    const nowMs = getTaskPanelNow();
+    const lastMs = Number.isFinite(Number(telemetry.last_ms)) ? telemetry.last_ms : nowMs;
+    const startedMs = Number.isFinite(Number(telemetry.started_ms)) ? telemetry.started_ms : nowMs;
+    const stagePayload = {
+        stage,
+        label,
+        duration_ms: roundTimingMs(nowMs - lastMs),
+        since_start_ms: roundTimingMs(nowMs - startedMs),
+        ...normaliseTelemetryMetadata(metadata),
+    };
+    telemetry.stages = Array.isArray(telemetry.stages) ? telemetry.stages : [];
+    telemetry.stages.push(stagePayload);
+    telemetry.last_ms = nowMs;
+    telemetry.total_ms = stagePayload.since_start_ms;
+    telemetry.current_label = label || stage;
+    return telemetry;
+}
+
+function updateTaskLoadElapsed(telemetry, label = null) {
+    if (!telemetry || typeof telemetry !== 'object') return telemetry;
+    const nowMs = getTaskPanelNow();
+    const startedMs = Number.isFinite(Number(telemetry.started_ms)) ? telemetry.started_ms : nowMs;
+    telemetry.total_ms = roundTimingMs(nowMs - startedMs);
+    if (label) {
+        telemetry.current_label = label;
+    }
+    return telemetry;
+}
+
+function serialiseTaskLoadTelemetry(telemetry) {
+    if (!telemetry || typeof telemetry !== 'object') return null;
+    return {
+        schema_version: telemetry.schema_version,
+        load_kind: telemetry.load_kind,
+        status: telemetry.status,
+        started_at: telemetry.started_at,
+        finished_at: telemetry.finished_at || null,
+        total_ms: roundTimingMs(telemetry.total_ms),
+        current_label: telemetry.current_label,
+        stages: Array.isArray(telemetry.stages) ? [...telemetry.stages] : [],
+        backend: telemetry.backend || null,
+    };
+}
+
+function finishTaskLoadTelemetry(telemetry, status, label, metadata = {}) {
+    if (!telemetry || typeof telemetry !== 'object') return null;
+    telemetry.status = status || 'complete';
+    markTaskLoadStage(
+        telemetry,
+        telemetry.status === 'error' ? 'load_failed' : 'load_complete',
+        label || telemetry.current_label || 'Task load complete',
+        metadata,
+    );
+    telemetry.finished_at = new Date().toISOString();
+    _lastTaskLoadTelemetry = serialiseTaskLoadTelemetry(telemetry);
+    if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        console.debug('[taskPanel] Global tasks load telemetry', _lastTaskLoadTelemetry);
+    }
+    return _lastTaskLoadTelemetry;
+}
+
+function startTaskLoadProgressTicker(telemetry) {
+    if (typeof setInterval !== 'function') return () => {};
+    const intervalId = setInterval(() => {
+        if (!telemetry || telemetry.status !== 'loading') return;
+        updateTaskLoadElapsed(telemetry);
+        renderTaskLoadProgress(telemetry.current_label, telemetry);
+    }, 1000);
+    return () => {
+        if (typeof clearInterval === 'function') {
+            clearInterval(intervalId);
+        }
+    };
+}
+
+function formatTelemetryDuration(value) {
+    return `${roundTimingMs(value).toLocaleString('en-NZ', { maximumFractionDigits: 2 })} ms`;
+}
+
+function renderTelemetryStageRows(stages, emptyLabel) {
+    const rows = Array.isArray(stages) ? stages.slice(-8) : [];
+    if (rows.length === 0) {
+        return `<div class="task-load-stage-row"><span>${escapeHtml(emptyLabel)}</span><span></span></div>`;
+    }
+    return rows.map((stage) => `
+        <div class="task-load-stage-row">
+            <span class="task-load-stage-name">${escapeHtml(stage?.label || stage?.stage || 'stage')}</span>
+            <span class="task-load-stage-time">${escapeHtml(formatTelemetryDuration(stage?.duration_ms || 0))}</span>
+        </div>
+    `).join('');
+}
+
+function renderTaskLoadProgress(label, telemetry = _lastTaskLoadTelemetry) {
+    if (!_globalTasksContainer || !telemetry) return;
+
+    let progressEl = _globalTasksContainer.querySelector('#globalTaskLoadProgress');
+    if (!progressEl) {
+        _globalTasksContainer.innerHTML = `
+            <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
+        `;
+        progressEl = _globalTasksContainer.querySelector('#globalTaskLoadProgress');
+    }
+    if (!progressEl) return;
+
+    const publicTelemetry = serialiseTaskLoadTelemetry(telemetry) || telemetry;
+    const backendTelemetry = publicTelemetry.backend || null;
+    const serviceTelemetry = backendTelemetry?.service || null;
+    const serverSummary = backendTelemetry
+        ? `Route ${formatTelemetryDuration(backendTelemetry.total_ms)}${serviceTelemetry ? `, service ${formatTelemetryDuration(serviceTelemetry.total_ms)}` : ''}`
+        : 'Server timing pending';
+    const statusLabel = label || publicTelemetry.current_label || 'Loading tasks';
+    const currentStage = publicTelemetry.stages?.[publicTelemetry.stages.length - 1] || null;
+
+    progressEl.classList.toggle('complete', publicTelemetry.status === 'complete');
+    progressEl.classList.toggle('error', publicTelemetry.status === 'error');
+    progressEl.innerHTML = `
+        <div class="task-load-progress-main">
+            <span class="task-load-progress-dot" aria-hidden="true"></span>
+            <div class="task-load-progress-body">
+                <div class="task-load-progress-title">${escapeHtml(statusLabel)}</div>
+                <div class="task-load-progress-meta">
+                    Client ${escapeHtml(formatTelemetryDuration(publicTelemetry.total_ms))}
+                    <span>${escapeHtml(serverSummary)}</span>
+                    ${currentStage?.stage ? `<span>Stage: ${escapeHtml(currentStage.stage)}</span>` : ''}
+                </div>
+            </div>
+        </div>
+        <details class="task-load-debug">
+            <summary>Load timings</summary>
+            <div class="task-load-stage-list">
+                <div class="task-load-debug-heading">Client</div>
+                ${renderTelemetryStageRows(publicTelemetry.stages, 'No client stages yet')}
+                <div class="task-load-debug-heading">Route</div>
+                ${renderTelemetryStageRows(backendTelemetry?.stages, 'Waiting for route timings')}
+                <div class="task-load-debug-heading">Service</div>
+                ${renderTelemetryStageRows(serviceTelemetry?.stages, 'Waiting for service timings')}
+            </div>
+        </details>
+    `;
 }
 
 function buildGlobalTasksUrl() {
@@ -402,7 +591,9 @@ export function toggleTaskPanel(options = {}) {
  * Renders into the globalTasksContainer instead of the overlay panel.
  */
 export async function showGlobalTasks() {
+    const telemetry = createTaskLoadTelemetry('global_tasks_initial');
     loadTaskGroupSelectionFromStorage();
+    markTaskLoadStage(telemetry, 'initialise', 'Preparing All Tasks workspace');
     _currentSessionId = null;  // Clear session filter
     _isGlobalTabMode = true;
 
@@ -416,10 +607,16 @@ export async function showGlobalTasks() {
         return;
     }
 
-    _globalTasksContainer.innerHTML = '<div class="loading">Loading tasks…</div>';
+    renderTaskLoadProgress('Preparing All Tasks workspace', telemetry);
+    markTaskLoadStage(telemetry, 'taxonomy_request', 'Loading task filters');
+    renderTaskLoadProgress('Loading task filters', telemetry);
     await ensureTaskTaxonomyLoaded();
+    markTaskLoadStage(telemetry, 'taxonomy_response', 'Task filters loaded');
+    renderTaskLoadProgress('Task filters loaded', telemetry);
     renderGlobalTasksTabContent();
-    await loadGlobalTasks();
+    markTaskLoadStage(telemetry, 'shell_rendered', 'Task controls ready');
+    renderTaskLoadProgress('Task controls ready', telemetry);
+    await loadGlobalTasks({ telemetry });
 }
 
 /**
@@ -488,6 +685,7 @@ function renderGlobalTasksTabContent() {
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
+            <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
             <div class="global-tasks-create">
                 <input type="text" id="globalNewTaskTitle" class="task-input" placeholder="Task title...">
                 <textarea id="globalNewTaskDescription" class="task-textarea" placeholder="Task description..." rows="2"></textarea>
@@ -749,26 +947,73 @@ export async function loadMyTasks(statusFilter = null) {
     }
 }
 
-async function loadGlobalTasks() {
+async function loadGlobalTasks(options = {}) {
     if (_isLoading) return;
 
+    const telemetry = options?.telemetry || createTaskLoadTelemetry('global_tasks_refresh');
+    if (!Array.isArray(telemetry.stages) || telemetry.stages.length === 0) {
+        markTaskLoadStage(telemetry, 'initialise', 'Preparing task request');
+    }
     loadTaskGroupSelectionFromStorage();
+    markTaskLoadStage(telemetry, 'storage_state_loaded', 'Task display preferences loaded');
     _isLoading = true;
     updateLoadingState(true);
+    renderTaskLoadProgress('Requesting tasks from Von', telemetry);
+    const stopProgressTicker = startTaskLoadProgressTicker(telemetry);
 
     try {
-        const response = await getJson(buildGlobalTasksUrl());
+        const url = buildGlobalTasksUrl();
+        markTaskLoadStage(telemetry, 'request_start', 'Requesting tasks from Von', {
+            limit: Number(TASK_LIST_LIMIT),
+            bulk_visibility: _bulkTaskVisibility || 'exclude',
+            scope: _globalTaskScope,
+        });
+        renderTaskLoadProgress('Requesting tasks from Von', telemetry);
+
+        const response = await getJson(url);
+        telemetry.backend = response?.load_telemetry || null;
+        markTaskLoadStage(telemetry, 'response_received', 'Task payload received', {
+            returned_count: Array.isArray(response?.tasks) ? response.tasks.length : 0,
+        });
+        renderTaskLoadProgress('Task payload received', telemetry);
+
         _tasks = response.tasks || [];
+        markTaskLoadStage(telemetry, 'cache_updated', 'Task cache updated', {
+            task_count: _tasks.length,
+        });
+
         setBulkTaskVisibilitySummary(response);
+        markTaskLoadStage(telemetry, 'bulk_visibility_summary', 'Bulk visibility summary updated', {
+            hidden_bulk_task_total: _hiddenBulkTaskTotal,
+            hidden_bulk_collection_count: _hiddenBulkTaskCollections.length,
+        });
+
         pruneTaskDetailState();
         refreshTaskGroupOptions();
         ensureSelectedTaskStillValid();
+        markTaskLoadStage(telemetry, 'local_state_prepared', 'Preparing task board render', {
+            group_count: _taskGroupOptions.length,
+        });
+        renderTaskLoadProgress('Preparing task board render', telemetry);
+
         renderTaskList();
         updateTaskCountBadge();
+        markTaskLoadStage(telemetry, 'render_complete', 'Task board rendered', {
+            visible_count: getFilteredTasks().length,
+        });
+        finishTaskLoadTelemetry(telemetry, 'complete', `Loaded ${_tasks.length} tasks`, {
+            visible_count: getFilteredTasks().length,
+        });
+        renderTaskLoadProgress(`Loaded ${_tasks.length} tasks`, telemetry);
     } catch (err) {
         console.error('[taskPanel] Failed to load global tasks:', err);
+        finishTaskLoadTelemetry(telemetry, 'error', 'Failed to load tasks', {
+            error_type: err?.name || 'Error',
+        });
+        renderTaskLoadProgress('Failed to load tasks', telemetry);
         showToast('Failed to load tasks', 'error');
     } finally {
+        stopProgressTicker();
         _isLoading = false;
         updateLoadingState(false);
     }

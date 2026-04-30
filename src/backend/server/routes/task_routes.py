@@ -6,6 +6,8 @@ Tasks are stored as Vontology concepts.
 
 from datetime import datetime, timezone
 import logging
+import time
+from typing import Any
 
 from flask import Blueprint, request, jsonify, session
 from flask.typing import ResponseReturnValue
@@ -36,6 +38,47 @@ from ...services.task_management_service import (
 logger = logging.getLogger(__name__)
 
 task_bp = Blueprint("tasks", __name__)
+
+TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
+
+
+def _round_duration_ms(duration_seconds: float) -> float:
+    return round(max(0.0, float(duration_seconds)) * 1000.0, 2)
+
+
+def _new_task_list_load_timer(source: str):
+    started = time.perf_counter()
+    last = started
+    stages: list[dict[str, Any]] = []
+
+    def mark(stage: str, **metadata: Any) -> None:
+        nonlocal last
+        now = time.perf_counter()
+        stage_payload: dict[str, Any] = {
+            "stage": stage,
+            "duration_ms": _round_duration_ms(now - last),
+            "since_start_ms": _round_duration_ms(now - started),
+        }
+        stage_payload.update(
+            {key: value for key, value in metadata.items() if value is not None}
+        )
+        stages.append(stage_payload)
+        last = now
+
+    def finish(**metadata: Any) -> dict[str, Any]:
+        now = time.perf_counter()
+        payload: dict[str, Any] = {
+            "schema_version": TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION,
+            "source": source,
+            "total_ms": _round_duration_ms(now - started),
+            "stages": stages,
+        }
+        payload.update(
+            {key: value for key, value in metadata.items() if value is not None}
+        )
+        return payload
+
+    return mark, finish
 
 
 def _parse_optional_datetime(value: object, field_name: str) -> datetime | None:
@@ -303,6 +346,9 @@ def list_tasks_route() -> ResponseReturnValue:
         priority: str - Filter by priority
         include_created: bool - Include tasks created by user (not just assigned)
     """
+    mark_load, finish_load = _new_task_list_load_timer(
+        "task_routes.list_tasks_route"
+    )
     try:
         user_concept_id = request.args.get("user")
         status_filter = request.args.get("status")
@@ -331,15 +377,35 @@ def list_tasks_route() -> ResponseReturnValue:
             "bulk_task_visibility"
         )
         bulk_collection_ids = _parse_bulk_collection_ids()
+        mark_load(
+            "parse_request",
+            limit=limit,
+            offset=offset,
+            has_session_id=bool(session_id),
+            has_user_scope=bool(user_concept_id),
+            has_status_filter=bool(status_filter),
+            has_priority_filter=bool(priority_filter),
+            has_task_type_filter=bool(task_type_ids),
+            has_task_source_filter=bool(task_source_ids),
+        )
 
         # If filtering by session, use get_tasks_for_conversation
+        service_telemetry = None
         if session_id:
             tasks = get_tasks_for_conversation(session_id=session_id)
+            mark_load("conversation_task_query", raw_count=len(tasks))
+
             visibility_payload = apply_bulk_task_visibility(
                 tasks,
                 bulk_visibility=bulk_visibility,
                 bulk_collection_ids=bulk_collection_ids,
             )
+            mark_load(
+                "bulk_visibility_filter",
+                visible_count=len(visibility_payload["tasks"]),
+                hidden_bulk_task_total=visibility_payload["hidden_bulk_task_total"],
+            )
+
             visible_tasks = visibility_payload["tasks"]
             paged_tasks = visible_tasks[offset : offset + limit]
             payload = {
@@ -356,6 +422,12 @@ def list_tasks_route() -> ResponseReturnValue:
                     "hidden_bulk_task_collections"
                 ],
             }
+            mode = "conversation_session"
+            mark_load(
+                "pagination_and_payload",
+                returned_count=len(paged_tasks),
+                total=len(visible_tasks),
+            )
         else:
             payload = list_tasks_with_visibility(
                 user_concept_id=user_concept_id,
@@ -371,7 +443,34 @@ def list_tasks_route() -> ResponseReturnValue:
                 limit=limit,
                 offset=offset,
             )
+            service_telemetry = payload.get("load_telemetry")
+            mark_load(
+                "list_tasks_with_visibility",
+                returned_count=payload.get("count"),
+                total=payload.get("total"),
+            )
             payload["total_matching_count"] = payload["total"]
+            mode = "task_listing"
+            mark_load("route_payload_finalize")
+
+        payload["load_telemetry"] = finish_load(
+            mode=mode,
+            request={
+                "limit": limit,
+                "offset": offset,
+                "bulk_visibility": bulk_visibility,
+                "bulk_collection_count": len(bulk_collection_ids or []),
+                "has_session_id": bool(session_id),
+                "has_user_scope": bool(user_concept_id),
+                "has_assignee_scope": bool(assignee_concept_id),
+                "has_created_by_scope": bool(created_by_concept_id),
+                "has_status_filter": bool(status_filter),
+                "has_priority_filter": bool(priority_filter),
+                "has_task_type_filter": bool(task_type_ids),
+                "has_task_source_filter": bool(task_source_ids),
+            },
+            service=service_telemetry,
+        )
 
         return jsonify(payload), 200
 

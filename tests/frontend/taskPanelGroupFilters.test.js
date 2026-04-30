@@ -44,6 +44,7 @@ describe('task panel ontology-backed groups', () => {
 
     beforeEach(() => {
         jest.resetModules();
+        jest.spyOn(console, 'debug').mockImplementation(() => {});
         localStorage.clear();
         document.body.innerHTML = `
             <div id="globalTasksContainer"></div>
@@ -351,6 +352,68 @@ describe('task panel ontology-backed groups', () => {
         ]));
         expect(document.querySelector('.task-bulk-collection-chip')?.textContent || '')
             .toContain('Jira migration backlog');
+    });
+
+    test('renders incremental load progress and backend timing telemetry for global tasks', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const visibleTask = {
+            task_concept_id: '#V#task_visible',
+            title: 'Visible task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        };
+
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                return Promise.resolve({
+                    tasks: [visibleTask],
+                    hidden_bulk_task_total: 0,
+                    hidden_bulk_task_collections: [],
+                    load_telemetry: {
+                        schema_version: 'task_list_load_telemetry.v1',
+                        source: 'task_routes.list_tasks_route',
+                        total_ms: 123.45,
+                        stages: [
+                            {
+                                stage: 'parse_request',
+                                duration_ms: 1.2,
+                                since_start_ms: 1.2,
+                            },
+                        ],
+                        service: {
+                            source: 'task_management.list_tasks_with_visibility',
+                            total_ms: 98.7,
+                            stages: [
+                                {
+                                    stage: 'repository_find_page',
+                                    duration_ms: 44.4,
+                                    since_start_ms: 70,
+                                },
+                            ],
+                        },
+                    },
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+
+        const progress = document.querySelector('#globalTaskLoadProgress');
+        expect(progress).toBeTruthy();
+        expect(progress.classList.contains('complete')).toBe(true);
+        expect(progress.textContent).toContain('Loaded 1 tasks');
+        expect(progress.textContent).toContain('Route 123.45 ms');
+        expect(progress.textContent).toContain('service 98.7 ms');
+        expect(progress.textContent).toContain('repository_find_page');
     });
 
     test('reloads global task scope filters through the backend query', async () => {

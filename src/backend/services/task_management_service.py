@@ -9,6 +9,7 @@ All tasks are stored as first-class Vontology concepts (type: #V#task_specificat
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -65,6 +66,48 @@ from .workflow_event_integration_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
+
+
+def _round_duration_ms(duration_seconds: float) -> float:
+    return round(max(0.0, float(duration_seconds)) * 1000.0, 2)
+
+
+def _new_task_list_load_timer(source: str):
+    started = time.perf_counter()
+    last = started
+    stages: list[dict[str, Any]] = []
+
+    def mark(stage: str, **metadata: Any) -> None:
+        nonlocal last
+        now = time.perf_counter()
+        stage_payload: dict[str, Any] = {
+            "stage": stage,
+            "duration_ms": _round_duration_ms(now - last),
+            "since_start_ms": _round_duration_ms(now - started),
+        }
+        stage_payload.update(
+            {key: value for key, value in metadata.items() if value is not None}
+        )
+        stages.append(stage_payload)
+        last = now
+
+    def finish(**metadata: Any) -> dict[str, Any]:
+        now = time.perf_counter()
+        payload: dict[str, Any] = {
+            "schema_version": TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION,
+            "source": source,
+            "total_ms": _round_duration_ms(now - started),
+            "stages": stages,
+        }
+        payload.update(
+            {key: value for key, value in metadata.items() if value is not None}
+        )
+        return payload
+
+    return mark, finish
+
 
 # Task type concept IDs
 TASK_SPECIFICATION_TYPE_ID = "#V#task_specification"
@@ -2355,6 +2398,10 @@ def list_tasks_with_visibility(
     before it has selected the page the UI actually needs.
     """
 
+    mark_load, finish_load = _new_task_list_load_timer(
+        "task_management.list_tasks_with_visibility"
+    )
+
     try:
         limit = max(1, min(int(limit), 500))
     except (TypeError, ValueError):
@@ -2366,6 +2413,14 @@ def list_tasks_with_visibility(
 
     visibility = _normalise_bulk_task_visibility(bulk_visibility)
     collection_ids = _normalise_bulk_task_collection_ids(bulk_collection_ids)
+    mark_load(
+        "normalise_inputs",
+        limit=limit,
+        offset=offset,
+        bulk_visibility=visibility,
+        bulk_collection_count=len(collection_ids),
+    )
+
     base_query = _build_task_listing_query(
         organisation_concept_id=organisation_concept_id,
         user_concept_id=user_concept_id,
@@ -2378,10 +2433,26 @@ def list_tasks_with_visibility(
         bulk_visibility=visibility,
         collection_ids=collection_ids,
     )
+    mark_load(
+        "build_queries",
+        has_user_scope=bool(user_concept_id),
+        include_created=bool(include_created),
+        has_assignee_scope=bool(assignee_concept_id),
+        has_created_by_scope=bool(created_by_concept_id),
+    )
+
     visibility_summary = _build_bulk_visibility_summary_for_query(
         base_query,
         collection_ids=collection_ids,
     )
+    mark_load(
+        "bulk_visibility_summary",
+        hidden_bulk_task_total=visibility_summary["hidden_bulk_task_total"],
+        hidden_bulk_collection_count=len(
+            visibility_summary["hidden_bulk_task_collections"]
+        ),
+    )
+
     sort_spec = [("updated_at", -1), ("created_at", -1), ("concept_id", 1)]
     requires_post_filter = any(
         (
@@ -2391,13 +2462,27 @@ def list_tasks_with_visibility(
             _has_nonempty_filter_values(task_source_ids),
         )
     )
+    mark_load(
+        "prepare_sort_and_filters",
+        requires_post_filter=requires_post_filter,
+        has_status_filter=bool(status_filter),
+        has_priority_filter=bool(priority_filter),
+        has_task_type_filter=_has_nonempty_filter_values(task_type_ids),
+        has_task_source_filter=_has_nonempty_filter_values(task_source_ids),
+    )
 
     if requires_post_filter:
-        docs = ConceptsRepository.find(
-            visibility_query,
-            sort=sort_spec,
+        docs = list(
+            ConceptsRepository.find(
+                visibility_query,
+                sort=sort_spec,
+            )
         )
+        mark_load("repository_find_all", raw_count=len(docs))
+
         tasks = [_build_task_response(doc) for doc in docs]
+        mark_load("build_task_responses", response_count=len(tasks))
+
         tasks = _filter_task_response_list(
             tasks,
             status_filter=status_filter,
@@ -2405,24 +2490,38 @@ def list_tasks_with_visibility(
             task_type_ids=task_type_ids,
             task_source_ids=task_source_ids,
         )
+        mark_load("post_filter", filtered_count=len(tasks))
+
         total = len(tasks)
         paged_tasks = tasks[offset : offset + limit]
+        mark_load("paginate", returned_count=len(paged_tasks), total=total)
     else:
         try:
             total = int(ConceptsRepository.count_documents(visibility_query) or 0)
+            count_failed = False
         except Exception:
             total = 0
-        docs = ConceptsRepository.find(
-            visibility_query,
-            sort=sort_spec,
-            skip=offset,
-            limit=limit,
+            count_failed = True
+        mark_load("repository_count", total=total, failed=count_failed)
+
+        docs = list(
+            ConceptsRepository.find(
+                visibility_query,
+                sort=sort_spec,
+                skip=offset,
+                limit=limit,
+            )
         )
+        mark_load("repository_find_page", raw_count=len(docs))
+
         paged_tasks = [_build_task_response(doc) for doc in docs]
+        mark_load("build_task_responses", response_count=len(paged_tasks))
+
         if not total:
             total = len(paged_tasks)
+            mark_load("infer_total_from_page", total=total)
 
-    return {
+    payload = {
         "tasks": paged_tasks,
         "total": total,
         "count": len(paged_tasks),
@@ -2435,6 +2534,27 @@ def list_tasks_with_visibility(
             "hidden_bulk_task_collections"
         ],
     }
+    mark_load("response_payload", returned_count=len(paged_tasks), total=total)
+    payload["load_telemetry"] = finish_load(
+        request={
+            "limit": limit,
+            "offset": offset,
+            "bulk_visibility": visibility,
+            "bulk_collection_count": len(collection_ids),
+            "has_user_scope": bool(user_concept_id),
+            "include_created": bool(include_created),
+            "has_assignee_scope": bool(assignee_concept_id),
+            "has_created_by_scope": bool(created_by_concept_id),
+            "has_status_filter": bool(status_filter),
+            "has_priority_filter": bool(priority_filter),
+            "has_task_type_filter": _has_nonempty_filter_values(task_type_ids),
+            "has_task_source_filter": _has_nonempty_filter_values(task_source_ids),
+            "requires_post_filter": requires_post_filter,
+        },
+        returned_count=len(paged_tasks),
+        total=total,
+    )
+    return payload
 
 
 def search_tasks(
