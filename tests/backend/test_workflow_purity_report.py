@@ -520,6 +520,80 @@ def test_build_workflow_purity_report_allows_conversation_turn_seed_bootstrap_se
     assert repo_seed_drift["offending_paths"] == []
 
 
+def test_build_workflow_purity_report_allows_retrieval_monitoring_seed_bootstrap_services(
+    tmp_path: Path,
+) -> None:
+    for relative_path, function_name in {
+        (
+            "src/backend/services/"
+            "concept_search_instance_retrieval_workflow_vontology_service.py"
+        ): "bootstrap_canonical_concept_search_instance_retrieval_workflow",
+        (
+            "src/backend/services/"
+            "entity_information_retrieval_workflow_vontology_service.py"
+        ): "bootstrap_canonical_entity_information_retrieval_workflow",
+        (
+            "src/backend/services/"
+            "multilingual_concept_enrichment_vontology_service.py"
+        ): "bootstrap_canonical_multilingual_concept_enrichment_workflow",
+        (
+            "src/backend/services/"
+            "turn_pipeline_monitoring_workflow_vontology_service.py"
+        ): "bootstrap_canonical_turn_pipeline_monitoring_workflows",
+    }.items():
+        _write(
+            relative_path,
+            (
+                "from src.backend.services.workflow_repo_seed_bootstrap import "
+                "bootstrap_repo_seed_workflow_bundle\n\n"
+                f"def {function_name}():\n"
+                "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+            ),
+            root=tmp_path,
+        )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    repo_seed_drift = report["details"]["repo_seed_authority_drift"]
+    assert report["counters"]["repo_seed_authority_drift_path_count"] == 0
+    assert repo_seed_drift["offending_paths"] == []
+    assert all(item["allowed"] for item in repo_seed_drift["matches"])
+
+
 def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
     tmp_path: Path,
 ) -> None:
@@ -780,6 +854,74 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
     ]
 
 
+def test_build_workflow_purity_report_ignores_prompt_metadata_specs(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/episode_evaluation_workflow_vontology_service.py",
+        (
+            "_PROMPT_CONCEPT_SPECS = (\n"
+            "    {\n"
+            "        'concept_id': '#V#episode_evaluation_prompt',\n"
+            "        'asset_path': 'episode_evaluation_prompt_seed.md',\n"
+            "        'name': 'Episode critic evaluation prompt',\n"
+            "        'description': 'Canonical prompt metadata for a Vontology "
+            "prompt concept; the body remains in text relations.',\n"
+            "    },\n"
+            ")\n\n"
+            "WORKFLOW_GAP_ANALYSIS_PROMPT = 'Return JSON that analyses the gap "
+            "and proposes reusable workflow behaviour for the user request.'\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["python_authored_workflow_prompt_source_count"] == 1
+    assert report["details"]["python_authored_workflow_prompt_sources"] == [
+        {
+            "path": "src/backend/services/episode_evaluation_workflow_vontology_service.py",
+            "kind": "assignment",
+            "symbol": "WORKFLOW_GAP_ANALYSIS_PROMPT",
+            "line": 10,
+        },
+    ]
+
+
 def test_build_workflow_purity_report_flags_post_cleanup_support_surface_drift(
     tmp_path: Path,
 ) -> None:
@@ -950,9 +1092,7 @@ def test_build_workflow_purity_report_ignores_explanatory_docstrings_in_guarded_
     assert report["counters"]["support_surface_policy_contract_violation_count"] == 2
     patterns = [
         item["pattern"]
-        for item in report["details"]["support_surface_policy_contracts"][
-            "violations"
-        ]
+        for item in report["details"]["support_surface_policy_contracts"]["violations"]
     ]
     assert patterns == [
         "unexpected_write_tool_regex_backstop",

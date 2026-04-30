@@ -87,7 +87,7 @@ _SELF_IMPROVEMENT_PROMOTION_PROMPT_SEED_ASSET_PATH = (
     / "episode_self_improvement_promotion_prompt_seed.md"
 )
 
-_PROMPT_CONFIGS = (
+_PROMPT_CONCEPT_SPECS = (
     {
         "concept_id": EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
         "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
@@ -168,7 +168,7 @@ def _ensure_episode_evaluation_prompt_support(
                 description=str(config["description"]),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             )
-            for config in _PROMPT_CONFIGS
+            for config in _PROMPT_CONCEPT_SPECS
         ),
         workflow_links=tuple(
             WorkflowPromptLinkSpec(
@@ -178,14 +178,16 @@ def _ensure_episode_evaluation_prompt_support(
                 context={"jira": _SOURCE_TAG},
                 reason="episode_evaluation_prompt_link_bootstrap",
             )
-            for config in _PROMPT_CONFIGS
+            for config in _PROMPT_CONCEPT_SPECS
         ),
         provenance_source=_MANAGED_BY,
     )
 
     seeded_prompt_ids: list[str] = []
-    required_prompt_ids = [str(config["concept_id"]) for config in _PROMPT_CONFIGS]
-    for config in _PROMPT_CONFIGS:
+    required_prompt_ids = [
+        str(config["concept_id"]) for config in _PROMPT_CONCEPT_SPECS
+    ]
+    for config in _PROMPT_CONCEPT_SPECS:
         concept_id = str(config["concept_id"])
         if force_prompt_seed or not prompt_concept_has_content(concept_id):
             upsert_singleton_text_relation(
@@ -265,7 +267,9 @@ def _ensure_episode_evaluation_event_bindings() -> dict[str, Any]:
     }
 
 
-def _merge_publication_reports(*publication_rows: Mapping[str, Any] | None) -> dict[str, Any]:
+def _merge_publication_reports(
+    *publication_rows: Mapping[str, Any] | None
+) -> dict[str, Any]:
     reports = [dict(row) for row in publication_rows if isinstance(row, Mapping)]
     counts: dict[str, int] = {}
     for report in reports:
@@ -296,8 +300,10 @@ def bootstrap_canonical_episode_evaluation_workflow(
         publish_context_manager_factory=suspend_event_workflow_integration,
         force_republish=force_republish,
     )
-    self_improvement_profile_support = ensure_canonical_episode_self_improvement_profiles(
-        context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+    self_improvement_profile_support = (
+        ensure_canonical_episode_self_improvement_profiles(
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+        )
     )
     event_bindings = _ensure_episode_evaluation_event_bindings()
     publication = _merge_publication_reports(

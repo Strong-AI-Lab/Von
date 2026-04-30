@@ -130,9 +130,7 @@ ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS = {
     ),
 }
 WORKFLOW_CAPABILITY_RETIRED_SYMBOL_PATTERNS = {
-    "retired_workflow_capability_bm25_symbol": re.compile(
-        r"(?i)(?:^|_)bm25(?:$|_)"
-    ),
+    "retired_workflow_capability_bm25_symbol": re.compile(r"(?i)(?:^|_)bm25(?:$|_)"),
     "retired_workflow_capability_stopword_symbol": re.compile(
         r"(?i)(?:^|_)stop_?words?(?:$|_)"
     ),
@@ -312,13 +310,17 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
+        "src/backend/services/concept_search_instance_retrieval_workflow_vontology_service.py",
         "src/backend/services/conversation_turn_workflow_vontology_service.py",
+        "src/backend/services/entity_information_retrieval_workflow_vontology_service.py",
         "src/backend/services/entity_representation_workflow_vontology_service.py",
         "src/backend/services/episode_evaluation_workflow_vontology_service.py",
+        "src/backend/services/multilingual_concept_enrichment_vontology_service.py",
         "src/backend/services/paper_recommendation_workflow_vontology_service.py",
         "src/backend/services/paper_representation_workflow_vontology_service.py",
         "src/backend/services/talk_representation_workflow_vontology_service.py",
         "src/backend/services/testing_workflow_vontology_service.py",
+        "src/backend/services/turn_pipeline_monitoring_workflow_vontology_service.py",
         "src/backend/services/workflow_repo_seed_bootstrap.py",
         "src/backend/workflows/workflow_concept_authority_service.py",
         "src/backend/workflows/workflow_template_profile_service.py",
@@ -618,7 +620,9 @@ def _scan_contract_symbol_drift(
     }
     banned_symbol_patterns = [
         (str(reason), pattern)
-        for reason, pattern in dict(contract.get("banned_symbol_patterns") or {}).items()
+        for reason, pattern in dict(
+            contract.get("banned_symbol_patterns") or {}
+        ).items()
         if str(reason).strip() and isinstance(pattern, re.Pattern)
     ]
     banned_import_modules = {
@@ -632,7 +636,9 @@ def _scan_contract_symbol_drift(
         if str(name).strip() and str(reason).strip()
     }
 
-    def _append_violation(*, line: int, pattern: str, symbol: str | None = None) -> None:
+    def _append_violation(
+        *, line: int, pattern: str, symbol: str | None = None
+    ) -> None:
         key = (pattern, str(symbol or ""), int(line))
         if key in seen:
             return
@@ -746,7 +752,9 @@ def _scan_allowed_regex_backstop_scope(
                 is_module_level_compile = True
                 for target in parent.targets:
                     module_level_symbols.extend(_extract_target_names(target))
-            elif isinstance(parent, ast.AnnAssign) and isinstance(grandparent, ast.Module):
+            elif isinstance(parent, ast.AnnAssign) and isinstance(
+                grandparent, ast.Module
+            ):
                 is_module_level_compile = True
                 module_level_symbols.extend(_extract_target_names(parent.target))
 
