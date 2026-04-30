@@ -53,6 +53,18 @@ class _FakeGateway:
         )
 
 
+class _SchemaAwareGateway(_FakeGateway):
+    def __init__(self, *, category: str, input_schema, payload_factory) -> None:
+        super().__init__(definitions={"strict_tool": category}, payload_factory=payload_factory)
+        self._input_schema = input_schema
+
+    def get_method_definition(self, method_name: str):
+        category = self._definitions.get(method_name)
+        if category is None:
+            return None
+        return SimpleNamespace(category=category, input_schema=self._input_schema)
+
+
 def _always_true(_context):
     return True
 
@@ -122,6 +134,37 @@ def test_workflow_mcp_action_invokes_read_tool_and_maps_structured_output():
     assert gateway.invocations == [
         ("demo_echo", {"message": "hello", "namespace": "#V#tester"})
     ]
+
+
+def test_workflow_mcp_action_omits_namespace_for_strict_schema_without_namespace():
+    strict_schema = SimpleNamespace(required={}, optional={}, allow_unknown=False)
+    gateway = _SchemaAwareGateway(
+        category="read",
+        input_schema=strict_schema,
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "payload": payload,
+        },
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "strict_tool",
+            "tool_arguments": {"profile": "zhan-gmail"},
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == [("strict_tool", {"profile": "zhan-gmail"})]
 
 
 def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():

@@ -17,6 +17,7 @@ from src.backend.workflows.action_registry import (
 )
 from src.backend.workflows.durable.tool_result_hint_actions import (
     EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID,
+    RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID,
     register_tool_result_hint_actions,
 )
 
@@ -64,6 +65,7 @@ def _make_request(
 
 def test_action_registers(registry: ActionRegistry) -> None:
     assert EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID in set(registry.all_action_ids())
+    assert RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID in set(registry.all_action_ids())
 
 
 def test_register_is_idempotent() -> None:
@@ -72,6 +74,7 @@ def test_register_is_idempotent() -> None:
     register_tool_result_hint_actions(reg)  # must not raise
     ids = list(reg.all_action_ids())
     assert ids.count(EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID) == 1
+    assert ids.count(RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID) == 1
 
 
 def test_missing_source_tool_concept_fails(registry: ActionRegistry) -> None:
@@ -193,3 +196,97 @@ def test_no_llm_client_fails_without_calling_service(registry: ActionRegistry) -
     result = spec.handler(req)
     assert result.status == "failed"
     assert "LLM client" in (result.error or "")
+
+
+def test_resolve_followup_hint_selects_required_action_kind(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.tool_result_hint_actions.resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": (
+            '{"schema_version":"tool_output_followup_hint.v1",'
+            '"entries":[{"action_kind":"terminal_completion",'
+            '"action":{"type":"workflow_mcp.invoke_tool",'
+            '"tool_name":"some_tool",'
+            '"tool_arguments":{"add_labels":["done"]}},'
+            '"upstream_filter":{"query_fragment":"-label:done"}}]}'
+        ),
+    )
+
+    spec = registry.get(RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID)
+    assert spec is not None
+    req = _make_request(
+        inputs={
+            "source_tool_concept": "#V#some_tool",
+            "required_action_kind": "terminal_completion",
+        },
+    )
+
+    result = spec.handler(req)
+
+    assert result.status == "success", result.error
+    assert result.outputs["hint_resolved"] is True
+    assert result.outputs["selected_action"]["tool_name"] == "some_tool"
+    assert result.outputs["selected_tool_arguments"]["add_labels"] == ["done"]
+    assert (
+        result.outputs["selected_upstream_filter"]["query_fragment"]
+        == "-label:done"
+    )
+
+
+def test_resolve_followup_hint_accepts_entry_level_tool_arguments(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.tool_result_hint_actions.resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": (
+            '{"schema_version":"tool_output_followup_hint.v1",'
+            '"entries":[{"action_kind":"terminal_completion",'
+            '"action":{"type":"workflow_mcp.invoke_tool",'
+            '"tool_name":"some_tool"},'
+            '"tool_arguments":{"add_labels":["done"]}}]}'
+        ),
+    )
+
+    spec = registry.get(RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID)
+    assert spec is not None
+    req = _make_request(
+        inputs={
+            "source_tool_concept": "#V#some_tool",
+            "required_action_kind": "terminal_completion",
+        },
+    )
+
+    result = spec.handler(req)
+
+    assert result.status == "success", result.error
+    assert result.outputs["selected_action"]["tool_name"] == "some_tool"
+    assert result.outputs["selected_tool_arguments"]["add_labels"] == ["done"]
+
+
+def test_resolve_followup_hint_fails_when_required_kind_missing(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.tool_result_hint_actions.resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": (
+            '{"schema_version":"tool_output_followup_hint.v1","entries":[]}'
+        ),
+    )
+
+    spec = registry.get(RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID)
+    assert spec is not None
+    req = _make_request(
+        inputs={
+            "source_tool_concept": "#V#some_tool",
+            "required_action_kind": "terminal_completion",
+        },
+    )
+
+    result = spec.handler(req)
+
+    assert result.status == "failed"
+    assert "terminal_completion" in (result.error or "")

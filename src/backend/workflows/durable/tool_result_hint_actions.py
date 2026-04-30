@@ -21,13 +21,18 @@ behaviour lives in Vontology hint bodies.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Mapping
 
 from ...services.output_hint_contracts import (
+    OUTPUT_FOLLOWUP_HINT_PREDICATE_ID,
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
 )
-from ...services.tool_result_hints import extract_signals_from_tool_result
+from ...services.tool_result_hints import (
+    extract_signals_from_tool_result,
+    resolve_hint_body,
+)
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -41,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID = "extract_signals_from_tool_result"
 """Canonical action id used by VWL workflow definitions."""
+
+RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID = "resolve_tool_output_followup_hint"
+"""Resolve a Vontology-authored follow-up hint for a tool concept."""
 
 
 def _safe_str(value: Any) -> str:
@@ -150,6 +158,149 @@ def _handle_extract_signals_from_tool_result(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _parse_followup_hint_body(hint_body: str) -> tuple[Mapping[str, Any], str | None]:
+    if not hint_body.strip():
+        return {}, "followup_hint_empty"
+    try:
+        parsed = json.loads(hint_body)
+    except json.JSONDecodeError:
+        return {}, "followup_hint_json_parse_failed"
+    if not isinstance(parsed, Mapping):
+        return {}, "followup_hint_not_object"
+    return parsed, None
+
+
+def _normalise_entries(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _select_followup_entry(
+    entries: list[Mapping[str, Any]],
+    *,
+    required_action_kind: str | None = None,
+) -> Mapping[str, Any] | None:
+    action_kind = _safe_str(required_action_kind)
+    if action_kind:
+        for entry in entries:
+            if _safe_str(entry.get("action_kind")) == action_kind:
+                return entry
+        return None
+    return entries[0] if entries else None
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _handle_resolve_tool_output_followup_hint(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = dict(request.inputs or {})
+    source_tool_concept = (
+        _safe_str(inputs.get("source_tool_concept"))
+        or _safe_str(inputs.get("source_tool_concept_id"))
+        or _safe_str(inputs.get("tool_concept_id"))
+    )
+    if not source_tool_concept:
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                "resolve_tool_output_followup_hint requires 'source_tool_concept' "
+                "(the Vontology concept id of the tool whose authored follow-up "
+                "hint should be resolved)."
+            ),
+        )
+
+    hint_predicate_id = (
+        _safe_str(inputs.get("hint_predicate_id")) or OUTPUT_FOLLOWUP_HINT_PREDICATE_ID
+    )
+    lang = _safe_str(inputs.get("lang")) or "en-NZ"
+    required_action_kind = _safe_str(inputs.get("required_action_kind")) or None
+
+    hint_body = resolve_hint_body(source_tool_concept, hint_predicate_id, lang=lang)
+    if not hint_body:
+        return WorkflowActionResult(
+            status="failed",
+            outputs={
+                "hint": {},
+                "hint_resolved": False,
+                "hint_body_present": False,
+                "warnings": ["hint_not_authored"],
+                "source_tool_concept": source_tool_concept,
+                "hint_predicate_id": hint_predicate_id,
+            },
+            error="hint_not_authored",
+        )
+
+    hint, parse_error = _parse_followup_hint_body(hint_body)
+    if parse_error:
+        return WorkflowActionResult(
+            status="failed",
+            outputs={
+                "hint": {},
+                "hint_resolved": True,
+                "hint_body_present": True,
+                "warnings": [parse_error],
+                "source_tool_concept": source_tool_concept,
+                "hint_predicate_id": hint_predicate_id,
+                "raw_hint_body": hint_body,
+            },
+            error=parse_error,
+        )
+
+    entries = _normalise_entries(hint.get("entries"))
+    selected_entry = _select_followup_entry(
+        entries,
+        required_action_kind=required_action_kind,
+    )
+    if selected_entry is None:
+        reason = (
+            f"followup_hint_required_action_kind_missing:{required_action_kind}"
+            if required_action_kind
+            else "followup_hint_entries_missing"
+        )
+        return WorkflowActionResult(
+            status="failed",
+            outputs={
+                "hint": dict(hint),
+                "hint_resolved": True,
+                "hint_body_present": True,
+                "warnings": [reason],
+                "entries": [dict(entry) for entry in entries],
+                "source_tool_concept": source_tool_concept,
+                "hint_predicate_id": hint_predicate_id,
+                "required_action_kind": required_action_kind,
+            },
+            error=reason,
+        )
+
+    selected_action = _mapping_or_empty(selected_entry.get("action"))
+    selected_tool_arguments = _mapping_or_empty(
+        selected_entry.get("tool_arguments")
+    ) or _mapping_or_empty(selected_action.get("tool_arguments"))
+    selected_upstream_filter = _mapping_or_empty(selected_entry.get("upstream_filter"))
+
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "hint": dict(hint),
+            "hint_resolved": True,
+            "hint_body_present": True,
+            "warnings": [],
+            "entries": [dict(entry) for entry in entries],
+            "selected_entry": dict(selected_entry),
+            "selected_action": dict(selected_action),
+            "selected_tool_arguments": dict(selected_tool_arguments),
+            "selected_upstream_filter": dict(selected_upstream_filter),
+            "source_tool_concept": source_tool_concept,
+            "hint_predicate_id": hint_predicate_id,
+            "required_action_kind": required_action_kind,
+        },
+    )
+
+
 def register_tool_result_hint_actions(registry: ActionRegistry) -> None:
     """Register the extract_signals_from_tool_result action.
 
@@ -168,9 +319,22 @@ def register_tool_result_hint_actions(registry: ActionRegistry) -> None:
             ),
         )
     )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID,
+            handler=_handle_resolve_tool_output_followup_hint,
+            description=(
+                "Generic durable action: read a Vontology-authored follow-up "
+                "hint for the named source tool concept, parse its JSON body, "
+                "and expose the selected follow-up entry for declarative VWL "
+                "steps to consume."
+            ),
+        )
+    )
 
 
 __all__ = [
     "EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID",
+    "RESOLVE_TOOL_OUTPUT_FOLLOWUP_HINT_ACTION_ID",
     "register_tool_result_hint_actions",
 ]
