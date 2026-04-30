@@ -214,6 +214,35 @@ Validation semantics:
 - write or destructive tools MUST declare an explicit represented write policy such as step `mutation_authority` or `workflow_execution_side_effect_policy`;
 - domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
 
+### 3.4b Tool Follow-Up Hint Resolution
+
+VWL workflows may resolve Vontology-authored tool follow-up hints through the generic durable action:
+
+- `resolve_tool_output_followup_hint`
+
+Required input:
+
+- `source_tool_concept`: the tool concept whose `#V#output_followup_hint` text relation should be resolved.
+
+Optional inputs:
+
+- `hint_predicate_id`: override predicate; defaults to `#V#output_followup_hint`.
+- `lang`: text-relation language; defaults to `en-NZ`.
+- `required_action_kind`: when supplied, selects the first hint entry with the matching `action_kind` and fails closed if absent.
+
+Runtime semantics:
+
+- the action reads and parses the JSON hint body from Vontology;
+- it returns the complete parsed hint under `hint`;
+- it exposes the selected entry under `selected_entry`, with convenience mappings `selected_action`, `selected_tool_arguments`, and `selected_upstream_filter`;
+- `selected_tool_arguments` may be authored either as entry-level `tool_arguments` or, for compatibility with older hints, under `action.tool_arguments`;
+- workflows can then map those fields into context and pass them into later declarative steps such as `workflow_control.context_template` or `workflow_mcp.invoke_tool`.
+
+Authority rule:
+
+- the follow-up decision policy and user-facing action semantics belong in the Vontology hint body;
+- the action is only a resolver/parser and MUST NOT contain integration-specific policy such as Gmail labels, arXiv IDs, or paper-ingestion behaviour.
+
 ## 4. VWL Program Model
 
 A VWL program is a workflow concept graph:

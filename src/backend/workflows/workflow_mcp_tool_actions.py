@@ -139,6 +139,20 @@ def _normalise_tool_payload(inputs: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _method_accepts_namespace(method_definition: Any) -> bool:
+    input_schema = getattr(method_definition, "input_schema", None)
+    if input_schema is None:
+        return True
+    if bool(getattr(input_schema, "allow_unknown", False)):
+        return True
+    required = getattr(input_schema, "required", None)
+    optional = getattr(input_schema, "optional", None)
+    return (
+        (isinstance(required, Mapping) and "namespace" in required)
+        or (isinstance(optional, Mapping) and "namespace" in optional)
+    )
+
+
 def _has_explicit_write_policy(metadata: Mapping[str, Any]) -> bool:
     if metadata.get("mutation_authority") is not None:
         return normalise_workflow_step_mutation_authority_spec(
@@ -338,9 +352,6 @@ def _handle_workflow_mcp_invoke_tool(
         )
 
     payload = _normalise_tool_payload(inputs)
-    user_namespace = getattr(request.environment, "user_namespace", None)
-    if isinstance(user_namespace, str) and user_namespace.strip():
-        payload.setdefault("namespace", user_namespace.strip())
 
     try:
         gateway = _resolve_gateway(request)
@@ -362,6 +373,14 @@ def _handle_workflow_mcp_invoke_tool(
                     "mcp_requested_tool": requested_tool_name,
                 },
             )
+
+        user_namespace = getattr(request.environment, "user_namespace", None)
+        if (
+            isinstance(user_namespace, str)
+            and user_namespace.strip()
+            and _method_accepts_namespace(method_definition)
+        ):
+            payload.setdefault("namespace", user_namespace.strip())
 
         if _runtime_write_policy_missing(
             request=request,
