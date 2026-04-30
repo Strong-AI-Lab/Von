@@ -29,6 +29,9 @@ test-results.txt
 logs/
 *.log
 
+# Local Playwright MCP scratch artefacts
+.playwright-mcp/
+
 # Deprecated code
 replaced_or_deprecated_code/
 
