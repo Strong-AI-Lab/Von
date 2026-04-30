@@ -1255,7 +1255,8 @@ class _EntityInformationRetrievalWorkflowLLM:
                 '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
                 '"answering_guidance":"Answer from grounded represented evidence only; if no grounded papers are found, say that clearly.",'
                 '"reasoning":"The request combines authenticated self-identity with grounded entity-relative paper attribution, so the workflow should retrieve represented relations before answering.",'
-                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"],'
+                '"target_type_ids":["#V#scholarly_article","#V#scholarly_work","#V#paper_on_arxiv"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -1330,7 +1331,8 @@ class _EntityInformationFalseNegativeAfterIncidenceLLM:
                 '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
                 '"answering_guidance":"Answer from grounded represented evidence only; if no grounded papers are found, say that clearly.",'
                 '"reasoning":"The request combines authenticated self-identity with grounded entity-relative paper attribution, so the workflow should retrieve represented relations before answering.",'
-                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"],'
+                '"target_type_ids":["#V#scholarly_article","#V#scholarly_work","#V#paper_on_arxiv"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -1499,7 +1501,8 @@ class _EntityInformationUnfilteredRelationLLM:
                 '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
                 '"answering_guidance":"Answer from grounded represented evidence only; if no grounded papers are found, say that clearly.",'
                 '"reasoning":"The request combines authenticated self-identity with grounded entity-relative paper attribution, so the workflow should retrieve represented relations before answering.",'
-                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"],'
+                '"target_type_ids":["#V#scholarly_article","#V#scholarly_work","#V#paper_on_arxiv"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (

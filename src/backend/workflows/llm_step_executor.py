@@ -739,6 +739,10 @@ def _normalise_validated_json_payload_for_prompt(
         normalised["reasoning"] = contract.reasoning
     if contract.required_tools:
         normalised["required_tools"] = list(contract.required_tools)
+    if contract.target_concept_ids:
+        normalised["target_concept_ids"] = list(contract.target_concept_ids)
+    if contract.target_type_ids:
+        normalised["target_type_ids"] = list(contract.target_type_ids)
     return normalised
 
 

@@ -2,8 +2,8 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "6",
-  "source_tag": "JVNAUTOSCI-2192",
+  "seed_version": "7",
+  "source_tag": "JVNAUTOSCI-2075",
   "supported_action_ids": [
     "llm.action"
   ],
@@ -99,7 +99,32 @@
                   "limit": 20,
                   "__derive_predicate_filter_from_recent_incidence": {
                     "enabled": true,
-                    "max_predicates": 2
+                    "max_predicates": 2,
+                    "selection_profile": {
+                      "schema_version": "predicate_incidence_follow_up_selection_profile.v1",
+                      "profile_id": "#V#entity_information_retrieval_paper_extent_follow_up_profile",
+                      "description": "Select predicates that retrieve scholarly-work extents for an entity-information request whose expected-outcome contract names a scholarly target type.",
+                      "activation": {
+                        "target_type_ids": [
+                          "#V#scholarly_article",
+                          "#V#scholarly_work",
+                          "#V#paper_on_arxiv"
+                        ]
+                      },
+                      "preferred_predicate_ids": [
+                        "#V#author_of",
+                        "#V#is_author_of",
+                        "#V#owner_of",
+                        "#V#is_owner_of"
+                      ],
+                      "preferred_argument_type_ids": [
+                        "#V#scholarly_article",
+                        "#V#scholarly_work",
+                        "#V#paper_on_arxiv"
+                      ],
+                      "match_mode": "predicate_and_type",
+                      "allow_single_predicate_fallback": false
+                    }
                   }
                 },
                 "list_uncertain_relationship_assertions": {

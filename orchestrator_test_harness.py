@@ -30,6 +30,102 @@ from workflow_test_support import (
 )
 
 
+class _WorkflowPreludeGatewayProxy:
+    """Add canonical prelude read support without touching scenario tool stubs."""
+
+    enabled = True
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    def describe_methods(self) -> dict[str, Any]:
+        methods: dict[str, Any] = {}
+        describe = getattr(self._delegate, "describe_methods", None)
+        if callable(describe):
+            raw_methods = describe()
+            if isinstance(raw_methods, dict):
+                methods.update(raw_methods)
+        methods.setdefault(
+            "get_text_relations",
+            {
+                "description": (
+                    "Read bounded Vontology text relations for workflow guidance."
+                ),
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                        "predicate": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "sort_recent_first": {"type": "boolean"},
+                    },
+                },
+            },
+        )
+        methods.setdefault(
+            "get_text_relations_summary",
+            {
+                "description": (
+                    "Summarise bounded Vontology text relations for workflow guidance."
+                ),
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                        "predicates": {"type": "array"},
+                        "languages": {"type": "array"},
+                        "max_relation_ids_per_group": {"type": "integer"},
+                    },
+                },
+            },
+        )
+        return methods
+
+    def get_method_definition(self, tool_name: str) -> Any:
+        getter = getattr(self._delegate, "get_method_definition", None)
+        if callable(getter):
+            try:
+                definition = getter(tool_name)
+            except Exception:
+                definition = None
+            if definition is not None:
+                return definition
+        return self.describe_methods().get(tool_name)
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]) -> Any:
+        if tool_name == "get_text_relations":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "concept_id": payload.get("concept_id"),
+                    "predicate": payload.get("predicate"),
+                    "relations_found": 0,
+                    "relations": [],
+                },
+                duration_ms=0,
+            )
+        if tool_name == "get_text_relations_summary":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "concept_id": payload.get("concept_id"),
+                    "groups": [],
+                    "groups_found": 0,
+                    "total_relations_scanned": 0,
+                },
+                duration_ms=0,
+            )
+        invoker = getattr(self._delegate, "invoke", None)
+        if not callable(invoker):
+            raise AttributeError("delegate gateway has no invoke method")
+        return invoker(tool_name, payload)
+
+
 def _stub_stage_model_snapshot() -> dict[str, Any]:
     stages = [
         ("expected_outcome_inference", "Infer expected outcome", None, None),
@@ -227,6 +323,8 @@ def build_db_independent_orchestrator(
             spec=spec,
         )
 
+    gateway_for_orchestrator = _WorkflowPreludeGatewayProxy(gateway)
+
     def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
         assert defer_parity_work is True
         registry = WorkflowRegistry(definition_loader=_load_seed_workflow_definition)
@@ -272,6 +370,23 @@ def build_db_independent_orchestrator(
     )
 
     def _build_test_action_registry() -> ActionRegistry:
+        from src.backend.workflows.mcp_tool_bridge import (
+            workflow_action_result_from_mcp_payload,
+        )
+
+        def _gateway_fallback_action(request: Any):
+            payload = dict(getattr(request, "inputs", {}) or {})
+            environment = getattr(request, "environment", None)
+            user_namespace = getattr(environment, "user_namespace", None)
+            if isinstance(user_namespace, str) and user_namespace.strip():
+                payload.setdefault("namespace", user_namespace.strip())
+            result = gateway_for_orchestrator.invoke(request.action_id, payload)
+            return workflow_action_result_from_mcp_payload(
+                tool_name=request.action_id,
+                payload=result.payload,
+                duration_ms=result.duration_ms,
+            )
+
         registry = ActionRegistry()
         register_control_flow_actions(
             registry,
@@ -282,6 +397,7 @@ def build_db_independent_orchestrator(
             definition_loader=_load_seed_workflow_definition,
         )
         register_turn_execution_actions(registry)
+        registry.set_fallback_handler(_gateway_fallback_action)
         return registry
 
     monkeypatch.setattr(
@@ -306,7 +422,7 @@ def build_db_independent_orchestrator(
     )
 
     orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, gateway),
+        gateway=cast(Any, gateway_for_orchestrator),
         max_tool_invocations=max_tool_invocations,
         tool_batch_cap=tool_batch_cap,
     )

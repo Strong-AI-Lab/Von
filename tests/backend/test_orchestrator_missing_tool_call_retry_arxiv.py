@@ -321,9 +321,7 @@ def test_missing_tool_call_retry_uses_workflow_recovery_contract_binding():
             ),
             "_retry_recovery_contract_source": "definition_metadata",
             "_retry_recovery_effect_id": "grounded_entity_information_evidence",
-            "_retry_recovery_strategy_id": (
-                "recover_text_relations_for_focal_entity"
-            ),
+            "_retry_recovery_strategy_id": ("recover_text_relations_for_focal_entity"),
         }
     ]
     assert orchestrator._summarise_retry_tool_call_binding_sources(
@@ -333,9 +331,7 @@ def test_missing_tool_call_retry_uses_workflow_recovery_contract_binding():
             "tool": "get_text_relations_summary",
             "binding_source": "workflow_recovery_contract",
             "target_concept_source": "required_fetch_or_focal_concept",
-            "recovery_contract_id": (
-                "grounded_entity_information_retrieval_evidence"
-            ),
+            "recovery_contract_id": ("grounded_entity_information_retrieval_evidence"),
             "recovery_contract_source": "definition_metadata",
             "recovery_effect_id": "grounded_entity_information_evidence",
             "recovery_strategy_id": "recover_text_relations_for_focal_entity",
@@ -2164,9 +2160,7 @@ def test_tool_calling_backfill_uses_workflow_contract_for_required_text_summary(
             "tool": "get_text_relations_summary",
             "binding_source": "workflow_recovery_contract",
             "target_concept_source": "required_fetch_or_focal_concept",
-            "recovery_contract_id": (
-                "grounded_entity_information_retrieval_evidence"
-            ),
+            "recovery_contract_id": ("grounded_entity_information_retrieval_evidence"),
             "recovery_contract_source": "definition_metadata",
             "recovery_effect_id": "grounded_entity_information_evidence",
             "recovery_strategy_id": "recover_text_relations_for_focal_entity",
@@ -2243,9 +2237,7 @@ def test_tool_calling_backfill_uses_workflow_recovery_contract_for_uncertainty_a
                             "recover_uncertain_relationship_assertions_for_focal_entity"
                         ),
                         "tool": "list_uncertain_relationship_assertions",
-                        "recovers_tools": [
-                            "list_uncertain_relationship_assertions"
-                        ],
+                        "recovers_tools": ["list_uncertain_relationship_assertions"],
                         "target_concept_source": "required_fetch_or_focal_concept",
                         "target_concept_argument_name": "source_id",
                         "target_concept_max_count": 2,
@@ -2354,9 +2346,7 @@ def test_tool_calling_backfill_uses_workflow_recovery_contract_for_uncertainty_a
             "tool": "list_uncertain_relationship_assertions",
             "binding_source": "workflow_recovery_contract",
             "target_concept_source": "required_fetch_or_focal_concept",
-            "recovery_contract_id": (
-                "grounded_entity_information_retrieval_evidence"
-            ),
+            "recovery_contract_id": ("grounded_entity_information_retrieval_evidence"),
             "recovery_contract_source": "definition_metadata",
             "recovery_effect_id": "grounded_entity_information_evidence",
             "recovery_strategy_id": (
@@ -2710,6 +2700,83 @@ def test_missing_tool_retry_uses_predicate_incidence_before_filtered_relation_hi
                 "limit": 20,
             },
         },
+    ]
+
+
+def test_missing_tool_retry_uses_represented_predicate_follow_up_profile_for_target_extent():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Tell me who I am and list my papers.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "target_type_ids": ["#V#scholarly_article"],
+        },
+        missing_required_tools=["find_relations_with_argument"],
+        user_concept_id="#V#michael_witbrock",
+        tool_argument_defaults={
+            "find_relations_with_argument": {
+                "__derive_predicate_filter_from_recent_incidence": {
+                    "enabled": True,
+                    "max_predicates": 2,
+                    "selection_profile": {
+                        "profile_id": "#V#paper_extent_follow_up_profile",
+                        "activation": {"target_type_ids": ["#V#scholarly_article"]},
+                        "preferred_predicate_ids": ["#V#author_of"],
+                        "preferred_argument_type_ids": ["#V#scholarly_article"],
+                        "match_mode": "predicate_and_type",
+                    },
+                }
+            }
+        },
+        tool_invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {
+                    "predicates": [
+                        {
+                            "predicate_concept_id": (
+                                "#V#has_paper_recommendation_assertion"
+                            ),
+                            "argument_type_counts": [
+                                {
+                                    "type_concept_id": (
+                                        "#V#paper_recommendation_assertion"
+                                    )
+                                }
+                            ],
+                        },
+                        {
+                            "predicate_concept_id": "#V#author_of",
+                            "argument_type_counts": [
+                                {"type_concept_id": "#V#scholarly_article"}
+                            ],
+                        },
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#michael_witbrock",
+                "predicate_filter": ["#V#author_of"],
+                "limit": 20,
+            },
+            "_retry_binding_source": "predicate_incidence_follow_up_profile",
+            "_retry_predicate_follow_up_profile_id": (
+                "#V#paper_extent_follow_up_profile"
+            ),
+            "_retry_predicate_follow_up_profile_source": (
+                "workflow_tool_argument_defaults"
+            ),
+        }
     ]
 
 

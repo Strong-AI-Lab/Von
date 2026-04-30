@@ -42,8 +42,9 @@ def _bootstrap_authoritative_workflows() -> None:
 
 
 def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
-    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = (
-        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt")
+    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = lambda **_kwargs: (
+        "You are Von.",
+        "#V#test_base_system_prompt",
     )
 
 
@@ -637,15 +638,20 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
     assert payload["predicates"][0]["sample_groundings"][0]["type_ids"] == [
         "#V#scholarly_article"
     ]
-    assert payload["predicates"][0]["argument_type_counts"][0][
-        "type_concept_id"
-    ] == "#V#scholarly_article"
-    assert payload["predicates"][0]["role_expansion"][
-        "reified_node_type_counts"
-    ][0]["type_concept_id"] == "#V#authorship_event"
-    assert payload["typed_predicate_incidence_diagnostics"][
-        "role_expansion_mode"
-    ] == "explicit"
+    assert (
+        payload["predicates"][0]["argument_type_counts"][0]["type_concept_id"]
+        == "#V#scholarly_article"
+    )
+    assert (
+        payload["predicates"][0]["role_expansion"]["reified_node_type_counts"][0][
+            "type_concept_id"
+        ]
+        == "#V#authorship_event"
+    )
+    assert (
+        payload["typed_predicate_incidence_diagnostics"]["role_expansion_mode"]
+        == "explicit"
+    )
     assert "predicate row" in payload["retrieval_diagnostics"]["note"]
 
 
@@ -763,6 +769,124 @@ def test_turn_scoped_tool_payload_support_applies_workflow_tool_argument_default
     assert payload_with_explicit_values["argument_index"] == "subject"
     assert payload_with_explicit_values["relation_kind"] == "binary"
     assert payload_with_explicit_values["limit"] == 3
+
+
+def test_turn_scoped_tool_payload_support_uses_represented_predicate_follow_up_profile():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_context_chars=80_000,
+    )
+
+    payload = {"concept_id": "#V#michael_witbrock"}
+    data: dict[str, Any] = {
+        "turn_expected_outcome_profile": {"target_type_ids": ["#V#scholarly_article"]},
+        "tool_argument_defaults": {
+            "find_relations_with_argument": {
+                "limit": 20,
+                "__derive_predicate_filter_from_recent_incidence": {
+                    "enabled": True,
+                    "max_predicates": 2,
+                    "selection_profile": {
+                        "profile_id": "#V#paper_extent_follow_up_profile",
+                        "activation": {"target_type_ids": ["#V#scholarly_article"]},
+                        "preferred_predicate_ids": ["#V#author_of"],
+                        "preferred_argument_type_ids": ["#V#scholarly_article"],
+                        "match_mode": "predicate_and_type",
+                    },
+                },
+            }
+        },
+        "invocations": [
+            {
+                "tool": "get_predicate_incidence",
+                "effective_payload": {
+                    "predicates": [
+                        {
+                            "predicate_concept_id": (
+                                "#V#has_paper_recommendation_assertion"
+                            ),
+                            "argument_type_counts": [
+                                {
+                                    "type_concept_id": (
+                                        "#V#paper_recommendation_assertion"
+                                    )
+                                }
+                            ],
+                        },
+                        {
+                            "predicate_concept_id": "#V#author_of",
+                            "argument_type_counts": [
+                                {"type_concept_id": "#V#scholarly_article"}
+                            ],
+                        },
+                    ]
+                },
+            }
+        ],
+    }
+
+    orchestrator._apply_turn_scoped_tool_payload_support(
+        tool_name="find_relations_with_argument",
+        payload=payload,
+        data=data,
+    )
+
+    assert payload["predicate_filter"] == ["#V#author_of"]
+    assert data["tool_payload_support_events"][0]["selection_profile_ids"] == [
+        "#V#paper_extent_follow_up_profile"
+    ]
+
+
+def test_turn_scoped_tool_payload_support_leaves_broad_profile_relation_lookup_unfiltered():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_context_chars=80_000,
+    )
+
+    payload = {"concept_id": "#V#michael_witbrock"}
+    data: dict[str, Any] = {
+        "turn_expected_outcome_profile": {},
+        "tool_argument_defaults": {
+            "find_relations_with_argument": {
+                "__derive_predicate_filter_from_recent_incidence": {
+                    "enabled": True,
+                    "selection_profile": {
+                        "profile_id": "#V#paper_extent_follow_up_profile",
+                        "activation": {"target_type_ids": ["#V#scholarly_article"]},
+                        "preferred_predicate_ids": ["#V#author_of"],
+                        "preferred_argument_type_ids": ["#V#scholarly_article"],
+                    },
+                }
+            }
+        },
+        "invocations": [
+            {
+                "tool": "get_predicate_incidence",
+                "effective_payload": {
+                    "predicates": [
+                        {
+                            "predicate_concept_id": "#V#author_of",
+                            "argument_type_counts": [
+                                {"type_concept_id": "#V#scholarly_article"}
+                            ],
+                        },
+                        {"predicate_concept_id": "#V#member_of_organisation"},
+                    ]
+                },
+            }
+        ],
+    }
+
+    orchestrator._apply_turn_scoped_tool_payload_support(
+        tool_name="find_relations_with_argument",
+        payload=payload,
+        data=data,
+    )
+
+    assert "predicate_filter" not in payload
+    assert "tool_payload_support_events" not in data
 
 
 def test_format_tool_result_shapes_related_concepts_payload_for_live_follow_up():

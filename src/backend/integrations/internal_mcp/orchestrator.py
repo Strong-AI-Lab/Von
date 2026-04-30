@@ -1377,6 +1377,8 @@ class _ToolCallRequest(TypedDict):
     _retry_recovery_contract_source: NotRequired[str]
     _retry_recovery_effect_id: NotRequired[str]
     _retry_recovery_strategy_id: NotRequired[str]
+    _retry_predicate_follow_up_profile_id: NotRequired[str]
+    _retry_predicate_follow_up_profile_source: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -4488,7 +4490,9 @@ class InternalMCPChatOrchestrator:
         recovery_outcome = (
             "retry_needed"
             if retry_needed
-            else "retry_suppressed" if retry_suppressed else "no_retry_required"
+            else "retry_suppressed"
+            if retry_suppressed
+            else "no_retry_required"
         )
         if retry_suppressed:
             try:
@@ -5211,9 +5215,6 @@ class InternalMCPChatOrchestrator:
         turn_expected_outcome_contract_object = (
             self._build_turn_expected_outcome_contract_object(data)
         )
-        turn_expected_outcome_contract = self._turn_expected_outcome_contract_payload(
-            turn_expected_outcome_contract_object
-        )
         missing_surface_notes: list[str] = []
         turn_contract_required_tools = {
             str(tool_name).strip().lower()
@@ -5280,7 +5281,7 @@ class InternalMCPChatOrchestrator:
         forced = self._infer_missing_tool_call_retry_tool_calls(
             retry_context,
             user_prompt=data.get("user_prompt"),
-            turn_expected_outcome_contract=turn_expected_outcome_contract,
+            turn_expected_outcome_contract=turn_expected_outcome_contract_object,
             workflow_required_effects_contract=(
                 data.get("workflow_required_effects_contract")
                 if isinstance(data.get("workflow_required_effects_contract"), Mapping)
@@ -5288,7 +5289,9 @@ class InternalMCPChatOrchestrator:
             ),
             workflow_required_effects_contract_source=(
                 str(data.get("workflow_required_effects_contract_source")).strip()
-                if isinstance(data.get("workflow_required_effects_contract_source"), str)
+                if isinstance(
+                    data.get("workflow_required_effects_contract_source"), str
+                )
                 and str(data.get("workflow_required_effects_contract_source")).strip()
                 else None
             ),
@@ -5299,6 +5302,11 @@ class InternalMCPChatOrchestrator:
             required_create_type_name=required_create_type_name,
             required_url_extraction_url=required_url_extraction_url,
             tool_invocations=tool_invocation_sequence,
+            tool_argument_defaults=(
+                data.get("tool_argument_defaults")
+                if isinstance(data.get("tool_argument_defaults"), Mapping)
+                else None
+            ),
             invoked_tool_names=successful_tool_names,
             user_concept_id=(
                 data.get("user_concept_id")
@@ -5844,7 +5852,9 @@ class InternalMCPChatOrchestrator:
             classifier_verdict_text = (
                 "yes"
                 if classifier_verdict is True
-                else "no" if classifier_verdict is False else "unavailable"
+                else "no"
+                if classifier_verdict is False
+                else "unavailable"
             )
             if "missing_tool_call_detection" not in existing_types:
                 aux_log.append(
@@ -5905,7 +5915,9 @@ class InternalMCPChatOrchestrator:
         retry_stage = (
             "completed"
             if retry_success
-            else "skipped" if retry_suppressed else "failed"
+            else "skipped"
+            if retry_suppressed
+            else "failed"
         )
         aux_log.append(
             {
@@ -7456,6 +7468,7 @@ class InternalMCPChatOrchestrator:
             "tool_call_validation_unavailable_tools",
             "tool_call_validation_diagnostics",
             "tool_call_repaired_calls",
+            "tool_payload_support_events",
         ):
             value = data.get(key)
             if isinstance(value, list):
@@ -8003,7 +8016,7 @@ class InternalMCPChatOrchestrator:
                     tool_plan_context,
                     user_prompt=prompt,
                     turn_expected_outcome_contract=(
-                        self._build_turn_expected_outcome_contract(data)
+                        self._build_turn_expected_outcome_contract_object(data)
                     ),
                     workflow_required_effects_contract=(
                         data.get("workflow_required_effects_contract")
@@ -8013,7 +8026,9 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     workflow_required_effects_contract_source=(
-                        str(data.get("workflow_required_effects_contract_source")).strip()
+                        str(
+                            data.get("workflow_required_effects_contract_source")
+                        ).strip()
                         if isinstance(
                             data.get("workflow_required_effects_contract_source"), str
                         )
@@ -8073,6 +8088,11 @@ class InternalMCPChatOrchestrator:
                         str(data.get("user_concept_id")).strip()
                         if isinstance(data.get("user_concept_id"), str)
                         and str(data.get("user_concept_id")).strip()
+                        else None
+                    ),
+                    tool_argument_defaults=(
+                        data.get("tool_argument_defaults")
+                        if isinstance(data.get("tool_argument_defaults"), Mapping)
                         else None
                     ),
                 )
@@ -8401,9 +8421,7 @@ class InternalMCPChatOrchestrator:
                         "tool_call_validation_unavailable_tools": list(
                             preflight.tool_unavailable
                         ),
-                        "tool_call_validation_diagnostics": list(
-                            preflight.diagnostics
-                        ),
+                        "tool_call_validation_diagnostics": list(preflight.diagnostics),
                         "raw_tool_plan_text": raw_tool_call,
                         "tool_call_repair_attempts": repair_attempts,
                         "tool_call_repair_budget": repair_budget,
@@ -10034,7 +10052,7 @@ class InternalMCPChatOrchestrator:
                                 )
                             ),
                             turn_expected_outcome_contract=(
-                                self._build_turn_expected_outcome_contract(data)
+                                self._build_turn_expected_outcome_contract_object(data)
                             ),
                             workflow_required_effects_contract=(
                                 data.get("workflow_required_effects_contract")
@@ -10046,7 +10064,9 @@ class InternalMCPChatOrchestrator:
                             ),
                             workflow_required_effects_contract_source=(
                                 str(
-                                    data.get("workflow_required_effects_contract_source")
+                                    data.get(
+                                        "workflow_required_effects_contract_source"
+                                    )
                                 ).strip()
                                 if isinstance(
                                     data.get(
@@ -10055,7 +10075,9 @@ class InternalMCPChatOrchestrator:
                                     str,
                                 )
                                 and str(
-                                    data.get("workflow_required_effects_contract_source")
+                                    data.get(
+                                        "workflow_required_effects_contract_source"
+                                    )
                                 ).strip()
                                 else None
                             ),
@@ -10074,6 +10096,13 @@ class InternalMCPChatOrchestrator:
                                 prompt_requirements.required_url_extraction_url
                             ),
                             tool_invocations=invocations_for_requirements,
+                            tool_argument_defaults=(
+                                data.get("tool_argument_defaults")
+                                if isinstance(
+                                    data.get("tool_argument_defaults"), Mapping
+                                )
+                                else None
+                            ),
                             invoked_tool_names=(
                                 self._extract_successful_tool_names(
                                     invocations_for_requirements
@@ -10281,7 +10310,7 @@ class InternalMCPChatOrchestrator:
                             )
                         ),
                         turn_expected_outcome_contract=(
-                            self._build_turn_expected_outcome_contract(data)
+                            self._build_turn_expected_outcome_contract_object(data)
                         ),
                         workflow_required_effects_contract=(
                             data.get("workflow_required_effects_contract")
@@ -10319,6 +10348,11 @@ class InternalMCPChatOrchestrator:
                             prompt_requirements.required_url_extraction_url
                         ),
                         tool_invocations=invocations_for_requirements,
+                        tool_argument_defaults=(
+                            data.get("tool_argument_defaults")
+                            if isinstance(data.get("tool_argument_defaults"), Mapping)
+                            else None
+                        ),
                         invoked_tool_names=(
                             self._extract_successful_tool_names(
                                 invocations_for_requirements
@@ -12772,7 +12806,7 @@ class InternalMCPChatOrchestrator:
             )
         else:
             auth_status = (
-                "AUTHENTICATION STATUS: Not authenticated. " "RAG tools unavailable."
+                "AUTHENTICATION STATUS: Not authenticated. RAG tools unavailable."
             )
 
         max_invocations = int(getattr(self, "_max_tool_invocations", 0))
@@ -16710,7 +16744,7 @@ class InternalMCPChatOrchestrator:
         max_tools: int = 20,
     ) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
-        for definition in list(tool_definitions or ())[:max(0, int(max_tools))]:
+        for definition in list(tool_definitions or ())[: max(0, int(max_tools))]:
             tool_name = getattr(definition, "name", None)
             if not isinstance(tool_name, str) or not tool_name.strip():
                 continue
@@ -16720,7 +16754,9 @@ class InternalMCPChatOrchestrator:
                     description=getattr(definition, "description", None),
                     input_schema=(
                         getattr(definition, "input_schema", None)
-                        if isinstance(getattr(definition, "input_schema", None), Mapping)
+                        if isinstance(
+                            getattr(definition, "input_schema", None), Mapping
+                        )
                         else None
                     ),
                     output_schema=(
@@ -16825,10 +16861,12 @@ class InternalMCPChatOrchestrator:
             if isinstance(tool_name, str) and tool_name.strip():
                 tool_names.append(tool_name.strip())
 
-        tool_contracts = InternalMCPChatOrchestrator._tool_definition_contract_summaries(
-            tool_definitions,
-            include_schema=False,
-            max_tools=50,
+        tool_contracts = (
+            InternalMCPChatOrchestrator._tool_definition_contract_summaries(
+                tool_definitions,
+                include_schema=False,
+                max_tools=50,
+            )
         )
 
         payload: dict[str, Any] = {
@@ -17153,9 +17191,7 @@ class InternalMCPChatOrchestrator:
                         include_schema=True,
                         max_tools=20,
                     ),
-                    "selected_tool_contracts_truncated": len(
-                        available_tool_definitions
-                    )
+                    "selected_tool_contracts_truncated": len(available_tool_definitions)
                     > 20,
                     "structured_call_options": dict(structured_call_kwargs),
                     "hinted_families": list(tool_candidates.hinted_families),
@@ -17453,9 +17489,12 @@ class InternalMCPChatOrchestrator:
                         **selection_metadata,
                     }
                 )
-                if isinstance(
-                    getattr(llm_response, "tool_call_diagnostics", None), list
-                ) and llm_response.tool_call_diagnostics:
+                if (
+                    isinstance(
+                        getattr(llm_response, "tool_call_diagnostics", None), list
+                    )
+                    and llm_response.tool_call_diagnostics
+                ):
                     aux_log.append(
                         {
                             "type": "tool_call_contract_validation",
@@ -18580,8 +18619,7 @@ class InternalMCPChatOrchestrator:
                         str(field_name).strip(): tuple(
                             str(source_field).strip()
                             for source_field in source_fields
-                            if isinstance(source_field, str)
-                            and source_field.strip()
+                            if isinstance(source_field, str) and source_field.strip()
                         )
                         for field_name, source_fields in raw_json_schema.get(
                             "x-von-scalar-source-fields", {}
@@ -18665,9 +18703,7 @@ class InternalMCPChatOrchestrator:
             enum_values=(
                 {
                     str(field_name).strip(): tuple(values)
-                    for field_name, values in raw_schema.get(
-                        "enum_values", {}
-                    ).items()
+                    for field_name, values in raw_schema.get("enum_values", {}).items()
                     if isinstance(field_name, str)
                     and field_name.strip()
                     and isinstance(values, Sequence)
@@ -18811,7 +18847,9 @@ class InternalMCPChatOrchestrator:
                     if not isinstance(field_name, str) or not field_name.strip():
                         continue
                     field_key = field_name.strip()
-                    if not self._tool_follow_up_value_is_missing(payload.get(field_key)):
+                    if not self._tool_follow_up_value_is_missing(
+                        payload.get(field_key)
+                    ):
                         continue
                     hinted_value = batch_field_hints.get((tool_name_key, field_key))
                     if self._tool_follow_up_value_is_missing(hinted_value):
@@ -19130,6 +19168,172 @@ class InternalMCPChatOrchestrator:
             line for line in query_lines if isinstance(line, str) and line.strip()
         )
 
+    @classmethod
+    def _extract_turn_expected_target_type_ids(
+        cls,
+        *payloads: Mapping[str, Any] | TurnExpectedOutcomeContract | None,
+    ) -> list[str]:
+        ordered: list[str] = []
+        for raw_payload in payloads:
+            if raw_payload is None:
+                continue
+            if isinstance(raw_payload, TurnExpectedOutcomeContract):
+                ordered.extend(raw_payload.target_type_ids)
+                continue
+            if not isinstance(raw_payload, Mapping):
+                continue
+            try:
+                contract = TurnExpectedOutcomeContract.from_mapping(raw_payload)
+                ordered.extend(contract.target_type_ids)
+            except Exception:
+                pass
+            for key in (
+                "turn_expected_outcome_target_type_ids",
+                "target_type_ids",
+                "requested_extent_type_ids",
+                "required_target_type_ids",
+            ):
+                value = raw_payload.get(key)
+                if isinstance(value, Mapping):
+                    for item in value.values():
+                        concept_id = cls._normalise_concept_id_candidate(item)
+                        if concept_id:
+                            ordered.append(concept_id)
+                    continue
+                if isinstance(value, str):
+                    concept_id = cls._normalise_concept_id_candidate(value)
+                    if concept_id:
+                        ordered.append(concept_id)
+                    continue
+                if isinstance(value, Sequence) and not isinstance(
+                    value, (str, bytes, bytearray)
+                ):
+                    for item in value:
+                        if isinstance(item, Mapping):
+                            concept_id = cls._normalise_concept_id_candidate(
+                                item.get("concept_id")
+                                or item.get("target_type_id")
+                                or item.get("type_id")
+                                or item.get("id")
+                            )
+                        else:
+                            concept_id = cls._normalise_concept_id_candidate(item)
+                        if concept_id:
+                            ordered.append(concept_id)
+            profile = raw_payload.get("turn_expected_outcome_profile")
+            if isinstance(profile, Mapping):
+                ordered.extend(cls._extract_turn_expected_target_type_ids(profile))
+            contract_state = raw_payload.get("turn_expected_outcome_contract_state")
+            if isinstance(contract_state, Mapping):
+                ordered.extend(
+                    cls._extract_turn_expected_target_type_ids(contract_state)
+                )
+            contract_payload = raw_payload.get("turn_expected_outcome_contract")
+            if isinstance(contract_payload, Mapping):
+                ordered.extend(
+                    cls._extract_turn_expected_target_type_ids(contract_payload)
+                )
+        return cls._dedupe_preserving_order(
+            [item for item in ordered if isinstance(item, str) and item.strip()]
+        )
+
+    @classmethod
+    def _extract_predicate_follow_up_profiles(
+        cls,
+        derivation_spec: Mapping[str, Any] | None,
+        *,
+        data: Mapping[str, Any] | None = None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ) = None,
+    ) -> list[Mapping[str, Any]]:
+        if not isinstance(derivation_spec, Mapping):
+            return []
+
+        target_type_ids = cls._extract_turn_expected_target_type_ids(
+            data if isinstance(data, Mapping) else None,
+            turn_expected_outcome_contract
+            if isinstance(
+                turn_expected_outcome_contract, (Mapping, TurnExpectedOutcomeContract)
+            )
+            else None,
+        )
+        target_type_lookup = {item.lower() for item in target_type_ids}
+
+        raw_profiles: list[Any] = []
+        for key in (
+            "selection_profiles",
+            "predicate_selection_profiles",
+            "follow_up_profiles",
+        ):
+            value = derivation_spec.get(key)
+            if isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                raw_profiles.extend(value)
+        for key in (
+            "selection_profile",
+            "predicate_selection_profile",
+            "follow_up_profile",
+        ):
+            value = derivation_spec.get(key)
+            if isinstance(value, Mapping):
+                raw_profiles.append(value)
+
+        active_profiles: list[Mapping[str, Any]] = []
+        for raw_profile in raw_profiles:
+            if not isinstance(raw_profile, Mapping):
+                continue
+            activation_payload = (
+                raw_profile.get("activation")
+                if isinstance(raw_profile.get("activation"), Mapping)
+                else raw_profile
+            )
+            required_type_ids = cls._extract_turn_expected_target_type_ids(
+                activation_payload
+            )
+            if required_type_ids and not (
+                {item.lower() for item in required_type_ids} & target_type_lookup
+            ):
+                continue
+            active_profiles.append(raw_profile)
+        return active_profiles
+
+    @classmethod
+    def _predicate_follow_up_derivation_context(
+        cls,
+        derivation_spec: Mapping[str, Any] | None,
+        *,
+        data: Mapping[str, Any] | None = None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        profiles = cls._extract_predicate_follow_up_profiles(
+            derivation_spec,
+            data=data,
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
+        )
+        profile_ids = [
+            str(profile.get("profile_id") or profile.get("id") or "").strip()
+            for profile in profiles
+            if isinstance(profile.get("profile_id") or profile.get("id"), str)
+            and str(profile.get("profile_id") or profile.get("id")).strip()
+        ]
+        return {
+            "selection_profiles": profiles,
+            "profile_ids": cls._dedupe_preserving_order(profile_ids),
+            "target_type_ids": cls._extract_turn_expected_target_type_ids(
+                data if isinstance(data, Mapping) else None,
+                turn_expected_outcome_contract
+                if isinstance(
+                    turn_expected_outcome_contract,
+                    (Mapping, TurnExpectedOutcomeContract),
+                )
+                else None,
+            ),
+        }
+
     def _apply_turn_scoped_tool_payload_support(
         self,
         *,
@@ -19179,6 +19383,13 @@ class InternalMCPChatOrchestrator:
                     )
                 except (TypeError, ValueError):
                     max_predicates_int = 3
+                derivation_context = self._predicate_follow_up_derivation_context(
+                    derivation_spec,
+                    data=data,
+                    turn_expected_outcome_contract=(
+                        self._build_turn_expected_outcome_contract_object(data)
+                    ),
+                )
                 combined_invocations: list[Mapping[str, Any]] = []
                 historical_invocations = data.get("invocations")
                 if isinstance(historical_invocations, list):
@@ -19194,14 +19405,32 @@ class InternalMCPChatOrchestrator:
                 derived_predicate_ids = (
                     self._extract_get_predicate_incidence_follow_up_predicate_ids(
                         combined_invocations,
-                        user_text=self._coerce_non_empty_text(
-                            data.get("user_prompt") or data.get("prompt")
-                        ),
+                        selection_profiles=derivation_context.get("selection_profiles"),
                         max_predicates=max(1, max_predicates_int),
                     )
                 )
                 if derived_predicate_ids:
                     payload["predicate_filter"] = derived_predicate_ids
+                    if isinstance(data, MutableMapping):
+                        events = data.setdefault("tool_payload_support_events", [])
+                        if isinstance(events, list):
+                            events.append(
+                                {
+                                    "tool": lowered_tool_name,
+                                    "field": "predicate_filter",
+                                    "source": (
+                                        "workflow_tool_argument_defaults."
+                                        "__derive_predicate_filter_from_recent_incidence"
+                                    ),
+                                    "predicate_ids": list(derived_predicate_ids),
+                                    "selection_profile_ids": list(
+                                        derivation_context.get("profile_ids") or []
+                                    ),
+                                    "turn_expected_outcome_target_type_ids": list(
+                                        derivation_context.get("target_type_ids") or []
+                                    ),
+                                }
+                            )
 
         if lowered_tool_name != "search_knowledge_base":
             return
@@ -25942,8 +26171,7 @@ class InternalMCPChatOrchestrator:
                     if isinstance(item, str) and str(item).strip()
                 ]
                 if not (
-                    {item.lower() for item in recovers_tools}
-                    & set(missing_lookup)
+                    {item.lower() for item in recovers_tools} & set(missing_lookup)
                 ):
                     continue
                 strategy = dict(raw_strategy)
@@ -26117,6 +26345,12 @@ class InternalMCPChatOrchestrator:
             strategy_id = tool_call.get("_retry_recovery_strategy_id")
             if isinstance(strategy_id, str) and strategy_id.strip():
                 entry["recovery_strategy_id"] = strategy_id.strip()
+            profile_id = tool_call.get("_retry_predicate_follow_up_profile_id")
+            if isinstance(profile_id, str) and profile_id.strip():
+                entry["predicate_follow_up_profile_id"] = profile_id.strip()
+            profile_source = tool_call.get("_retry_predicate_follow_up_profile_source")
+            if isinstance(profile_source, str) and profile_source.strip():
+                entry["predicate_follow_up_profile_source"] = profile_source.strip()
             summaries.append(entry)
         return summaries
 
@@ -26143,7 +26377,9 @@ class InternalMCPChatOrchestrator:
         ]
         if not fields:
             return True
-        return any(cls._tool_follow_up_value_is_missing(item.get(field)) for field in fields)
+        return any(
+            cls._tool_follow_up_value_is_missing(item.get(field)) for field in fields
+        )
 
     @staticmethod
     def _resolve_tool_follow_up_binding_value(
@@ -26323,6 +26559,7 @@ class InternalMCPChatOrchestrator:
         missing_required_tools: Sequence[str],
         user_concept_id: str | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+        tool_argument_defaults: Mapping[str, Any] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
         missing_required_scholarly_representation_file_copy_ids: (
@@ -26403,10 +26640,39 @@ class InternalMCPChatOrchestrator:
             if pure_ontology_follow_up
             else []
         )
+        find_relations_defaults: Mapping[str, Any] | None = None
+        if isinstance(tool_argument_defaults, Mapping):
+            for raw_tool_name, raw_defaults in tool_argument_defaults.items():
+                if str(raw_tool_name or "").strip().lower() != (
+                    "find_relations_with_argument"
+                ):
+                    continue
+                if isinstance(raw_defaults, Mapping):
+                    find_relations_defaults = raw_defaults
+                break
+        predicate_follow_up_derivation_spec = (
+            find_relations_defaults.get(
+                "__derive_predicate_filter_from_recent_incidence"
+            )
+            if isinstance(find_relations_defaults, Mapping)
+            else None
+        )
+        predicate_follow_up_derivation_context = (
+            self._predicate_follow_up_derivation_context(
+                predicate_follow_up_derivation_spec,
+                data={"tool_argument_defaults": dict(tool_argument_defaults or {})},
+                turn_expected_outcome_contract=turn_expected_outcome_contract,
+            )
+            if isinstance(predicate_follow_up_derivation_spec, Mapping)
+            and bool(predicate_follow_up_derivation_spec.get("enabled", True))
+            else {"selection_profiles": [], "profile_ids": [], "target_type_ids": []}
+        )
         predicate_incidence_follow_up_predicate_ids = (
             self._extract_get_predicate_incidence_follow_up_predicate_ids(
                 tool_invocations,
-                user_text=user_text,
+                selection_profiles=predicate_follow_up_derivation_context.get(
+                    "selection_profiles"
+                ),
                 max_predicates=2,
             )
             if pure_ontology_follow_up
@@ -26526,23 +26792,28 @@ class InternalMCPChatOrchestrator:
                 or ontology_follow_up_concept_ids
             )
             skip_metadata_binding = (
-                pure_ontology_follow_up
-                and has_prior_retry_invocations
-                and name
-                in {
-                    "fetch_concept",
-                    "get_predicate_incidence",
-                    "find_relations_with_argument",
-                    "get_text_relations_summary",
-                    "get_related_concepts",
-                    "list_uncertain_relationship_assertions",
-                }
-            ) or (
-                name in {"get_predicate_incidence", "find_relations_with_argument"}
-                and pure_ontology_follow_up
-                and only_actor_target_is_available
-            ) or (
-                name == "find_relations_with_argument" and has_dynamic_relation_filter
+                (
+                    pure_ontology_follow_up
+                    and has_prior_retry_invocations
+                    and name
+                    in {
+                        "fetch_concept",
+                        "get_predicate_incidence",
+                        "find_relations_with_argument",
+                        "get_text_relations_summary",
+                        "get_related_concepts",
+                        "list_uncertain_relationship_assertions",
+                    }
+                )
+                or (
+                    name in {"get_predicate_incidence", "find_relations_with_argument"}
+                    and pure_ontology_follow_up
+                    and only_actor_target_is_available
+                )
+                or (
+                    name == "find_relations_with_argument"
+                    and has_dynamic_relation_filter
+                )
             )
             if name == "get_predicate_incidence" and ontology_follow_up_predicate_ids:
                 skip_metadata_binding = True
@@ -26792,17 +27063,31 @@ class InternalMCPChatOrchestrator:
                     retry_actor_concept_id
                     and predicate_incidence_follow_up_predicate_ids
                 ):
-                    forced_calls.append(
-                        {
-                            "action": "call_tool",
-                            "tool": name,
-                            "payload": {
-                                "concept_id": retry_actor_concept_id,
-                                "predicate_filter": predicate_incidence_follow_up_predicate_ids,
-                                "limit": 20,
-                            },
-                        }
+                    profile_ids = predicate_follow_up_derivation_context.get(
+                        "profile_ids"
                     )
+                    forced_call: _ToolCallRequest = {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "concept_id": retry_actor_concept_id,
+                            "predicate_filter": predicate_incidence_follow_up_predicate_ids,
+                            "limit": 20,
+                        },
+                        "_retry_binding_source": (
+                            "predicate_incidence_follow_up_profile"
+                            if isinstance(profile_ids, list) and profile_ids
+                            else "predicate_incidence_single_row_fallback"
+                        ),
+                    }
+                    if isinstance(profile_ids, list) and profile_ids:
+                        forced_call["_retry_predicate_follow_up_profile_id"] = str(
+                            profile_ids[0]
+                        )
+                        forced_call["_retry_predicate_follow_up_profile_source"] = (
+                            "workflow_tool_argument_defaults"
+                        )
+                    forced_calls.append(forced_call)
                     continue
                 if predicate_incidence_follow_up_concept_ids:
                     for concept_id in predicate_incidence_follow_up_concept_ids:
@@ -27022,60 +27307,118 @@ class InternalMCPChatOrchestrator:
                     return predicate_ids
         return predicate_ids
 
-    @staticmethod
-    def _user_text_targets_paper_like_extent(user_text: str | None) -> bool:
-        if not isinstance(user_text, str) or not user_text.strip():
-            return False
-        lowered = user_text.strip().lower()
-        return bool(
-            re.search(
-                r"\b(?:paper|papers|scholarly|article|articles)\b",
-                lowered,
-                flags=re.IGNORECASE,
-            )
-        )
-
     @classmethod
-    def _predicate_incidence_row_has_paper_like_grounding(
+    def _predicate_incidence_row_type_ids(
         cls,
         row: Mapping[str, Any],
-    ) -> bool:
-        paper_like_type_ids = {
-            "#v#scholarly_article",
-            "#v#scholarly_work",
-            "#v#paper_on_arxiv",
-        }
-        raw_sample_groundings = row.get("sample_groundings")
-        if not isinstance(raw_sample_groundings, list):
-            return False
-
-        for grounding in raw_sample_groundings:
-            if not isinstance(grounding, Mapping):
-                continue
-            concept_id = cls._normalise_concept_id_candidate(
-                grounding.get("concept_id")
-            )
-            if concept_id and any(
-                token in concept_id.lower()
-                for token in (
-                    "paper_on_arxiv",
-                    "scholarly_paper",
-                    "scholarly_article",
-                    "scholarly_work",
+    ) -> list[str]:
+        type_ids: list[str] = []
+        raw_argument_type_counts = row.get("argument_type_counts")
+        if isinstance(raw_argument_type_counts, list):
+            for item in raw_argument_type_counts:
+                if not isinstance(item, Mapping):
+                    continue
+                type_id = cls._normalise_concept_id_candidate(
+                    item.get("type_concept_id")
+                    or item.get("type_id")
+                    or item.get("concept_id")
                 )
-            ):
-                return True
+                if type_id:
+                    type_ids.append(type_id)
 
-            raw_type_ids = grounding.get("type_ids")
-            if not isinstance(raw_type_ids, list):
-                continue
-            lowered_type_ids = {
-                str(type_id).strip().lower()
-                for type_id in raw_type_ids
-                if isinstance(type_id, str) and str(type_id).strip()
-            }
-            if lowered_type_ids & paper_like_type_ids:
-                return True
+        raw_sample_groundings = row.get("sample_groundings")
+        if isinstance(raw_sample_groundings, list):
+            for grounding in raw_sample_groundings:
+                if not isinstance(grounding, Mapping):
+                    continue
+                raw_type_ids = grounding.get("type_ids")
+                if not isinstance(raw_type_ids, list):
+                    continue
+                for raw_type_id in raw_type_ids:
+                    type_id = cls._normalise_concept_id_candidate(raw_type_id)
+                    if type_id:
+                        type_ids.append(type_id)
+
+        raw_role_expansion = row.get("role_expansion")
+        if isinstance(raw_role_expansion, Mapping):
+            for key in ("role_filler_type_counts", "reified_node_type_counts"):
+                raw_type_counts = raw_role_expansion.get(key)
+                if not isinstance(raw_type_counts, list):
+                    continue
+                for item in raw_type_counts:
+                    if not isinstance(item, Mapping):
+                        continue
+                    type_id = cls._normalise_concept_id_candidate(
+                        item.get("type_concept_id")
+                        or item.get("type_id")
+                        or item.get("concept_id")
+                    )
+                    if type_id:
+                        type_ids.append(type_id)
+        return cls._dedupe_preserving_order(type_ids)
+
+    @classmethod
+    def _predicate_incidence_row_matches_follow_up_profile(
+        cls,
+        row: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> bool:
+        predicate_id = cls._normalise_concept_id_candidate(
+            row.get("predicate_concept_id")
+        )
+        predicate_ids = {
+            concept_id.lower()
+            for concept_id in (
+                cls._normalise_concept_id_candidate(item)
+                for key in ("predicate_ids", "preferred_predicate_ids")
+                for item in (
+                    profile.get(key)
+                    if isinstance(profile.get(key), Sequence)
+                    and not isinstance(profile.get(key), (str, bytes, bytearray))
+                    else []
+                )
+            )
+            if concept_id
+        }
+        type_ids = {
+            concept_id.lower()
+            for concept_id in (
+                cls._normalise_concept_id_candidate(item)
+                for key in (
+                    "type_ids",
+                    "target_type_ids",
+                    "preferred_type_ids",
+                    "preferred_argument_type_ids",
+                    "preferred_result_type_ids",
+                )
+                for item in (
+                    profile.get(key)
+                    if isinstance(profile.get(key), Sequence)
+                    and not isinstance(profile.get(key), (str, bytes, bytearray))
+                    else []
+                )
+            )
+            if concept_id
+        }
+        predicate_matches = bool(
+            predicate_id and predicate_ids and predicate_id.lower() in predicate_ids
+        )
+        row_type_ids = {
+            type_id.lower()
+            for type_id in cls._predicate_incidence_row_type_ids(row)
+            if isinstance(type_id, str) and type_id.strip()
+        }
+        type_matches = bool(type_ids and row_type_ids & type_ids)
+
+        if predicate_ids and type_ids:
+            match_mode = str(profile.get("match_mode") or "").strip().lower()
+            if match_mode in {"predicate_or_type", "any"}:
+                return predicate_matches or type_matches
+            return predicate_matches and type_matches
+        if predicate_ids:
+            return predicate_matches
+        if type_ids:
+            return type_matches
         return False
 
     @classmethod
@@ -27129,7 +27472,7 @@ class InternalMCPChatOrchestrator:
         cls,
         tool_invocations: Sequence[Mapping[str, Any]] | None,
         *,
-        user_text: str | None = None,
+        selection_profiles: Any = None,
         max_predicates: int = 3,
     ) -> list[str]:
         if not tool_invocations or max_predicates <= 0:
@@ -27139,15 +27482,20 @@ class InternalMCPChatOrchestrator:
         matched_predicate_ids: list[str] = []
         fallback_predicate_ids: list[str] = []
         seen: set[str] = set()
-        user_targets_paper_like_extent = cls._user_text_targets_paper_like_extent(
-            user_text
+        active_profiles = [
+            profile
+            for profile in (
+                selection_profiles
+                if isinstance(selection_profiles, Sequence)
+                and not isinstance(selection_profiles, (str, bytes, bytearray))
+                else []
+            )
+            if isinstance(profile, Mapping)
+        ]
+        allow_profile_single_predicate_fallback = any(
+            bool(profile.get("allow_single_predicate_fallback"))
+            for profile in active_profiles
         )
-        preferred_paper_predicates = {
-            "#v#author_of",
-            "#v#is_author_of",
-            "#v#owner_of",
-            "#v#is_owner_of",
-        }
 
         def _append_once(target: list[str], predicate_id: str) -> bool:
             lowered = predicate_id.lower()
@@ -27204,9 +27552,12 @@ class InternalMCPChatOrchestrator:
                 lowered = predicate_id.lower()
                 if lowered in seen:
                     continue
-                if user_targets_paper_like_extent and (
-                    lowered in preferred_paper_predicates
-                    or cls._predicate_incidence_row_has_paper_like_grounding(row)
+                if any(
+                    cls._predicate_incidence_row_matches_follow_up_profile(
+                        row,
+                        profile,
+                    )
+                    for profile in active_profiles
                 ):
                     if _append_once(matched_predicate_ids, predicate_id):
                         return matched_predicate_ids
@@ -27217,7 +27568,9 @@ class InternalMCPChatOrchestrator:
             return explicit_predicate_ids[:max_predicates]
         if matched_predicate_ids:
             return matched_predicate_ids[:max_predicates]
-        if len(fallback_predicate_ids) == 1:
+        if len(fallback_predicate_ids) == 1 and (
+            not active_profiles or allow_profile_single_predicate_fallback
+        ):
             return fallback_predicate_ids[:max_predicates]
         return []
 
@@ -27606,7 +27959,9 @@ class InternalMCPChatOrchestrator:
         self,
         augmented_context: Sequence[Mapping[str, Any]],
         user_prompt: Any | None = None,
-        turn_expected_outcome_contract: Mapping[str, Any] | None = None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ) = None,
         workflow_required_effects_contract: Mapping[str, Any] | None = None,
         workflow_required_effects_contract_source: str | None = None,
         missing_required_tools: Sequence[str] | None = None,
@@ -27618,6 +27973,7 @@ class InternalMCPChatOrchestrator:
         required_create_type_name: str | None = None,
         required_url_extraction_url: str | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+        tool_argument_defaults: Mapping[str, Any] | None = None,
         invoked_tool_names: Sequence[str] | None = None,
         user_concept_id: str | None = None,
     ) -> list[_ToolCallRequest] | None:
@@ -27692,6 +28048,11 @@ class InternalMCPChatOrchestrator:
             workflow_required_effects_contract=workflow_required_effects_contract,
             workflow_required_effects_contract_source=(
                 workflow_required_effects_contract_source
+            ),
+            tool_argument_defaults=(
+                tool_argument_defaults
+                if isinstance(tool_argument_defaults, Mapping)
+                else None
             ),
         )
         if self._has_authoritative_workflow_required_effects_contract(
@@ -31994,9 +32355,9 @@ class InternalMCPChatOrchestrator:
                     except Exception:
                         return
 
-                def _build_action_turn_live_workflow_routing_payload() -> (
-                    Mapping[str, Any]
-                ):
+                def _build_action_turn_live_workflow_routing_payload() -> Mapping[
+                    str, Any
+                ]:
                     payload: dict[str, Any] = {}
                     if isinstance(workflow_discovery_result, Mapping):
                         payload["workflow_discovery"] = dict(workflow_discovery_result)
@@ -33134,8 +33495,7 @@ class InternalMCPChatOrchestrator:
             # rendering is only the support-surface backstop.
             "thinking_card_mode": (
                 thinking_card_mode.strip().lower()
-                if isinstance(thinking_card_mode, str)
-                and thinking_card_mode.strip()
+                if isinstance(thinking_card_mode, str) and thinking_card_mode.strip()
                 else "default"
             ),
             "model_for_stage": _model_for_stage,
@@ -34391,9 +34751,9 @@ class InternalMCPChatOrchestrator:
             ),
         )
 
-        def _prepare_workflow_continuation_context() -> (
-            tuple[str, Mapping[str, Any] | None]
-        ):
+        def _prepare_workflow_continuation_context() -> tuple[
+            str, Mapping[str, Any] | None
+        ]:
             effective_prompt = prompt
             workflow_continuation_payload_local = (
                 dict(workflow_continuation_context)
@@ -37958,9 +38318,7 @@ class InternalMCPChatOrchestrator:
                             "chunks": f"Chunk {row_index}",
                             "matches": f"Match {row_index}",
                             "references": f"Reference {row_index}",
-                        }.get(
-                            collection_key, f"Section {row_index}"
-                        )
+                        }.get(collection_key, f"Section {row_index}")
                         section = _section_from_mapping(
                             row,
                             section_id=section_id,
@@ -41154,7 +41512,9 @@ class InternalMCPChatOrchestrator:
                         if continue_to_tool_pipeline
                         and continue_to_tool_pipeline_reason
                         == "custom_workflow_missing_required_prompt_tools"
-                        else "completed" if wf_completed else "failed"
+                        else "completed"
+                        if wf_completed
+                        else "failed"
                     )
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
@@ -41651,7 +42011,9 @@ class InternalMCPChatOrchestrator:
             if tc_completed
             and gate_safe_to_claim_completion
             and not gate_requires_follow_up
-            else "follow_up_required" if tc_completed else "failed"
+            else "follow_up_required"
+            if tc_completed
+            else "failed"
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.
@@ -41686,7 +42048,9 @@ class InternalMCPChatOrchestrator:
                 if tc_completed
                 and gate_safe_to_claim_completion
                 and not gate_requires_follow_up
-                else "follow_up_required" if tc_completed else "failed"
+                else "follow_up_required"
+                if tc_completed
+                else "failed"
             ),
             final_state=tc_result.final_state,
             completed=tc_completed,

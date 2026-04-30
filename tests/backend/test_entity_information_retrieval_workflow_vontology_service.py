@@ -172,6 +172,39 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
             "__derive_predicate_filter_from_recent_incidence": {
                 "enabled": True,
                 "max_predicates": 2,
+                "selection_profile": {
+                    "schema_version": (
+                        "predicate_incidence_follow_up_selection_profile.v1"
+                    ),
+                    "profile_id": (
+                        "#V#entity_information_retrieval_paper_extent_follow_up_profile"
+                    ),
+                    "description": (
+                        "Select predicates that retrieve scholarly-work extents "
+                        "for an entity-information request whose expected-outcome "
+                        "contract names a scholarly target type."
+                    ),
+                    "activation": {
+                        "target_type_ids": [
+                            "#V#scholarly_article",
+                            "#V#scholarly_work",
+                            "#V#paper_on_arxiv",
+                        ]
+                    },
+                    "preferred_predicate_ids": [
+                        "#V#author_of",
+                        "#V#is_author_of",
+                        "#V#owner_of",
+                        "#V#is_owner_of",
+                    ],
+                    "preferred_argument_type_ids": [
+                        "#V#scholarly_article",
+                        "#V#scholarly_work",
+                        "#V#paper_on_arxiv",
+                    ],
+                    "match_mode": "predicate_and_type",
+                    "allow_single_predicate_fallback": False,
+                },
             },
         },
         "list_uncertain_relationship_assertions": {
