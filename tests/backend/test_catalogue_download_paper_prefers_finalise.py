@@ -96,9 +96,63 @@ def test_download_paper_falls_back_when_not_authenticated(monkeypatch, tmp_path)
     # Act
     result = catalogue._download_paper(arxiv_id="2506.16596")
 
-    # Assert
-    assert result["success"] is True
+    # Assert: the proxy path was tried, but success without an artefact handle is
+    # not usable by downstream representation workflows.
+    assert result["success"] is False
     assert result.get("source") == "proxy"
+    assert result["error_code"] == "acquisition_result_missing_artefact_handle"
+    assert result["acquisition_result_contract"] == {
+        "schema_version": "acquisition_result_contract.v1",
+        "artefact_kind": "computer_file_copy",
+        "required_handle_fields": ["file_path", "storage"],
+        "satisfied": False,
+    }
+
+
+def test_download_paper_fails_closed_when_proxy_success_omits_file_path(
+    monkeypatch,
+    tmp_path,
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#workflow_user",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+
+    class _Proxy:
+        async def download_paper(self, *, arxiv_id: str, filename=None):
+            return {
+                "success": True,
+                "arxiv_id": arxiv_id,
+                "storage": {
+                    "backend": "swift",
+                    "key": f"arxiv/papers/{arxiv_id}.pdf",
+                    "uri": f"swift://von-artifacts/von/arxiv/papers/{arxiv_id}.pdf",
+                },
+            }
+
+    async def _fake_get_proxy():
+        return _Proxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _fake_get_proxy,
+    )
+
+    result = catalogue._download_paper(
+        arxiv_id="2603.26499",
+        namespace="#V#workflow_user@default",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "acquisition_result_missing_artefact_handle"
+    assert result["error_details"]["missing_handle_fields"] == ["file_path"]
+    registration = cast(dict[str, Any], result["computer_file_copy_registration"])
+    assert registration["status"] == "skipped_unusable_download_payload"
 
 
 def test_download_paper_registers_file_copy_when_authenticated(monkeypatch, tmp_path):

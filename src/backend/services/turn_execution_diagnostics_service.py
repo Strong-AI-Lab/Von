@@ -220,41 +220,86 @@ def _load_turn_execution_record(
     return _safe_mapping(doc)
 
 
-def _extract_workflow_execution_trace_refs(
+def _selected_workflow_id_from_payload(
+    payload: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+
+    candidates: list[Any] = []
+    workflow_selection = payload.get("workflow_selection")
+    if isinstance(workflow_selection, Mapping):
+        candidates.append(workflow_selection.get("selected_workflow_id"))
+    workflow_routing = payload.get("workflow_routing")
+    if isinstance(workflow_routing, Mapping):
+        candidates.append(workflow_routing.get("workflow_id"))
+    routing_diagnostics = payload.get("workflow_routing_diagnostics")
+    if isinstance(routing_diagnostics, Mapping):
+        candidates.append(routing_diagnostics.get("selected_workflow_id"))
+    selected_trace = payload.get("selected_workflow_trace")
+    if isinstance(selected_trace, Mapping):
+        candidates.extend(
+            (
+                selected_trace.get("selected_workflow_id"),
+                selected_trace.get("workflow_id"),
+            )
+        )
+    turn_diagnostics = payload.get("turn_execution_diagnostics")
+    if isinstance(turn_diagnostics, Mapping):
+        candidates.append(_selected_workflow_id_from_payload(turn_diagnostics))
+    turn_record = payload.get("turn_execution_record")
+    if isinstance(turn_record, Mapping):
+        candidates.append(_selected_workflow_id_from_payload(turn_record))
+
+    for candidate in candidates:
+        cleaned = _safe_str(candidate)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def build_workflow_execution_trace_mcp_access_refs(
     payload: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    """Extract durable workflow trace access refs from debug/record payloads."""
+
     if not isinstance(payload, Mapping):
         return []
-    workflow_selection = payload.get("workflow_selection")
-    selected_workflow_id = (
-        _safe_str(workflow_selection.get("selected_workflow_id"))
-        if isinstance(workflow_selection, Mapping)
-        else None
-    )
+    selected_workflow_id = _selected_workflow_id_from_payload(payload)
     aux_llm_calls = payload.get("aux_llm_calls")
-    if not isinstance(aux_llm_calls, Sequence) or isinstance(
-        aux_llm_calls, (str, bytes, bytearray)
-    ):
-        return []
 
     traces: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str | None, str | None]] = set()
-    for raw_entry in aux_llm_calls:
-        if not isinstance(raw_entry, Mapping):
-            continue
-        if _safe_str(raw_entry.get("type")) != "workflow_execution_trace":
-            continue
-        execution_id = _safe_str(raw_entry.get("execution_id"))
-        instance_id = _safe_str(raw_entry.get("instance_id"))
+
+    def _append_ref(
+        *,
+        raw_entry: Mapping[str, Any],
+        source: str,
+        selected_hint: bool = False,
+    ) -> None:
+        execution_id = _safe_str(raw_entry.get("execution_id")) or _safe_str(
+            raw_entry.get("execution_trace_id")
+        )
+        instance_id = (
+            _safe_str(raw_entry.get("instance_id"))
+            or _safe_str(raw_entry.get("workflow_instance_id"))
+            or _safe_str(raw_entry.get("workflow_instance_concept_id"))
+        )
+        if not execution_id and not instance_id:
+            return
         trace_key = (execution_id, instance_id)
         if trace_key in seen_pairs:
-            continue
+            return
         seen_pairs.add(trace_key)
-        if not execution_id and not instance_id:
-            continue
-        trace_workflow_id = _safe_str(raw_entry.get("workflow_id"))
+        trace_workflow_id = (
+            _safe_str(raw_entry.get("workflow_id"))
+            or _safe_str(raw_entry.get("selected_workflow_id"))
+            or _safe_str(raw_entry.get("dispatch_workflow_id"))
+        )
         trace_role = "workflow_execution"
-        if selected_workflow_id and trace_workflow_id:
+        if selected_hint:
+            trace_role = "selected_workflow"
+        elif selected_workflow_id and trace_workflow_id:
             trace_role = (
                 "selected_workflow"
                 if trace_workflow_id.strip().lower()
@@ -277,10 +322,65 @@ def _extract_workflow_execution_trace_refs(
                 ),
             }
         )
+
+    selected_trace = payload.get("selected_workflow_trace")
+    if isinstance(selected_trace, Mapping):
+        _append_ref(
+            raw_entry=selected_trace,
+            source="selected_workflow_trace",
+            selected_hint=True,
+        )
+
+    execution = payload.get("execution")
+    if isinstance(execution, Mapping):
+        execution_selected_trace = execution.get("selected_workflow_trace")
+        if isinstance(execution_selected_trace, Mapping):
+            _append_ref(
+                raw_entry=execution_selected_trace,
+                source="execution.selected_workflow_trace",
+                selected_hint=True,
+            )
+
+    turn_record = payload.get("turn_execution_record")
+    if isinstance(turn_record, Mapping):
+        turn_record_execution = turn_record.get("execution")
+        if isinstance(turn_record_execution, Mapping):
+            turn_record_selected_trace = turn_record_execution.get(
+                "selected_workflow_trace"
+            )
+            if isinstance(turn_record_selected_trace, Mapping):
+                _append_ref(
+                    raw_entry=turn_record_selected_trace,
+                    source="turn_execution_record.execution.selected_workflow_trace",
+                    selected_hint=True,
+                )
+
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(
+        aux_llm_calls, (str, bytes, bytearray)
+    ):
+        aux_llm_calls = []
+
+    for raw_entry in aux_llm_calls:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry_type = _safe_str(raw_entry.get("type"))
+        if entry_type == "workflow_execution_trace":
+            _append_ref(raw_entry=raw_entry, source="aux_llm_calls")
+            continue
+        if entry_type == "workflow_use_episode":
+            _append_ref(raw_entry=raw_entry, source="workflow_use_episode")
+            continue
+
     traces.sort(
         key=lambda entry: 0 if entry.get("trace_role") == "selected_workflow" else 1
     )
     return traces
+
+
+def _extract_workflow_execution_trace_refs(
+    payload: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return build_workflow_execution_trace_mcp_access_refs(payload)
 
 
 def _build_turn_diagnostics_mcp_access(
@@ -357,6 +457,17 @@ def _build_turn_diagnostics_mcp_access(
     workflow_traces = _extract_workflow_execution_trace_refs(payload)
     if workflow_traces:
         access["workflow_execution_traces"] = workflow_traces
+        primary_trace = next(
+            (
+                trace
+                for trace in workflow_traces
+                if trace.get("trace_role") == "selected_workflow"
+            ),
+            workflow_traces[0],
+        )
+        primary_access = primary_trace.get("mcp_access")
+        if isinstance(primary_access, Mapping):
+            access["workflow_get_execution_trace"] = dict(primary_access)
 
     return access
 

@@ -26986,28 +26986,85 @@ function initializeLlmDebugPopup() {
 }
 
 function _getWorkflowExecutionTelemetry(debugData) {
-    const traces = Array.isArray(debugData?.aux_llm_calls)
-        ? debugData.aux_llm_calls.filter((entry) => {
-            if (!entry || typeof entry !== 'object') {
-                return false;
-            }
-            if (entry.type !== 'workflow_execution_trace') {
-                return false;
-            }
-            const executionId = typeof entry.execution_id === 'string'
-                ? entry.execution_id.trim()
-                : '';
-            const instanceId = typeof entry.instance_id === 'string'
-                ? entry.instance_id.trim()
-                : '';
-            return Boolean(executionId || instanceId);
-        })
-        : [];
+    const normaliseTraceRef = (entry, source) => {
+        if (!entry || typeof entry !== 'object') {
+            return null;
+        }
+        const executionId = typeof entry.execution_id === 'string'
+            ? entry.execution_id.trim()
+            : (typeof entry.execution_trace_id === 'string' ? entry.execution_trace_id.trim() : '');
+        const instanceId = typeof entry.instance_id === 'string'
+            ? entry.instance_id.trim()
+            : (typeof entry.workflow_instance_id === 'string' ? entry.workflow_instance_id.trim() : '');
+        if (!executionId && !instanceId) {
+            return null;
+        }
+        return {
+            ...entry,
+            execution_id: executionId || null,
+            instance_id: instanceId || null,
+            workflow_id: (
+                typeof entry.workflow_id === 'string'
+                    ? entry.workflow_id
+                    : (
+                        typeof entry.selected_workflow_id === 'string'
+                            ? entry.selected_workflow_id
+                            : null
+                    )
+            ),
+            trace_source: source
+        };
+    };
 
-    const selectedWorkflowId = typeof debugData?.turn_execution_diagnostics?.workflow_selection?.selected_workflow_id === 'string'
-        ? debugData.turn_execution_diagnostics.workflow_selection.selected_workflow_id.trim()
-        : '';
+    const selectedWorkflowCandidates = [
+        debugData?.turn_execution_diagnostics?.workflow_selection?.selected_workflow_id,
+        debugData?.turn_execution_diagnostics?.workflow_routing_diagnostics?.selected_workflow_id,
+        debugData?.workflow_routing_diagnostics?.selected_workflow_id,
+        debugData?.workflow_routing?.workflow_id,
+        debugData?.selected_workflow_trace?.selected_workflow_id,
+        debugData?.selected_workflow_trace?.workflow_id,
+        debugData?.turn_execution_record?.workflow_selection?.selected_workflow_id
+    ];
+    const selectedWorkflowId = selectedWorkflowCandidates.find((value) => (
+        typeof value === 'string' && value.trim()
+    ))?.trim() || '';
+
+    const traces = [];
+    const seenTraceRefs = new Set();
+    const appendTrace = (trace) => {
+        if (!trace) {
+            return;
+        }
+        const key = `${trace.execution_id || ''}|${trace.instance_id || ''}`;
+        if (seenTraceRefs.has(key)) {
+            return;
+        }
+        seenTraceRefs.add(key);
+        traces.push(trace);
+    };
+
+    appendTrace(normaliseTraceRef(debugData?.selected_workflow_trace, 'selected_workflow_trace'));
+    appendTrace(normaliseTraceRef(
+        debugData?.turn_execution_record?.execution?.selected_workflow_trace,
+        'turn_execution_record.execution.selected_workflow_trace'
+    ));
+    if (Array.isArray(debugData?.aux_llm_calls)) {
+        debugData.aux_llm_calls.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return;
+            }
+            if (entry.type === 'workflow_execution_trace') {
+                appendTrace(normaliseTraceRef(entry, 'aux_llm_calls'));
+            } else if (entry.type === 'workflow_use_episode') {
+                appendTrace(normaliseTraceRef(entry, 'workflow_use_episode'));
+            }
+        });
+    }
+
     const primaryTrace = traces.find((entry) => (
+        entry.trace_source === 'selected_workflow_trace'
+        || entry.trace_source === 'turn_execution_record.execution.selected_workflow_trace'
+    )) || traces.find((entry) => (
         selectedWorkflowId
         && typeof entry.workflow_id === 'string'
         && entry.workflow_id.trim().toLowerCase() === selectedWorkflowId.toLowerCase()
@@ -27385,10 +27442,9 @@ async function showLlmDebugPopup(turnId, options = {}) {
     const metadata = buildLlmDebugMetadata(debugData);
     const hasError = debugData.error !== undefined;
 
-    let workflowExecutionTelemetry = { traces: [], primaryTrace: null };
+    let workflowExecutionTelemetry = _getWorkflowExecutionTelemetry(debugData);
     let workflowStages = [];
     if (Array.isArray(debugData.aux_llm_calls)) {
-        workflowExecutionTelemetry = _getWorkflowExecutionTelemetry(debugData);
         workflowStages = debugData.aux_llm_calls.filter((entry) => {
             if (!entry || typeof entry !== 'object') {
                 return false;
@@ -27416,13 +27472,26 @@ async function showLlmDebugPopup(turnId, options = {}) {
         }));
         metadataHtml += '<div class="llm-debug-metadata-section">';
         metadataHtml += '<strong>Workflow execution traces</strong>';
-        if (workflowExecutionTelemetry.primaryTrace && typeof workflowExecutionTelemetry.primaryTrace.execution_id === 'string') {
-            const executionId = workflowExecutionTelemetry.primaryTrace.execution_id.trim();
-            const href = `/api/workflows/executions/${encodeURIComponent(executionId)}`;
-            metadataHtml += '<div>';
-            metadataHtml += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(executionId)}</a>`;
-            metadataHtml += ' <span>(selected workflow)</span>';
-            metadataHtml += '</div>';
+        if (workflowExecutionTelemetry.primaryTrace) {
+            const executionId = typeof workflowExecutionTelemetry.primaryTrace.execution_id === 'string'
+                ? workflowExecutionTelemetry.primaryTrace.execution_id.trim()
+                : '';
+            const instanceId = typeof workflowExecutionTelemetry.primaryTrace.instance_id === 'string'
+                ? workflowExecutionTelemetry.primaryTrace.instance_id.trim()
+                : '';
+            const displayId = executionId || instanceId;
+            if (executionId) {
+                const href = `/api/workflows/executions/${encodeURIComponent(executionId)}`;
+                metadataHtml += '<div>';
+                metadataHtml += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(executionId)}</a>`;
+                metadataHtml += ' <span>(selected workflow)</span>';
+                metadataHtml += '</div>';
+            } else if (displayId) {
+                metadataHtml += '<div>';
+                metadataHtml += `<span>${escapeHtml(displayId)}</span>`;
+                metadataHtml += ' <span>(selected workflow)</span>';
+                metadataHtml += '</div>';
+            }
         }
         metadataHtml += '<pre>';
         metadataHtml += escapeHtml(JSON.stringify(workflowSummary, null, 2));

@@ -2394,6 +2394,11 @@ def _download_paper(**kwargs):
                     stored.setdefault("acquisition_path", "reacquire_partial_cache")
                 else:
                     stored.setdefault("acquisition_path", "download_from_source")
+                stored = _normalise_acquisition_result_contract(
+                    stored,
+                    artefact_kind="computer_file_copy",
+                    required_handle_fields=("file_path", "storage"),
+                )
 
             # If authenticated, always register the Computer File Copy (even on a fresh
             # download). The proxy already stores the PDF in durable blob storage.
@@ -3377,8 +3382,8 @@ def _download_result_is_materially_successful(payload: Any) -> bool:
 
     if not isinstance(payload, Mapping):
         return False
-    if payload.get("success") is True:
-        return True
+    if payload.get("success") is False:
+        return False
 
     file_path = str(payload.get("file_path") or "").strip()
     storage = payload.get("storage")
@@ -3389,6 +3394,52 @@ def _download_result_is_materially_successful(payload: Any) -> bool:
     key = str(storage.get("key") or "").strip()
     uri = str(storage.get("uri") or "").strip()
     return bool(backend and (key or uri))
+
+
+def _normalise_acquisition_result_contract(
+    payload: Mapping[str, Any],
+    *,
+    artefact_kind: str,
+    required_handle_fields: Sequence[str],
+) -> dict[str, Any]:
+    """Fail closed when an acquisition success lacks its required artefact handle."""
+
+    normalised = {str(key): value for key, value in payload.items() if isinstance(key, str)}
+    if normalised.get("success") is False:
+        return normalised
+
+    materially_successful = _download_result_is_materially_successful(normalised)
+    contract_payload = {
+        "schema_version": "acquisition_result_contract.v1",
+        "artefact_kind": artefact_kind,
+        "required_handle_fields": list(required_handle_fields),
+        "satisfied": materially_successful,
+    }
+    normalised["acquisition_result_contract"] = contract_payload
+    if materially_successful:
+        normalised.setdefault("success", True)
+        return normalised
+
+    if normalised.get("success") is True:
+        missing_fields = [
+            field_name
+            for field_name in required_handle_fields
+            if not str(normalised.get(field_name) or "").strip()
+        ]
+        if not isinstance(normalised.get("storage"), Mapping):
+            missing_fields.append("storage")
+        normalised["success"] = False
+        normalised["error_code"] = "acquisition_result_missing_artefact_handle"
+        normalised["error"] = (
+            "Acquisition reported success but did not return a usable durable "
+            "artefact handle."
+        )
+        normalised["error_details"] = {
+            "artefact_kind": artefact_kind,
+            "missing_handle_fields": sorted(set(missing_fields)),
+            "required_handle_fields": list(required_handle_fields),
+        }
+    return normalised
 
 
 # Blob/file-copy retrieval

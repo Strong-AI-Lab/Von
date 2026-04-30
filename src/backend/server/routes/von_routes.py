@@ -2420,9 +2420,15 @@ def _build_turn_execution_mcp_access(
     namespace: str | None,
     history_owner_user_id: str | None,
     organisation_concept_id: str | None,
+    workflow_routing: Mapping[str, Any] | None = None,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+    selected_workflow_trace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from ...services.conversation_scope_binding_service import (
         build_conversation_scope_binding,
+    )
+    from ...services.turn_execution_diagnostics_service import (
+        build_workflow_execution_trace_mcp_access_refs,
     )
 
     def _tool_call_descriptor(
@@ -2480,6 +2486,36 @@ def _build_turn_execution_mcp_access(
             },
             purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
         )
+
+    workflow_trace_payload: dict[str, Any] = {}
+    if isinstance(workflow_routing, Mapping):
+        workflow_trace_payload["workflow_routing"] = dict(workflow_routing)
+    if isinstance(selected_workflow_trace, Mapping):
+        workflow_trace_payload["selected_workflow_trace"] = dict(
+            selected_workflow_trace
+        )
+    if isinstance(aux_llm_calls, Sequence) and not isinstance(
+        aux_llm_calls, (str, bytes, bytearray)
+    ):
+        workflow_trace_payload["aux_llm_calls"] = [
+            dict(entry) for entry in aux_llm_calls if isinstance(entry, Mapping)
+        ]
+    workflow_traces = build_workflow_execution_trace_mcp_access_refs(
+        workflow_trace_payload
+    )
+    if workflow_traces:
+        access["workflow_execution_traces"] = workflow_traces
+        primary_trace = next(
+            (
+                trace
+                for trace in workflow_traces
+                if trace.get("trace_role") == "selected_workflow"
+            ),
+            workflow_traces[0],
+        )
+        primary_access = primary_trace.get("mcp_access")
+        if isinstance(primary_access, Mapping):
+            access["workflow_get_execution_trace"] = dict(primary_access)
 
     return access
 
@@ -11338,12 +11374,27 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         tool_progress_snapshot = _snapshot_tool_progress_for_request(
             progress_scope_key, request_id
         )
+        selected_workflow_trace_payload = (
+            dict(raw_selected_workflow_trace)
+            if isinstance(
+                raw_selected_workflow_trace := getattr(
+                    orchestrator_result,
+                    "selected_workflow_trace",
+                    None,
+                ),
+                Mapping,
+            )
+            else None
+        )
         turn_execution_mcp_access = _build_turn_execution_mcp_access(
             request_id=request_id,
             session_id=session_id,
             namespace=user_namespace,
             history_owner_user_id=history_user_id,
             organisation_concept_id=org_concept_id,
+            workflow_routing=workflow_routing_info,
+            aux_llm_calls=auxiliary_llm_calls,
+            selected_workflow_trace=selected_workflow_trace_payload,
         )
         turn_execution_diagnostics = _build_turn_execution_diagnostics(
             request_id=request_id,
@@ -11460,18 +11511,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "workflow_routing": workflow_routing_info,
             "display_elements": display_elements_contract,
             "turn_execution_diagnostics": turn_execution_diagnostics,
-            "selected_workflow_trace": (
-                dict(raw_selected_workflow_trace)
-                if isinstance(
-                    raw_selected_workflow_trace := getattr(
-                        orchestrator_result,
-                        "selected_workflow_trace",
-                        None,
-                    ),
-                    dict,
-                )
-                else None
-            ),
+            "selected_workflow_trace": selected_workflow_trace_payload,
             "critic_verdict": (
                 dict(raw_critic_verdict)
                 if isinstance(

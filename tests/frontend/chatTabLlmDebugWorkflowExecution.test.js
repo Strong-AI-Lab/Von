@@ -335,6 +335,58 @@ describe('LLM debug popup workflow execution hook', () => {
         ]);
     });
 
+    test('copy payload treats workflow-use episode instance as selected-workflow evidence', async () => {
+        const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
+
+        setLlmDebugDataForTurn('assistant-790', {
+            model: 'gpt-5.2-test',
+            messages: [],
+            response: 'failed',
+            workflow_routing: {
+                workflow_id: '#V#arxiv_paper_representation_workflow',
+                verdict: 'rag_selected'
+            },
+            aux_llm_calls: [
+                {
+                    type: 'workflow_execution_trace',
+                    workflow_id: '#V#chat_narration_workflow',
+                    execution_id: 'exec-narration',
+                    stored: true,
+                    status: 'stored'
+                },
+                {
+                    type: 'workflow_use_episode',
+                    workflow_id: '#V#arxiv_paper_representation_workflow',
+                    workflow_instance_id: 'wf-instance-selected',
+                    completed: false
+                }
+            ]
+        });
+
+        await showLlmDebugPopup('assistant-790');
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
+
+        expect(payload.mcp_access.workflow_get_execution_trace).toEqual(expect.objectContaining({
+            tool_name: 'workflow_get_execution_trace',
+            arguments: expect.objectContaining({
+                instance_id: 'wf-instance-selected'
+            })
+        }));
+        expect(payload.mcp_access.workflow_execution_traces).toEqual([
+            expect.objectContaining({
+                workflow_id: '#V#chat_narration_workflow',
+                trace_role: 'auxiliary_workflow'
+            }),
+            expect.objectContaining({
+                workflow_id: '#V#arxiv_paper_representation_workflow',
+                instance_id: 'wf-instance-selected',
+                trace_role: 'selected_workflow'
+            })
+        ]);
+    });
+
     test('hydrates popup locator history_location from the server conversation locator when missing locally', async () => {
         const {
             __testOnly_setActiveChatSession,
