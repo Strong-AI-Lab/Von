@@ -32,7 +32,10 @@ from ..action_registry import (
     WorkflowActionResult,
 )
 from ..engine import WorkflowEnvironment, WorkflowExecutor
-from ..mcp_tool_bridge import resolve_internal_mcp_tool_name
+from ..mcp_tool_bridge import (
+    apply_namespace_to_mcp_payload,
+    resolve_internal_mcp_tool_name,
+)
 from ..vontology_loader import discover_workflow_ids, load_workflow_definition_from_vontology
 from ..workflow_creation_contracts import (
     WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
@@ -1718,9 +1721,6 @@ def _gateway_fallback_action(request: WorkflowActionRequest) -> WorkflowActionRe
             error=f"gateway_unavailable_for:{tool_name}",
         )
     payload = dict(request.inputs) if isinstance(request.inputs, Mapping) else {}
-    user_namespace = _clean_text(request.environment.user_namespace)
-    if user_namespace:
-        payload.setdefault("namespace", user_namespace)
     try:
         available_tool_names = tuple(gateway.describe_methods().keys())
         resolved_tool_name = (
@@ -1731,6 +1731,11 @@ def _gateway_fallback_action(request: WorkflowActionRequest) -> WorkflowActionRe
             or tool_name
         )
         method_definition = gateway.get_method_definition(resolved_tool_name)
+        apply_namespace_to_mcp_payload(
+            payload,
+            input_schema=getattr(method_definition, "input_schema", None),
+            user_namespace=_clean_text(request.environment.user_namespace),
+        )
         blocked_result = enforce_workflow_mcp_write_guardrails(
             request=request,
             resolved_tool_name=resolved_tool_name,

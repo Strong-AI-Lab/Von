@@ -24,6 +24,7 @@ from .. import WorkflowRegistry
 from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import (
+    apply_namespace_to_mcp_payload,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -333,9 +334,6 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
 
     payload = dict(getattr(request, "inputs", {}) or {})
     environment = getattr(request, "environment", None)
-    user_namespace = getattr(environment, "user_namespace", None)
-    if isinstance(user_namespace, str) and user_namespace.strip():
-        payload.setdefault("namespace", user_namespace.strip())
 
     try:
         gateway = _get_or_build_durable_mcp_gateway()
@@ -348,6 +346,11 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             or tool_name
         )
         method_definition = gateway.get_method_definition(resolved_tool_name)
+        apply_namespace_to_mcp_payload(
+            payload,
+            input_schema=getattr(method_definition, "input_schema", None),
+            user_namespace=getattr(environment, "user_namespace", None),
+        )
         blocked_result = enforce_workflow_mcp_write_guardrails(
             request=request,
             resolved_tool_name=resolved_tool_name,

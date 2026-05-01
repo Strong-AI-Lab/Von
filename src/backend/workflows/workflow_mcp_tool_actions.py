@@ -19,6 +19,7 @@ from .action_registry import (
     WorkflowActionResult,
 )
 from .mcp_tool_bridge import (
+    apply_namespace_to_mcp_payload,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -137,20 +138,6 @@ def _normalise_tool_payload(inputs: Mapping[str, Any]) -> dict[str, Any]:
         and str(key).strip()
         and str(key).strip() not in _CONTROL_INPUT_KEYS
     }
-
-
-def _method_accepts_namespace(method_definition: Any) -> bool:
-    input_schema = getattr(method_definition, "input_schema", None)
-    if input_schema is None:
-        return True
-    if bool(getattr(input_schema, "allow_unknown", False)):
-        return True
-    required = getattr(input_schema, "required", None)
-    optional = getattr(input_schema, "optional", None)
-    return (
-        (isinstance(required, Mapping) and "namespace" in required)
-        or (isinstance(optional, Mapping) and "namespace" in optional)
-    )
 
 
 def _has_explicit_write_policy(metadata: Mapping[str, Any]) -> bool:
@@ -374,13 +361,11 @@ def _handle_workflow_mcp_invoke_tool(
                 },
             )
 
-        user_namespace = getattr(request.environment, "user_namespace", None)
-        if (
-            isinstance(user_namespace, str)
-            and user_namespace.strip()
-            and _method_accepts_namespace(method_definition)
-        ):
-            payload.setdefault("namespace", user_namespace.strip())
+        apply_namespace_to_mcp_payload(
+            payload,
+            input_schema=getattr(method_definition, "input_schema", None),
+            user_namespace=getattr(request.environment, "user_namespace", None),
+        )
 
         if _runtime_write_policy_missing(
             request=request,

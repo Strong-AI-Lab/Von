@@ -89,7 +89,10 @@ from ...workflows.execution_contracts import (
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     derive_workflow_terminal_status,
 )
-from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
+from ...workflows.mcp_tool_bridge import (
+    apply_namespace_to_mcp_payload,
+    workflow_action_result_from_mcp_payload,
+)
 from ...workflows.workflow_side_effect_guardrails import (
     enforce_workflow_mcp_write_guardrails,
 )
@@ -19289,26 +19292,22 @@ class InternalMCPChatOrchestrator:
                         "value_present": True,
                     }
                 )
-            if "namespace" in payload:
-                payload.pop("namespace", None)
-                bindings.append(
-                    {
-                        "field": "namespace",
-                        "source": "removed_for_gmail_contract",
-                        "value_present": False,
-                    }
-                )
+            namespace_binding = apply_namespace_to_mcp_payload(
+                payload,
+                input_schema=schema,
+                user_namespace=user_namespace,
+            )
+            if namespace_binding is not None:
+                bindings.append(namespace_binding)
             return bindings
 
-        if user_namespace and "namespace" not in payload:
-            payload["namespace"] = user_namespace
-            bindings.append(
-                {
-                    "field": "namespace",
-                    "source": "user_namespace",
-                    "value_present": True,
-                }
-            )
+        namespace_binding = apply_namespace_to_mcp_payload(
+            payload,
+            input_schema=schema,
+            user_namespace=user_namespace,
+        )
+        if namespace_binding is not None:
+            bindings.append(namespace_binding)
 
         # Preserve user-attribution for auto-created concepts so namespace
         # isolation has a deterministic provenance trail (JVNAUTOSCI-925).

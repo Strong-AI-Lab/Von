@@ -168,6 +168,107 @@ def test_workflow_mcp_action_omits_namespace_for_strict_schema_without_namespace
     assert gateway.invocations == [("strict_tool", {"profile": "zhan-gmail"})]
 
 
+def test_workflow_mcp_action_strips_explicit_namespace_for_strict_schema():
+    strict_schema = SimpleNamespace(required={}, optional={}, allow_unknown=False)
+    gateway = _SchemaAwareGateway(
+        category="read",
+        input_schema=strict_schema,
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "payload": payload,
+        },
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "strict_tool",
+            "tool_arguments": {
+                "profile": "zhan-gmail",
+                "namespace": "#V#tester",
+            },
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == [("strict_tool", {"profile": "zhan-gmail"})]
+
+
+def test_turn_recovery_tool_batch_omits_namespace_for_strict_mcp_fallback(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import registry_factory
+    from src.backend.workflows.durable.turn_execution_actions import (
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        register_turn_execution_actions,
+    )
+
+    strict_schema = SimpleNamespace(
+        required={"profile": str},
+        optional={},
+        allow_unknown=False,
+    )
+
+    class _Gateway:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.invocations: list[tuple[str, dict[str, object]]] = []
+
+        def describe_methods(self):
+            return {"gmail_list_labels": {"category": "read"}}
+
+        def get_method_definition(self, method_name: str):
+            if method_name != "gmail_list_labels":
+                return None
+            return SimpleNamespace(category="read", input_schema=strict_schema)
+
+        def invoke(self, method_name: str, payload=None):
+            self.invocations.append((method_name, dict(payload or {})))
+            return SimpleNamespace(
+                payload={"success": True, "labels": []},
+                duration_ms=3.0,
+            )
+
+    gateway = _Gateway()
+    monkeypatch.setattr(
+        registry_factory,
+        "_get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
+
+    result = registry.execute(
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "gmail_list_labels",
+                    "arguments": {"profile": "zhan-gmail"},
+                }
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None, user_namespace="#V#tester"),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == [
+        ("gmail_list_labels", {"profile": "zhan-gmail"})
+    ]
+    assert result.outputs["completion_report"]["status"] == "completed"
+
+
 def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     gateway = _FakeGateway(
         definitions={"delete_concept": "write"},

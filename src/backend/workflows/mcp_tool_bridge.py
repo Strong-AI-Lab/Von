@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 from .action_registry import WorkflowActionResult
@@ -56,6 +56,97 @@ def resolve_internal_mcp_tool_name(
     return None
 
 
+def mcp_input_schema_accepts_namespace(input_schema: Any) -> bool:
+    """Return whether an MCP input schema can receive ``namespace``.
+
+    Namespace is runtime tenancy context, not a universal tool argument. Strict
+    tool schemas that do not declare it must not receive it, otherwise gateway
+    validation fails before the handler can run.
+    """
+
+    if input_schema is None:
+        return True
+    if bool(getattr(input_schema, "allow_unknown", False)):
+        return True
+    if isinstance(input_schema, Mapping) and (
+        bool(input_schema.get("allow_unknown"))
+        or bool(input_schema.get("additionalProperties"))
+    ):
+        return True
+    properties = (
+        input_schema.get("properties") if isinstance(input_schema, Mapping) else None
+    )
+    if isinstance(properties, Mapping) and "namespace" in properties:
+        return True
+
+    required = (
+        input_schema.get("required")
+        if isinstance(input_schema, Mapping)
+        else getattr(input_schema, "required", None)
+    )
+    optional = (
+        input_schema.get("optional")
+        if isinstance(input_schema, Mapping)
+        else getattr(input_schema, "optional", None)
+    )
+    return (
+        (isinstance(required, Mapping) and "namespace" in required)
+        or (
+            isinstance(required, Sequence)
+            and not isinstance(required, (str, bytes, bytearray))
+            and "namespace" in required
+        )
+        or (isinstance(optional, Mapping) and "namespace" in optional)
+        or (
+            isinstance(optional, Sequence)
+            and not isinstance(optional, (str, bytes, bytearray))
+            and "namespace" in optional
+        )
+    )
+
+
+def mcp_method_accepts_namespace(method_definition: Any) -> bool:
+    """Return whether a resolved MCP method can receive ``namespace``."""
+
+    if method_definition is None:
+        return False
+    if isinstance(method_definition, Mapping):
+        return mcp_input_schema_accepts_namespace(method_definition.get("input_schema"))
+    return mcp_input_schema_accepts_namespace(
+        getattr(method_definition, "input_schema", None)
+    )
+
+
+def apply_namespace_to_mcp_payload(
+    payload: MutableMapping[str, Any],
+    *,
+    input_schema: Any,
+    user_namespace: str | None,
+) -> dict[str, Any] | None:
+    """Apply or remove runtime namespace context according to the tool schema."""
+
+    accepts_namespace = mcp_input_schema_accepts_namespace(input_schema)
+    if not accepts_namespace:
+        if "namespace" not in payload:
+            return None
+        payload.pop("namespace", None)
+        return {
+            "field": "namespace",
+            "source": "removed_for_strict_tool_schema",
+            "value_present": False,
+        }
+
+    namespace = str(user_namespace or "").strip() if isinstance(user_namespace, str) else ""
+    if namespace and "namespace" not in payload:
+        payload["namespace"] = namespace
+        return {
+            "field": "namespace",
+            "source": "user_namespace",
+            "value_present": True,
+        }
+    return None
+
+
 def workflow_action_result_from_mcp_payload(
     *,
     tool_name: str,
@@ -92,7 +183,10 @@ def workflow_action_result_from_mcp_payload(
 
 
 __all__ = [
+    "apply_namespace_to_mcp_payload",
     "candidate_internal_mcp_tool_names",
+    "mcp_input_schema_accepts_namespace",
+    "mcp_method_accepts_namespace",
     "resolve_internal_mcp_tool_name",
     "workflow_action_result_from_mcp_payload",
 ]
