@@ -1084,6 +1084,67 @@ def _build_fail_closed_completion_gate_response(
     return status_line
 
 
+def _required_tools_from_turn_context(data: Mapping[str, Any]) -> list[str]:
+    tools: list[str] = []
+    for surface in (
+        data,
+        data.get("completion_report"),
+        data.get("selected_workflow_trace"),
+    ):
+        if not isinstance(surface, Mapping):
+            continue
+        tools.extend(_dedupe_string_sequence(surface.get("required_prompt_tools")))
+        tools.extend(_dedupe_string_sequence(surface.get("missing_prompt_tools")))
+
+    for key in (
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_contract",
+        "expected_outcome_contract_state",
+        "expected_outcome_contract",
+    ):
+        contract = data.get(key)
+        if isinstance(contract, Mapping):
+            tools.extend(_dedupe_string_sequence(contract.get("required_tools")))
+
+    return _dedupe_string_sequence(tools)
+
+
+def _completion_gate_record_lacks_required_tool_effects(
+    *,
+    record: Mapping[str, Any],
+    data: Mapping[str, Any],
+) -> bool:
+    required_tools = _required_tools_from_turn_context(data)
+    if not required_tools:
+        return False
+
+    required_effects = record.get("required_effects")
+    if isinstance(required_effects, list) and required_effects:
+        return False
+
+    gate = record.get("completion_gate")
+    if not isinstance(gate, Mapping):
+        return True
+
+    evidence = gate.get("evidence_payload")
+    required_effect_count = 0
+    if isinstance(evidence, Mapping):
+        try:
+            required_effect_count = int(evidence.get("required_effect_count") or 0)
+        except Exception:
+            required_effect_count = 0
+
+    safe_to_claim = _coerce_bool(
+        gate.get("safe_to_claim_completion"),
+        default=True,
+    )
+    requires_follow_up = _coerce_bool(
+        gate.get("requires_follow_up"),
+        default=False,
+    )
+    return required_effect_count <= 0 and safe_to_claim and not requires_follow_up
+
+
 def render_selected_workflow_user_response(
     *,
     selected_workflow_id: str | None,
@@ -2106,7 +2167,14 @@ def run_turn_execution_completion_gate(
 
     data = request.data
     record = data.get("turn_execution_record")
-    if not isinstance(record, Mapping):
+    record_is_stale = bool(
+        isinstance(record, Mapping)
+        and _completion_gate_record_lacks_required_tool_effects(
+            record=record,
+            data=data,
+        )
+    )
+    if not isinstance(record, Mapping) or record_is_stale:
         critic_result = run_turn_execution_critic(
             request,
             annotation_component=annotation_component,
@@ -2116,6 +2184,31 @@ def run_turn_execution_completion_gate(
         )
         rebuilt_record = critic_result.outputs.get("turn_execution_record")
         record = rebuilt_record if isinstance(rebuilt_record, Mapping) else {}
+        if record_is_stale:
+            aux_llm_calls = data.get("aux_llm_calls")
+            if isinstance(aux_llm_calls, list):
+                try:
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "completion_gate_record_rebuilt",
+                                "reason": "stale_zero_required_effects_with_required_tools",
+                                "required_tools": _required_tools_from_turn_context(
+                                    data
+                                ),
+                            },
+                            stage="completion_gate",
+                            component=annotation_component,
+                            function=annotation_function,
+                            decision_class="completion_gate_record_rebuild",
+                            decision_source="required_tool_contract_presence",
+                            changed_outcome=True,
+                            reason_code="stale_zero_required_effects",
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
+                except Exception:
+                    pass
 
     completion_gate_payload = record.get("completion_gate")
     if not isinstance(completion_gate_payload, Mapping):

@@ -73,7 +73,7 @@ class _JiraGateway:
             handler=lambda **_kwargs: None,
             input_schema=Schema(
                 required={"issue_key": str},
-                optional={"fields": list, "expand": list},
+                optional={"fields": list, "expand": list, "namespace": str},
                 allow_unknown=False,
                 description="jira_get_issue input",
             ),
@@ -88,7 +88,7 @@ class _JiraGateway:
                 "description": "Fetch a Jira issue by issue key",
                 "input_schema": {
                     "required": {"issue_key": str},
-                    "optional": {"fields": list, "expand": list},
+                    "optional": {"fields": list, "expand": list, "namespace": str},
                     "allow_unknown": False,
                     "description": "jira_get_issue input",
                 },
@@ -110,6 +110,54 @@ class _JiraGateway:
             },
             duration_ms=1.0,
         )
+
+
+class _CreateConceptsGateway:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+        self._definition = MethodDefinition(
+            name="create_concepts",
+            handler=lambda **_kwargs: None,
+            input_schema=Schema(
+                required={"parent_id": str, "concepts": list},
+                optional={"namespace": str},
+                allow_unknown=False,
+                description=(
+                    "create_concepts input: parent_id (str, parent concept_id), "
+                    "concepts (list of {name, kind?, description?, notes?})."
+                ),
+            ),
+            category="write",
+            description="Create Vontology concepts under a parent type.",
+        )
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "create_concepts": {
+                "category": "write",
+                "description": "Create Vontology concepts under a parent type.",
+                "input_schema": {
+                    "required": {"parent_id": str, "concepts": list},
+                    "optional": {"namespace": str},
+                    "allow_unknown": False,
+                    "description": (
+                        "create_concepts input: parent_id (str, parent concept_id), "
+                        "concepts (list of {name, kind?, description?, notes?})."
+                    ),
+                },
+            }
+        }
+
+    def get_method_definition(self, method_name: str) -> MethodDefinition | None:
+        if method_name == "create_concepts":
+            return self._definition
+        return None
+
+    def invoke(self, tool_name: str, payload: Mapping[str, Any]) -> _TransportResult:
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        return _TransportResult(payload={"ok": True}, duration_ms=1.0)
 
 
 class _SequencedLLM:
@@ -219,6 +267,63 @@ def _tool_calling_request(
     )
 
 
+def _validation_request(
+    *,
+    gateway: Any,
+) -> SimpleNamespace:
+    data: dict[str, Any] = {
+        "tool_calls": [
+            {
+                "tool": "create_concepts",
+                "payload": {
+                    "concepts": [{"name": "Assistant label", "kind": "type"}],
+                    "namespace": "#V#user",
+                },
+            }
+        ],
+        "required_prompt_tools": ["create_concepts", "add_relationship"],
+        "missing_prompt_tools": [],
+        "prompt": "Create the represented ontology artefacts.",
+        "prompt_for_requirements": "Create the represented ontology artefacts.",
+        "policy_state": SimpleNamespace(enabled=False, policy=None),
+        "registry_snapshot": {},
+        "model_for_stage": lambda _stage: None,
+        "record_llm_call": lambda **_kwargs: None,
+        "aux_llm_calls": [],
+        "llm_calls": [],
+        "invocations": [],
+        "tool_messages": [],
+        "tool_call_repair_attempts": 0,
+        "tool_call_repair_budget": 0,
+        "llm_allowed_tools": ["create_concepts", "add_relationship"],
+        "method_catalogue": gateway.describe_methods(),
+        "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: OrchestratorResult(
+            response_text="Tool validation failed.",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        ),
+    }
+    return SimpleNamespace(
+        action_id="tool_calling.validate",
+        data=data,
+        environment=SimpleNamespace(
+            llm_client=_SequencedLLM([]),
+            gateway=gateway,
+            model=None,
+            user_namespace="#V#user",
+            max_tool_invocations=4,
+            max_tool_result_chars=4000,
+            max_tool_result_field_chars=2000,
+            default_gmail_profile=None,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="validate",
+        workflow_state_metadata={},
+    )
+
+
 @pytest.fixture(autouse=True)
 def _stub_authoritative_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -297,6 +402,31 @@ def test_tool_call_repair_recovers_invalid_payload(
     assert gateway.invocations[0]["payload"]["query"].strip()
     assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()
+
+
+def test_required_tool_validation_failure_surfaces_missing_required_tool() -> None:
+    gateway = _CreateConceptsGateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+
+    action_result = orchestrator._action_tool_calling_validate(
+        _validation_request(gateway=gateway)
+    )
+
+    assert action_result.status == "success"
+    assert action_result.outputs["tool_calls_validated"] is False
+    assert action_result.outputs["tool_call_validation_required_failed_tools"] == [
+        "create_concepts"
+    ]
+    assert action_result.outputs["missing_prompt_tools"] == [
+        "create_concepts",
+        "add_relationship",
+    ]
+    required_errors = action_result.outputs[
+        "tool_call_validation_required_tool_errors"
+    ]
+    assert required_errors[0]["tool"] == "create_concepts"
+    assert "parent_id" in required_errors[0]["message"]
+    assert gateway.invocations == []
 
 
 def test_tool_call_repair_recovers_unknown_tool_with_params(

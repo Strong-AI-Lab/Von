@@ -7611,6 +7611,9 @@ class InternalMCPChatOrchestrator:
             "tool_call_validation_warnings",
             "tool_call_validation_unavailable_tools",
             "tool_call_validation_diagnostics",
+            "tool_call_validation_failed_tools",
+            "tool_call_validation_required_failed_tools",
+            "tool_call_validation_required_tool_errors",
             "tool_call_repaired_calls",
             "tool_payload_support_events",
         ):
@@ -8551,6 +8554,26 @@ class InternalMCPChatOrchestrator:
                 and self._tool_call_repair_enabled()
                 and repair_remaining > 0
             )
+            validation_failure_context = (
+                self._required_tool_validation_failure_context(
+                    diagnostics=preflight.diagnostics,
+                    required_tools=(
+                        data.get("required_prompt_tools")
+                        if isinstance(data.get("required_prompt_tools"), list)
+                        else []
+                    ),
+                    existing_missing_tools=(
+                        data.get("missing_prompt_tools")
+                        if isinstance(data.get("missing_prompt_tools"), list)
+                        else []
+                    ),
+                    tool_invocations=(
+                        data.get("invocations")
+                        if isinstance(data.get("invocations"), list)
+                        else []
+                    ),
+                )
+            )
 
             data["tool_call_validation_errors"] = list(preflight.errors)
             data["tool_call_validation_warnings"] = list(preflight.warnings)
@@ -8558,6 +8581,25 @@ class InternalMCPChatOrchestrator:
                 preflight.tool_unavailable
             )
             data["tool_call_validation_diagnostics"] = list(preflight.diagnostics)
+            data["tool_call_validation_failed_tools"] = list(
+                validation_failure_context.get("tool_call_validation_failed_tools")
+                or []
+            )
+            data["tool_call_validation_required_failed_tools"] = list(
+                validation_failure_context.get(
+                    "tool_call_validation_required_failed_tools"
+                )
+                or []
+            )
+            data["tool_call_validation_required_tool_errors"] = list(
+                validation_failure_context.get(
+                    "tool_call_validation_required_tool_errors"
+                )
+                or []
+            )
+            data["missing_prompt_tools"] = list(
+                validation_failure_context.get("missing_prompt_tools") or []
+            )
             data["raw_tool_plan_text"] = raw_tool_call
             data["tool_call_validation_error_pending"] = True
             data["tool_call_repair_required"] = repair_required
@@ -8609,6 +8651,16 @@ class InternalMCPChatOrchestrator:
                             preflight.tool_unavailable
                         ),
                         "tool_call_validation_diagnostics": list(preflight.diagnostics),
+                        "tool_call_validation_failed_tools": list(
+                            data["tool_call_validation_failed_tools"]
+                        ),
+                        "tool_call_validation_required_failed_tools": list(
+                            data["tool_call_validation_required_failed_tools"]
+                        ),
+                        "tool_call_validation_required_tool_errors": list(
+                            data["tool_call_validation_required_tool_errors"]
+                        ),
+                        "missing_prompt_tools": list(data["missing_prompt_tools"]),
                         "raw_tool_plan_text": raw_tool_call,
                         "tool_call_repair_attempts": repair_attempts,
                         "tool_call_repair_budget": repair_budget,
@@ -8644,6 +8696,16 @@ class InternalMCPChatOrchestrator:
                             if repair_budget <= repair_attempts
                             else "validation_failed"
                         ),
+                        "tool_call_validation_failed_tools": list(
+                            data["tool_call_validation_failed_tools"]
+                        ),
+                        "tool_call_validation_required_failed_tools": list(
+                            data["tool_call_validation_required_failed_tools"]
+                        ),
+                        "tool_call_validation_required_tool_errors": list(
+                            data["tool_call_validation_required_tool_errors"]
+                        ),
+                        "missing_prompt_tools": list(data["missing_prompt_tools"]),
                         "orchestrator_result": error_result,
                         "result": False,
                     }
@@ -8664,6 +8726,9 @@ class InternalMCPChatOrchestrator:
                 "tool_call_validation_warnings": list(preflight.warnings),
                 "tool_call_validation_unavailable_tools": [],
                 "tool_call_validation_diagnostics": list(preflight.diagnostics),
+                "tool_call_validation_failed_tools": [],
+                "tool_call_validation_required_failed_tools": [],
+                "tool_call_validation_required_tool_errors": [],
                 "result": True,
             }
         )
@@ -8752,10 +8817,21 @@ class InternalMCPChatOrchestrator:
                 max_chars=8000,
             )
         )
-        preferred_tools = (
-            list(data.get("missing_prompt_tools"))
-            if isinstance(data.get("missing_prompt_tools"), list)
-            else []
+        preferred_tools = list(
+            self._ordered_unique_tool_names(
+                [
+                    *(
+                        list(data.get("missing_prompt_tools"))
+                        if isinstance(data.get("missing_prompt_tools"), list)
+                        else []
+                    ),
+                    *(
+                        list(data.get("required_prompt_tools"))
+                        if isinstance(data.get("required_prompt_tools"), list)
+                        else []
+                    ),
+                ]
+            )
         )
 
         next_attempts = repair_attempts + 1
@@ -13617,27 +13693,124 @@ class InternalMCPChatOrchestrator:
         if not required_tools:
             return []
 
-        def _tool_requirement_key(tool_name: str) -> str:
-            lowered = tool_name.strip().lower()
-            if lowered in {"search_concepts", "vontology_concept_search"}:
-                return "concept_search"
-            return lowered
-
         observed_tools: set[str] = set()
         for invocation in tool_invocations:
             if not isinstance(invocation, Mapping):
                 continue
+            if not InternalMCPChatOrchestrator._tool_invocation_completed_successfully(
+                invocation
+            ):
+                continue
             raw_tool = invocation.get("tool")
             if isinstance(raw_tool, str) and raw_tool.strip():
-                observed_tools.add(_tool_requirement_key(raw_tool))
+                observed_tools.add(
+                    InternalMCPChatOrchestrator._tool_requirement_key(raw_tool)
+                )
 
         return [
             tool_name
             for tool_name in required_tools
             if isinstance(tool_name, str)
             and tool_name.strip()
-            and _tool_requirement_key(tool_name) not in observed_tools
+            and InternalMCPChatOrchestrator._tool_requirement_key(tool_name)
+            not in observed_tools
         ]
+
+    @staticmethod
+    def _tool_requirement_key(tool_name: Any) -> str:
+        cleaned = str(tool_name or "").strip().lower()
+        if cleaned in {"search_concepts", "vontology_concept_search"}:
+            return "concept_search"
+        return cleaned
+
+    @classmethod
+    def _required_tool_validation_failure_context(
+        cls,
+        *,
+        diagnostics: Sequence[Mapping[str, Any]],
+        required_tools: Sequence[Any],
+        existing_missing_tools: Sequence[Any],
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        required_by_key: dict[str, str] = {}
+        for raw_tool_name in required_tools:
+            if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                continue
+            key = cls._tool_requirement_key(raw_tool_name)
+            if key and key not in required_by_key:
+                required_by_key[key] = raw_tool_name.strip()
+
+        failed_tools: list[str] = []
+        required_failed_tools: list[str] = []
+        required_tool_errors: list[dict[str, Any]] = []
+        seen_failed: set[str] = set()
+        seen_required_failed: set[str] = set()
+
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, Mapping):
+                continue
+            tool_name = diagnostic.get("tool")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                continue
+            clean_tool_name = tool_name.strip()
+            tool_key = cls._tool_requirement_key(clean_tool_name)
+            if tool_key and tool_key not in seen_failed:
+                seen_failed.add(tool_key)
+                failed_tools.append(clean_tool_name)
+            required_tool_name = required_by_key.get(tool_key)
+            if not required_tool_name:
+                continue
+            if tool_key not in seen_required_failed:
+                seen_required_failed.add(tool_key)
+                required_failed_tools.append(required_tool_name)
+            error_payload: dict[str, Any] = {
+                "tool": required_tool_name,
+                "planned_tool": clean_tool_name,
+                "error_code": str(diagnostic.get("error_code") or "").strip(),
+                "message": str(diagnostic.get("message") or "").strip(),
+            }
+            payload = diagnostic.get("payload")
+            if isinstance(payload, Mapping):
+                error_payload["payload"] = dict(payload)
+            contract = diagnostic.get("contract")
+            if isinstance(contract, Mapping):
+                error_payload["contract"] = dict(contract)
+            required_tool_errors.append(
+                {key: value for key, value in error_payload.items() if value}
+            )
+
+        missing_tools = cls._missing_prompt_tool_requirements(
+            required_tools=[
+                tool_name
+                for tool_name in required_by_key.values()
+                if isinstance(tool_name, str)
+            ],
+            tool_invocations=tool_invocations,
+        )
+        missing_by_key = {
+            cls._tool_requirement_key(tool_name)
+            for tool_name in missing_tools
+            if isinstance(tool_name, str)
+        }
+        for raw_tool_name in existing_missing_tools:
+            if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                continue
+            key = cls._tool_requirement_key(raw_tool_name)
+            if key and key not in missing_by_key:
+                missing_by_key.add(key)
+                missing_tools.append(raw_tool_name.strip())
+        for tool_name in required_failed_tools:
+            key = cls._tool_requirement_key(tool_name)
+            if key and key not in missing_by_key:
+                missing_by_key.add(key)
+                missing_tools.append(tool_name)
+
+        return {
+            "tool_call_validation_failed_tools": failed_tools,
+            "tool_call_validation_required_failed_tools": required_failed_tools,
+            "tool_call_validation_required_tool_errors": required_tool_errors,
+            "missing_prompt_tools": missing_tools,
+        }
 
     @classmethod
     def _extract_fetch_concept_ids_from_invocations(

@@ -4386,6 +4386,208 @@ def _extract_required_tool_names_from_aux(
     )
 
 
+def _extract_tool_call_validation_failure_context(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    failures_by_tool: dict[str, dict[str, Any]] = {}
+    ordered_failed_tools: list[str] = []
+    repair_outcome = ""
+    repair_stop_reason = ""
+    repair_decision: dict[str, Any] | None = None
+
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        entry_type = (_safe_str(entry.get("type")) or "").lower()
+        if entry_type == "tool_call_validation_repair_result":
+            raw_decision = entry.get("decision")
+            repair_decision = (
+                dict(raw_decision) if isinstance(raw_decision, Mapping) else None
+            )
+            if isinstance(repair_decision, Mapping):
+                repair_outcome = (
+                    "repair_succeeded"
+                    if bool(repair_decision.get("succeeded"))
+                    else "repair_failed"
+                )
+                repair_stop_reason = _safe_str(repair_decision.get("reason"))
+            continue
+        if entry_type != "tool_contract_attempt":
+            continue
+
+        diagnostics = entry.get("diagnostics")
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, Mapping):
+                continue
+            tool_name = _safe_str(diagnostic.get("tool"))
+            if not tool_name:
+                continue
+            tool_key = _tool_requirement_key(tool_name)
+            if tool_key not in failures_by_tool:
+                failures_by_tool[tool_key] = {
+                    "tool": tool_name,
+                    "errors": [],
+                }
+                ordered_failed_tools.append(tool_name)
+            error_payload: dict[str, Any] = {
+                "tool": tool_name,
+                "error_code": _safe_str(diagnostic.get("error_code")),
+                "message": _safe_str(diagnostic.get("message")),
+            }
+            payload = diagnostic.get("payload")
+            if isinstance(payload, Mapping):
+                error_payload["payload"] = dict(payload)
+            contract = diagnostic.get("contract")
+            if isinstance(contract, Mapping):
+                error_payload["contract"] = dict(contract)
+            failures_by_tool[tool_key]["errors"].append(
+                {key: value for key, value in error_payload.items() if value}
+            )
+
+        if diagnostics:
+            continue
+        tool_calls = entry.get("tool_calls")
+        validation_errors: list[str] = []
+        for raw_error in entry.get("validation_errors") or []:
+            error = _safe_str(raw_error)
+            if error:
+                validation_errors.append(error)
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, Mapping):
+                continue
+            tool_name = _safe_str(tool_call.get("tool"))
+            if not tool_name:
+                continue
+            matching_errors = [
+                error
+                for error in validation_errors
+                if error.lower().startswith(f"{tool_name.lower()}:")
+            ]
+            if not matching_errors:
+                continue
+            tool_key = _tool_requirement_key(tool_name)
+            if tool_key not in failures_by_tool:
+                failures_by_tool[tool_key] = {
+                    "tool": tool_name,
+                    "errors": [],
+                }
+                ordered_failed_tools.append(tool_name)
+            for error in matching_errors:
+                failures_by_tool[tool_key]["errors"].append(
+                    {
+                        "tool": tool_name,
+                        "error_code": "schema_validation_failed",
+                        "message": error,
+                    }
+                )
+
+    return {
+        "failed_tools": ordered_failed_tools,
+        "failures_by_tool": failures_by_tool,
+        "repair_outcome": repair_outcome,
+        "repair_stop_reason": repair_stop_reason,
+        "repair_decision": repair_decision,
+    }
+
+
+def _apply_tool_call_validation_failures_to_required_effects(
+    *,
+    required_effects: Sequence[Mapping[str, Any]],
+    validation_failure_context: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(validation_failure_context, Mapping):
+        return [
+            dict(effect)
+            for effect in required_effects
+            if isinstance(effect, Mapping)
+        ]
+    failures_by_tool_raw = validation_failure_context.get("failures_by_tool")
+    if not isinstance(failures_by_tool_raw, Mapping) or not failures_by_tool_raw:
+        return [
+            dict(effect)
+            for effect in required_effects
+            if isinstance(effect, Mapping)
+        ]
+
+    failures_by_tool: dict[str, Mapping[str, Any]] = {
+        _tool_requirement_key(tool_key): failure
+        for tool_key, failure in failures_by_tool_raw.items()
+        if isinstance(failure, Mapping) and _tool_requirement_key(tool_key)
+    }
+    repair_outcome = _safe_str(validation_failure_context.get("repair_outcome"))
+    repair_stop_reason = _safe_str(validation_failure_context.get("repair_stop_reason"))
+    repair_decision = validation_failure_context.get("repair_decision")
+    updated_effects: list[dict[str, Any]] = []
+
+    for raw_effect in required_effects:
+        if not isinstance(raw_effect, Mapping):
+            continue
+        effect = dict(raw_effect)
+        required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
+        matched_failure: Mapping[str, Any] | None = None
+        for tool_name in required_tools:
+            failure = failures_by_tool.get(_tool_requirement_key(tool_name))
+            if isinstance(failure, Mapping):
+                matched_failure = failure
+                break
+        if matched_failure is None:
+            updated_effects.append(effect)
+            continue
+
+        errors = [
+            dict(error)
+            for error in (matched_failure.get("errors") or [])
+            if isinstance(error, Mapping)
+        ]
+        first_message = next(
+            (
+                _safe_str(error.get("message"))
+                for error in errors
+                if _safe_str(error.get("message"))
+            ),
+            "",
+        )
+        first_error_code = next(
+            (
+                _safe_str(error.get("error_code"))
+                for error in errors
+                if _safe_str(error.get("error_code"))
+            ),
+            "",
+        )
+        failure_code = (
+            _safe_str(effect.get("failed_failure_code"))
+            or f"{_effect_failure_code_slug(effect)}_validation_failed"
+        )
+        failure_codes = _normalise_failure_codes(effect.get("failure_codes"))
+        for code in (failure_code, first_error_code, "tool_call_validation_failed"):
+            if code and code not in failure_codes:
+                failure_codes.append(code)
+
+        effect["status"] = "not_satisfied"
+        effect["status_reason"] = (
+            first_message
+            or _safe_str(effect.get("failed_reason"))
+            or "Required tool call failed validation before execution."
+        )
+        effect["failure_code"] = failure_code
+        effect["failure_codes"] = failure_codes
+        effect["tool_call_validation_errors"] = errors
+        if repair_outcome:
+            effect["tool_call_repair_outcome"] = repair_outcome
+        if repair_stop_reason:
+            effect["tool_call_repair_stop_reason"] = repair_stop_reason
+        if isinstance(repair_decision, Mapping):
+            effect["tool_call_repair_decision"] = dict(repair_decision)
+        updated_effects.append(effect)
+
+    return updated_effects
+
+
 def _extract_required_scholarly_file_copy_ids_from_aux(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> list[str]:
@@ -6725,6 +6927,14 @@ def build_turn_execution_record(
     required_effects.extend(prompt_required_evidence_effects)
     required_effects.extend(workflow_required_effects)
 
+    tool_call_validation_failure_context = (
+        _extract_tool_call_validation_failure_context(aux_llm_calls)
+    )
+    required_effects = _apply_tool_call_validation_failures_to_required_effects(
+        required_effects=required_effects,
+        validation_failure_context=tool_call_validation_failure_context,
+    )
+
     mutation_effects: list[dict[str, Any]] = []
     if not representation_effects and not workflow_required_effects:
         # Mutation effects must remain tool-authored or workflow-authored.
@@ -6735,7 +6945,8 @@ def build_turn_execution_record(
     required_effects.extend(mutation_effects)
 
     if (
-        not mutation_effects
+        not required_effects
+        and not mutation_effects
         and not successful_write_tools
         and not representation_effects
         and not workflow_required_effects
@@ -6757,6 +6968,31 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
         observed_equivalent_tools=execution_surface_observed_tools,
     )
+    failed_validation_tools = _dedupe_string_sequence(
+        tool_call_validation_failure_context.get("failed_tools") or []
+    )
+    if failed_validation_tools:
+        execution_summary = dict(execution_summary)
+        execution_summary["tool_call_validation_failed_tools"] = list(
+            failed_validation_tools
+        )
+        execution_summary["tool_call_validation_error_count"] = sum(
+            len(failure.get("errors") or [])
+            for failure in (
+                tool_call_validation_failure_context.get("failures_by_tool") or {}
+            ).values()
+            if isinstance(failure, Mapping)
+        )
+        repair_outcome = _safe_str(
+            tool_call_validation_failure_context.get("repair_outcome")
+        )
+        repair_stop_reason = _safe_str(
+            tool_call_validation_failure_context.get("repair_stop_reason")
+        )
+        if repair_outcome:
+            execution_summary["tool_call_repair_outcome"] = repair_outcome
+        if repair_stop_reason:
+            execution_summary["tool_call_repair_stop_reason"] = repair_stop_reason
     workflow_routing_diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery=workflow_discovery,
         workflow_routing=workflow_routing,
