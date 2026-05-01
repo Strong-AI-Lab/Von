@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from .text_value_service import upsert_singleton_text_relation
+from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
     WorkflowPromptConceptSpec,
     ensure_prompt_concept_support,
     prompt_concept_has_content,
+    safe_str,
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from ..workflows.definitions import (
@@ -150,6 +151,31 @@ def _load_tool_call_repair_prompt_seed_text() -> str:
     return prompt_text
 
 
+def _prompt_seed_needs_refresh(
+    prompt_concept_id: str,
+    *,
+    required_markers: tuple[str, ...],
+) -> bool:
+    try:
+        rows = get_texts_for_concept(
+            subject_concept_id=prompt_concept_id,
+            limit=16,
+        )
+    except Exception:
+        return False
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        predicate = safe_str(row.get("predicate"))
+        if predicate not in {"hasContent", "#V#hasContent"}:
+            continue
+        text = safe_str(row.get("text")) or ""
+        if text and any(marker not in text for marker in required_markers):
+            return True
+    return False
+
+
 def _ensure_conversation_turn_prompt_support(
     *,
     force_prompt_seed: bool = False,
@@ -208,8 +234,9 @@ def _ensure_conversation_turn_prompt_support(
                     "action requiring MCP tools but omits the executable "
                     "tool-call JSON. The prompt instructs the model to use "
                     "available generic Vontology mutation tools for explicit "
-                    "low-risk additive writes rather than inventing "
-                    "domain-specific tool names."
+                    "low-risk additive writes, and exact external write tools "
+                    "for explicitly requested side effects, rather than "
+                    "inventing domain-specific tool names."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -238,8 +265,13 @@ def _ensure_conversation_turn_prompt_support(
     )
 
     seeded_prompt_ids: list[str] = []
-    if force_prompt_seed or not prompt_concept_has_content(
-        _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
+            required_markers=("gmail_send_message", "external-system side effect"),
+        )
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -282,8 +314,13 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
+            required_markers=("gmail_send_message", "external-system side effect"),
+        )
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,

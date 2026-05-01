@@ -1,9 +1,9 @@
 """Gmail utility layer for MCP/email workflows.
 
-Provides profile-based access to Gmail with read-focused helpers suitable
-for Von's agent and user mailboxes. Profiles are loaded from environment
-variables to avoid hardcoding credentials. The helpers are intentionally
-read-only and require explicit opt-in for any mutation scopes.
+Provides profile-based access to Gmail with read helpers and guarded
+send/mutation helpers suitable for Von's agent and user mailboxes. Profiles are
+loaded from environment variables to avoid hardcoding credentials. Read-only is
+the default posture; mutations require explicit opt-in flags and OAuth scopes.
 """
 
 from __future__ import annotations
@@ -325,9 +325,7 @@ def list_profile_summaries(
         authorised: Optional[str] = None
         if callable(_get_agent_gmail_token_status):
             try:
-                authorised = _get_agent_gmail_token_status(
-                    profile_id
-                ).authorised_email
+                authorised = _get_agent_gmail_token_status(profile_id).authorised_email
             except Exception:  # pragma: no cover - defensive
                 authorised = None
         summaries.append({"profile_id": profile_id, "authorised_email": authorised})

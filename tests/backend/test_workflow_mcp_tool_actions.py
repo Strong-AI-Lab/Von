@@ -9,7 +9,9 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.durable.subworkflow_actions import register_subworkflow_actions
+from src.backend.workflows.durable.subworkflow_actions import (
+    register_subworkflow_actions,
+)
 from src.backend.workflows.workflow_mcp_tool_actions import (
     WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
     register_workflow_mcp_tool_actions,
@@ -34,8 +36,7 @@ class _FakeGateway:
 
     def describe_methods(self):
         return {
-            name: {"category": category}
-            for name, category in self._definitions.items()
+            name: {"category": category} for name, category in self._definitions.items()
         }
 
     def get_method_definition(self, method_name: str):
@@ -55,7 +56,9 @@ class _FakeGateway:
 
 class _SchemaAwareGateway(_FakeGateway):
     def __init__(self, *, category: str, input_schema, payload_factory) -> None:
-        super().__init__(definitions={"strict_tool": category}, payload_factory=payload_factory)
+        super().__init__(
+            definitions={"strict_tool": category}, payload_factory=payload_factory
+        )
         self._input_schema = input_schema
 
     def get_method_definition(self, method_name: str):
@@ -91,9 +94,7 @@ def test_workflow_mcp_action_invokes_read_tool_and_maps_structured_output():
                         action_id=WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
                         inputs={
                             "tool_name": "demo.echo",
-                            "tool_arguments": {
-                                "message": {"$context_key": "message"}
-                            },
+                            "tool_arguments": {"message": {"$context_key": "message"}},
                         },
                     ),
                 ),
@@ -197,6 +198,78 @@ def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     assert result.error == "workflow_mcp_write_policy_missing:delete_concept"
     assert result.outputs["mutation_guardrail_blocked"] is True
     assert gateway.invocations == []
+
+
+def test_workflow_mcp_action_invokes_gmail_send_with_represented_external_policy():
+    from src.backend.workflows.write_tool_policy import (
+        WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+        WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+    )
+
+    gateway = _FakeGateway(
+        definitions={"gmail_send_message": "write"},
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "id": "gmail-msg-1",
+            "message_id": "gmail-msg-1",
+            "profile": payload.get("profile"),
+            "to": payload.get("to"),
+            "subject": payload.get("subject"),
+        },
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "gmail_send_message",
+            "tool_arguments": {
+                "profile": "zhan-gmail",
+                "to": "witbrock@gmail.com",
+                "subject": "Hi From Von",
+                "body_text": "A short authorised test body.",
+                "allow_send": True,
+            },
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+        workflow_id="#V#gmail_send_capability_workflow",
+        workflow_state_id="send",
+        workflow_state_metadata={
+            "mutation_authority": {
+                "schema_version": WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+                "maximum_level": "external_system_guarded",
+            },
+            "workflow_execution_side_effect_policy": {
+                "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+                "mode": "theory_bounded",
+                "testing_theory_id": "#V#gmail_send_capability_test",
+                "allowed_write_tools": ["gmail_send_message"],
+            },
+        },
+    )
+
+    assert result.status == "success"
+    assert result.outputs["result"]["message_id"] == "gmail-msg-1"
+    assert result.outputs["mcp_resolved_tool"] == "gmail_send_message"
+    assert gateway.invocations == [
+        (
+            "gmail_send_message",
+            {
+                "profile": "zhan-gmail",
+                "to": "witbrock@gmail.com",
+                "subject": "Hi From Von",
+                "body_text": "A short authorised test body.",
+                "allow_send": True,
+                "namespace": "#V#tester",
+            },
+        )
+    ]
 
 
 def test_workflow_mcp_output_can_feed_subworkflow_without_tool_batch_action():

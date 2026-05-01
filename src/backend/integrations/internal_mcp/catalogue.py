@@ -3404,7 +3404,9 @@ def _normalise_acquisition_result_contract(
 ) -> dict[str, Any]:
     """Fail closed when an acquisition success lacks its required artefact handle."""
 
-    normalised = {str(key): value for key, value in payload.items() if isinstance(key, str)}
+    normalised = {
+        str(key): value for key, value in payload.items() if isinstance(key, str)
+    }
     if normalised.get("success") is False:
         return normalised
 
@@ -19686,7 +19688,7 @@ def _rag_sync_text_relations(**kwargs):
     return payload
 
 
-# Gmail MCP handlers (read-only surface)
+# Gmail MCP handlers (profile-scoped read/write surface)
 _GMAIL_DETAIL_FIELDS = ("sender", "subject", "date", "snippet")
 
 
@@ -27747,7 +27749,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "Use this to debug search/extraction failures or verify Tavily API connectivity."
             ),
         ),
-        # Gmail MCP tools (read-only surface)
+        # Gmail MCP tools (profile-scoped read/write surface)
         MethodDefinition(
             name="gmail_list_profiles",
             handler=_gmail_list_profiles,

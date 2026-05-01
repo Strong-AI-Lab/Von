@@ -100,7 +100,11 @@ def _write_tool_request_evidence_prompt_seed_needs_refresh() -> bool:
         if predicate not in {"hasContent", "#V#hasContent"}:
             continue
         text = safe_str(row.get("text")) or ""
-        if text and "denial_state" not in text:
+        if text and (
+            "denial_state" not in text
+            or "external-system side effects" not in text
+            or "gmail_send_message" not in text
+        ):
             return True
     return False
 
@@ -116,7 +120,8 @@ def ensure_write_tool_request_evidence_prompt_support(
                 name="Write-tool request evidence inference prompt",
                 description=(
                     "Canonical prompt for inferring structured write-request and "
-                    "destructive-confirmation evidence for proposed write tools."
+                    "destructive-confirmation evidence for proposed write tools, "
+                    "including guarded external side effects."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -155,7 +160,9 @@ def ensure_write_tool_request_evidence_prompt_support(
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
     missing_content_prompt_ids = list(report.get("missing_content_prompt_ids") or [])
-    prompt_ready = prompt_concept_has_content(WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID)
+    prompt_ready = prompt_concept_has_content(
+        WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID
+    )
     if prompt_ready:
         errors_by_target.pop(WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID, None)
         missing_content_prompt_ids = [
@@ -385,7 +392,11 @@ def infer_write_tool_request_evidence(
         variables={
             "current_prompt": str(prompt or "").strip(),
             "recent_user_prompts_json": json.dumps(
-                [str(item).strip() for item in (recent_user_prompts or []) if str(item).strip()],
+                [
+                    str(item).strip()
+                    for item in (recent_user_prompts or [])
+                    if str(item).strip()
+                ],
                 ensure_ascii=True,
                 sort_keys=True,
             ),
@@ -427,7 +438,9 @@ def infer_write_tool_request_evidence(
 
     parsed_payload, parse_mode = _extract_json_payload(str(raw_response or ""))
     diagnostics["parse_mode"] = parse_mode
-    diagnostics["status"] = "ok" if isinstance(parsed_payload, Mapping) else "parse_failed"
+    diagnostics["status"] = (
+        "ok" if isinstance(parsed_payload, Mapping) else "parse_failed"
+    )
     normalised = _normalise_tool_evidence(
         parsed_payload if isinstance(parsed_payload, Mapping) else {},
         requested_tools=requested,

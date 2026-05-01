@@ -36,9 +36,7 @@ SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
-POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
-    "#V#prompt_turn_execution_postcondition_critic"
-)
+POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_postcondition_critic"
 
 
 @pytest.fixture
@@ -106,6 +104,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "Use `task_create` only when the user asks for a task" in (
         expected_outcome_text
     )
+    assert "external-system side effect" in expected_outcome_text
+    assert "gmail_send_message" in expected_outcome_text
+    assert "allow_send=true" in expected_outcome_text
+    assert '"required_tools":["gmail_send_message"]' in expected_outcome_text
 
     missing_tool_retry_rows = get_texts_for_concept(
         MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
@@ -124,15 +126,16 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "Choose exact tool names from the available tool list" in (
         missing_tool_retry_text
     )
-    assert "`create_concepts` for the represented instance" in (
-        missing_tool_retry_text
-    )
+    assert "`create_concepts` for the represented instance" in (missing_tool_retry_text)
     assert "`upsert_singleton_text_relation` for supplied content" in (
         missing_tool_retry_text
     )
     assert "Do NOT invent domain-specific tool names such as `diary_create`" in (
         missing_tool_retry_text
     )
+    assert "external-system side effect" in missing_tool_retry_text
+    assert "`gmail_send_message`" in missing_tool_retry_text
+    assert "Gmail list/read/label tools" in missing_tool_retry_text
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
@@ -273,7 +276,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     prelude_action = turn_definition.states[prelude_step_id].actions[0]
     assert prelude_action.action_id == "workflow_invoke_subworkflow"
-    assert prelude_action.subworkflow_id == WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+    assert (
+        prelude_action.subworkflow_id == WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+    )
     prelude_definition = load_workflow_definition_from_vontology(
         WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
     )
@@ -302,9 +307,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         assert action.inputs["predicate"] == predicate_id
         assert action.inputs["limit"] == 5
         assert action.inputs["sort_recent_first"] is True
-        mappings = prelude_definition.states[step_id].metadata.get(
-            "tool_output_context_mappings"
-        ) or []
+        mappings = (
+            prelude_definition.states[step_id].metadata.get(
+                "tool_output_context_mappings"
+            )
+            or []
+        )
         assert any(
             mapping.get("tool_output_field") == "result.relations"
             and mapping.get("context_key") == context_key

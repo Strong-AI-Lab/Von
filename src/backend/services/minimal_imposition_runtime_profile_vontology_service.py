@@ -81,6 +81,7 @@ _DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
     "download_paper": "additive_low_risk",
     "finalise_cached_paper": "additive_low_risk",
     "gmail_modify_labels": "external_non_vontology",
+    "gmail_send_message": "external_non_vontology",
     "import_url_file_copy": "additive_low_risk",
     "issue_write": "external_non_vontology",
     "jira_add_attachment": "external_non_vontology",
@@ -289,9 +290,7 @@ def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
 def _profile_display_name(profile: Mapping[str, Any]) -> str:
     profile_id = _safe_str(profile.get("profile_id")) or "minimal imposition runtime"
     pretty = profile_id.replace("_", " ").strip()
-    return (
-        f"{pretty[:1].upper() + pretty[1:] if pretty else 'Minimal imposition runtime'} profile"
-    )
+    return f"{pretty[:1].upper() + pretty[1:] if pretty else 'Minimal imposition runtime'} profile"
 
 
 def canonical_minimal_imposition_runtime_profile_concept_ids() -> tuple[str, ...]:
@@ -301,8 +300,12 @@ def canonical_minimal_imposition_runtime_profile_concept_ids() -> tuple[str, ...
     )
 
 
-def canonical_minimal_imposition_runtime_profile_blueprints() -> tuple[dict[str, Any], ...]:
-    return tuple(dict(item) for item in _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS)
+def canonical_minimal_imposition_runtime_profile_blueprints() -> (
+    tuple[dict[str, Any], ...]
+):
+    return tuple(
+        dict(item) for item in _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS
+    )
 
 
 def _normalise_profile(
@@ -311,7 +314,9 @@ def _normalise_profile(
     profile_concept_id: str,
 ) -> dict[str, Any]:
     decision_policy = raw_profile.get("decision_policy")
-    decision_policy = dict(decision_policy) if isinstance(decision_policy, Mapping) else {}
+    decision_policy = (
+        dict(decision_policy) if isinstance(decision_policy, Mapping) else {}
+    )
     scenario_policies = raw_profile.get("scenario_policies")
     scenario_policies = (
         list(scenario_policies) if isinstance(scenario_policies, Sequence) else []
@@ -456,7 +461,9 @@ def load_minimal_imposition_runtime_profile(
         return None, diagnostics
 
     for predicate in _PROFILE_TEXT_PREDICATES:
-        texts = get_texts_for_concept(resolved_profile_id, predicate=predicate, limit=10)
+        texts = get_texts_for_concept(
+            resolved_profile_id, predicate=predicate, limit=10
+        )
         for row in texts:
             text = _safe_str((row or {}).get("text"))
             if not text:

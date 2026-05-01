@@ -40,6 +40,10 @@ def test_classify_write_tool_risk_covers_policy_classes():
         classify_write_tool_risk("jira_create_issue")
         == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
+    assert (
+        classify_write_tool_risk("gmail_send_message")
+        == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
+    )
     assert classify_write_tool_risk("task_create") == WRITE_RISK_ADDITIVE_LOW_RISK
     assert (
         classify_write_tool_risk("task_update_status")
@@ -47,12 +51,10 @@ def test_classify_write_tool_risk_covers_policy_classes():
     )
     assert classify_write_tool_risk("task_delete") == WRITE_RISK_DESTRUCTIVE
     assert (
-        classify_write_tool_risk("jira_move_issue")
-        == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
+        classify_write_tool_risk("jira_move_issue") == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
     assert (
-        classify_write_tool_risk("import_url_file_copy")
-        == WRITE_RISK_ADDITIVE_LOW_RISK
+        classify_write_tool_risk("import_url_file_copy") == WRITE_RISK_ADDITIVE_LOW_RISK
     )
 
 
@@ -272,6 +274,27 @@ def test_external_write_requires_explicit_request():
     assert decision.reason == REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST
 
 
+def test_explicit_request_allows_gmail_send_external_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Send an email from zhan-gmail to witbrock@gmail.com now.",
+        requested_tools=["gmail_send_message"],
+        request_evidence=_request_evidence(
+            "gmail_send_message",
+            request_state="explicit_request",
+            rationale="current prompt explicitly asks Von to send email",
+        ),
+        recent_user_prompts=[],
+    )
+
+    assert "gmail_send_message" in decision.allowed_tools
+    assert decision.reason == REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST
+
+
 def test_global_mutation_authority_caps_external_write():
     from src.backend.workflows.write_tool_policy import (
         MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
@@ -440,4 +463,3 @@ def test_workflow_execution_policy_allows_allowlisted_write_in_theory_scope():
 
     assert "add_relationship" in decision.allowed_tools
     assert decision.reason == REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST
-

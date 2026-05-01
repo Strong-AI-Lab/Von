@@ -78,9 +78,23 @@ def test_ensure_canonical_minimal_imposition_runtime_profiles_creates_and_links(
         "#V#write_tool_policy_workflow",
         "#V#has_minimal_imposition_runtime_profile",
     ) in texts_by_concept
+    profile_payload = json.loads(
+        texts_by_concept[
+            (
+                "#V#minimal_imposition_runtime_profile_write_policy_v1",
+                "#V#has_minimal_imposition_runtime_profile_json",
+            )
+        ]
+    )
+    assert (
+        profile_payload["tool_risk_classes"]["gmail_send_message"]
+        == "external_non_vontology"
+    )
 
 
-def test_load_minimal_imposition_runtime_profile_uses_workflow_link(monkeypatch) -> None:
+def test_load_minimal_imposition_runtime_profile_uses_workflow_link(
+    monkeypatch,
+) -> None:
     payload = {
         "profile_id": "write_policy_runtime_v1",
         "decision_policy": {
@@ -103,13 +117,15 @@ def test_load_minimal_imposition_runtime_profile_uses_workflow_link(monkeypatch)
     monkeypatch.setattr(
         service,
         "get_concept_by_concept_id",
-        lambda concept_id: {"concept_id": concept_id, "relationships": {}}
-        if concept_id
-        in {
-            "#V#minimal_imposition_runtime_profile_write_policy_v1",
-            "#V#write_tool_policy_workflow",
-        }
-        else None,
+        lambda concept_id: (
+            {"concept_id": concept_id, "relationships": {}}
+            if concept_id
+            in {
+                "#V#minimal_imposition_runtime_profile_write_policy_v1",
+                "#V#write_tool_policy_workflow",
+            }
+            else None
+        ),
     )
 
     def _mock_get_texts_for_concept(concept_id: str, predicate: str, limit: int = 1):

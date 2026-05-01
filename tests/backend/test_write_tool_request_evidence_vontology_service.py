@@ -53,6 +53,8 @@ def test_ensure_prompt_support_seeds_missing_prompt(monkeypatch):
     assert seeded[0]["subject_concept_id"] == (
         service.WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID
     )
+    assert "external-system side effects" in seeded[0]["text"]
+    assert "gmail_send_message" in seeded[0]["text"]
 
 
 def test_infer_write_tool_request_evidence_parses_structured_response(monkeypatch):

@@ -127,6 +127,11 @@ _DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
         evidence_surface_family="jira",
         external_surface=True,
     ),
+    "gmail": ToolDispatchSurfaceMetadata(
+        surface_family="gmail",
+        evidence_surface_family="gmail",
+        external_surface=True,
+    ),
     "task": ToolDispatchSurfaceMetadata(
         surface_family="task",
         evidence_surface_family="task",
@@ -464,6 +469,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "Sent message: {subject}",
+        "planner_hint": (
+            "Use only when the user explicitly asks Von to send outbound email. "
+            "Required payload fields are profile, to, subject, body_text, and "
+            "allow_send=true; the result is Gmail send metadata, not the body."
+        ),
     },
     "gmail_get_attachment": {
         "salience": "medium",

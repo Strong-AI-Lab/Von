@@ -17,6 +17,7 @@ Task:
 - For destructive tools, separately decide whether explicit destructive confirmation is present.
 - If the request is unclear, return low confidence rather than guessing.
 - For additive ingestion tools, a directly supplied artefact or URL can count as an explicit request for that ingestion side effect when the current prompt clearly presents it for action.
+- For external-system side effects, including outbound Gmail/email sending through `gmail_send_message`, the current prompt must clearly ask Von to perform the external action; a draft, list, summary, or hypothetical plan is not enough.
 
 Return strict JSON only with this shape:
 {
