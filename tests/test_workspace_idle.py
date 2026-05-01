@@ -314,6 +314,29 @@ def test_workspace_idle_main_fails_closed_when_fast_windows_snapshot_is_empty(
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out.splitlines() == ["NO"]
+    assert captured.err == ""
+
+
+def test_workspace_idle_main_reports_failure_diagnostics_without_no_fail(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(check_workspace_idle.os, "name", "nt")
+    monkeypatch.setattr(workspace_idle, "iter_fast_local_processes", lambda: [])
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--ignore-recent-repo-activity",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out.splitlines() == ["NO"]
     assert "fast Windows process snapshot returned no rows" in captured.err
 
 
@@ -386,4 +409,37 @@ def test_powershell_wrapper_falls_back_after_broken_python_candidate(
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == ["YES"]
+    assert completed.stderr == ""
+
+
+@pytest.mark.skipif(not POWERSHELL_EXE, reason="PowerShell is required")
+def test_powershell_wrapper_no_fail_missing_entrypoint_is_exact_no(
+    tmp_path: Path,
+) -> None:
+    assert POWERSHELL_EXE is not None
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copyfile(
+        REPO_ROOT / "scripts" / "check_workspace_idle.ps1",
+        scripts_dir / "check_workspace_idle.ps1",
+    )
+
+    completed = subprocess.run(
+        [
+            POWERSHELL_EXE,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(scripts_dir / "check_workspace_idle.ps1"),
+            "--no-fail",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["NO"]
     assert completed.stderr == ""

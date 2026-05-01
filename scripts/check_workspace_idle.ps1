@@ -5,6 +5,26 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 $PythonScript = Join-Path $ScriptDir "check_workspace_idle.py"
 $PythonCandidateFailures = New-Object System.Collections.Generic.List[string]
+$NoFailRequested = $ForwardedArgs -contains "--no-fail"
+$JsonOutputRequested = $ForwardedArgs -contains "--json"
+
+function Complete-WorkspaceIdleFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Summary,
+        [string[]] $Details = @()
+    )
+
+    Write-Output "NO"
+    if (-not $NoFailRequested) {
+        [Console]::Error.WriteLine("workspace idle check failed: $Summary")
+        foreach ($detail in $Details) {
+            [Console]::Error.WriteLine("workspace idle check failed: $detail")
+        }
+        exit 2
+    }
+    exit 0
+}
 
 function Add-WorkspaceIdleExcludedPid {
     $pids = @()
@@ -65,12 +85,34 @@ function Invoke-WorkspaceIdlePython {
     $trimmedStdout = $stdout.Trim()
     $hasAuthoritativeOutput = $trimmedStdout -eq "YES" -or $trimmedStdout -eq "NO"
 
-    if ($hasAuthoritativeOutput -or $exitCode -eq 0) {
+    if ($hasAuthoritativeOutput) {
+        [Console]::Out.Write($stdout)
+        if ($stderr -and -not $NoFailRequested) {
+            [Console]::Error.Write($stderr)
+        }
+        if ($NoFailRequested) {
+            exit 0
+        }
+        exit $exitCode
+    }
+
+    if ($exitCode -eq 0) {
+        if ($JsonOutputRequested) {
+            [Console]::Out.Write($stdout)
+            if ($stderr) {
+                [Console]::Error.Write($stderr)
+            }
+            exit 0
+        }
+        if ($NoFailRequested) {
+            Write-Output "NO"
+            exit 0
+        }
         [Console]::Out.Write($stdout)
         if ($stderr) {
             [Console]::Error.Write($stderr)
         }
-        exit $exitCode
+        exit 0
     }
 
     $candidateLabel = @($PythonCommand) + @($PythonPrefixArgs) -join " "
@@ -89,9 +131,7 @@ function Invoke-WorkspaceIdlePython {
 }
 
 if (-not (Test-Path -LiteralPath $PythonScript -PathType Leaf)) {
-    Write-Output "NO"
-    [Console]::Error.WriteLine("workspace idle check failed: Python entry point not found at $PythonScript")
-    exit 2
+    Complete-WorkspaceIdleFailure -Summary "Python entry point not found at $PythonScript"
 }
 
 $candidatePaths = @()
@@ -122,13 +162,10 @@ foreach ($commandName in @("python.exe", "python3.exe", "python", "python3")) {
     }
 }
 
-Write-Output "NO"
 if ($PythonCandidateFailures.Count -gt 0) {
-    [Console]::Error.WriteLine("workspace idle check failed: no Python interpreter could run $PythonScript")
-    foreach ($failure in $PythonCandidateFailures) {
-        [Console]::Error.WriteLine("workspace idle check failed: $failure")
-    }
+    Complete-WorkspaceIdleFailure `
+        -Summary "no Python interpreter could run $PythonScript" `
+        -Details $PythonCandidateFailures.ToArray()
 } else {
-    [Console]::Error.WriteLine("workspace idle check failed: no Python interpreter was found")
+    Complete-WorkspaceIdleFailure -Summary "no Python interpreter was found"
 }
-exit 2

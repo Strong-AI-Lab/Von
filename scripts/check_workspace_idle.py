@@ -261,7 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print("NO")
-            print(f"workspace idle check failed: {exc}", file=sys.stderr)
+            if not args.no_fail:
+                print(f"workspace idle check failed: {exc}", file=sys.stderr)
         return 0 if args.no_fail else 2
 
     _print_assessment(
