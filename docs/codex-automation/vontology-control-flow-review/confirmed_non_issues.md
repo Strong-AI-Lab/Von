@@ -35,6 +35,18 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   namespace and write guardrails. File only if tool choice or domain process
   policy is added there rather than represented workflow metadata.
 
+## Inspected, Not Filed On 2026-05-02
+
+- `conversation_turn_stage_model.py`: current evidence points to stage
+  labelling/telemetry support. File only if stage specs start pruning context,
+  changing user-facing response semantics, or overriding workflow authority.
+- `renderer_applicability_vontology_service.py`: renderer-profile seed
+  blueprints are watch-listed, but the stronger live issue is
+  `JVNAUTOSCI-2234` for concept-summary panel construction after applicability.
+- `scripts/publish_email_resource_link_extraction_workflow.py`: one-shot
+  publication script for a Vontology workflow. File only if it becomes a normal
+  runtime workflow source or recurring Python workflow authoring pathway.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.

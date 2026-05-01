@@ -43,3 +43,25 @@
 - Inspected `tool_result_hint_actions.py` and `workflow_mcp_tool_actions.py`;
   treated them as generic support surfaces, not new drift tasks.
 - No production code was changed.
+
+## 2026-05-02T03:13:26.5808015+12:00
+
+- Ran `python scripts\check_workflow_purity.py --verbose`; all counters were
+  zero and the workflow-purity gate passed.
+- Created `JVNAUTOSCI-2234` for concept-summary panel policy in
+  `concept_summary_renderer_service.py`: renderer-id branches, domain panel
+  builders, section labels, field order, and type exclusions are still
+  Python-authored user-visible information policy.
+- Created `JVNAUTOSCI-2235` for file-copy semantic typing and route hints in
+  `file_copy_typing_service.py`: regexes, semantic type blueprints, score
+  thresholds, and route-hint taxonomy are still Python-authored before being
+  persisted as Vontology facts.
+- Updated `JVNAUTOSCI-1985` with current evidence that
+  `minimal_imposition_runtime_profile_vontology_service.py` still falls back
+  to Python default decision policy/tool risk classes, including recent Gmail
+  tool-risk entries.
+- Inspected `conversation_turn_stage_model.py`,
+  `renderer_applicability_vontology_service.py`, and
+  `scripts/publish_email_resource_link_extraction_workflow.py`; left them as
+  watch items rather than filing new tasks this run.
+- No production code was changed.

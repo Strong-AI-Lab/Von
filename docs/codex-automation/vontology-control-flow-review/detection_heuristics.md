@@ -25,6 +25,16 @@ represented authority before filing Jira work.
   `workflow_authoring.resolve_<domain>`, hard-coded type/predicate defaults,
   domain profile fields, and tests asserting those action ids are strong
   represented-authority drift signals.
+- User-visible renderer services that query Vontology metadata but then branch
+  on renderer IDs or domain concept families to choose section labels, field
+  ordering, expanded panels, or type exclusions are information-policy drift.
+- File-copy typing/routing services need a split read: MIME/extension evidence
+  extraction can be support logic, but semantic categories such as scholarly
+  paper, CV, business card, meeting transcript, or email message are represented
+  workflow/profile policy when they influence routing or persisted KB facts.
+- Vontology profile services that fall back at runtime to canonical Python
+  default decision policies, tool-risk classes, or profile blueprints are
+  authority seams even when they also materialise those defaults into KB.
 
 ## 2026-04-30 Examples
 
@@ -36,3 +46,5 @@ represented authority before filing Jira work.
 - File-copy entity materialisation contract bindings: `JVNAUTOSCI-2216`.
 - PhD-student workflow-authoring action contracts and handlers:
   `JVNAUTOSCI-2219`.
+- Concept-summary renderer panel policy: `JVNAUTOSCI-2234`.
+- File-copy semantic typing and route hints: `JVNAUTOSCI-2235`.

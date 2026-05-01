@@ -30,6 +30,15 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-2219` - PhD-student workflow-authoring policy, profile fields,
   domain action ids, and relationship/postcondition handling in Python.
 
+## 2026-05-02 Drift Tasks
+
+- `JVNAUTOSCI-2234` - concept-summary renderer panel policy, field/section
+  layout, domain labels, and type exclusions in Python.
+- `JVNAUTOSCI-2235` - file-copy semantic typing and route hints in Python
+  before Vontology persistence.
+- `JVNAUTOSCI-1985` - updated with minimal-imposition runtime profile fallback
+  evidence; do not create a duplicate for Python default tool-risk classes.
+
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to
 `JVNAUTOSCI-1913`.
