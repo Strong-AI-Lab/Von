@@ -48,6 +48,8 @@ if TYPE_CHECKING:
         validate_mongo_startup_or_raise,
     )
     from ..services.settings_service import (
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+        INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
         get_internal_mcp_max_tool_invocations,
         get_internal_mcp_tool_batch_cap,
     )
@@ -154,6 +156,8 @@ _bind_imports(
 _bind_imports(
     "src.backend.services.settings_service",
     [
+        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT",
+        "INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT",
         "get_internal_mcp_max_tool_invocations",
         "get_internal_mcp_tool_batch_cap",
     ],
@@ -2148,11 +2152,13 @@ def _configure_internal_mcp_orchestrator_startup(app: Flask, gateway_instance) -
             try:
                 bootstrap_max_tool_invocations = get_internal_mcp_max_tool_invocations()
             except Exception:
-                bootstrap_max_tool_invocations = 30
+                bootstrap_max_tool_invocations = (
+                    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+                )
             try:
                 bootstrap_tool_batch_cap = get_internal_mcp_tool_batch_cap()
             except Exception:
-                bootstrap_tool_batch_cap = 10
+                bootstrap_tool_batch_cap = INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT
             orchestrator_instance = InternalMCPChatOrchestrator(
                 gateway=gateway_instance,
                 logger=orchestrator_logger,

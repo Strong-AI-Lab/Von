@@ -28,6 +28,8 @@ from ...services.settings_service import (
     set_org_enabled_llm_settings,
     set_disable_remote_ollama_scan,
     set_show_tool_use_during_thinking,
+    get_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
     set_internal_mcp_max_tool_invocations,
     set_internal_mcp_tool_batch_cap,
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
@@ -839,6 +841,7 @@ def save_all_settings():
         workflow_capability_rebuild = None
         llm_scope = None
         llm_scope_concept_id = None
+        internal_mcp_caps_updated = False
         if "disable_write_tool_conservatism" in data:
             if not _is_admin_or_owner_session():
                 return (
@@ -1136,6 +1139,7 @@ def save_all_settings():
                     400,
                 )
             set_internal_mcp_max_tool_invocations(parsed_invocations)
+            internal_mcp_caps_updated = True
             current_app.logger.info("internal_mcp_max_tool_invocations updated")
 
         if "internal_mcp_tool_batch_cap" in data:
@@ -1176,7 +1180,24 @@ def save_all_settings():
                     400,
                 )
             set_internal_mcp_tool_batch_cap(parsed_batch)
+            internal_mcp_caps_updated = True
             current_app.logger.info("internal_mcp_tool_batch_cap updated")
+
+        if internal_mcp_caps_updated:
+            try:
+                orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
+                if orchestrator is not None and hasattr(
+                    orchestrator, "configure_execution_caps"
+                ):
+                    orchestrator.configure_execution_caps(
+                        max_tool_invocations=get_internal_mcp_max_tool_invocations(),
+                        tool_batch_cap=get_internal_mcp_tool_batch_cap(),
+                    )
+            except Exception:
+                current_app.logger.warning(
+                    "Failed to refresh internal MCP orchestrator caps after settings save.",
+                    exc_info=True,
+                )
 
         if "show_tool_use_during_thinking" in data:
             try:

@@ -93,6 +93,12 @@ const LS_CARTOUCHE_SHOW_ID = 'von_cartouche_show_id';
 const LS_CARTOUCHE_SHOW_KIND = 'von_cartouche_show_kind';
 const LS_CARTOUCHE_KIND_AS_BG = 'von_cartouche_kind_as_background';
 const RUNTIME_REFRESH_MS = 12000;
+const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT = 100;
+const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN = 0;
+const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
+const INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10;
+const INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1;
+const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
 
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
@@ -1653,6 +1659,102 @@ function clampNumber(value, minValue, maxValue, fallbackValue) {
   return Math.min(Math.max(num, minValue), maxValue);
 }
 
+function normaliseInternalMcpCapSettings(settings = {}) {
+  const maxInvocationsRaw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_max_tool_invocations')
+    ? settings.internal_mcp_max_tool_invocations
+    : INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT;
+  const batchCapRaw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_tool_batch_cap')
+    ? settings.internal_mcp_tool_batch_cap
+    : INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT;
+
+  return {
+    internal_mcp_max_tool_invocations: clampNumber(
+      maxInvocationsRaw,
+      INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+      INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
+      INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+    ),
+    internal_mcp_tool_batch_cap: clampNumber(
+      batchCapRaw,
+      INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+      INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
+      INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
+    ),
+  };
+}
+
+function readInternalMcpCapSettingsFromForm() {
+  return normaliseInternalMcpCapSettings({
+    internal_mcp_max_tool_invocations: document.getElementById('internalMcpMaxToolInvocations')?.value,
+    internal_mcp_tool_batch_cap: document.getElementById('internalMcpToolBatchCap')?.value,
+  });
+}
+
+function populateInternalMcpCapInputs(settings = {}) {
+  const caps = normaliseInternalMcpCapSettings(settings);
+  const maxInvEl = document.getElementById('internalMcpMaxToolInvocations');
+  if (maxInvEl) {
+    maxInvEl.value = String(caps.internal_mcp_max_tool_invocations);
+  }
+  const batchCapEl = document.getElementById('internalMcpToolBatchCap');
+  if (batchCapEl) {
+    batchCapEl.value = String(caps.internal_mcp_tool_batch_cap);
+  }
+}
+
+function normaliseInternalMcpCapInputsInPlace() {
+  const caps = readInternalMcpCapSettingsFromForm();
+  populateInternalMcpCapInputs(caps);
+  return caps;
+}
+
+async function persistInternalMcpCapInputs() {
+  normaliseInternalMcpCapInputsInPlace();
+  const saved = await saveAllSettings();
+  if (!saved) {
+    throw new Error('Settings save did not complete.');
+  }
+  showStatusMessage('settingsStatusMessage', 'Saved. Applies to new chat turns.', false);
+}
+
+function setupInternalMcpCapAutoSave({
+  saveFn = persistInternalMcpCapInputs,
+  debounceMs = 600,
+} = {}) {
+  const controls = [
+    document.getElementById('internalMcpMaxToolInvocations'),
+    document.getElementById('internalMcpToolBatchCap'),
+  ].filter(Boolean);
+
+  let pendingTimer = null;
+  const clearPending = () => {
+    if (pendingTimer !== null) {
+      window.clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+  };
+  const saveNow = () => {
+    clearPending();
+    Promise.resolve(saveFn()).catch((error) => {
+      console.warn('Failed to save internal MCP execution caps', error);
+      showStatusMessage('settingsStatusMessage', 'Failed to save setting', true);
+    });
+  };
+  const scheduleSave = () => {
+    clearPending();
+    pendingTimer = window.setTimeout(saveNow, Math.max(0, debounceMs));
+  };
+
+  controls.forEach((control) => {
+    if (control.__vonInternalMcpCapAutoSaveBound) {
+      return;
+    }
+    control.__vonInternalMcpCapAutoSaveBound = true;
+    control.addEventListener('input', scheduleSave);
+    control.addEventListener('change', saveNow);
+  });
+}
+
 function normaliseLanguageSetting(value) {
   return String(value ?? '').trim();
 }
@@ -2436,6 +2538,22 @@ export function __testOnly_initialiseSettingsConcernNavigation() {
   initialiseSettingsConcernNavigation();
 }
 
+export function __testOnly_normaliseInternalMcpCapSettings(settings = {}) {
+  return normaliseInternalMcpCapSettings(settings);
+}
+
+export function __testOnly_readInternalMcpCapSettingsFromForm() {
+  return readInternalMcpCapSettingsFromForm();
+}
+
+export function __testOnly_populateInternalMcpCapInputs(settings = {}) {
+  return populateInternalMcpCapInputs(settings);
+}
+
+export function __testOnly_setupInternalMcpCapAutoSave(options = {}) {
+  return setupInternalMcpCapAutoSave(options);
+}
+
 function isSettingsRuntimePanelVisible() {
   try {
     const frameEl = window.frameElement;
@@ -2849,6 +2967,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateGmailProfileStatus();
     });
   }
+
+  setupInternalMcpCapAutoSave();
 });
 
 // Expose a lightweight hook so inline auth script can refresh org selector post-login
@@ -3335,20 +3455,7 @@ async function loadAndDisplaySettings() {
 
     // Populate internal MCP execution caps
     try {
-      const maxInvEl = document.getElementById('internalMcpMaxToolInvocations');
-      if (maxInvEl) {
-        const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_max_tool_invocations')
-          ? settings.internal_mcp_max_tool_invocations
-          : 30;
-        maxInvEl.value = String(clampNumber(raw, 0, 50, 30));
-      }
-      const batchCapEl = document.getElementById('internalMcpToolBatchCap');
-      if (batchCapEl) {
-        const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_tool_batch_cap')
-          ? settings.internal_mcp_tool_batch_cap
-          : 10;
-        batchCapEl.value = String(clampNumber(raw, 1, 50, 10));
-      }
+      populateInternalMcpCapInputs(settings);
     } catch { }
 
     // Populate tool-use during thinking toggle (JVNAUTOSCI-942)
@@ -3592,18 +3699,7 @@ async function saveAllSettings() {
     preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
     fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
     disable_remote_ollama_scan: !!document.getElementById('disableRemoteOllamaScanToggle')?.checked,
-    internal_mcp_max_tool_invocations: clampNumber(
-      document.getElementById('internalMcpMaxToolInvocations')?.value,
-      0,
-      50,
-      30,
-    ),
-    internal_mcp_tool_batch_cap: clampNumber(
-      document.getElementById('internalMcpToolBatchCap')?.value,
-      1,
-      50,
-      10,
-    ),
+    ...readInternalMcpCapSettingsFromForm(),
     show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
     buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
     auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,

@@ -164,6 +164,14 @@ from src.backend.services.buttonify_service import (
     enforce_buttonify_prompt_contract,
 )
 from src.backend.services.namespace_service import derive_actor_context_from_namespace
+from src.backend.services.settings_service import (
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+    INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
+    INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
+    INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+)
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
@@ -3333,8 +3341,8 @@ class InternalMCPChatOrchestrator:
         *,
         gateway: InternalMCPGateway,
         logger: logging.Logger | None = None,
-        max_tool_invocations: int = 1,
-        tool_batch_cap: int = 4,
+        max_tool_invocations: int = INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+        tool_batch_cap: int = INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
         default_gmail_profile: str | None = None,
         max_context_chars: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -3342,8 +3350,14 @@ class InternalMCPChatOrchestrator:
     ) -> None:
         self._gateway = gateway
         self._logger = logger or logging.getLogger(__name__)
-        self._max_tool_invocations = max(0, int(max_tool_invocations))
-        self._tool_batch_cap = max(1, int(tool_batch_cap))
+        self._max_tool_invocations = max(
+            INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+            min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, int(max_tool_invocations)),
+        )
+        self._tool_batch_cap = max(
+            INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+            min(INTERNAL_MCP_TOOL_BATCH_CAP_MAX, int(tool_batch_cap)),
+        )
         # Per-turn retry budget for missing-tool-call recovery.
         # Keep this bounded to avoid retry thrashing when multiple malformed
         # tool-call responses occur in the same turn.
@@ -3534,14 +3548,20 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 coerced = self._max_tool_invocations
             # Safety clamp.
-            self._max_tool_invocations = max(0, min(50, coerced))
+            self._max_tool_invocations = max(
+                INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+                min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, coerced),
+            )
 
         if tool_batch_cap is not None:
             try:
                 coerced = int(tool_batch_cap)
             except Exception:
                 coerced = self._tool_batch_cap
-            self._tool_batch_cap = max(1, min(50, coerced))
+            self._tool_batch_cap = max(
+                INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+                min(INTERNAL_MCP_TOOL_BATCH_CAP_MAX, coerced),
+            )
 
         if max_missing_tool_call_retries_per_turn is not None:
             self._max_missing_tool_call_retries_per_turn = (
@@ -3665,7 +3685,10 @@ class InternalMCPChatOrchestrator:
         if raw_value is None:
             return int(self._max_tool_invocations)
         try:
-            return max(0, min(50, int(raw_value)))
+            return max(
+                INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+                min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, int(raw_value)),
+            )
         except Exception:
             return int(self._max_tool_invocations)
 
@@ -8403,7 +8426,7 @@ class InternalMCPChatOrchestrator:
         """
         data = request.data
         env = request.environment
-        llm_client = env.llm_client
+        _ = env.llm_client
         tool_calls = data.get("tool_calls")
         if not tool_calls:
             return WorkflowActionResult(
@@ -8414,14 +8437,14 @@ class InternalMCPChatOrchestrator:
                 }
             )
 
-        policy_state = data["policy_state"]
-        registry_snapshot = data.get("registry_snapshot")
-        user_concept_id = data.get("user_concept_id")
-        org_concept_id = data.get("org_concept_id")
-        model_for_stage = data["model_for_stage"]
-        record_llm_call = data["record_llm_call"]
+        for required_key in (
+            "policy_state",
+            "model_for_stage",
+            "record_llm_call",
+            "llm_calls",
+        ):
+            data[required_key]
         aux_llm_calls = data["aux_llm_calls"]
-        llm_calls = data["llm_calls"]
         gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
         conversation_session_id = data.get("conversation_session_id")
 
@@ -28143,16 +28166,6 @@ class InternalMCPChatOrchestrator:
         )
 
         primary_concept_id = concept_ids[0]
-        target_concept_sources: Mapping[str, Sequence[str]] = {
-            "focal_concept": concept_ids,
-            "recent_resolved_concept_ids": concept_ids,
-            "ontology_follow_up_concept_ids": concept_ids,
-            "predicate_incidence_follow_up_concept_ids": (),
-            "turn_expected_outcome.target_concept_ids": (),
-            "missing_required_fetch_concept_ids": (),
-            "authenticated_user_concept_id": (),
-            "uncertainty_source_concept_ids": concept_ids,
-        }
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_tools:
             if tool_name == "get_predicate_incidence":

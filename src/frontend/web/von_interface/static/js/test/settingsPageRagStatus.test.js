@@ -5,11 +5,15 @@ import {
     __testOnly_formatServerDefaultSummary,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
+    __testOnly_normaliseInternalMcpCapSettings,
+    __testOnly_populateInternalMcpCapInputs,
+    __testOnly_readInternalMcpCapSettingsFromForm,
     __testOnly_populateServerDefaultLlmForm,
     __testOnly_readRuntimeModelSettingFromForm,
     __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
     __testOnly_syncInitialScopedSelections,
+    __testOnly_setupInternalMcpCapAutoSave,
 } from '../settingsPage.js';
 
 describe('settingsPage RAG status summary', () => {
@@ -339,6 +343,60 @@ describe('settingsPage RAG status summary', () => {
 
         const option = document.querySelector('#currentUserSelect option');
         expect(__testOnly_buildStoredUserContextFromOption(option)).toBeNull();
+    });
+
+    test('internal MCP caps default and clamp to the UI/backend contract', () => {
+        expect(__testOnly_normaliseInternalMcpCapSettings({})).toEqual({
+            internal_mcp_max_tool_invocations: 100,
+            internal_mcp_tool_batch_cap: 10,
+        });
+
+        expect(__testOnly_normaliseInternalMcpCapSettings({
+            internal_mcp_max_tool_invocations: 999,
+            internal_mcp_tool_batch_cap: 99,
+        })).toEqual({
+            internal_mcp_max_tool_invocations: 500,
+            internal_mcp_tool_batch_cap: 20,
+        });
+    });
+
+    test('internal MCP cap form values can persist 100 and 10', () => {
+        document.body.innerHTML = `
+            <input id="internalMcpMaxToolInvocations" value="100" />
+            <input id="internalMcpToolBatchCap" value="10" />
+        `;
+
+        expect(__testOnly_readInternalMcpCapSettingsFromForm()).toEqual({
+            internal_mcp_max_tool_invocations: 100,
+            internal_mcp_tool_batch_cap: 10,
+        });
+    });
+
+    test('internal MCP cap inputs are populated with canonical defaults', () => {
+        document.body.innerHTML = `
+            <input id="internalMcpMaxToolInvocations" value="" />
+            <input id="internalMcpToolBatchCap" value="" />
+        `;
+
+        __testOnly_populateInternalMcpCapInputs({});
+
+        expect(document.getElementById('internalMcpMaxToolInvocations').value).toBe('100');
+        expect(document.getElementById('internalMcpToolBatchCap').value).toBe('10');
+    });
+
+    test('internal MCP cap inputs auto-save when changed', () => {
+        document.body.innerHTML = `
+            <input id="internalMcpMaxToolInvocations" value="100" />
+            <input id="internalMcpToolBatchCap" value="10" />
+        `;
+        const saveFn = jest.fn().mockResolvedValue(true);
+
+        __testOnly_setupInternalMcpCapAutoSave({ saveFn });
+        document
+            .getElementById('internalMcpMaxToolInvocations')
+            .dispatchEvent(new Event('change'));
+
+        expect(saveFn).toHaveBeenCalledTimes(1);
     });
 
     test('stored browser-test user is re-injected and selected when the dropdown is rebuilt without it', () => {

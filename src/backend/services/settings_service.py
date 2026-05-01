@@ -46,7 +46,7 @@ INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocati
 INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
 # Canonical cap defaults/clamps must stay aligned across getters, settings batch,
 # runtime bootstrap, and MCP surfaces so users do not see contradictory budgets.
-INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT = 30
+INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT = 100
 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN = 0
 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500
 INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10
@@ -346,13 +346,17 @@ def get_all_settings_batch() -> Dict[str, Any]:
             raw.get(AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME),
             default=True,
         ),
-        "internal_mcp_max_tool_invocations": _coerce_int(
+        "internal_mcp_max_tool_invocations": _coerce_int_setting(
             raw.get(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME),
             default=INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+            min_value=INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+            max_value=INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
         ),
-        "internal_mcp_tool_batch_cap": _coerce_int(
+        "internal_mcp_tool_batch_cap": _coerce_int_setting(
             raw.get(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME),
             default=INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
+            min_value=INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+            max_value=INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
         ),
         "disable_write_tool_conservatism": _coerce_bool(
             raw.get(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME), default=False
@@ -1463,7 +1467,7 @@ def _coerce_int_setting(
 def get_internal_mcp_max_tool_invocations() -> int:
     """Return the maximum number of internal MCP tool calls per chat turn.
 
-    Defaults to 30 when unset/invalid.
+    Defaults to 100 when unset/invalid.
     """
 
     val = get_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME)

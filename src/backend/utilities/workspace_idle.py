@@ -65,6 +65,7 @@ _INTERACTIVE_SHELL_NAMES: set[str] = {
 }
 
 _EXCLUDED_PIDS_ENV = "VON_WORKSPACE_IDLE_EXCLUDE_PIDS"
+_WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -512,7 +513,9 @@ def _parse_windows_process_csv(raw_output: str) -> list[ProcessSnapshot]:
     return rows
 
 
-def iter_windows_cim_processes(*, timeout_seconds: float = 3.0) -> list[ProcessSnapshot]:
+def iter_windows_cim_processes(
+    *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
+) -> list[ProcessSnapshot]:
     """Fast Windows process snapshot using scalar CIM fields.
 
     psutil command-line enumeration can be very slow on process-heavy Windows
@@ -553,7 +556,9 @@ def iter_windows_cim_processes(*, timeout_seconds: float = 3.0) -> list[ProcessS
     return _parse_windows_process_csv(completed.stdout or "")
 
 
-def iter_fast_local_processes(*, timeout_seconds: float = 3.0) -> list[ProcessSnapshot]:
+def iter_fast_local_processes(
+    *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
+) -> list[ProcessSnapshot]:
     """Return a fast local process snapshot where the host supports one."""
 
     if os.name == "nt":

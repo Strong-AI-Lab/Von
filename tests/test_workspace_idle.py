@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from src.backend.utilities import workspace_idle
 from src.backend.utilities.workspace_idle import (
     ProcessSnapshot,
     RepoActivityAssessment,
@@ -251,6 +252,50 @@ def test_parse_windows_process_csv_builds_snapshots() -> None:
             create_time=1000.0,
         )
     ]
+
+
+def test_fast_windows_snapshot_default_timeout_is_generous(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+    rows = [ProcessSnapshot(pid=123, name="python.exe", cmdline=("python",))]
+
+    monkeypatch.setattr(workspace_idle.os, "name", "nt")
+
+    def fake_cim_processes(*, timeout_seconds: float) -> list[ProcessSnapshot]:
+        captured["timeout_seconds"] = timeout_seconds
+        return rows
+
+    def fail_full_scan(*, include_cwd: bool = False) -> list[ProcessSnapshot]:
+        raise AssertionError("fast Windows process snapshot should not fall back")
+
+    monkeypatch.setattr(workspace_idle, "iter_windows_cim_processes", fake_cim_processes)
+    monkeypatch.setattr(workspace_idle, "iter_local_processes", fail_full_scan)
+
+    assert workspace_idle.iter_fast_local_processes() == rows
+    assert captured["timeout_seconds"] == 30.0
+
+
+def test_windows_cim_snapshot_default_timeout_is_generous(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+
+    monkeypatch.setattr(
+        workspace_idle.shutil,
+        "which",
+        lambda name: "powershell.exe" if name == "powershell.exe" else None,
+    )
+
+    def fake_run(args, **kwargs):
+        captured["timeout_seconds"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='"ProcessId","Name","CommandLine","CreateTimeUnix"\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(workspace_idle.subprocess, "run", fake_run)
+
+    assert workspace_idle.iter_windows_cim_processes() == []
+    assert captured["timeout_seconds"] == 30.0
 
 
 @pytest.mark.skipif(not POWERSHELL_EXE, reason="PowerShell is required")
