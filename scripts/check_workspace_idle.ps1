@@ -19,16 +19,9 @@ function Add-WorkspaceIdleExcludedPid {
 
     $currentPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
     $pids += [string]$currentPid
-
-    try {
-        $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction SilentlyContinue
-        if ($null -ne $currentProcess -and $currentProcess.ParentProcessId) {
-            $pids += [string]$currentProcess.ParentProcessId
-        }
-    } catch {
-        # Parent PID exclusion is an optimisation; the Python checker still
-        # excludes its own process when this host lookup is unavailable.
-    }
+    # Do not query Win32_Process here. This wrapper is used as a preflight
+    # guard, and a host-level CIM stall must not prevent the Python checker
+    # from reaching its own bounded process-snapshot path.
 
     $env:VON_WORKSPACE_IDLE_EXCLUDE_PIDS = ($pids | Select-Object -Unique) -join ","
 }

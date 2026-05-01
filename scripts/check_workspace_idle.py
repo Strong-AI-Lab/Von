@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -209,7 +210,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0 if args.no_fail else 1
 
-        if args.full_process_scan or not fast_processes:
+        if not fast_processes and os.name == "nt" and not args.full_process_scan:
+            raise RuntimeError("fast Windows process snapshot returned no rows")
+
+        if args.full_process_scan:
             try:
                 full_processes = iter_local_processes()
             except RuntimeError:

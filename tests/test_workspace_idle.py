@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+import scripts.check_workspace_idle as check_workspace_idle
 from src.backend.utilities import workspace_idle
 from src.backend.utilities.workspace_idle import (
     ProcessSnapshot,
@@ -272,6 +273,48 @@ def test_fast_windows_snapshot_default_timeout_is_generous(monkeypatch) -> None:
 
     assert workspace_idle.iter_fast_local_processes() == rows
     assert captured["timeout_seconds"] == 30.0
+
+
+def test_fast_windows_snapshot_does_not_fall_back_to_unbounded_scan(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(workspace_idle.os, "name", "nt")
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_windows_cim_processes",
+        lambda *, timeout_seconds: [],
+    )
+
+    def fail_full_scan(*, include_cwd: bool = False) -> list[ProcessSnapshot]:
+        raise AssertionError("default Windows fast snapshot must not run psutil")
+
+    monkeypatch.setattr(workspace_idle, "iter_local_processes", fail_full_scan)
+
+    assert workspace_idle.iter_fast_local_processes() == []
+
+
+def test_workspace_idle_main_fails_closed_when_fast_windows_snapshot_is_empty(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(check_workspace_idle.os, "name", "nt")
+    monkeypatch.setattr(workspace_idle, "iter_fast_local_processes", lambda: [])
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--ignore-recent-repo-activity",
+            "--no-fail",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == ["NO"]
+    assert "fast Windows process snapshot returned no rows" in captured.err
 
 
 def test_windows_cim_snapshot_default_timeout_is_generous(monkeypatch) -> None:

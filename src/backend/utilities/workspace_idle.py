@@ -562,9 +562,7 @@ def iter_fast_local_processes(
     """Return a fast local process snapshot where the host supports one."""
 
     if os.name == "nt":
-        rows = iter_windows_cim_processes(timeout_seconds=timeout_seconds)
-        if rows:
-            return rows
+        return iter_windows_cim_processes(timeout_seconds=timeout_seconds)
     return iter_local_processes(include_cwd=False)
 
 
