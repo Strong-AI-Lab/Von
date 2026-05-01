@@ -430,7 +430,7 @@ def test_workspace_idle_main_records_recent_activity_telemetry(
     assert record["assessment"]["recent_repo_activity"][0]["path"] == ".git\\index"
 
 
-def test_workspace_idle_telemetry_write_failure_is_ignored(
+def test_workspace_idle_telemetry_write_failure_dumps_to_stderr(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -457,7 +457,13 @@ def test_workspace_idle_telemetry_write_failure_is_ignored(
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out.splitlines() == ["YES"]
-    assert captured.err == ""
+    assert "workspace idle telemetry write failed" in captured.err
+    diagnostic = json.loads(captured.err[captured.err.index("{") :])
+    assert diagnostic["telemetry"]["answer"] == "YES"
+    assert diagnostic["telemetry"]["decision_reason"] == "idle"
+    assert diagnostic["telemetry_write_failures"][0]["path"] == str(
+        telemetry_directory
+    )
 
 
 def test_workspace_idle_default_telemetry_falls_back_to_temp_when_blocked(

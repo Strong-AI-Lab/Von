@@ -164,6 +164,28 @@ def _decision_reason(assessment, *, error: str | None = None) -> str:
     return "not_idle"
 
 
+def _dump_telemetry_failure_to_stderr(
+    *,
+    payload: dict[str, object],
+    failures: list[dict[str, str]],
+) -> None:
+    print(
+        "workspace idle telemetry write failed; dumping telemetry to stderr",
+        file=sys.stderr,
+    )
+    print(
+        json.dumps(
+            {
+                "telemetry_write_failures": failures,
+                "telemetry": payload,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+
+
 def _record_idle_telemetry(
     args: argparse.Namespace,
     *,
@@ -206,16 +228,30 @@ def _record_idle_telemetry(
         if error:
             payload["error"] = error
 
+        encoded_payload = json.dumps(payload, sort_keys=True)
+        failures: list[dict[str, str]] = []
         for path in paths:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, sort_keys=True))
+                    handle.write(encoded_payload)
                     handle.write("\n")
                 return
-            except Exception:
+            except Exception as exc:
+                failures.append(
+                    {
+                        "path": str(path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
                 continue
-    except Exception:
+        _dump_telemetry_failure_to_stderr(payload=payload, failures=failures)
+    except Exception as exc:
+        print(
+            "workspace idle telemetry construction failed; no telemetry file was written",
+            file=sys.stderr,
+        )
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return
 
 
