@@ -460,6 +460,44 @@ def test_workspace_idle_telemetry_write_failure_is_ignored(
     assert captured.err == ""
 
 
+def test_workspace_idle_default_telemetry_falls_back_to_temp_when_blocked(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    blocked_codex_home = tmp_path / "blocked-codex-home"
+    blocked_codex_home.write_text("not a directory", encoding="utf-8")
+    temp_root = tmp_path / "temp"
+    monkeypatch.setenv("CODEX_HOME", str(blocked_codex_home))
+    monkeypatch.delenv("VON_WORKSPACE_IDLE_TELEMETRY_PATH", raising=False)
+    monkeypatch.delenv("VON_WORKSPACE_IDLE_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.setattr(check_workspace_idle.tempfile, "gettempdir", lambda: str(temp_root))
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_fast_local_processes",
+        lambda: [ProcessSnapshot(pid=702, name="python.exe", cmdline=("python",))],
+    )
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--ignore-recent-repo-activity",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == ["YES"]
+    assert captured.err == ""
+
+    fallback_path = temp_root / "von-workspace-idle" / "telemetry.jsonl"
+    record = json.loads(fallback_path.read_text(encoding="utf-8").strip())
+    assert record["answer"] == "YES"
+    assert record["decision_reason"] == "idle"
+
+
 def test_windows_cim_snapshot_default_timeout_is_generous(monkeypatch) -> None:
     captured: dict[str, float] = {}
 

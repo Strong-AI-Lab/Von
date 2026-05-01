@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -95,8 +96,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Append idle decision telemetry as JSONL to this file. Defaults to "
-            f"{_TELEMETRY_PATH_ENV}, then CODEX_HOME automation storage, then "
-            "the user .codex automation storage."
+            f"{_TELEMETRY_PATH_ENV}, then automation storage, with a temp "
+            "directory fallback if the default location is write-blocked."
         ),
     )
     parser.add_argument(
@@ -115,19 +116,38 @@ def _truthy_env(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _default_telemetry_path() -> Path:
-    codex_home = os.environ.get("CODEX_HOME")
-    base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+def _automation_telemetry_path(base: Path) -> Path:
     return base / "automations" / "workspace-idle" / "telemetry.jsonl"
 
 
-def _resolve_telemetry_path(args: argparse.Namespace) -> Path | None:
+def _default_telemetry_paths() -> list[Path]:
+    codex_home = os.environ.get("CODEX_HOME")
+    primary = (
+        _automation_telemetry_path(Path(codex_home).expanduser())
+        if codex_home
+        else _automation_telemetry_path(Path.home() / ".codex")
+    )
+    temp_fallback = (
+        Path(tempfile.gettempdir()) / "von-workspace-idle" / "telemetry.jsonl"
+    )
+    return [primary, temp_fallback]
+
+
+def _telemetry_candidate_paths(args: argparse.Namespace) -> list[Path]:
     if args.no_idle_telemetry or _truthy_env(os.environ.get(_TELEMETRY_DISABLED_ENV)):
-        return None
+        return []
     configured = args.idle_telemetry_path or os.environ.get(_TELEMETRY_PATH_ENV)
     if configured:
-        return Path(configured).expanduser()
-    return _default_telemetry_path()
+        return [Path(configured).expanduser()]
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for path in _default_telemetry_paths():
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(path)
+    return candidates
 
 
 def _decision_reason(assessment, *, error: str | None = None) -> str:
@@ -156,8 +176,8 @@ def _record_idle_telemetry(
     """Best-effort JSONL decision telemetry; never affects idle results."""
 
     try:
-        path = _resolve_telemetry_path(args)
-        if path is None:
+        paths = _telemetry_candidate_paths(args)
+        if not paths:
             return
         completed_at = time.time()
         answer = assessment.answer if assessment is not None else "NO"
@@ -186,10 +206,15 @@ def _record_idle_telemetry(
         if error:
             payload["error"] = error
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+        for path in paths:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, sort_keys=True))
+                    handle.write("\n")
+                return
+            except Exception:
+                continue
     except Exception:
         return
 
