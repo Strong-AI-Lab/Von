@@ -21,6 +21,7 @@ from ..integrations.google.gmail_service import (
     load_profiles_from_env,
 )
 from .agent_gmail_token_store import upsert_agent_gmail_tokens
+from .google_oauth_config import configure_oauthlib_insecure_transport
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class AgentGmailOAuthService:
         profile = self._get_profile(profile_id)
         redirect_uri = self._get_redirect_uri()
         secret_path = self._get_client_secret_path(profile_id=profile_id)
+        configure_oauthlib_insecure_transport(redirect_uri)
 
         if not os.path.isfile(secret_path):
             raise AgentGmailOAuthError(

@@ -5,6 +5,7 @@ import pytest
 
 from oauthlib.oauth2.rfc6749.parameters import parse_token_response
 
+from src.backend.services import agent_gmail_oauth_service as oauth_module
 from src.backend.services.agent_gmail_oauth_service import AgentGmailOAuthService
 
 
@@ -90,3 +91,49 @@ def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) 
             os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
         else:
             os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = previous
+
+
+def test_agent_gmail_oauth_allows_localhost_redirect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_ALLOW_INSECURE_TRANSPORT", raising=False)
+    monkeypatch.setenv(
+        "VON_AGENT_GMAIL_OAUTH_REDIRECT_URI",
+        "http://localhost:5000/von/api/agent/gmail/oauth/callback",
+    )
+
+    secret_path = tmp_path / "client_secret.json"
+    secret_path.write_text("{}", encoding="utf-8")
+
+    class DummyProfile:
+        credentials_path = str(secret_path)
+        scopes = ["https://www.googleapis.com/auth/gmail.send"]
+
+    captured: dict[str, object] = {}
+
+    def fake_from_client_secrets_file(path, *, scopes, redirect_uri):
+        captured.update(
+            {
+                "path": path,
+                "scopes": list(scopes),
+                "redirect_uri": redirect_uri,
+            }
+        )
+        return object()
+
+    monkeypatch.setattr(
+        oauth_module.Flow,
+        "from_client_secrets_file",
+        staticmethod(fake_from_client_secrets_file),
+    )
+
+    service = AgentGmailOAuthService(profiles={"zhan-gmail": DummyProfile()})  # type: ignore[arg-type]
+    service._build_flow(profile_id="zhan-gmail")
+
+    assert os.getenv("OAUTHLIB_INSECURE_TRANSPORT") == "1"
+    assert captured == {
+        "path": str(secret_path),
+        "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+        "redirect_uri": "http://localhost:5000/von/api/agent/gmail/oauth/callback",
+    }
