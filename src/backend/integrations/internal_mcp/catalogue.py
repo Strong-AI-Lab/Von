@@ -19858,6 +19858,49 @@ def _gmail_send_message_output_schema() -> Schema:
     )
 
 
+def _gmail_create_label_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "id": str,
+            "label_id": str,
+            "name": str,
+            "profile": str,
+            "type": str,
+            "labelListVisibility": str,
+            "messageListVisibility": str,
+            "created": bool,
+        },
+        allow_unknown=True,
+        description=(
+            "gmail_create_label output: Gmail label metadata plus normalised "
+            "label_id, profile, and created=true only after Gmail returns "
+            "successful label-create metadata."
+        ),
+    )
+
+
+def _gmail_exception_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "resp", None)
+    status = getattr(response, "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gmail_label_conflict_error(exc: Exception) -> bool:
+    status_code = _gmail_exception_status_code(exc)
+    if status_code == 409:
+        return True
+    message = str(exc).lower()
+    return "label" in message and (
+        "already exists" in message or "duplicate" in message or "conflict" in message
+    )
+
+
 def _gmail_list_profiles(**kwargs):  # noqa: ARG001 (namespace ignored)
     from ...integrations.google import gmail_service as gs
 
@@ -20159,6 +20202,96 @@ def _gmail_list_labels(**kwargs):
             f"Gmail list labels failed: {exc}",
             details={"exception_type": type(exc).__name__},
             suggestions=["Check Gmail API connectivity and credentials"],
+        )
+
+
+def _gmail_create_label(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    name = kwargs.get("name") or kwargs.get("label_name")
+    allow_mutation = kwargs.get("allow_mutation") is True
+    profile_text = profile if isinstance(profile, str) and profile.strip() else None
+    label_name = name if isinstance(name, str) and name.strip() else None
+    missing = [
+        field
+        for field, value in (
+            ("profile", profile_text),
+            ("name", label_name),
+        )
+        if value in (None, "")
+    ]
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters for Gmail label creation",
+            details={"missing": missing},
+            suggestions=[
+                "Provide profile, name, and allow_mutation=true",
+            ],
+        )
+    if not allow_mutation:
+        return make_error_response(
+            "mutation_not_allowed",
+            "allow_mutation must be true to create Gmail labels",
+            suggestions=[
+                "Set allow_mutation=true only when the user or workflow explicitly authorises creating this Gmail label",
+            ],
+        )
+
+    assert profile_text is not None
+    assert label_name is not None
+    try:
+        return gs.create_label(
+            profile_id=profile_text,
+            name=label_name,
+            label_list_visibility=kwargs.get("label_list_visibility"),
+            message_list_visibility=kwargs.get("message_list_visibility"),
+            allow_mutation=allow_mutation,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_create_label",
+            },
+        )
+    except PermissionError as exc:
+        return make_error_response(
+            "gmail_permission_error",
+            f"Gmail label creation not permitted: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Check that the Gmail profile has gmail.modify scope",
+            ],
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "gmail_label_validation_error",
+            f"Gmail label creation validation failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Provide a non-empty label name and valid visibility options",
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        if _gmail_label_conflict_error(exc):
+            return make_error_response(
+                "gmail_label_already_exists",
+                f"Gmail label already exists: {label_name}",
+                details={
+                    "exception_type": type(exc).__name__,
+                    "name": label_name,
+                },
+                suggestions=[
+                    "Use gmail_list_labels to fetch the existing label ID before applying it to messages",
+                ],
+            )
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail create label failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Check Gmail API connectivity, credentials, profile ID, and gmail.modify OAuth scope",
+            ],
         )
 
 
@@ -27385,6 +27518,36 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         allow_unknown=False,
         description="List Gmail labels for a profile (read-only).",
     )
+    gmail_create_label_input_schema = Schema(
+        required={"profile": str, "name": str, "allow_mutation": bool},
+        optional={
+            "label_list_visibility": str,
+            "message_list_visibility": str,
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "Create a Gmail label for a profile. Requires allow_mutation=true "
+            "after explicit user or workflow authorisation and a profile with "
+            "gmail.modify scope."
+        ),
+        aliases={
+            "profile_id": "profile",
+            "identity": "profile",
+            "user_id": "profile",
+            "label_name": "name",
+            "label": "name",
+        },
+        batch_propagated_fields=("profile", "allow_mutation"),
+        enum_values={
+            "label_list_visibility": (
+                "labelShow",
+                "labelShowIfUnread",
+                "labelHide",
+            ),
+            "message_list_visibility": ("show", "hide"),
+        },
+    )
     gmail_modify_labels_input_schema = Schema(
         required={"profile": str, "message_id": str, "allow_mutation": bool},
         optional={
@@ -27856,6 +28019,24 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             category="read",
             timeout_sec=15.0,
             description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
+        ),
+        MethodDefinition(
+            name="gmail_create_label",
+            handler=_gmail_create_label,
+            input_schema=gmail_create_label_input_schema,
+            output_schema=_gmail_create_label_output_schema(),
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Create a Gmail label for a configured profile or authorised "
+                "Gmail address. Use when the user or represented workflow "
+                "explicitly asks to create mailbox labels. Required inputs are "
+                "profile, name, and allow_mutation=true; optional visibility "
+                "fields map to Gmail's labelListVisibility and "
+                "messageListVisibility. The profile must have gmail.modify "
+                "scope. Returns the created label ID/name metadata; use "
+                "gmail_list_labels if the label already exists."
+            ),
         ),
         MethodDefinition(
             name="gmail_modify_labels",

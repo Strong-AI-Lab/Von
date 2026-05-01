@@ -48,6 +48,15 @@ SEND_CAPABLE_SCOPES: set[str] = {
     MUTATION_SCOPE,
     FULL_MAIL_SCOPE,
 }
+LABEL_LIST_VISIBILITY_VALUES: set[str] = {
+    "labelShow",
+    "labelShowIfUnread",
+    "labelHide",
+}
+MESSAGE_LIST_VISIBILITY_VALUES: set[str] = {
+    "show",
+    "hide",
+}
 
 PROFILES_ENV_VAR = "VON_GMAIL_PROFILES"
 
@@ -137,6 +146,9 @@ def _log_gmail_audit(
     audit_context: Optional[Mapping[str, object]] = None,
     query: Optional[str] = None,
     label_ids: Optional[List[str]] = None,
+    label_name: Optional[str] = None,
+    label_list_visibility: Optional[str] = None,
+    message_list_visibility: Optional[str] = None,
     message_id: Optional[str] = None,
     attachment_id: Optional[str] = None,
     allow_mutation: Optional[bool] = None,
@@ -156,6 +168,9 @@ def _log_gmail_audit(
             "profile_id": profile_id,
             "query_preview": trimmed_query,
             "label_ids": safe_labels,
+            "label_name": label_name,
+            "label_list_visibility": label_list_visibility,
+            "message_list_visibility": message_list_visibility,
             "message_id": message_id,
             "attachment_id": attachment_id,
             "allow_mutation": allow_mutation,
@@ -499,6 +514,95 @@ def list_labels(
 
     request = service.users().labels().list(userId=profile.user_id)
     return request.execute() or {}
+
+
+def _normalise_optional_visibility(
+    value: str | None,
+    *,
+    field_name: str,
+    allowed_values: set[str],
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string when provided")
+    normalised = value.strip()
+    if normalised not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ValueError(f"{field_name} must be one of: {allowed}")
+    return normalised
+
+
+def create_label(
+    profile_id: str,
+    name: str,
+    *,
+    label_list_visibility: str | None = None,
+    message_list_visibility: str | None = None,
+    allow_mutation: bool = False,
+    profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
+) -> Dict:
+    """Create a Gmail label for a configured profile.
+
+    This is an additive external-system write. Callers must set
+    ``allow_mutation=True`` after explicit user request or workflow authority,
+    and the profile must include the Gmail modify scope.
+    """
+
+    if not allow_mutation:
+        raise ValueError("Label creation requires allow_mutation=True")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required")
+
+    label_name = name.strip()
+    label_list_visibility = _normalise_optional_visibility(
+        label_list_visibility,
+        field_name="label_list_visibility",
+        allowed_values=LABEL_LIST_VISIBILITY_VALUES,
+    )
+    message_list_visibility = _normalise_optional_visibility(
+        message_list_visibility,
+        field_name="message_list_visibility",
+        allowed_values=MESSAGE_LIST_VISIBILITY_VALUES,
+    )
+
+    profile = get_profile(profile_id, profiles)
+    if MUTATION_SCOPE not in profile.scopes:
+        raise PermissionError("Profile scopes do not include gmail.modify")
+
+    _log_gmail_audit(
+        "create_label",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        label_name=label_name,
+        label_list_visibility=label_list_visibility,
+        message_list_visibility=message_list_visibility,
+        allow_mutation=allow_mutation,
+    )
+
+    body: dict[str, Any] = {"name": label_name}
+    if label_list_visibility is not None:
+        body["labelListVisibility"] = label_list_visibility
+    if message_list_visibility is not None:
+        body["messageListVisibility"] = message_list_visibility
+
+    service = get_service(profile_id, profiles)
+    result = (
+        service.users()
+        .labels()
+        .create(userId=profile.user_id, body=body)
+        .execute()
+        or {}
+    )
+    payload = dict(result)
+    label_id = payload.get("id")
+    if isinstance(label_id, str) and label_id.strip():
+        payload.setdefault("label_id", label_id.strip())
+    payload.setdefault("name", label_name)
+    payload.setdefault("profile", profile.profile_id)
+    payload.setdefault("created", True)
+    return payload
 
 
 def _normalise_address_list(value: Any, field_name: str) -> list[str]:

@@ -2890,6 +2890,53 @@ async def _handle_gmail_list_labels(arguments: dict[str, Any]) -> list[TextConte
         ]
 
 
+async def _handle_gmail_create_label(arguments: dict[str, Any]) -> list[TextContent]:
+    profile = arguments.get("profile") or arguments.get("profile_id")
+    name = arguments.get("name") or arguments.get("label_name")
+    allow_mutation = arguments.get("allow_mutation") is True
+    if not profile or not (isinstance(name, str) and name.strip()):
+        return [
+            _json_error(
+                "Missing required parameters: profile and name",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide both profile ID and label name",
+                    "Set allow_mutation=true only when label creation is authorised",
+                ],
+            )
+        ]
+    if not allow_mutation:
+        return [
+            _json_error(
+                "allow_mutation must be true to create Gmail labels",
+                error_code="mutation_not_allowed",
+                suggestions=["Set allow_mutation=true to confirm label creation"],
+            )
+        ]
+    try:
+        result = gmail_service.create_label(
+            profile_id=profile,
+            name=name,
+            label_list_visibility=arguments.get("label_list_visibility"),
+            message_list_visibility=arguments.get("message_list_visibility"),
+            allow_mutation=allow_mutation,
+            audit_context=_gmail_audit_context("gmail_create_label"),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"Gmail create label failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the profile ID is correct",
+                    "Ensure Gmail integration is configured with gmail.modify scope",
+                    "Use gmail_list_labels if the label may already exist",
+                ],
+            )
+        ]
+
+
 async def _handle_gmail_modify_labels(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     message_id = arguments.get("message_id")
@@ -4384,6 +4431,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "gmail_send_message": _handle_gmail_send_message,
     "gmail_get_attachment": _handle_gmail_get_attachment,
     "gmail_list_labels": _handle_gmail_list_labels,
+    "gmail_create_label": _handle_gmail_create_label,
     "gmail_modify_labels": _handle_gmail_modify_labels,
     "add_relationship": _handle_add_relationship,
     "remove_relationship": _handle_remove_relationship,

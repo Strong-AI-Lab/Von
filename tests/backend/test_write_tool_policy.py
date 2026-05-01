@@ -44,6 +44,10 @@ def test_classify_write_tool_risk_covers_policy_classes():
         classify_write_tool_risk("gmail_send_message")
         == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
+    assert (
+        classify_write_tool_risk("gmail_create_label")
+        == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
+    )
     assert classify_write_tool_risk("task_create") == WRITE_RISK_ADDITIVE_LOW_RISK
     assert (
         classify_write_tool_risk("task_update_status")

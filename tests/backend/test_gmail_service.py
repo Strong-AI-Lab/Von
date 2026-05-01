@@ -173,6 +173,68 @@ def test_modify_labels_guard(monkeypatch):
         svc.users.return_value.messages.return_value.modify.assert_called_once()
 
 
+def test_create_label_guard_and_calls_gmail_api(monkeypatch):
+    monkeypatch.setenv("VON_GMAIL_TOKEN_PATH", "/tmp/token.json")
+    profiles = {
+        "p": gs.GmailProfile(
+            profile_id="p",
+            token_path="/tmp/token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        ),
+        "read-only": gs.GmailProfile(
+            profile_id="read-only",
+            token_path="/tmp/token.json",
+            scopes=list(gs.DEFAULT_SCOPES),
+        ),
+    }
+
+    with pytest.raises(ValueError, match="allow_mutation"):
+        gs.create_label("p", "VON/PAPER", allow_mutation=False, profiles=profiles)
+    with pytest.raises(ValueError, match="name"):
+        gs.create_label("p", " ", allow_mutation=True, profiles=profiles)
+    with pytest.raises(PermissionError, match="gmail.modify"):
+        gs.create_label(
+            "read-only",
+            "VON/PAPER",
+            allow_mutation=True,
+            profiles=profiles,
+        )
+
+    with patch(
+        "src.backend.integrations.google.gmail_service.get_service"
+    ) as mock_service:
+        svc = MagicMock()
+        mock_service.return_value = svc
+        svc.users.return_value.labels.return_value.create.return_value.execute.return_value = {
+            "id": "Label_1",
+            "name": "VON/PAPER",
+            "type": "user",
+        }
+
+        result = gs.create_label(
+            "p",
+            " VON/PAPER ",
+            label_list_visibility="labelShow",
+            message_list_visibility="show",
+            allow_mutation=True,
+            profiles=profiles,
+        )
+
+        assert result["id"] == "Label_1"
+        assert result["label_id"] == "Label_1"
+        assert result["name"] == "VON/PAPER"
+        assert result["profile"] == "p"
+        assert result["created"] is True
+        svc.users.return_value.labels.return_value.create.assert_called_once_with(
+            userId="me",
+            body={
+                "name": "VON/PAPER",
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            },
+        )
+
+
 @patch(
     "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
 )

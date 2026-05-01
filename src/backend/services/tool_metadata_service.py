@@ -485,6 +485,17 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "gmail",
         "display_template": "{count} labels",
     },
+    "gmail_create_label": {
+        "salience": "medium",
+        "category": "gmail",
+        "display_template": "Created label: {name}",
+        "planner_hint": (
+            "Use only when the user or represented workflow explicitly asks to "
+            "create a Gmail label. Required payload fields are profile, name, "
+            "and allow_mutation=true; use gmail_list_labels first when you need "
+            "to check whether a label already exists."
+        ),
+    },
     "gmail_modify_labels": {
         "salience": "medium",
         "category": "gmail",
@@ -914,6 +925,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "get_text_relations",
     "get_text_relations_summary",
     "get_tree",
+    "gmail_create_label",
     "gmail_get_attachment",
     "gmail_get_message",
     "gmail_send_message",
@@ -1074,6 +1086,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "finalise_cached_paper",
     "materialise_scholarly_representation_for_file_copy",
     "import_url_file_copy",
+    "gmail_create_label",
     "gmail_modify_labels",
     "gmail_send_message",
     "issue_write",

@@ -80,6 +80,7 @@ _DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
     "delete_text_relation": "destructive",
     "download_paper": "additive_low_risk",
     "finalise_cached_paper": "additive_low_risk",
+    "gmail_create_label": "external_non_vontology",
     "gmail_modify_labels": "external_non_vontology",
     "gmail_send_message": "external_non_vontology",
     "import_url_file_copy": "additive_low_risk",

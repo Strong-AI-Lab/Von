@@ -409,6 +409,142 @@ def test_gmail_send_message_gateway_fails_closed_without_allow_send(monkeypatch)
     assert called is False
 
 
+def test_gmail_create_label_registered_and_gateway_invokes(monkeypatch):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    captured: dict = {}
+
+    def fake_create_label(**kwargs):
+        captured.update(kwargs)
+        return {
+            "id": "Label_1",
+            "label_id": "Label_1",
+            "name": kwargs["name"],
+            "profile": kwargs["profile_id"],
+            "created": True,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.create_label",
+        fake_create_label,
+    )
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("gmail_create_label")
+    assert method.category == "write"
+    assert method.output_schema is not None
+    assert "allow_mutation=true" in (method.description or "")
+
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "gmail_create_label",
+        {
+            "profile": "zhan-gmail",
+            "label_name": "VON/PAPER",
+            "label_list_visibility": "labelShow",
+            "message_list_visibility": "show",
+            "allow_mutation": True,
+        },
+    ).payload
+
+    assert result["label_id"] == "Label_1"
+    assert result["created"] is True
+    assert captured["profile_id"] == "zhan-gmail"
+    assert captured["name"] == "VON/PAPER"
+    assert captured["label_list_visibility"] == "labelShow"
+    assert captured["message_list_visibility"] == "show"
+    assert captured["allow_mutation"] is True
+    assert captured["audit_context"]["tool"] == "gmail_create_label"
+
+
+def test_gmail_create_label_gateway_fails_closed_without_allow_mutation(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    called = False
+
+    def fake_create_label(**kwargs):
+        nonlocal called
+        called = True
+        return {"id": "Label_1"}
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.create_label",
+        fake_create_label,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "gmail_create_label",
+        {
+            "profile": "zhan-gmail",
+            "name": "VON/PAPER",
+            "allow_mutation": False,
+        },
+    ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "mutation_not_allowed"
+    assert called is False
+
+
+def test_gmail_create_label_gateway_surfaces_conflict(monkeypatch):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    class _Resp:
+        status = 409
+
+    class _ConflictError(Exception):
+        resp = _Resp()
+
+    def fake_create_label(**kwargs):
+        raise _ConflictError("Label already exists")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.create_label",
+        fake_create_label,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "gmail_create_label",
+        {
+            "profile": "zhan-gmail",
+            "name": "VON/PAPER",
+            "allow_mutation": True,
+        },
+    ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "gmail_label_already_exists"
+    assert result["error_details"]["name"] == "VON/PAPER"
+
+
 def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch):
     import base64
     from email import message_from_bytes

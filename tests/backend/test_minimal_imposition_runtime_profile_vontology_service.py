@@ -90,6 +90,10 @@ def test_ensure_canonical_minimal_imposition_runtime_profiles_creates_and_links(
         profile_payload["tool_risk_classes"]["gmail_send_message"]
         == "external_non_vontology"
     )
+    assert (
+        profile_payload["tool_risk_classes"]["gmail_create_label"]
+        == "external_non_vontology"
+    )
 
 
 def test_load_minimal_imposition_runtime_profile_uses_workflow_link(

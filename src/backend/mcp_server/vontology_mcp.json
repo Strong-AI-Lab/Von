@@ -2251,6 +2251,63 @@
             }
         },
         {
+            "name": "gmail_create_label",
+            "description": "Create a Gmail label for a configured profile or authorised Gmail address. Use when the user or represented workflow explicitly asks to create mailbox labels. Required inputs are profile, name, and allow_mutation=true; optional visibility fields map to Gmail's labelListVisibility and messageListVisibility. The profile must have gmail.modify scope. Returns the created label ID/name metadata; use gmail_list_labels if the label already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "name": {
+                        "type": "string"
+                    },
+                    "allow_mutation": {
+                        "type": "boolean"
+                    },
+                    "label_list_visibility": {
+                        "type": "string",
+                        "enum": [
+                            "labelShow",
+                            "labelShowIfUnread",
+                            "labelHide"
+                        ]
+                    },
+                    "message_list_visibility": {
+                        "type": "string",
+                        "enum": [
+                            "show",
+                            "hide"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "profile",
+                    "name",
+                    "allow_mutation"
+                ],
+                "additionalProperties": false,
+                "description": "Create a Gmail label for a profile. Requires allow_mutation=true after explicit user or workflow authorisation and a profile with gmail.modify scope.",
+                "x-von-argument-aliases": {
+                    "profile_id": "profile",
+                    "identity": "profile",
+                    "user_id": "profile",
+                    "label_name": "name",
+                    "label": "name"
+                },
+                "x-von-batch-propagated-fields": [
+                    "profile",
+                    "allow_mutation"
+                ]
+            }
+        },
+        {
             "name": "gmail_get_attachment",
             "description": "Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
             "inputSchema": {
