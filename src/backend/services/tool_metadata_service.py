@@ -460,6 +460,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "gmail",
         "display_template": "Message: {subject}",
     },
+    "gmail_send_message": {
+        "salience": "medium",
+        "category": "gmail",
+        "display_template": "Sent message: {subject}",
+    },
     "gmail_get_attachment": {
         "salience": "medium",
         "category": "gmail",
@@ -901,6 +906,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "get_tree",
     "gmail_get_attachment",
     "gmail_get_message",
+    "gmail_send_message",
     "gmail_list_labels",
     "gmail_list_messages",
     "gmail_modify_labels",
@@ -1059,6 +1065,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "materialise_scholarly_representation_for_file_copy",
     "import_url_file_copy",
     "gmail_modify_labels",
+    "gmail_send_message",
     "issue_write",
     "jira_add_attachment",
     "jira_add_comment",

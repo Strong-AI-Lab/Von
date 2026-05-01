@@ -8,11 +8,14 @@ read-only and require explicit opt-in for any mutation scopes.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, Optional
+from email.message import EmailMessage
+from email.utils import formataddr, getaddresses
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -36,6 +39,15 @@ DEFAULT_SCOPES: List[str] = [
 ]
 
 MUTATION_SCOPE: str = "https://www.googleapis.com/auth/gmail.modify"
+SEND_SCOPE: str = "https://www.googleapis.com/auth/gmail.send"
+COMPOSE_SCOPE: str = "https://www.googleapis.com/auth/gmail.compose"
+FULL_MAIL_SCOPE: str = "https://mail.google.com/"
+SEND_CAPABLE_SCOPES: set[str] = {
+    SEND_SCOPE,
+    COMPOSE_SCOPE,
+    MUTATION_SCOPE,
+    FULL_MAIL_SCOPE,
+}
 
 PROFILES_ENV_VAR = "VON_GMAIL_PROFILES"
 
@@ -129,6 +141,7 @@ def _log_gmail_audit(
     attachment_id: Optional[str] = None,
     allow_mutation: Optional[bool] = None,
     max_results: Optional[int] = None,
+    recipient_count: Optional[int] = None,
 ) -> None:
     """Record a minimal audit trail for Gmail tool calls without leaking content.
 
@@ -147,6 +160,7 @@ def _log_gmail_audit(
             "attachment_id": attachment_id,
             "allow_mutation": allow_mutation,
             "max_results": max_results,
+            "recipient_count": recipient_count,
         }
         record = {k: v for k, v in record.items() if v is not None}
         if audit_context:
@@ -487,6 +501,141 @@ def list_labels(
 
     request = service.users().labels().list(userId=profile.user_id)
     return request.execute() or {}
+
+
+def _normalise_address_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    raw_values: list[str] = []
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, list):
+        raw_values = [item for item in value if isinstance(item, str)]
+    else:
+        raise ValueError(f"{field_name} must be a string or list of strings")
+
+    parsed = getaddresses(raw_values)
+    addresses: list[str] = []
+    for display_name, address in parsed:
+        clean_address = address.strip()
+        if not clean_address:
+            continue
+        if display_name:
+            addresses.append(formataddr((display_name.strip(), clean_address)))
+        else:
+            addresses.append(clean_address)
+    return addresses
+
+
+def _build_raw_message(
+    *,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    reply_to: list[str] | None = None,
+    body_html: str | None = None,
+) -> str:
+    message = EmailMessage()
+    message["To"] = ", ".join(to)
+    message["Subject"] = subject
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    if bcc:
+        message["Bcc"] = ", ".join(bcc)
+    if reply_to:
+        message["Reply-To"] = ", ".join(reply_to)
+
+    message.set_content(body_text)
+    if isinstance(body_html, str) and body_html.strip():
+        message.add_alternative(body_html, subtype="html")
+
+    return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+
+
+def send_message(
+    profile_id: str,
+    to: str | list[str],
+    subject: str,
+    body_text: str,
+    *,
+    cc: str | list[str] | None = None,
+    bcc: str | list[str] | None = None,
+    reply_to: str | list[str] | None = None,
+    body_html: str | None = None,
+    allow_send: bool = False,
+    profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
+) -> Dict:
+    """Send an email through a configured Gmail profile.
+
+    Callers must set ``allow_send=True`` after an explicit user request or an
+    authorised workflow gate. The helper also checks that the profile declares a
+    Gmail scope accepted by ``users.messages.send`` before invoking the API.
+    """
+
+    if not allow_send:
+        raise ValueError("Sending email requires allow_send=True")
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("subject is required")
+    if not isinstance(body_text, str) or not body_text.strip():
+        raise ValueError("body_text is required")
+
+    to_addresses = _normalise_address_list(to, "to")
+    cc_addresses = _normalise_address_list(cc, "cc")
+    bcc_addresses = _normalise_address_list(bcc, "bcc")
+    reply_to_addresses = _normalise_address_list(reply_to, "reply_to")
+    if not to_addresses:
+        raise ValueError("At least one recipient is required in to")
+
+    profile = get_profile(profile_id, profiles)
+    profile_scopes = set(profile.scopes or [])
+    if not profile_scopes.intersection(SEND_CAPABLE_SCOPES):
+        raise PermissionError(
+            "Profile scopes do not include a Gmail send-capable scope"
+        )
+
+    recipient_count = len(to_addresses) + len(cc_addresses) + len(bcc_addresses)
+    _log_gmail_audit(
+        "send_message",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        allow_mutation=allow_send,
+        recipient_count=recipient_count,
+    )
+
+    raw_message = _build_raw_message(
+        to=to_addresses,
+        cc=cc_addresses,
+        bcc=bcc_addresses,
+        reply_to=reply_to_addresses,
+        subject=subject.strip(),
+        body_text=body_text,
+        body_html=body_html,
+    )
+
+    service = get_service(profile_id, profiles)
+    result = (
+        service.users()
+        .messages()
+        .send(userId=profile.user_id, body={"raw": raw_message})
+        .execute()
+        or {}
+    )
+    payload = dict(result)
+    message_id = payload.get("id")
+    if isinstance(message_id, str) and message_id.strip():
+        payload.setdefault("message_id", message_id.strip())
+    payload.setdefault("profile", profile.profile_id)
+    payload.setdefault("to", to_addresses)
+    if cc_addresses:
+        payload.setdefault("cc", cc_addresses)
+    if bcc_addresses:
+        payload.setdefault("bcc_count", len(bcc_addresses))
+    payload.setdefault("recipient_count", recipient_count)
+    payload.setdefault("subject", subject.strip())
+    return payload
 
 
 def modify_labels(

@@ -2408,6 +2408,87 @@
             }
         },
         {
+            "name": "gmail_send_message",
+            "description": "Send an outbound Gmail message from a configured profile alias or authorised Gmail address. Use when the user has explicitly asked Von to send email, not for drafts, reading, or label changes. Required inputs are profile, to, subject, body_text, and allow_send=true. Optional cc, bcc, reply_to, and body_html are supported. The profile must have a send-capable Gmail OAuth scope such as gmail.send, gmail.compose, gmail.modify, or mail.google.com. The tool returns Gmail send metadata and does not return the sent body.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "to": {
+                        "type": [
+                            "string",
+                            "array"
+                        ],
+                        "items": {}
+                    },
+                    "subject": {
+                        "type": "string"
+                    },
+                    "body_text": {
+                        "type": "string"
+                    },
+                    "allow_send": {
+                        "type": "boolean"
+                    },
+                    "cc": {
+                        "type": [
+                            "string",
+                            "array"
+                        ],
+                        "items": {}
+                    },
+                    "bcc": {
+                        "type": [
+                            "string",
+                            "array"
+                        ],
+                        "items": {}
+                    },
+                    "reply_to": {
+                        "type": [
+                            "string",
+                            "array"
+                        ],
+                        "items": {}
+                    },
+                    "body_html": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "profile",
+                    "to",
+                    "subject",
+                    "body_text",
+                    "allow_send"
+                ],
+                "additionalProperties": false,
+                "description": "Send an email through a configured Gmail profile. Requires allow_send=true after explicit user or workflow authorisation, and a profile with a Gmail send-capable OAuth scope.",
+                "x-von-argument-aliases": {
+                    "profile_id": "profile",
+                    "identity": "profile",
+                    "user_id": "profile",
+                    "recipient": "to",
+                    "recipients": "to",
+                    "body": "body_text",
+                    "message": "body_text",
+                    "allow_mutation": "allow_send"
+                },
+                "x-von-batch-propagated-fields": [
+                    "profile",
+                    "allow_send"
+                ]
+            }
+        },
+        {
             "name": "jira_add_attachment",
             "description": "Upload an attachment to a Jira issue using base64 content. Validates MIME type, file size, and filename safety before upload.",
             "inputSchema": {

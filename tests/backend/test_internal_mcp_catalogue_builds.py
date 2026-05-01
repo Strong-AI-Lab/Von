@@ -314,6 +314,189 @@ def test_gmail_list_messages_input_schema_accepts_bypass_flag():
     assert "effective_query" in output_description
 
 
+def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    captured: dict = {}
+
+    def fake_send_message(**kwargs):
+        captured.update(kwargs)
+        return {
+            "id": "sent-1",
+            "message_id": "sent-1",
+            "profile": kwargs["profile_id"],
+            "to": [kwargs["to"]],
+            "recipient_count": 1,
+            "subject": kwargs["subject"],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.send_message",
+        fake_send_message,
+    )
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("gmail_send_message")
+    assert method.category == "write"
+    assert method.output_schema is not None
+    assert "allow_send" in (method.description or "")
+
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "gmail_send_message",
+        {
+            "profile": "zhan-gmail",
+            "recipient": "witbrock@gmail.com",
+            "subject": "Hi From Von",
+            "body": "An interesting body.",
+            "allow_send": True,
+        },
+    ).payload
+
+    assert result["message_id"] == "sent-1"
+    assert captured["profile_id"] == "zhan-gmail"
+    assert captured["to"] == ["witbrock@gmail.com"]
+    assert captured["body_text"] == "An interesting body."
+    assert captured["allow_send"] is True
+    assert captured["audit_context"]["tool"] == "gmail_send_message"
+
+
+def test_gmail_send_message_gateway_fails_closed_without_allow_send(monkeypatch):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    called = False
+
+    def fake_send_message(**kwargs):
+        nonlocal called
+        called = True
+        return {"id": "sent-1"}
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.send_message",
+        fake_send_message,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "gmail_send_message",
+        {
+            "profile": "zhan-gmail",
+            "to": "witbrock@gmail.com",
+            "subject": "Hi From Von",
+            "body_text": "An interesting body.",
+            "allow_send": False,
+        },
+    ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "send_not_allowed"
+    assert called is False
+
+
+def test_gmail_service_send_message_builds_raw_mime_and_checks_scope(monkeypatch):
+    import base64
+    from email import message_from_bytes
+    from email.policy import default as email_policy
+
+    import pytest
+
+    from src.backend.integrations.google import gmail_service as gs
+
+    captured: dict = {}
+
+    class _Req:
+        def execute(self):
+            return {"id": "gmail-sent-1", "threadId": "thread-1"}
+
+    class _FakeMessages:
+        def send(self, **kwargs):
+            captured["send_kwargs"] = kwargs
+            return _Req()
+
+    class _FakeUsers:
+        def messages(self):
+            return _FakeMessages()
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+    send_profile = gs.GmailProfile(
+        profile_id="zhan-gmail",
+        token_path="/tmp/fake-token.json",
+        scopes=[gs.SEND_SCOPE],
+    )
+    read_profile = gs.GmailProfile(
+        profile_id="read-only-gmail",
+        token_path="/tmp/fake-token.json",
+        scopes=list(gs.DEFAULT_SCOPES),
+    )
+    profiles = {
+        "zhan-gmail": send_profile,
+        "read-only-gmail": read_profile,
+    }
+
+    monkeypatch.setattr(gs, "get_service", lambda *_a, **_kw: _FakeService())
+
+    payload = gs.send_message(
+        profile_id="zhan-gmail",
+        to="witbrock@gmail.com",
+        subject="Hi From Von",
+        body_text="Here is a small interesting thought.",
+        allow_send=True,
+        profiles=profiles,
+    )
+
+    assert payload["message_id"] == "gmail-sent-1"
+    assert payload["profile"] == "zhan-gmail"
+    assert payload["recipient_count"] == 1
+
+    raw_message = captured["send_kwargs"]["body"]["raw"]
+    decoded = base64.urlsafe_b64decode(raw_message.encode("ascii"))
+    message = message_from_bytes(decoded, policy=email_policy)
+    assert message["To"] == "witbrock@gmail.com"
+    assert message["Subject"] == "Hi From Von"
+    assert message.get_body(preferencelist=("plain",)).get_content().strip() == (
+        "Here is a small interesting thought."
+    )
+
+    with pytest.raises(ValueError, match="allow_send"):
+        gs.send_message(
+            profile_id="zhan-gmail",
+            to="witbrock@gmail.com",
+            subject="Hi From Von",
+            body_text="Body",
+            allow_send=False,
+            profiles=profiles,
+        )
+
+    with pytest.raises(PermissionError, match="send-capable"):
+        gs.send_message(
+            profile_id="read-only-gmail",
+            to="witbrock@gmail.com",
+            subject="Hi From Von",
+            body_text="Body",
+            allow_send=True,
+            profiles=profiles,
+        )
+
+
 def test_gmail_service_list_messages_bypass_skips_profile_prefix(monkeypatch):
     """JVNAUTOSCI-2127: gmail_service honours bypass_profile_query_prefix."""
 

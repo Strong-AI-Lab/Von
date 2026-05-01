@@ -12,7 +12,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 if TYPE_CHECKING:
     from datetime import datetime, timezone
@@ -2747,6 +2747,85 @@ async def _handle_gmail_get_message(arguments: dict[str, Any]) -> list[TextConte
         ]
 
 
+async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextContent]:
+    profile = arguments.get("profile") or arguments.get("profile_id")
+    to = (
+        arguments.get("to")
+        or arguments.get("recipient")
+        or arguments.get("recipients")
+    )
+    subject = arguments.get("subject")
+    body_text = arguments.get("body_text") or arguments.get("body") or arguments.get(
+        "message"
+    )
+    profile_text = profile if isinstance(profile, str) and profile.strip() else None
+    to_value = to if isinstance(to, (str, list)) and to else None
+    subject_text = subject if isinstance(subject, str) and subject.strip() else None
+    body_text_value = (
+        body_text if isinstance(body_text, str) and body_text.strip() else None
+    )
+    allow_send = bool(arguments.get("allow_send"))
+    missing = [
+        field
+        for field, value in (
+            ("profile", profile_text),
+            ("to", to_value),
+            ("subject", subject_text),
+            ("body_text", body_text_value),
+        )
+        if value in (None, "")
+    ]
+    if missing:
+        return [
+            _json_error(
+                "Missing required parameters for Gmail send",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide profile, to, subject, body_text, and allow_send=true",
+                ],
+            )
+        ]
+    assert profile_text is not None
+    assert to_value is not None
+    assert subject_text is not None
+    assert body_text_value is not None
+    if not allow_send:
+        return [
+            _json_error(
+                "allow_send must be true to send Gmail messages",
+                error_code="send_not_allowed",
+                suggestions=[
+                    "Set allow_send=true only when explicitly authorised to send this message",
+                ],
+            )
+        ]
+    try:
+        result = gmail_service.send_message(
+            profile_id=profile_text,
+            to=cast(str | list[str], to_value),
+            subject=subject_text,
+            body_text=body_text_value,
+            cc=arguments.get("cc"),
+            bcc=arguments.get("bcc"),
+            reply_to=arguments.get("reply_to"),
+            body_html=arguments.get("body_html"),
+            allow_send=allow_send,
+            audit_context=_gmail_audit_context("gmail_send_message"),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"Gmail send failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the profile ID is correct",
+                    "Ensure Gmail integration is configured with a send-capable OAuth scope",
+                ],
+            )
+        ]
+
+
 async def _handle_gmail_get_attachment(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     message_id = arguments.get("message_id")
@@ -4302,6 +4381,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "extract_url": _handle_extract_url,
     "gmail_list_messages": _handle_gmail_list_messages,
     "gmail_get_message": _handle_gmail_get_message,
+    "gmail_send_message": _handle_gmail_send_message,
     "gmail_get_attachment": _handle_gmail_get_attachment,
     "gmail_list_labels": _handle_gmail_list_labels,
     "gmail_modify_labels": _handle_gmail_modify_labels,

@@ -32,7 +32,7 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Sequence
+from typing import Any, List, Mapping, Sequence, cast
 
 from pymongo import DESCENDING
 
@@ -19832,6 +19832,30 @@ def _gmail_get_message_output_schema() -> Schema:
     )
 
 
+def _gmail_send_message_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "id": str,
+            "message_id": str,
+            "threadId": str,
+            "labelIds": list,
+            "profile": str,
+            "to": list,
+            "cc": list,
+            "bcc_count": int,
+            "recipient_count": int,
+            "subject": str,
+        },
+        allow_unknown=True,
+        description=(
+            "gmail_send_message output: Gmail send response metadata plus "
+            "normalised message_id, profile, recipient_count, and subject. "
+            "The sent body is not returned."
+        ),
+    )
+
+
 def _gmail_list_profiles(**kwargs):  # noqa: ARG001 (namespace ignored)
     from ...integrations.google import gmail_service as gs
 
@@ -19995,6 +20019,80 @@ def _gmail_get_message(**kwargs):
             f"Gmail get message failed: {exc}",
             details={"exception_type": type(exc).__name__},
             suggestions=["Check Gmail API connectivity and credentials"],
+        )
+
+
+def _gmail_send_message(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    to = kwargs.get("to")
+    subject = kwargs.get("subject")
+    body_text = kwargs.get("body_text") or kwargs.get("body")
+    profile_text = profile if isinstance(profile, str) and profile.strip() else None
+    to_value = to if isinstance(to, (str, list)) and to else None
+    subject_text = subject if isinstance(subject, str) and subject.strip() else None
+    body_text_value = (
+        body_text if isinstance(body_text, str) and body_text.strip() else None
+    )
+    allow_send = bool(kwargs.get("allow_send"))
+    missing = [
+        field
+        for field, value in (
+            ("profile", profile_text),
+            ("to", to_value),
+            ("subject", subject_text),
+            ("body_text", body_text_value),
+        )
+        if value in (None, "")
+    ]
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters for Gmail send",
+            details={"missing": missing},
+            suggestions=[
+                "Provide profile, to, subject, body_text, and allow_send=true",
+            ],
+        )
+    assert profile_text is not None
+    assert to_value is not None
+    assert subject_text is not None
+    assert body_text_value is not None
+    if not allow_send:
+        return make_error_response(
+            "send_not_allowed",
+            "allow_send must be true to send Gmail messages",
+            suggestions=[
+                "Set allow_send=true only when the user or workflow explicitly authorises sending this message",
+            ],
+        )
+
+    try:
+        return gs.send_message(
+            profile_id=profile_text,
+            to=cast(str | list[str], to_value),
+            subject=subject_text,
+            body_text=body_text_value,
+            cc=kwargs.get("cc"),
+            bcc=kwargs.get("bcc"),
+            reply_to=kwargs.get("reply_to"),
+            body_html=kwargs.get("body_html"),
+            allow_send=allow_send,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_send_message",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail send failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Check Gmail API connectivity, credentials, profile ID, and send-capable OAuth scope",
+            ],
         )
 
 
@@ -27240,6 +27338,39 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         },
         batch_propagated_fields=("profile",),
     )
+    gmail_send_message_input_schema = Schema(
+        required={
+            "profile": str,
+            "to": (str, list),
+            "subject": str,
+            "body_text": str,
+            "allow_send": bool,
+        },
+        optional={
+            "cc": (str, list),
+            "bcc": (str, list),
+            "reply_to": (str, list),
+            "body_html": str,
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "Send an email through a configured Gmail profile. Requires "
+            "allow_send=true after explicit user or workflow authorisation, "
+            "and a profile with a Gmail send-capable OAuth scope."
+        ),
+        aliases={
+            "profile_id": "profile",
+            "identity": "profile",
+            "user_id": "profile",
+            "recipient": "to",
+            "recipients": "to",
+            "body": "body_text",
+            "message": "body_text",
+            "allow_mutation": "allow_send",
+        },
+        batch_propagated_fields=("profile", "allow_send"),
+    )
     gmail_get_attachment_input_schema = Schema(
         required={"profile": str, "message_id": str, "attachment_id": str},
         optional={},
@@ -27675,6 +27806,25 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "metadata|full|raw|minimal and returns normalised sender, "
                 "subject, date, and snippet fields when available. Read-only; "
                 "profile token required."
+            ),
+        ),
+        MethodDefinition(
+            name="gmail_send_message",
+            handler=_gmail_send_message,
+            input_schema=gmail_send_message_input_schema,
+            output_schema=_gmail_send_message_output_schema(),
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Send an outbound Gmail message from a configured profile "
+                "alias or authorised Gmail address. Use when the user has "
+                "explicitly asked Von to send email, not for drafts, reading, "
+                "or label changes. Required inputs are profile, to, subject, "
+                "body_text, and allow_send=true. Optional cc, bcc, reply_to, "
+                "and body_html are supported. The profile must have a "
+                "send-capable Gmail OAuth scope such as gmail.send, "
+                "gmail.compose, gmail.modify, or mail.google.com. The tool "
+                "returns Gmail send metadata and does not return the sent body."
             ),
         ),
         MethodDefinition(
