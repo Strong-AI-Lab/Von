@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -338,6 +339,125 @@ def test_workspace_idle_main_reports_failure_diagnostics_without_no_fail(
     assert code == 2
     assert captured.out.splitlines() == ["NO"]
     assert "fast Windows process snapshot returned no rows" in captured.err
+
+
+def test_workspace_idle_main_records_decision_telemetry(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    telemetry_path = tmp_path / "idle" / "telemetry.jsonl"
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_fast_local_processes",
+        lambda: [ProcessSnapshot(pid=700, name="python.exe", cmdline=("python",))],
+    )
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--ignore-recent-repo-activity",
+            "--idle-telemetry-path",
+            str(telemetry_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == ["YES"]
+    assert captured.err == ""
+
+    records = [
+        json.loads(line)
+        for line in telemetry_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record["answer"] == "YES"
+    assert record["idle"] is True
+    assert record["exit_code"] == 0
+    assert record["decision_reason"] == "idle"
+    assert record["assessment"]["scanned_processes"] == 1
+    assert record["options"]["ignore_recent_repo_activity"] is True
+
+
+def test_workspace_idle_main_records_recent_activity_telemetry(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    telemetry_path = tmp_path / "idle" / "telemetry.jsonl"
+    activity = RepoActivityAssessment(
+        kind="git_metadata",
+        path=".git\\index",
+        reason="recent Git metadata activity",
+        age_seconds=12.0,
+    )
+    monkeypatch.setattr(
+        workspace_idle,
+        "detect_recent_repo_activity",
+        lambda *args, **kwargs: (activity,),
+    )
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_fast_local_processes",
+        lambda: pytest.fail("processes should not be scanned after repo activity"),
+    )
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--no-fail",
+            "--idle-telemetry-path",
+            str(telemetry_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == ["NO"]
+    assert captured.err == ""
+
+    record = json.loads(telemetry_path.read_text(encoding="utf-8").strip())
+    assert record["answer"] == "NO"
+    assert record["idle"] is False
+    assert record["exit_code"] == 0
+    assert record["decision_reason"] == "recent_repo_activity"
+    assert record["assessment"]["recent_repo_activity"][0]["path"] == ".git\\index"
+
+
+def test_workspace_idle_telemetry_write_failure_is_ignored(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    telemetry_directory = tmp_path / "telemetry-directory"
+    telemetry_directory.mkdir()
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_fast_local_processes",
+        lambda: [ProcessSnapshot(pid=701, name="python.exe", cmdline=("python",))],
+    )
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--ignore-recent-repo-activity",
+            "--idle-telemetry-path",
+            str(telemetry_directory),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == ["YES"]
+    assert captured.err == ""
 
 
 def test_windows_cim_snapshot_default_timeout_is_generous(monkeypatch) -> None:

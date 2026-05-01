@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -11,6 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+_TELEMETRY_PATH_ENV = "VON_WORKSPACE_IDLE_TELEMETRY_PATH"
+_TELEMETRY_DISABLED_ENV = "VON_WORKSPACE_IDLE_TELEMETRY_DISABLED"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -86,7 +90,108 @@ def _build_parser() -> argparse.ArgumentParser:
         default=220,
         help="Maximum command length shown in verbose text output.",
     )
+    parser.add_argument(
+        "--idle-telemetry-path",
+        default=None,
+        help=(
+            "Append idle decision telemetry as JSONL to this file. Defaults to "
+            f"{_TELEMETRY_PATH_ENV}, then CODEX_HOME automation storage, then "
+            "the user .codex automation storage."
+        ),
+    )
+    parser.add_argument(
+        "--no-idle-telemetry",
+        action="store_true",
+        help="Disable non-fatal idle decision telemetry writes.",
+    )
     return parser
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_telemetry_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    return base / "automations" / "workspace-idle" / "telemetry.jsonl"
+
+
+def _resolve_telemetry_path(args: argparse.Namespace) -> Path | None:
+    if args.no_idle_telemetry or _truthy_env(os.environ.get(_TELEMETRY_DISABLED_ENV)):
+        return None
+    configured = args.idle_telemetry_path or os.environ.get(_TELEMETRY_PATH_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return _default_telemetry_path()
+
+
+def _decision_reason(assessment, *, error: str | None = None) -> str:
+    if error:
+        return "error"
+    if assessment is None:
+        return "unknown"
+    if assessment.recent_repo_activity:
+        return "recent_repo_activity"
+    if assessment.blockers:
+        return "process_blockers"
+    if assessment.idle:
+        return "idle"
+    return "not_idle"
+
+
+def _record_idle_telemetry(
+    args: argparse.Namespace,
+    *,
+    workspace: str,
+    started_at: float,
+    exit_code: int,
+    assessment=None,
+    error: str | None = None,
+) -> None:
+    """Best-effort JSONL decision telemetry; never affects idle results."""
+
+    try:
+        path = _resolve_telemetry_path(args)
+        if path is None:
+            return
+        completed_at = time.time()
+        answer = assessment.answer if assessment is not None else "NO"
+        payload = {
+            "schema_version": 1,
+            "recorded_at": _utc_now_iso(),
+            "workspace_root": workspace,
+            "answer": answer,
+            "idle": answer == "YES",
+            "exit_code": exit_code,
+            "decision_reason": _decision_reason(assessment, error=error),
+            "duration_ms": round((completed_at - started_at) * 1000, 3),
+            "options": {
+                "json": bool(args.json),
+                "verbose": bool(args.verbose),
+                "no_fail": bool(args.no_fail),
+                "include_services": bool(args.include_services),
+                "include_agent_helpers": bool(args.include_agent_helpers),
+                "ignore_recent_repo_activity": bool(args.ignore_recent_repo_activity),
+                "full_process_scan": bool(args.full_process_scan),
+                "recent_seconds": float(args.recent_seconds),
+            },
+        }
+        if assessment is not None:
+            payload["assessment"] = assessment.to_json_dict()
+        if error:
+            payload["error"] = error
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True))
+            handle.write("\n")
+    except Exception:
+        return
 
 
 def _trim(value: str, max_chars: int) -> str:
@@ -151,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    started_at = time.time()
     workspace = str(Path(args.workspace).resolve())
 
     try:
@@ -183,7 +289,15 @@ def main(argv: list[str] | None = None) -> int:
                 verbose=bool(args.verbose),
                 max_command_chars=int(args.max_command_chars),
             )
-            return 0 if args.no_fail else 1
+            exit_code = 0 if args.no_fail else 1
+            _record_idle_telemetry(
+                args,
+                workspace=workspace,
+                started_at=started_at,
+                exit_code=exit_code,
+                assessment=assessment,
+            )
+            return exit_code
 
         process_now = time.time()
         fast_processes = iter_fast_local_processes()
@@ -208,7 +322,15 @@ def main(argv: list[str] | None = None) -> int:
                 verbose=bool(args.verbose),
                 max_command_chars=int(args.max_command_chars),
             )
-            return 0 if args.no_fail else 1
+            exit_code = 0 if args.no_fail else 1
+            _record_idle_telemetry(
+                args,
+                workspace=workspace,
+                started_at=started_at,
+                exit_code=exit_code,
+                assessment=assessment,
+            )
+            return exit_code
 
         if not fast_processes and os.name == "nt" and not args.full_process_scan:
             raise RuntimeError("fast Windows process snapshot returned no rows")
@@ -224,9 +346,15 @@ def main(argv: list[str] | None = None) -> int:
                         verbose=bool(args.verbose),
                         max_command_chars=int(args.max_command_chars),
                     )
-                    if args.no_fail or assessment.idle:
-                        return 0
-                    return 1
+                    exit_code = 0 if args.no_fail or assessment.idle else 1
+                    _record_idle_telemetry(
+                        args,
+                        workspace=workspace,
+                        started_at=started_at,
+                        exit_code=exit_code,
+                        assessment=assessment,
+                    )
+                    return exit_code
                 raise
 
             assessment = assess_workspace_idle(
@@ -263,7 +391,15 @@ def main(argv: list[str] | None = None) -> int:
             print("NO")
             if not args.no_fail:
                 print(f"workspace idle check failed: {exc}", file=sys.stderr)
-        return 0 if args.no_fail else 2
+        exit_code = 0 if args.no_fail else 2
+        _record_idle_telemetry(
+            args,
+            workspace=workspace,
+            started_at=started_at,
+            exit_code=exit_code,
+            error=str(exc),
+        )
+        return exit_code
 
     _print_assessment(
         assessment,
@@ -273,8 +409,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.no_fail or assessment.idle:
-        return 0
-    return 1
+        exit_code = 0
+    else:
+        exit_code = 1
+    _record_idle_telemetry(
+        args,
+        workspace=workspace,
+        started_at=started_at,
+        exit_code=exit_code,
+        assessment=assessment,
+    )
+    return exit_code
 
 
 if __name__ == "__main__":
