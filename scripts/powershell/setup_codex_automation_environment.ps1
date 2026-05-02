@@ -41,6 +41,10 @@
 .PARAMETER VerbosePdm
     Pass --verbose to PDM.
 
+.PARAMETER AutomationVenvRoot
+    Optional root for fallback automation virtual environments. Used only when
+    the checkout-local .venv Python exists but cannot be executed.
+
 .EXAMPLE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\setup_codex_automation_environment.ps1
 
@@ -72,6 +76,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$VerbosePdm,
+
+    [Parameter(Mandatory = $false)]
+    [string]$AutomationVenvRoot,
 
     [Parameter(Mandatory = $false)]
     [string[]]$VerifyImports = @("flask", "pymongo", "pytest", "mcp")
@@ -122,7 +129,8 @@ function Test-PythonCandidate {
             return $null
         }
 
-        $version = [Version]([string]$versionText[0])
+        $versionLine = [string](@($versionText)[0])
+        $version = [Version]$versionLine
         if ($version.Major -eq 3 -and $version.Minor -ge 11) {
             return @{
                 Command = $Command
@@ -138,6 +146,132 @@ function Test-PythonCandidate {
     return $null
 }
 
+function Invoke-ExternalWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @(),
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Attempts = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$DelaySeconds = 3
+    )
+
+    $lastOutput = @()
+    $lastExitCode = $null
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $output = & $FilePath @Arguments 2>&1
+            $exitCode = $LASTEXITCODE
+            if ($null -eq $exitCode) {
+                $exitCode = 0
+            }
+
+            if ($exitCode -eq 0) {
+                return @{
+                    Succeeded = $true
+                    Output = @($output)
+                    ExitCode = $exitCode
+                    Error = $null
+                }
+            }
+
+            $lastOutput = @($output)
+            $lastExitCode = $exitCode
+            $lastError = "$Description exited with code $exitCode"
+        }
+        catch {
+            $lastOutput = @()
+            $lastExitCode = $null
+            $lastError = $_.Exception.Message
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warn "$Description failed on attempt $attempt/$Attempts; retrying in $DelaySeconds seconds. Last error: $lastError"
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return @{
+        Succeeded = $false
+        Output = @($lastOutput)
+        ExitCode = $lastExitCode
+        Error = $lastError
+    }
+}
+
+function Test-VenvPythonUsable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath
+    )
+
+    if (-not (Test-Path -LiteralPath $PythonPath)) {
+        return $false
+    }
+
+    $probe = Invoke-ExternalWithRetry `
+        -FilePath $PythonPath `
+        -Arguments @("-c", "import sys; print(sys.executable); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')") `
+        -Description "Checking virtualenv Python at $PythonPath"
+
+    if ($probe.Succeeded) {
+        return $true
+    }
+
+    Write-Warn "Virtualenv Python is not usable at $PythonPath. Last error: $($probe.Error)"
+    return $false
+}
+
+function Resolve-AutomationVenvDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRepoRoot
+    )
+
+    if ($AutomationVenvRoot) {
+        $base = $AutomationVenvRoot
+    }
+    elseif ($env:VON_CODEX_AUTOMATION_VENV_ROOT) {
+        $base = $env:VON_CODEX_AUTOMATION_VENV_ROOT
+    }
+    elseif ($env:CODEX_HOME) {
+        $base = Join-Path $env:CODEX_HOME "automations\python-envs"
+    }
+    elseif ($env:USERPROFILE) {
+        $base = Join-Path $env:USERPROFILE ".codex\automations\python-envs"
+    }
+    else {
+        $base = Join-Path ([System.IO.Path]::GetTempPath()) "codex-automation-python-envs"
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($ResolvedRepoRoot.ToLowerInvariant())
+        $hashBytes = $sha.ComputeHash($bytes)
+    }
+    finally {
+        $sha.Dispose()
+    }
+    $shortHash = -join ($hashBytes[0..5] | ForEach-Object { $_.ToString("x2") })
+    $repoName = Split-Path -Leaf $ResolvedRepoRoot
+    $safeRepoName = ($repoName -replace '[^A-Za-z0-9._-]+', '_').Trim('_')
+    if (-not $safeRepoName) {
+        $safeRepoName = "repo"
+    }
+
+    return (Join-Path $base "$safeRepoName-$shortHash\.venv")
+}
+
 function Find-Python {
     $candidates = New-Object System.Collections.Generic.List[object]
 
@@ -145,12 +279,12 @@ function Find-Python {
         [void]$candidates.Add(@{ Command = "py"; Arguments = @("-$PythonVersion") })
     }
 
-    foreach ($minor in @("3.13", "3.12", "3.11")) {
-        [void]$candidates.Add(@{ Command = "py"; Arguments = @("-$minor") })
-    }
-
     foreach ($command in @("python", "python3")) {
         [void]$candidates.Add(@{ Command = $command; Arguments = @() })
+    }
+
+    foreach ($minor in @("3.13", "3.12", "3.11")) {
+        [void]$candidates.Add(@{ Command = "py"; Arguments = @("-$minor") })
     }
 
     foreach ($candidate in $candidates) {
@@ -193,6 +327,7 @@ $venvScriptsDir = Join-Path $venvDir "Scripts"
 $venvPython = Join-Path $venvScriptsDir "python.exe"
 $venvPdm = Join-Path $venvScriptsDir "pdm.exe"
 $venvCreated = $false
+$venvIsAutomationFallback = $false
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
     $python = Find-Python
@@ -204,17 +339,45 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
     $venvCreated = $true
 }
+elseif (-not (Test-VenvPythonUsable -PythonPath $venvPython)) {
+    $fallbackVenvDir = Resolve-AutomationVenvDir -ResolvedRepoRoot $root
+    Write-Warn "Existing checkout-local .venv Python could not be executed; using automation fallback venv at $fallbackVenvDir"
+    $venvDir = $fallbackVenvDir
+    $venvScriptsDir = Join-Path $venvDir "Scripts"
+    $venvPython = Join-Path $venvScriptsDir "python.exe"
+    $venvPdm = Join-Path $venvScriptsDir "pdm.exe"
+    $venvIsAutomationFallback = $true
+
+    if (-not (Test-VenvPythonUsable -PythonPath $venvPython)) {
+        $python = Find-Python
+        $displayArgs = if ($python.Arguments.Count -gt 0) { " $($python.Arguments -join ' ')" } else { "" }
+        Write-Step "Creating automation fallback venv with $($python.Command)$displayArgs (Python $($python.Version))"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $venvDir) | Out-Null
+        & $python.Command @($python.Arguments) -m venv $venvDir
+        if ($LASTEXITCODE -ne 0 -or -not (Test-VenvPythonUsable -PythonPath $venvPython)) {
+            throw "Failed to create usable automation fallback virtual environment at $venvDir"
+        }
+        $venvCreated = $true
+    }
+    else {
+        Write-Ok "Using existing automation fallback venv"
+    }
+}
 else {
     Write-Ok "Using existing .venv"
 }
 
-$pipVersion = & $venvPython -m pip --version 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $pipVersion) {
+$pipProbe = Invoke-ExternalWithRetry `
+    -FilePath $venvPython `
+    -Arguments @("-m", "pip", "--version") `
+    -Description "Checking pip inside selected virtualenv"
+if (-not $pipProbe.Succeeded -or -not $pipProbe.Output) {
     Invoke-Checked "Ensuring pip is available" {
         & $venvPython -m ensurepip --upgrade
     }
 }
 else {
+    $pipVersion = $pipProbe.Output
     Write-Ok "pip is available: $($pipVersion[0])"
 }
 
@@ -262,6 +425,9 @@ if ($currentPdmPython -ne $resolvedVenvPython) {
 $env:VIRTUAL_ENV = $venvDir
 $env:Path = "$venvScriptsDir;$env:Path"
 $env:PDM_CHECK_UPDATE = "false"
+if ($venvIsAutomationFallback) {
+    $env:VON_CODEX_AUTOMATION_USING_FALLBACK_VENV = "1"
+}
 
 function Test-VerifiedImports {
     param(

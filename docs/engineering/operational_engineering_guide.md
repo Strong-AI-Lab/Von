@@ -336,6 +336,13 @@ repo root. It also avoids upgrading `pip` in an existing usable `.venv` unless
 machine-global setup such as MongoDB, Tesseract, uv tools, or VS Code
 configuration.
 
+If the checkout-local `.venv\Scripts\python.exe` exists but cannot be executed
+inside a Codex automation sandbox, the bootstrap retries the probe and then uses
+a non-repo fallback venv under Codex automation storage rather than deleting the
+checkout `.venv`. This avoids breaking long-lived local Von services that may
+be using the checkout venv while still giving unattended automation a usable
+Python/PDM environment.
+
 Use the lighter smoke form when you only need to verify the already-prepared
 environment without reinstalling dependencies:
 
