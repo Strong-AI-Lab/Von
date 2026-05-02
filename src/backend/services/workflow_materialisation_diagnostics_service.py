@@ -58,6 +58,7 @@ DEFAULT_REQUIRED_CONCEPT_IDS: tuple[str, ...] = (
 
 WORKFLOW_BOOTSTRAP_REPORT_KEYS: tuple[str, ...] = (
     "entity_workflow_bootstrap",
+    "represented_artefact_creation_workflow_bootstrap",
     "conversation_turn_workflow_bootstrap",
     "paper_workflow_bootstrap",
     "episode_evaluation_workflow_bootstrap",

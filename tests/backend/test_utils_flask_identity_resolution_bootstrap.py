@@ -31,6 +31,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     "drift_detected": False,
                 },
             },
+            "represented_artefact_creation_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "paper_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -68,6 +75,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
             "materialisation_status": "current",
             "drift_detected": False,
         },
+        "represented_artefact_creation_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+        },
         "paper_workflow_bootstrap": {
             "success": True,
             "materialisation_status": "repaired_from_repo_seed",
@@ -101,6 +113,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
+        represented_artefact_creation_workflow_vontology_service as represented_artefact_creation_workflow_bootstrap,
         testing_workflow_vontology_service as testing_workflow_bootstrap,
         talk_representation_workflow_vontology_service as talk_workflow_bootstrap,
         turn_pipeline_monitoring_schedule_bootstrap_service as turn_pipeline_monitoring_schedule_bootstrap,
@@ -276,6 +289,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        represented_artefact_creation_workflow_bootstrap,
+        "bootstrap_canonical_represented_artefact_creation_workflow",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#represented_artefact_creation_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         multilingual_workflow_bootstrap,
         "bootstrap_canonical_multilingual_concept_enrichment_workflow",
         lambda: {
@@ -408,6 +430,13 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert (
         concept_search_instance_retrieval_workflow_bootstrap_report.get("success")
         is True
+    )
+    represented_artefact_creation_workflow_bootstrap_report = result.get(
+        "represented_artefact_creation_workflow_bootstrap"
+    )
+    assert isinstance(represented_artefact_creation_workflow_bootstrap_report, dict)
+    assert (
+        represented_artefact_creation_workflow_bootstrap_report.get("success") is True
     )
     multilingual_workflow_bootstrap_report = result.get(
         "multilingual_concept_enrichment_workflow_bootstrap"

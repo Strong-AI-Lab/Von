@@ -274,6 +274,8 @@ def _ensure_conversation_turn_prompt_support(
                 "gmail_send_message",
                 "external-system side effect",
                 "represented labels, categories, tags, role markers",
+                "#V#represented_artefact_creation_workflow",
+                "grounded `parent_id`",
             ),
         )
     ):
@@ -327,6 +329,8 @@ def _ensure_conversation_turn_prompt_support(
                 "gmail_send_message",
                 "external-system side effect",
                 "represented labels, categories, tags, workflow markers",
+                "Do NOT emit `create_concepts` without `parent_id`",
+                "Do NOT use `#V#thing` as the parent",
             ),
         )
     ):

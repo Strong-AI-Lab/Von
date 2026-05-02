@@ -103,6 +103,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "represented labels, categories, tags, role markers" in (
         expected_outcome_text
     )
+    assert "#V#represented_artefact_creation_workflow" in expected_outcome_text
+    assert "grounded `parent_id`" in expected_outcome_text
+    assert "with `#V#thing` as the parent, is not sufficient" in (
+        expected_outcome_text
+    )
     assert "Listing existing external-system labels" in expected_outcome_text
     assert "write-only required tool list is not sufficient" in (expected_outcome_text)
     assert "Do not invent tools such as `diary_create`" in expected_outcome_text
@@ -135,6 +140,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`upsert_singleton_text_relation` for supplied content" in (
         missing_tool_retry_text
     )
+    assert "Do NOT emit `create_concepts` without `parent_id`" in (
+        missing_tool_retry_text
+    )
+    assert "Do NOT use `#V#thing` as the parent" in missing_tool_retry_text
     assert "Do NOT invent domain-specific tool names such as `diary_create`" in (
         missing_tool_retry_text
     )

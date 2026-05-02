@@ -34,6 +34,7 @@ _SERVICE_EXPORT_MODULES = {
     "parent_specificity_schedule_bootstrap_service": ".parent_specificity_schedule_bootstrap_service",
     "parent_specificity_vontology_service": ".parent_specificity_vontology_service",
     "relation_elicitation_service": ".relation_elicitation_service",
+    "represented_artefact_creation_workflow_vontology_service": ".represented_artefact_creation_workflow_vontology_service",
     "settings_service": ".settings_service",
     "skill_catalogue_service": ".skill_catalogue_service",
     "testing_workflow_vontology_service": ".testing_workflow_vontology_service",
@@ -104,6 +105,9 @@ if TYPE_CHECKING:
         parent_specificity_vontology_service as parent_specificity_vontology_service,
     )
     from . import relation_elicitation_service as relation_elicitation_service
+    from . import (
+        represented_artefact_creation_workflow_vontology_service as represented_artefact_creation_workflow_vontology_service,
+    )
     from . import settings_service as settings_service
     from . import skill_catalogue_service as skill_catalogue_service
     from . import testing_workflow_vontology_service as testing_workflow_vontology_service
@@ -152,6 +156,7 @@ __all__ = [
     "parent_specificity_schedule_bootstrap_service",
     "parent_specificity_vontology_service",
     "relation_elicitation_service",
+    "represented_artefact_creation_workflow_vontology_service",
     "settings_service",
     "skill_catalogue_service",
     "testing_workflow_vontology_service",
