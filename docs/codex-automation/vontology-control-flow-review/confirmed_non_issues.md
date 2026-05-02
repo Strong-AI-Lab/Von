@@ -47,6 +47,21 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   publication script for a Vontology workflow. File only if it becomes a normal
   runtime workflow source or recurring Python workflow authoring pathway.
 
+## Inspected, Not Filed On 2026-05-03
+
+- `workflow_discovery_service.py` direct `workflow_execute` contract fallback:
+  currently appears to be generic direct-ID/structured-contract support for
+  capability-index cold starts. File only if it grows into domain workflow
+  routing, phrase-specific process selection, or user-facing launch policy.
+- `required_tool_obligation_service.py`: currently appears to preserve and
+  evaluate already-authored required-tool obligations. File only if operation
+  classes or tool-risk policy become Python defaults rather than Vontology tool
+  metadata; broad default tool metadata remains covered by `JVNAUTOSCI-1985`.
+- `catalogue.py` related-concepts graph/text fallback: currently treated as
+  generic degraded retrieval support. File if it starts deciding durable
+  relation importance, ranking policy, or user-facing KB explanation semantics
+  instead of returning bounded evidence/diagnostics.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.
