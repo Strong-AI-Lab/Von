@@ -556,13 +556,63 @@ def iter_windows_cim_processes(
     return _parse_windows_process_csv(completed.stdout or "")
 
 
+def iter_windows_wmi_processes(
+    *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
+) -> list[ProcessSnapshot]:
+    """Fallback Windows process snapshot using legacy WMI.
+
+    Some sandboxed PowerShell contexts return no rows from ``Get-CimInstance``
+    even though legacy WMI still exposes the same bounded scalar process fields.
+    Keep this separate from the psutil fallback because psutil command-line
+    enumeration has hung on process-heavy Windows hosts.
+    """
+
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        return []
+
+    command = (
+        "$ErrorActionPreference = 'SilentlyContinue'; "
+        "Get-WmiObject Win32_Process | "
+        "Select-Object ProcessId,Name,CommandLine,"
+        "@{Name='CreateTimeUnix';Expression={"
+        "if ($_.CreationDate) { "
+        "try { "
+        "([DateTimeOffset]"
+        "[Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate)"
+        ").ToUnixTimeSeconds() "
+        "} catch { '' } "
+        "} else { '' }"
+        "}} | ConvertTo-Csv -NoTypeInformation"
+    )
+    try:
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", command],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(0.5, timeout_seconds),
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    return _parse_windows_process_csv(completed.stdout or "")
+
+
 def iter_fast_local_processes(
     *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
 ) -> list[ProcessSnapshot]:
     """Return a fast local process snapshot where the host supports one."""
 
     if os.name == "nt":
-        return iter_windows_cim_processes(timeout_seconds=timeout_seconds)
+        rows = iter_windows_cim_processes(timeout_seconds=timeout_seconds)
+        if rows:
+            return rows
+        return iter_windows_wmi_processes(timeout_seconds=timeout_seconds)
     return iter_local_processes(include_cwd=False)
 
 

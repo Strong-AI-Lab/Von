@@ -394,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             return exit_code
 
         if not fast_processes and os.name == "nt" and not args.full_process_scan:
-            raise RuntimeError("fast Windows process snapshot returned no rows")
+            raise RuntimeError("bounded Windows process snapshot returned no rows")
 
         if args.full_process_scan:
             try:
