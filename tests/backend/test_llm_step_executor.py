@@ -433,6 +433,9 @@ def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workf
             captured["required_prompt_tools"] = request.data.get(
                 "required_prompt_tools"
             )
+            captured["required_tool_obligation_ledger"] = request.data.get(
+                "required_tool_obligation_ledger"
+            )
             captured["tool_argument_defaults"] = request.data.get(
                 "tool_argument_defaults"
             )
@@ -514,6 +517,16 @@ def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workf
         "get_predicate_incidence",
         "find_relations_with_argument",
     ]
+    ledger = captured["required_tool_obligation_ledger"]
+    assert isinstance(ledger, dict)
+    fetch_obligation = next(
+        item for item in ledger["obligations"] if item["tool_name"] == "fetch_concept"
+    )
+    assert fetch_obligation["allowed_by_workflow_policy"] is False
+    assert (
+        fetch_obligation["blocking_reason"]
+        == "contract_required_tool_not_allowed_by_workflow_policy"
+    )
     assert captured["tool_argument_defaults"] == {
         "get_predicate_incidence": {
             "argument_index": "subject",
@@ -635,6 +648,92 @@ def test_execute_llm_step_tool_mode_infers_predicate_incidence_from_alias_contra
         "get_predicate_incidence",
     ]
     assert captured["max_tool_invocations"] == 4
+
+
+def test_execute_llm_step_reserves_budget_for_kr_mutation_and_readback_contract(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    required_tools = [
+        "search_concepts",
+        "create_concepts",
+        "add_relationship",
+        "upsert_singleton_text_relation",
+        "fetch_concept",
+        "get_text_relations_summary",
+    ]
+
+    class _StubGateway:
+        def describe_methods(self) -> dict[str, object]:
+            return {tool_name: {} for tool_name in required_tools}
+
+    class _StubOrchestrator:
+        def __init__(self, **kwargs):
+            captured["max_tool_invocations"] = kwargs.get("max_tool_invocations")
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            return object(), {}
+
+        def _select_model_for_stage(self, **kwargs):
+            return kwargs.get("default_model")
+
+        def _action_tool_calling_plan(self, request):
+            captured["required_prompt_tools"] = request.data.get(
+                "required_prompt_tools"
+            )
+            captured["required_tool_obligation_ledger"] = request.data.get(
+                "required_tool_obligation_ledger"
+            )
+            return type(
+                "_Result",
+                (),
+                {
+                    "status": "success",
+                    "outputs": {
+                        "tool_calls_present": False,
+                        "orchestrator_result": {"response_text": '{"ok": true}'},
+                    },
+                },
+            )()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        lambda: {},
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="gemma4:26b",
+        ),
+        data={
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Represent reusable Vontology labels and read them back.",
+                },
+                "required_tools": list(required_tools),
+            }
+        },
+        prompt_contract={"prompt_text": "Call tools."},
+        llm_policy={"tool_mode": "allowed", "allowed_tools": list(required_tools)},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["max_tool_invocations"] == len(required_tools) + 2
+    assert captured["required_prompt_tools"] == required_tools
+    ledger = result.outputs["required_tool_obligation_ledger"]
+    assert ledger["unsatisfied_required_tools"] == required_tools
+    assert ledger["blocking_failure_codes"] == ["required_tool_not_planned"]
 
 
 def test_execute_llm_step_skips_completion_report_narration_when_tools_missing(

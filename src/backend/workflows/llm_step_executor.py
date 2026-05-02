@@ -19,6 +19,11 @@ from ..services.buttonify_service import (
     sanitise_buttonify_options,
 )
 from ..services.prompt_template_service import PromptTemplateService
+from ..services.required_tool_obligation_service import (
+    OPERATION_MUTATION_WRITE,
+    build_required_tool_obligation_ledger,
+    classify_required_tool_operation,
+)
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_timeout_sec,
@@ -179,6 +184,7 @@ def _resolve_llm_step_max_tool_invocations(
     request: WorkflowActionRequest,
     llm_policy: Mapping[str, Any],
     required_prompt_tools: Sequence[str],
+    required_obligation_tools: Sequence[str] | None = None,
 ) -> int:
     env_max_tool_invocations = request.environment.max_tool_invocations
     if env_max_tool_invocations is not None:
@@ -197,8 +203,21 @@ def _resolve_llm_step_max_tool_invocations(
     if policy_limit > 0:
         return policy_limit
 
-    if required_prompt_tools:
-        return max(_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP, len(required_prompt_tools))
+    required_tools = _merge_required_prompt_tools(
+        required_prompt_tools,
+        required_obligation_tools or (),
+    )
+    if required_tools:
+        operation_classes = [
+            classify_required_tool_operation(tool_name) for tool_name in required_tools
+        ]
+        required_budget = len(required_tools)
+        if OPERATION_MUTATION_WRITE in operation_classes:
+            # KR write contracts need room for resolution/search, mutation, and
+            # read-back.  The authored contract decides which tools are required;
+            # this support surface only avoids starving those obligations.
+            required_budget += 2
+        return max(_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP, required_budget)
 
     return 1
 
@@ -1030,6 +1049,9 @@ def _build_result(
     tool_messages: Sequence[Mapping[str, Any]],
     llm_calls: Sequence[Mapping[str, Any]],
     aux_llm_calls: Sequence[Mapping[str, Any]],
+    required_prompt_tools: Sequence[str] | None = None,
+    required_tool_obligation_ledger: Mapping[str, Any] | None = None,
+    max_tool_invocations: int | None = None,
 ) -> WorkflowActionResult:
     validated_outputs, validation_summary = _apply_validation_policy(
         request=request,
@@ -1063,6 +1085,17 @@ def _build_result(
             "tool_augmented_response" if tool_invocations else "direct_llm_response"
         ),
     }
+    if required_prompt_tools:
+        llm_step_envelope["required_prompt_tools"] = list(required_prompt_tools)
+    if isinstance(required_tool_obligation_ledger, Mapping):
+        llm_step_envelope["required_tool_obligation_ledger"] = dict(
+            required_tool_obligation_ledger
+        )
+        llm_step_envelope["required_tool_obligation_blockers"] = list(
+            required_tool_obligation_ledger.get("blocking_failure_codes") or []
+        )
+    if max_tool_invocations is not None:
+        llm_step_envelope["max_tool_invocations"] = int(max_tool_invocations)
 
     outputs = {
         "final_response": response_text,
@@ -1073,6 +1106,22 @@ def _build_result(
         "llm_calls": list(llm_calls),
         "aux_llm_calls": list(aux_llm_calls),
     }
+    if required_prompt_tools:
+        outputs["required_prompt_tools"] = list(required_prompt_tools)
+    if isinstance(required_tool_obligation_ledger, Mapping):
+        outputs["required_tool_obligation_ledger"] = dict(
+            required_tool_obligation_ledger
+        )
+        outputs["required_tool_obligation_blockers"] = list(
+            required_tool_obligation_ledger.get("blocking_failure_codes") or []
+        )
+        unsatisfied_tools = required_tool_obligation_ledger.get(
+            "unsatisfied_required_tools"
+        )
+        if isinstance(unsatisfied_tools, list):
+            outputs["missing_prompt_tools"] = list(unsatisfied_tools)
+    if max_tool_invocations is not None:
+        outputs["max_tool_invocations"] = int(max_tool_invocations)
     outputs.update(validated_outputs)
     validation_status = _context_string(validation_summary.get("status")).lower()
     if validation_status == "failed":
@@ -1436,18 +1485,27 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         if callable(infer_turn_contract_required_tools)
         else turn_expected_outcome_contract.required_tools
     )
-    required_prompt_tools = _filter_tool_names_to_allowed_set(
-        _merge_required_prompt_tools(
-            request.data.get("required_prompt_tools"),
-            llm_policy_map.get("required_tools"),
-            contract_required_tools or turn_expected_outcome_contract.required_tools,
+    required_tool_sources = {
+        "request_required_prompt_tools": request.data.get("required_prompt_tools"),
+        "llm_policy_required_tools": llm_policy_map.get("required_tools"),
+        "turn_expected_outcome_contract": (
+            contract_required_tools or turn_expected_outcome_contract.required_tools
         ),
+    }
+    required_obligation_tools = _merge_required_prompt_tools(
+        request.data.get("required_prompt_tools"),
+        llm_policy_map.get("required_tools"),
+        contract_required_tools or turn_expected_outcome_contract.required_tools,
+    )
+    required_prompt_tools = _filter_tool_names_to_allowed_set(
+        required_obligation_tools,
         allowed_tools,
     )
     max_tool_invocations = _resolve_llm_step_max_tool_invocations(
         request=request,
         llm_policy=llm_policy_map,
         required_prompt_tools=required_prompt_tools,
+        required_obligation_tools=required_obligation_tools,
     )
 
     orchestrator = InternalMCPChatOrchestrator(
@@ -1489,6 +1547,20 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             request.data.get("invocations")
             if isinstance(request.data.get("invocations"), list)
             else []
+        ),
+    )
+    initial_required_tool_obligation_ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source=required_tool_sources,
+        invocations=invocations,
+        allowed_tools=allowed_tools,
+        method_catalogue=(
+            method_catalogue if isinstance(method_catalogue, Mapping) else None
+        ),
+        max_tool_invocations=max_tool_invocations,
+        existing_ledger=(
+            request.data.get("required_tool_obligation_ledger")
+            if isinstance(request.data.get("required_tool_obligation_ledger"), Mapping)
+            else None
         ),
     )
     tool_messages = cast(
@@ -1572,6 +1644,13 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
                 "prompt_requirement_url_policy"
             ),
             "required_prompt_tools": required_prompt_tools,
+            "required_tool_obligation_tools": list(required_obligation_tools),
+            "required_tool_obligation_sources": required_tool_sources,
+            "required_tool_obligation_ledger": initial_required_tool_obligation_ledger,
+            "required_tool_obligation_blockers": list(
+                initial_required_tool_obligation_ledger.get("blocking_failure_codes")
+                or []
+            ),
             "tool_argument_defaults": _normalise_tool_argument_defaults(
                 llm_policy_map.get("tool_argument_defaults")
             ),
@@ -1657,16 +1736,20 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
                     "raw_response": getattr(error, "raw_response", None),
                 },
             ),
-            "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: _build_simple_error_result(
-                "tool_call_validation_error",
-                {
-                    "message": "; ".join([*list(errors or []), *list(warnings or [])])
-                    or "tool validation failed",
-                    "errors": list(errors or []),
-                    "warnings": list(warnings or []),
-                    "unavailable": list(unavailable or []),
-                    **kwargs,
-                },
+            "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: (
+                _build_simple_error_result(
+                    "tool_call_validation_error",
+                    {
+                        "message": "; ".join(
+                            [*list(errors or []), *list(warnings or [])]
+                        )
+                        or "tool validation failed",
+                        "errors": list(errors or []),
+                        "warnings": list(warnings or []),
+                        "unavailable": list(unavailable or []),
+                        **kwargs,
+                    },
+                )
             ),
             "aux_llm_calls": aux_llm_calls,
             "llm_calls": llm_calls,
@@ -1682,6 +1765,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             "tool_call_repair_budget": 1,
             "llm_allowed_tools": allowed_tools,
             "method_catalogue": method_catalogue,
+            "max_tool_invocations": max_tool_invocations,
         }
     )
 
@@ -1764,6 +1848,31 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             selected_candidate = candidate
             break
 
+    planned_tool_calls = shared_data.get("tool_calls")
+    final_required_tool_obligation_ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source=required_tool_sources,
+        invocations=invocations,
+        planned_tool_calls=(
+            planned_tool_calls if isinstance(planned_tool_calls, list) else None
+        ),
+        allowed_tools=allowed_tools,
+        method_catalogue=(
+            method_catalogue if isinstance(method_catalogue, Mapping) else None
+        ),
+        max_tool_invocations=max_tool_invocations,
+        existing_ledger=(
+            shared_data.get("required_tool_obligation_ledger")
+            if isinstance(shared_data.get("required_tool_obligation_ledger"), Mapping)
+            else None
+        ),
+    )
+    shared_data["required_tool_obligation_ledger"] = (
+        final_required_tool_obligation_ledger
+    )
+    shared_data["required_tool_obligation_blockers"] = list(
+        final_required_tool_obligation_ledger.get("blocking_failure_codes") or []
+    )
+
     return _build_result(
         request=request,
         response_text=response_text,
@@ -1778,6 +1887,9 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         tool_messages=tool_messages,
         llm_calls=llm_calls,
         aux_llm_calls=aux_llm_calls,
+        required_prompt_tools=required_obligation_tools,
+        required_tool_obligation_ledger=final_required_tool_obligation_ledger,
+        max_tool_invocations=max_tool_invocations,
     )
 
 

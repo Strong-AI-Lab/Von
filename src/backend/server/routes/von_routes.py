@@ -5345,6 +5345,13 @@ def _finalise_llm_debug_info(
                 if isinstance(llm_debug_info.get("completion_report"), dict)
                 else None
             ),
+            required_tool_obligation_ledger=(
+                llm_debug_info.get("required_tool_obligation_ledger")
+                if isinstance(
+                    llm_debug_info.get("required_tool_obligation_ledger"), dict
+                )
+                else None
+            ),
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
         routing_diagnostics = turn_execution_record.get("workflow_routing_diagnostics")

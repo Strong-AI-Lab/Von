@@ -1990,6 +1990,11 @@ def run_turn_execution_critic(
             if isinstance(data.get("required_prompt_tools"), list)
             else None
         ),
+        required_tool_obligation_ledger=(
+            data.get("required_tool_obligation_ledger")
+            if isinstance(data.get("required_tool_obligation_ledger"), Mapping)
+            else None
+        ),
     )
 
     completion_gate = turn_execution_record.get("completion_gate")

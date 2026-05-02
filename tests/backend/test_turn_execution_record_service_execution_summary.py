@@ -5,6 +5,21 @@ from src.backend.services.turn_execution_record_service import (
     build_workflow_routing_diagnostics,
     _summarise_tool_execution_context,
 )
+from src.backend.services.required_tool_obligation_service import (
+    BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
+    BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
+    build_required_tool_obligation_ledger,
+)
+
+
+_KR_REQUIRED_TOOLS = [
+    "search_concepts",
+    "create_concepts",
+    "add_relationship",
+    "upsert_singleton_text_relation",
+    "fetch_concept",
+    "get_text_relations_summary",
+]
 
 
 def test_worker_unavailable_failure_code_only_applies_to_tool_routes() -> None:
@@ -982,10 +997,9 @@ def test_turn_record_preserves_first_class_turn_expected_outcome_contract_snapsh
         ]["fields"]
         == expected_contract
     )
-    assert (
-        record["execution"]["summary"]["turn_expected_outcome_contract_field_count"]
-        == len(expected_contract)
-    )
+    assert record["execution"]["summary"][
+        "turn_expected_outcome_contract_field_count"
+    ] == len(expected_contract)
 
 
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> (
@@ -1370,7 +1384,9 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     assert diagnostics["dispatch"]["turn_contract_check"]["override_reason"] == (
         "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
     )
-    assert diagnostics["dispatch"]["turn_contract_check"]["turn_expected_outcome_contract"] == {
+    assert diagnostics["dispatch"]["turn_contract_check"][
+        "turn_expected_outcome_contract"
+    ] == {
         "success_target": "Grounded meeting invitation test plan.",
         "selector_guidance": (
             "Use represented meeting context and live web confirmation."
@@ -1742,4 +1758,92 @@ def test_build_turn_execution_correctness_summary_marks_answer_evidence_contradi
     assert summary["metric_labels"]["false_success"] is True
     assert (
         summary["gate_labels"]["required_evidence_answer_consistency_blocked"] is True
+    )
+
+
+def test_turn_execution_record_rejects_search_only_kr_required_tool_run() -> None:
+    invocations = [{"tool": "search_concepts", "status": "ok"}]
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={"turn_expected_outcome_contract": _KR_REQUIRED_TOOLS},
+        invocations=invocations,
+        allowed_tools=_KR_REQUIRED_TOOLS,
+        method_catalogue={tool_name: {} for tool_name in _KR_REQUIRED_TOOLS},
+        max_tool_invocations=1,
+    )
+
+    record = build_turn_execution_record(
+        request_id="req-kr-search-only",
+        session_id="session-1",
+        namespace="#V#user@test",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Represent these labels in the Vontology.",
+        response_text="Done.",
+        interaction_timestamp_utc="2026-05-02T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_seeking",
+        },
+        tool_invocations=invocations,
+        turn_expected_outcome_contract={"required_tools": _KR_REQUIRED_TOOLS},
+        required_tool_obligation_ledger=ledger,
+    )
+
+    gate = record["completion_gate"]
+    summary = record["execution"]["summary"]
+    assert gate["safe_to_claim_completion"] is False
+    assert (
+        BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS
+        in gate["blocking_failure_codes"]
+    )
+    assert (
+        BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS
+        in summary["required_tool_obligation_blocking_failure_codes"]
+    )
+    assert summary["required_tool_obligations"]["unsatisfied_required_tools"] == [
+        "create_concepts",
+        "add_relationship",
+        "upsert_singleton_text_relation",
+        "fetch_concept",
+        "get_text_relations_summary",
+    ]
+
+
+def test_turn_execution_record_preserves_required_tool_allowed_policy_blocker() -> None:
+    required_tools = ["search_concepts", "create_concepts"]
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={"turn_expected_outcome_contract": required_tools},
+        invocations=[],
+        allowed_tools=["search_concepts"],
+        method_catalogue={tool_name: {} for tool_name in required_tools},
+    )
+
+    record = build_turn_execution_record(
+        request_id="req-kr-unallowed",
+        session_id="session-1",
+        namespace="#V#user@test",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Represent these labels in the Vontology.",
+        response_text="I could not write.",
+        interaction_timestamp_utc="2026-05-02T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_seeking",
+        },
+        tool_invocations=[],
+        turn_expected_outcome_contract={"required_tools": required_tools},
+        required_tool_obligation_ledger=ledger,
+    )
+
+    gate = record["completion_gate"]
+    diagnostics = record["workflow_routing_diagnostics"]
+    assert gate["safe_to_claim_completion"] is False
+    assert (
+        BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY
+        in gate["blocking_failure_codes"]
+    )
+    assert (
+        BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY
+        in diagnostics["dispatch"]["required_tool_obligation_blocking_failure_codes"]
     )

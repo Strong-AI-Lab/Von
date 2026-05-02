@@ -29,6 +29,11 @@ from .representation_contract_vontology_service import (
     ensure_canonical_representation_contract_profiles,
     load_representation_contract_profiles_from_concept_ids,
 )
+from .required_tool_obligation_service import (
+    BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
+    build_required_tool_obligation_ledger,
+    required_tool_obligation_effect,
+)
 from .tool_metadata_service import (
     is_tool_prompt_required_evidence,
     is_tool_prompt_required_mutation,
@@ -2658,6 +2663,18 @@ def build_workflow_routing_diagnostics(
         if isinstance(tool_execution_payload_raw, Mapping)
         else {}
     )
+    required_tool_obligations_payload_raw = execution_summary_payload.get(
+        "required_tool_obligations"
+    )
+    if not isinstance(required_tool_obligations_payload_raw, Mapping):
+        required_tool_obligations_payload_raw = tool_execution_payload.get(
+            "required_tool_obligations"
+        )
+    required_tool_obligations_payload = (
+        dict(required_tool_obligations_payload_raw)
+        if isinstance(required_tool_obligations_payload_raw, Mapping)
+        else {}
+    )
     custom_workflow_execution_payload_raw = execution_summary_payload.get(
         "custom_workflow_execution"
     )
@@ -2988,6 +3005,20 @@ def build_workflow_routing_diagnostics(
                 )
                 or []
             ),
+            "required_tool_obligations": required_tool_obligations_payload,
+            "required_tool_obligation_unsatisfied_count": _safe_non_negative_int(
+                execution_summary_payload.get(
+                    "required_tool_obligation_unsatisfied_count"
+                )
+            ),
+            "required_tool_obligation_blocking_failure_codes": (
+                _dedupe_string_sequence(
+                    execution_summary_payload.get(
+                        "required_tool_obligation_blocking_failure_codes"
+                    )
+                    or []
+                )
+            ),
             "failure_codes": dispatch_failure_codes,
             "zero_execution_primary_failure_code": dispatch_primary_failure_code,
             "zero_execution_primary_failure_reason": dispatch_primary_failure_reason,
@@ -3091,6 +3122,14 @@ def build_workflow_routing_diagnostics(
                 ),
                 "failure_codes": _dedupe_string_sequence(
                     tool_execution_payload.get("failure_codes") or []
+                ),
+                "required_tool_obligations": required_tool_obligations_payload,
+                "required_tool_obligation_unsatisfied_count": (
+                    _safe_non_negative_int(
+                        tool_execution_payload.get(
+                            "required_tool_obligation_unsatisfied_count"
+                        )
+                    )
                 ),
             },
             "custom_workflow_execution": (
@@ -4082,6 +4121,25 @@ def _extract_string_sequence_from_mapping(
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
     return _dedupe_string_sequence(value)
+
+
+def _extract_required_tool_obligation_ledger(
+    *sources: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        if isinstance(source.get("obligations"), list):
+            return dict(source)
+        nested = source.get("required_tool_obligation_ledger")
+        if isinstance(nested, Mapping):
+            return dict(nested)
+        envelope = source.get("llm_step_envelope")
+        if isinstance(envelope, Mapping) and isinstance(
+            envelope.get("required_tool_obligation_ledger"), Mapping
+        ):
+            return dict(envelope["required_tool_obligation_ledger"])
+    return None
 
 
 def _extract_invocation_concept_argument(invocation: Mapping[str, Any]) -> str | None:
@@ -6690,6 +6748,7 @@ def build_turn_execution_record(
     completion_gate_verdict: Mapping[str, Any] | None = None,
     completion_report: Mapping[str, Any] | None = None,
     required_prompt_tools: Sequence[Any] | None = None,
+    required_tool_obligation_ledger: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -6778,6 +6837,34 @@ def build_turn_execution_record(
                 "required_prompt_tools",
             ),
         ]
+    )
+    required_tool_sources = {
+        "required_prompt_tools": list(required_prompt_tools or ()),
+        "turn_expected_outcome_contract": list(
+            resolved_turn_expected_outcome_contract.required_tools
+        ),
+        "selected_workflow_trace_required_prompt_tools": (
+            _extract_string_sequence_from_mapping(
+                selected_workflow_trace_payload,
+                "required_prompt_tools",
+            )
+        ),
+        "completion_report_required_prompt_tools": (
+            _extract_string_sequence_from_mapping(
+                completion_report_payload,
+                "required_prompt_tools",
+            )
+        ),
+    }
+    existing_required_tool_obligation_ledger = _extract_required_tool_obligation_ledger(
+        required_tool_obligation_ledger,
+        selected_workflow_trace_payload,
+        completion_report_payload,
+    )
+    required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
+        required_tools_by_source=required_tool_sources,
+        invocations=serialised_invocations,
+        existing_ledger=existing_required_tool_obligation_ledger,
     )
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
@@ -6944,6 +7031,21 @@ def build_turn_execution_record(
         )
     required_effects.extend(mutation_effects)
 
+    required_tool_effect = required_tool_obligation_effect(
+        required_tool_obligation_ledger_payload
+    )
+    required_tool_blocking_codes = {
+        code
+        for code in _dedupe_string_sequence(
+            required_tool_obligation_ledger_payload.get("blocking_failure_codes") or []
+        )
+    }
+    if isinstance(required_tool_effect, Mapping) and (
+        not required_effects
+        or bool(required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED})
+    ):
+        required_effects.append(dict(required_tool_effect))
+
     if (
         not required_effects
         and not mutation_effects
@@ -6968,6 +7070,39 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
         observed_equivalent_tools=execution_surface_observed_tools,
     )
+    if int(required_tool_obligation_ledger_payload.get("required_tool_count") or 0) > 0:
+        execution_summary = dict(execution_summary)
+        execution_summary["required_tool_obligations"] = dict(
+            required_tool_obligation_ledger_payload
+        )
+        execution_summary["required_tool_obligation_unsatisfied_count"] = int(
+            required_tool_obligation_ledger_payload.get("unsatisfied_count") or 0
+        )
+        execution_summary["required_tool_obligation_blocking_failure_codes"] = (
+            _dedupe_string_sequence(
+                required_tool_obligation_ledger_payload.get("blocking_failure_codes")
+                or []
+            )
+        )
+        summary_failure_codes = _dedupe_string_sequence(
+            [
+                *(execution_summary.get("failure_codes") or []),
+                *execution_summary["required_tool_obligation_blocking_failure_codes"],
+            ]
+        )
+        execution_summary["failure_codes"] = summary_failure_codes
+        tool_execution_raw = execution_summary.get("tool_execution")
+        tool_execution = (
+            dict(tool_execution_raw) if isinstance(tool_execution_raw, Mapping) else {}
+        )
+        tool_execution["required_tool_obligations"] = dict(
+            required_tool_obligation_ledger_payload
+        )
+        tool_execution["required_tool_obligation_unsatisfied_count"] = (
+            execution_summary["required_tool_obligation_unsatisfied_count"]
+        )
+        tool_execution["failure_codes"] = summary_failure_codes
+        execution_summary["tool_execution"] = tool_execution
     failed_validation_tools = _dedupe_string_sequence(
         tool_call_validation_failure_context.get("failed_tools") or []
     )
@@ -7272,6 +7407,15 @@ def build_turn_execution_record(
             "missing_prompt_tools": (
                 list(effective_missing_prompt_tools)
                 if effective_required_prompt_tools
+                else None
+            ),
+            "required_tool_obligations": (
+                dict(required_tool_obligation_ledger_payload)
+                if int(
+                    required_tool_obligation_ledger_payload.get("required_tool_count")
+                    or 0
+                )
+                > 0
                 else None
             ),
             "diagnostic_events": diagnostic_events,
