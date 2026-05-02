@@ -8,11 +8,22 @@ produce.
 Current user prompt:
 {prompt}
 
+Important workflow context:
+- If `current_represented_artefact_request` is present, plan exactly that
+  one item. Treat the item object/text as the authoritative current artefact
+  request, and use the full user prompt only as provenance/background.
+- If `current_represented_artefact_request` is absent, plan the single
+  artefact requested by the user prompt. Do not try to represent a whole set in
+  this item-planning step; set extraction is handled by the parent workflow.
+
 Task:
 - Use available concept-search tools to check whether the named artefact, code,
   parent type, or predicate already exists.
 - Classify the target as a type, individual, or predicate.
 - Resolve a grounded parent/type before any creation plan.
+- The workflow will assert the resolved parent/type membership with
+  `add_relationship` after a concept ID is resolved. Return `parent_id` for
+  both `create` and `reuse_existing` when the parent/type is grounded.
 - Return a JSON object only.
 
 Parent/type policy:
@@ -33,7 +44,8 @@ Parent/type policy:
 
 Existing concept policy:
 - If search verifies an exact existing represented artefact for the requested
-  name or code, set decision `reuse_existing` and provide `existing_concept_id`.
+  name or code, set decision `reuse_existing` and provide `existing_concept_id`
+  plus the grounded `parent_id` needed for relationship verification.
 - Otherwise, set decision `create` only when `parent_id` and `concepts` are
   both fully grounded.
 

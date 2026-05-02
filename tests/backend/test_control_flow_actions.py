@@ -149,6 +149,7 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
             "workflow_id": "#V#child_each",
             "items_context_key": "candidate_items",
             "max_items": 2,
+            "max_concurrency": 2,
             "success_policy": "all_must_succeed",
         },
         context=context,
@@ -157,12 +158,24 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
 
     assert result.status == "success"
     assert result.outputs.get("for_each_item_count") == 2
+    assert result.outputs.get("for_each_max_concurrency") == 2
     assert result.outputs.get("for_each_success_count") == 2
     assert result.outputs.get("for_each_error_count") == 0
     results = result.outputs.get("iteration_results")
     assert isinstance(results, list)
     assert results[0]["result"] == {"item_value": "A", "item_index": 0}
     assert results[1]["result"] == {"item_value": "B", "item_index": 1}
+    invocations = result.outputs.get("invocations")
+    assert isinstance(invocations, list)
+    assert [item.get("tool") for item in invocations] == [
+        "child.emit_item",
+        "child.emit_item",
+    ]
+    assert all(item.get("workflow_step_evidence") is True for item in invocations)
+    assert results[0]["tool_invocations"][0]["payload"] == {
+        "item_value": "A",
+        "item_index": 0,
+    }
 
 
 def test_for_each_action_respects_partial_success_policy() -> None:

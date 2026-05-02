@@ -8,6 +8,7 @@ JVNAUTOSCI-1311:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 from typing import Any, Callable, Dict, Mapping, Sequence
@@ -39,6 +40,7 @@ from ..execution_contracts import (
     WORKFLOW_FORK_FAILURE_POLICY_COLLECT_ERRORS,
     WORKFLOW_FORK_FAILURE_POLICY_FAIL_FAST,
     WORKFLOW_FORK_MERGE_POLICY_LAST_WRITER_WINS,
+    WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     append_runtime_event,
     increment_runtime_metric,
 )
@@ -52,9 +54,12 @@ _DEFAULT_BRANCH_MAX_TRANSITIONS = 40
 _MAX_BRANCH_MAX_TRANSITIONS = 200
 _DEFAULT_FOR_EACH_ITEM_LIMIT = 16
 _MAX_FOR_EACH_ITEM_LIMIT = 256
+_DEFAULT_FOR_EACH_MAX_CONCURRENCY = 1
+_MAX_FOR_EACH_MAX_CONCURRENCY = 16
 _FORK_BRANCH_LIMIT_ENV = "VON_WORKFLOW_FORK_MAX_BRANCHES"
 _FORK_BRANCH_TRANSITIONS_ENV = "VON_WORKFLOW_FORK_BRANCH_MAX_TRANSITIONS"
 _FOR_EACH_ITEM_LIMIT_ENV = "VON_WORKFLOW_FOR_EACH_MAX_ITEMS"
+_FOR_EACH_MAX_CONCURRENCY_ENV = "VON_WORKFLOW_FOR_EACH_MAX_CONCURRENCY"
 
 
 def _normalise_text(value: Any) -> str:
@@ -90,6 +95,21 @@ def _coerce_for_each_limit(value: Any) -> int:
         default=default_limit,
         min_value=1,
         max_value=_MAX_FOR_EACH_ITEM_LIMIT,
+    )
+
+
+def _coerce_for_each_max_concurrency(value: Any) -> int:
+    default_concurrency = _coerce_int(
+        os.getenv(_FOR_EACH_MAX_CONCURRENCY_ENV),
+        default=_DEFAULT_FOR_EACH_MAX_CONCURRENCY,
+        min_value=1,
+        max_value=_MAX_FOR_EACH_MAX_CONCURRENCY,
+    )
+    return _coerce_int(
+        value,
+        default=default_concurrency,
+        min_value=1,
+        max_value=_MAX_FOR_EACH_MAX_CONCURRENCY,
     )
 
 
@@ -224,6 +244,86 @@ def _extract_declared_output_payload(result: Any) -> dict[str, Any]:
             if isinstance(output_payload, Mapping):
                 return dict(output_payload)
     return {}
+
+
+def _child_context_target_payload(child_data: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in (
+        "concept_id",
+        "paper_concept_id",
+        "file_copy_concept_id",
+        "computer_file_copy_concept_id",
+        "source_file_copy_concept_id",
+        "represented_artefact_concept_id",
+    ):
+        value = child_data.get(key)
+        if value not in (None, "", [], {}):
+            payload[key] = value
+    if "concept_id" not in payload and payload.get("represented_artefact_concept_id"):
+        payload["concept_id"] = payload["represented_artefact_concept_id"]
+    return payload
+
+
+def _derive_child_step_invocations(
+    result: Any,
+    *,
+    child_workflow_id: str,
+) -> list[dict[str, Any]]:
+    data = getattr(result, "data", None)
+    if not isinstance(data, Mapping):
+        return []
+    raw_envelopes = data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    if not isinstance(raw_envelopes, Sequence) or isinstance(
+        raw_envelopes,
+        (str, bytes, bytearray),
+    ):
+        return []
+
+    context_payload = _child_context_target_payload(data)
+    invocations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for envelope in raw_envelopes:
+        if not isinstance(envelope, Mapping):
+            continue
+        envelope_workflow_id = _normalise_text(envelope.get("workflow_id"))
+        if envelope_workflow_id and envelope_workflow_id != child_workflow_id:
+            continue
+        action_id = _normalise_text(envelope.get("action_id"))
+        if not action_id:
+            continue
+        raw_output_payload = envelope.get("output_payload")
+        output_payload = (
+            dict(raw_output_payload) if isinstance(raw_output_payload, Mapping) else {}
+        )
+        effective_payload = {**context_payload, **output_payload}
+        action_outcome = _normalise_text(envelope.get("action_outcome")).lower()
+        status = "ok" if action_outcome in {"success", "succeeded", "ok"} else "failed"
+        fingerprint = (
+            action_id.lower(),
+            json.dumps(effective_payload, sort_keys=True, default=str),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+
+        raw_diagnostics = envelope.get("diagnostics")
+        diagnostics = (
+            dict(raw_diagnostics) if isinstance(raw_diagnostics, Mapping) else {}
+        )
+        error_text = _normalise_text(diagnostics.get("error"))
+        record: dict[str, Any] = {
+            "tool": action_id,
+            "status": status,
+            "payload": effective_payload,
+            "effective_payload": effective_payload,
+            "workflow_step_evidence": True,
+            "workflow_id": envelope_workflow_id,
+            "workflow_state_id": _normalise_text(envelope.get("state_id")),
+        }
+        if error_text:
+            record["error"] = error_text
+        invocations.append(record)
+    return invocations
 
 
 def _build_continue_handler() -> Callable[[WorkflowActionRequest], WorkflowActionResult]:
@@ -424,10 +524,15 @@ def _build_for_each_handler(
         max_transitions = _coerce_branch_max_transitions(
             request.inputs.get("max_transitions")
         )
+        max_concurrency = min(
+            _coerce_for_each_max_concurrency(request.inputs.get("max_concurrency")),
+            len(selected_items) or 1,
+        )
 
-        iteration_results: list[dict[str, Any]] = []
-        for index, item in enumerate(selected_items):
+        def _execute_item(index: int, item: Any) -> dict[str, Any]:
             child_context = dict(request.data)
+            child_context.pop(WORKFLOW_STEP_RESULT_ENVELOPES_KEY, None)
+            child_context.pop("invocations", None)
             child_context[item_context_key] = item
             child_context[index_context_key] = index
             child_context["__workflow_for_each_parent_workflow_id"] = _normalise_text(
@@ -466,20 +571,65 @@ def _build_for_each_handler(
                 data=child_context,
                 trace=child_trace,
             )
-            iteration_results.append(
-                {
-                    "index": index,
-                    "item": item,
-                    "completed": bool(child_result.completed),
-                    "final_state": _normalise_text(child_result.final_state),
-                    "error": _normalise_text(child_result.error) or None,
-                    "result": _extract_declared_output_payload(child_result),
-                    "result_envelope": (
-                        dict(child_result.result_envelope)
-                        if isinstance(child_result.result_envelope, Mapping)
-                        else None
-                    ),
+            child_invocations = _derive_child_step_invocations(
+                child_result,
+                child_workflow_id=child_workflow_id,
+            )
+            return {
+                "index": index,
+                "item": item,
+                "completed": bool(child_result.completed),
+                "final_state": _normalise_text(child_result.final_state),
+                "error": _normalise_text(child_result.error) or None,
+                "tool_invocations": child_invocations,
+                "result": _extract_declared_output_payload(child_result),
+                "result_envelope": (
+                    dict(child_result.result_envelope)
+                    if isinstance(child_result.result_envelope, Mapping)
+                    else None
+                ),
+            }
+
+        indexed_results: dict[int, dict[str, Any]] = {}
+        if max_concurrency <= 1 or len(selected_items) <= 1:
+            for index, item in enumerate(selected_items):
+                indexed_results[index] = _execute_item(index, item)
+        else:
+            with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+                future_to_index = {
+                    executor.submit(_execute_item, index, item): index
+                    for index, item in enumerate(selected_items)
                 }
+                for future in as_completed(future_to_index):
+                    index = future_to_index[future]
+                    try:
+                        indexed_results[index] = future.result()
+                    except Exception as exc:
+                        indexed_results[index] = {
+                            "index": index,
+                            "item": selected_items[index],
+                            "completed": False,
+                            "final_state": None,
+                            "error": f"for_each_item_exception:{exc}",
+                            "tool_invocations": [],
+                            "result": {},
+                            "result_envelope": None,
+                        }
+
+        iteration_results = [
+            indexed_results[index]
+            for index in range(len(selected_items))
+            if index in indexed_results
+        ]
+        child_step_invocations: list[Mapping[str, Any]] = []
+        for item in iteration_results:
+            raw_item_invocations = item.get("tool_invocations")
+            if not isinstance(raw_item_invocations, list):
+                continue
+            child_step_invocations.extend(
+                invocation
+                for invocation in raw_item_invocations
+                if isinstance(invocation, Mapping)
             )
 
         success_count = len([item for item in iteration_results if item["completed"]])
@@ -488,12 +638,27 @@ def _build_for_each_handler(
             "items_source": items_source or None,
             "for_each_item_count": len(iteration_results),
             "for_each_item_limit": item_limit,
+            "for_each_max_concurrency": max_concurrency,
             "for_each_success_policy": success_policy,
             "for_each_success_count": success_count,
             "for_each_error_count": error_count,
             "for_each_partial_success": success_count > 0 and error_count > 0,
             "iteration_results": iteration_results,
         }
+        existing_invocations = request.data.get("invocations")
+        if isinstance(existing_invocations, list) or child_step_invocations:
+            outputs["invocations"] = [
+                *(
+                    item
+                    for item in (
+                        existing_invocations
+                        if isinstance(existing_invocations, list)
+                        else []
+                    )
+                    if isinstance(item, Mapping)
+                ),
+                *child_step_invocations,
+            ]
 
         increment_runtime_metric(context=request.data, key="for_each_invocations")
         append_runtime_event(
@@ -503,6 +668,7 @@ def _build_for_each_handler(
                 "workflow_id": child_workflow_id,
                 "item_count": len(iteration_results),
                 "item_limit": item_limit,
+                "max_concurrency": max_concurrency,
                 "success_count": success_count,
                 "error_count": error_count,
                 "success_policy": success_policy,

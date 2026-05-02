@@ -17,12 +17,18 @@ from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID = (
     "#V#represented_artefact_creation_workflow"
 )
+REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID = (
+    "#V#represented_artefact_item_creation_workflow"
+)
 REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID = (
     "#V#prompt_represented_artefact_creation_plan"
 )
+REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID = (
+    "#V#prompt_represented_artefact_set_extraction"
+)
 
 _MANAGED_BY = "represented_artefact_creation_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-2249"
+_SOURCE_TAG = "JVNAUTOSCI-2247"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -35,12 +41,26 @@ _PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "prompt_represented_artefact_creation_plan_seed.md"
 )
+_SET_EXTRACTION_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "prompt_represented_artefact_set_extraction_seed.md"
+)
 _PROMPT_REFRESH_MARKERS = (
     "#V#workflow_marker",
     "#V#workflow_label",
     "#V#paper_suggestion_provenance_fact",
+    "current_represented_artefact_request",
     "parent_resolution_required",
     "Do not use `#V#thing` as the parent",
+)
+_SET_EXTRACTION_REFRESH_MARKERS = (
+    "artefact_specs",
+    "current_represented_artefact_request",
+    "set",
+    "single",
+    "Do not call tools in this step",
 )
 
 
@@ -51,11 +71,24 @@ def _load_represented_artefact_creation_prompt_seed_text() -> str:
     return prompt_text
 
 
-def _represented_artefact_creation_prompt_needs_refresh() -> bool:
+def _load_represented_artefact_set_extraction_prompt_seed_text() -> str:
+    prompt_text = _SET_EXTRACTION_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("represented_artefact_set_extraction_prompt_seed_missing")
+    return prompt_text
+
+
+def _prompt_needs_refresh(
+    concept_id: str,
+    *,
+    markers: tuple[str, ...],
+) -> bool:
     from .text_value_service import get_texts_for_concept
 
     rows = get_texts_for_concept(
-        REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID,
+        concept_id,
         predicate="hasContent",
         limit=5,
     )
@@ -66,7 +99,21 @@ def _represented_artefact_creation_prompt_needs_refresh() -> bool:
     )
     if not prompt_text.strip():
         return True
-    return any(marker not in prompt_text for marker in _PROMPT_REFRESH_MARKERS)
+    return any(marker not in prompt_text for marker in markers)
+
+
+def _represented_artefact_creation_prompt_needs_refresh() -> bool:
+    return _prompt_needs_refresh(
+        REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID,
+        markers=_PROMPT_REFRESH_MARKERS,
+    )
+
+
+def _represented_artefact_set_extraction_prompt_needs_refresh() -> bool:
+    return _prompt_needs_refresh(
+        REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID,
+        markers=_SET_EXTRACTION_REFRESH_MARKERS,
+    )
 
 
 def _ensure_represented_artefact_creation_prompt_support(
@@ -81,6 +128,16 @@ def _ensure_represented_artefact_creation_prompt_support(
                 description=(
                     "Canonical prompt for generic represented artefact creation "
                     "planning, grounded parent/type resolution, and verified reuse."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
+                concept_id=REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID,
+                name="Represented artefact set extraction prompt",
+                description=(
+                    "Canonical prompt for deciding whether a represented-artefact "
+                    "request names one artefact or a bounded set of artefacts, and "
+                    "for producing per-item child workflow requests."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -105,12 +162,35 @@ def _ensure_represented_artefact_creation_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID)
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(
+            REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
+        )
+        or _represented_artefact_set_extraction_prompt_needs_refresh()
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=(
+                REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
+            ),
+            predicate="hasContent",
+            text=_load_represented_artefact_set_extraction_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(
+            REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
+        )
 
     report = dict(report)
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
     report["success"] = bool(
         prompt_concept_has_content(REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID)
+        and prompt_concept_has_content(
+            REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
+        )
     )
     return report
 
@@ -127,7 +207,10 @@ def bootstrap_canonical_represented_artefact_creation_workflow(
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,
         force_republish=force_republish,
-        target_workflow_ids=(REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,),
+        target_workflow_ids=(
+            REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+            REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        ),
     )
     publication_counts = dict(
         (publication.get("publication") or {}).get("counts") or {}
@@ -140,7 +223,10 @@ def bootstrap_canonical_represented_artefact_creation_workflow(
         "success": bool(prompt_support.get("success"))
         and int(publication_counts.get("errors") or 0) == 0
         and not support_errors,
-        "workflow_ids": [REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID],
+        "workflow_ids": [
+            REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID,
+            REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID,
+        ],
         "prompt_support": prompt_support,
         "publication": publication.get("publication"),
         "support_concepts": support_concepts,
@@ -153,7 +239,10 @@ def bootstrap_canonical_represented_artefact_creation_workflow(
 __all__ = [
     "REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID",
     "REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID",
+    "REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID",
+    "REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID",
     "_ensure_represented_artefact_creation_prompt_support",
     "_load_represented_artefact_creation_prompt_seed_text",
+    "_load_represented_artefact_set_extraction_prompt_seed_text",
     "bootstrap_canonical_represented_artefact_creation_workflow",
 ]

@@ -2,23 +2,25 @@
   "family_id": "represented_artefact_creation_workflow_seed_bundle",
   "managed_by": "represented_artefact_creation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-2249",
+  "seed_version": "5",
+  "source_tag": "JVNAUTOSCI-2247",
   "supported_action_ids": [
     "llm.action",
     "create_concepts",
+    "add_relationship",
     "upsert_singleton_text_relation",
     "fetch_concept",
     "get_text_relations_summary",
     "workflow_control.context_set",
-    "workflow_control.context_template"
+    "workflow_control.context_template",
+    "workflow_control.for_each"
   ],
   "workflows": [
     {
       "workflow_id": "#V#represented_artefact_creation_workflow",
       "display_name": "Represented Artefact Creation Workflow",
-      "description": "Generic workflow for creating or reusing small durable Vontology artefacts after resolving a grounded parent/type, then attaching supplied meaning/code text and reading the represented state back.",
-      "content": "Plan a generic represented artefact from the user request, search for existing matching concepts, resolve a specific parent/type, fail closed when placement is ambiguous, create only with a grounded parent_id, attach supplied code/meaning/provenance text, and verify by fetch_concept plus get_text_relations_summary.",
+      "description": "Generic workflow for creating or reusing one or more small durable Vontology artefacts after resolving grounded parent/type placement, then reading the represented state back.",
+      "content": "Decompose represented-artefact requests into a single artefact or a bounded set. For sets, fan out to the item workflow so each artefact is created or reused and read back independently. For single artefacts, use the direct grounded creation path.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -53,7 +55,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Represent this workflow marker in the Vontology so Von can reuse it later.\", \"Create a durable label for this workflow state and read it back.\", \"Remember this marker so future email checks skip already processed suggestions.\", \"Record that this paper was suggested by Alice.\", \"Create a represented research-lab artefact for this reusable coordination object.\"], \"keywords\": [\"represented artefact creation\", \"represent label in Vontology\", \"remember workflow marker\", \"create reusable marker\", \"durable coordination artefact\", \"paper suggested by\", \"paper suggestion provenance\", \"research lab artefact\", \"Vontology marker\", \"Vontology label\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"schema_version\": \"workflow_discovery_exemplars.v1\", \"examples\": [\"Represent this workflow marker in the Vontology so Von can reuse it later.\", \"Create durable labels for these workflow states and read them back.\", \"Represent those labels and their meanings and codes in the Vontology so we can use them later.\", \"Remember these markers so future email checks skip already processed suggestions.\", \"Record that this paper was suggested by Alice.\", \"Create represented research-lab artefacts for these reusable coordination objects.\"], \"keywords\": [\"represented artefact creation\", \"represented artefact set creation\", \"represent label in Vontology\", \"represent labels in Vontology\", \"remember workflow marker\", \"create reusable marker\", \"durable coordination artefact\", \"paper suggested by\", \"paper suggestion provenance\", \"research lab artefact\", \"Vontology marker\", \"Vontology label\"]}",
           "lang": "en-NZ"
         },
         {
@@ -68,13 +70,144 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\": \"represented_artefact_creation_readback\", \"required_effects\": [{\"description\": \"The workflow must read back the represented artefact concept and its text relations before claiming success.\", \"effect_id\": \"represented_artefact_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"represented_artefact_readback_failed\", \"missing_failure_code\": \"represented_artefact_readback_missing\", \"not_executed_reason\": \"Represented artefact read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact read-back did not verify durable state.\", \"required_tools\": [\"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "text": "{\"schema_version\": \"workflow_required_effects_contract.v1\", \"contract_id\": \"represented_artefact_creation_or_set_readback\", \"required_effects\": [{\"effect_id\": \"represented_artefact_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"description\": \"A represented-artefact run must assert the resolved parent/type relationship and read back the represented artefact concept plus text relations before claiming success. Set runs satisfy this through their item workflow mutation/read-backs.\", \"required_tools\": [\"add_relationship\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\", \"missing_failure_code\": \"represented_artefact_mutation_readback_missing\", \"failed_failure_code\": \"represented_artefact_mutation_readback_failed\", \"not_executed_reason\": \"Represented artefact parent/type assertion or read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact mutation/read-back did not verify durable state.\"}]}",
           "lang": "en-NZ"
         }
       ],
       "publication_spec": {
-        "initial_state": "plan_represented_artefact",
+        "initial_state": "extract_represented_artefact_set",
         "steps": [
+          {
+            "state_id": "extract_represented_artefact_set",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_represented_artefact_set_extraction"
+            ],
+            "llm_policy": {
+              "tool_mode": "none",
+              "required_tools": [],
+              "max_tool_invocations": 4,
+              "policy_stage": "represented_artefact_set_extraction",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current represented-artefact request"
+                },
+                {
+                  "context_key": "user_prompt",
+                  "label": "User prompt alias"
+                },
+                {
+                  "context_key": "current_represented_artefact_request",
+                  "label": "Current item request when already in fan-out"
+                },
+                {
+                  "context_key": "turn_expected_outcome_contract_state",
+                  "label": "Expected outcome contract"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Expected grounding requirement"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance"
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance"
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Historical minimal-imposition exploration guidance"
+                }
+              ],
+              "response_contract_text": "Return JSON only. Decide whether the request is single, set, or escalate. Do not call write tools in this step. For set mode, emit 2 to 16 self-contained artefact_specs, each with a child prompt for exactly one artefact.",
+              "tool_argument_defaults": {
+                "fetch_concept": {
+                  "include_relations_any_arg": true,
+                  "include_text_relations_arg1": true,
+                  "limit": 50
+                },
+                "search_concepts": {
+                  "include_description": true,
+                  "include_hierarchy_path": true,
+                  "limit": 10,
+                  "match_type": "substring"
+                }
+              }
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_mode_to_mode",
+                "tool_output_field": "validated_json.mode",
+                "context_key": "represented_artefact_request_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_specs_to_items",
+                "tool_output_field": "validated_json.artefact_specs",
+                "context_key": "represented_artefact_items"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_summary_to_summary",
+                "tool_output_field": "validated_json.set_summary",
+                "context_key": "represented_artefact_set_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_blocker_to_blocker",
+                "tool_output_field": "validated_json.blocking_reason",
+                "context_key": "represented_artefact_blocking_reason"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_request_mode",
+              "represented_artefact_items",
+              "represented_artefact_set_summary",
+              "represented_artefact_blocking_reason"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "create_represented_artefact_set",
+                "reason": "represented_artefact_set_ready",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "represented_artefact_request_mode",
+                      "value": "set"
+                    },
+                    {
+                      "kind": "context_cardinality",
+                      "key": "represented_artefact_items",
+                      "operator": ">",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "plan_represented_artefact",
+                "reason": "single_represented_artefact_request",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "represented_artefact_request_mode",
+                  "value": "single"
+                }
+              },
+              {
+                "to_state": "summarise_blocker",
+                "reason": "represented_artefact_set_extraction_failed_closed",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
           {
             "state_id": "plan_represented_artefact",
             "action_id": "llm.action",
@@ -123,6 +256,10 @@
                 {
                   "context_key": "workflow_low_imposition_exploration_history",
                   "label": "Historical minimal-imposition exploration guidance"
+                },
+                {
+                  "context_key": "current_represented_artefact_request",
+                  "label": "Current item request for set fan-out child runs"
                 }
               ],
               "max_tool_invocations": 5,
@@ -215,7 +352,7 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "read_back_concept",
+                "to_state": "assert_parent_relationship",
                 "reason": "reuse_existing_verified",
                 "condition_spec": {
                   "kind": "all",
@@ -233,6 +370,16 @@
                     {
                       "kind": "context_is_null",
                       "key": "represented_artefact_concept_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
                       "expected": false
                     }
                   ]
@@ -375,7 +522,7 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "attach_description",
+                "to_state": "assert_parent_relationship",
                 "reason": "represented_artefact_id_resolved",
                 "condition_spec": {
                   "kind": "all",
@@ -389,6 +536,16 @@
                       "kind": "context_is_null",
                       "key": "represented_artefact_concept_id",
                       "expected": false
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
                     }
                   ]
                 }
@@ -401,6 +558,48 @@
                 }
               }
             ]
+          },
+          {
+            "state_id": "assert_parent_relationship",
+            "action_id": "add_relationship",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_creation_assert_parent_source_to_source_id_parameter",
+                "context_key": "represented_artefact_concept_id",
+                "tool_param": "source_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_creation_assert_parent_target_to_target_parameter",
+                "context_key": "represented_artefact_parent_id",
+                "tool_param": "target",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "instance_of"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_creation_assert_parent_success_to_parent_relationship_success",
+                "tool_output_field": "success",
+                "context_key": "represented_artefact_parent_relationship_success"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_parent_relationship_success"
+            ],
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "represented_artefact_parent_membership_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "attach_description",
+            "on_failure_state": "summarise_blocker"
           },
           {
             "state_id": "attach_description",
@@ -537,7 +736,947 @@
                 "value": [
                   {
                     "key": "response_text",
-                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nRead-back: fetch_concept and get_text_relations_summary completed.",
+                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nMutation/read-back: add_relationship, fetch_concept, and get_text_relations_summary completed.",
+                    "variables": {
+                      "code": {
+                        "default": "not supplied",
+                        "value_from_context": "represented_artefact_code"
+                      },
+                      "concept_id": {
+                        "value_from_context": "represented_artefact_concept_id"
+                      },
+                      "kind": {
+                        "default": "not supplied",
+                        "value_from_context": "represented_artefact_kind"
+                      },
+                      "name": {
+                        "default": "not supplied",
+                        "value_from_context": "represented_artefact_name"
+                      },
+                      "parent_id": {
+                        "value_from_context_options": [
+                          "represented_artefact_parent_id_used",
+                          "represented_artefact_parent_id"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "completed"
+          },
+          {
+            "state_id": "summarise_blocker",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "I did not create the represented artefact. Blocker: {blocker}. Parent/type: {parent_id}.",
+                    "variables": {
+                      "blocker": {
+                        "default": "parent_resolution_required",
+                        "value_from_context_options": [
+                          "represented_artefact_blocking_reason",
+                          "last_action_error"
+                        ]
+                      },
+                      "parent_id": {
+                        "default": "unresolved",
+                        "value_from_context": "represented_artefact_parent_id"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "failed"
+          },
+          {
+            "state_id": "create_represented_artefact_set",
+            "action_id": "workflow_control.for_each",
+            "execution_mode": "control",
+            "static_input_bindings": [
+              {
+                "key": "workflow_id",
+                "value": "#V#represented_artefact_item_creation_workflow"
+              },
+              {
+                "key": "items_context_key",
+                "value": "represented_artefact_items"
+              },
+              {
+                "key": "item_context_key",
+                "value": "current_represented_artefact_request"
+              },
+              {
+                "key": "index_context_key",
+                "value": "current_represented_artefact_index"
+              },
+              {
+                "key": "max_items",
+                "value": 16
+              },
+              {
+                "key": "max_transitions",
+                "value": 20
+              },
+              {
+                "key": "max_concurrency",
+                "value": 6
+              },
+              {
+                "key": "success_policy",
+                "value": "all_must_succeed"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_iteration_results_to_results",
+                "tool_output_field": "iteration_results",
+                "context_key": "represented_artefact_iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_success_count_to_success_count",
+                "tool_output_field": "for_each_success_count",
+                "context_key": "represented_artefact_set_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_error_count_to_error_count",
+                "tool_output_field": "for_each_error_count",
+                "context_key": "represented_artefact_set_error_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_set_item_count_to_item_count",
+                "tool_output_field": "for_each_item_count",
+                "context_key": "represented_artefact_set_item_count"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_iteration_results",
+              "represented_artefact_set_success_count",
+              "represented_artefact_set_error_count",
+              "represented_artefact_set_item_count"
+            ],
+            "next_state": "summarise_set_success",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "summarise_set_success",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "Represented artefact set verified. Items requested: {item_count}. Items completed: {success_count}. Item workflow read-back ran for each completed item.",
+                    "variables": {
+                      "item_count": {
+                        "default": "0",
+                        "value_from_context": "represented_artefact_set_item_count"
+                      },
+                      "success_count": {
+                        "default": "0",
+                        "value_from_context": "represented_artefact_set_success_count"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
+            "next_state": "completed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#represented_artefact_item_creation_workflow",
+      "display_name": "Represented Artefact Item Creation Workflow",
+      "description": "Internal child workflow for creating or reusing one durable represented artefact from a parent set workflow item, with grounded parent/type resolution and read-back.",
+      "content": "Create or reuse exactly one represented artefact supplied by current_represented_artefact_request, attach supplied text, and verify it by read-back.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass through the represented-artefact request."
+          },
+          {
+            "target_context_key": "user_prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": false,
+            "description": "Alias for prompts and replay tooling that use user_prompt."
+          },
+          {
+            "target_context_key": "current_represented_artefact_request",
+            "source_expression": "inputs.current_represented_artefact_request",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional set-item request supplied by the parent fan-out workflow."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"authoring_intent_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"phase\": \"published\", \"published\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"require_completed_true\": true, \"require_completion_gate_safe_to_claim_completion\": false, \"require_final_state\": true, \"require_terminal_status\": true, \"required_summary_fields\": [\"workflow_id\", \"terminal_status\", \"final_state\", \"completed\"], \"schema_version\": \"workflow_terminal_success_contract.v1\", \"success_statuses\": [\"completed\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"contract_id\": \"represented_artefact_creation_readback\", \"required_effects\": [{\"description\": \"The workflow must assert the resolved parent/type relationship and read back the represented artefact concept plus text relations before claiming success.\", \"effect_id\": \"represented_artefact_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"represented_artefact_mutation_readback_failed\", \"missing_failure_code\": \"represented_artefact_mutation_readback_missing\", \"not_executed_reason\": \"Represented artefact parent/type assertion or read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact mutation/read-back did not verify durable state.\", \"required_tools\": [\"add_relationship\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "initialise_from_item_request",
+        "steps": [
+          {
+            "state_id": "initialise_from_item_request",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "represented_artefact_decision",
+                    "value_from_context": "current_represented_artefact_request.decision",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_name",
+                    "value_from_context_options": [
+                      "current_represented_artefact_request.target_name",
+                      "current_represented_artefact_request.name"
+                    ],
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_code",
+                    "value_from_context_options": [
+                      "current_represented_artefact_request.target_code",
+                      "current_represented_artefact_request.code"
+                    ],
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_kind",
+                    "value_from_context_options": [
+                      "current_represented_artefact_request.target_kind",
+                      "current_represented_artefact_request.kind_hint"
+                    ],
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_parent_id",
+                    "value_from_context": "current_represented_artefact_request.parent_id",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_concept_id",
+                    "value_from_context": "current_represented_artefact_request.existing_concept_id",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_create_concepts",
+                    "value_from_context": "current_represented_artefact_request.concepts",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_description_text",
+                    "value_from_context": "current_represented_artefact_request.description_text",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_parent_rationale",
+                    "value_from_context": "current_represented_artefact_request.parent_rationale",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "represented_artefact_blocking_reason",
+                    "value_from_context": "current_represented_artefact_request.blocking_reason",
+                    "skip_if_unresolved": true
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_decision",
+              "represented_artefact_name",
+              "represented_artefact_code",
+              "represented_artefact_kind",
+              "represented_artefact_parent_id",
+              "represented_artefact_concept_id",
+              "represented_artefact_create_concepts",
+              "represented_artefact_description_text",
+              "represented_artefact_parent_rationale",
+              "represented_artefact_blocking_reason"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "assert_parent_relationship",
+                "reason": "preplanned_reuse_existing_verified",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "represented_artefact_decision",
+                      "value": "reuse_existing"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_concept_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_concept_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "create_represented_artefact",
+                "reason": "preplanned_create_ready",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "represented_artefact_decision",
+                      "value": "create"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_cardinality",
+                      "key": "represented_artefact_create_concepts",
+                      "operator": ">",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "summarise_blocker",
+                "reason": "preplanned_item_blocked",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_blocking_reason",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_blocking_reason",
+                      "expected": false
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "plan_represented_artefact",
+                "reason": "item_request_needs_llm_planning",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "plan_represented_artefact",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_represented_artefact_creation_plan"
+            ],
+            "llm_policy": {
+              "allowed_tools": [
+                "search_concepts",
+                "fetch_concept"
+              ],
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current represented-artefact request"
+                },
+                {
+                  "context_key": "user_prompt",
+                  "label": "User prompt alias"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated user concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "turn_expected_outcome_contract_state",
+                  "label": "Expected outcome contract"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Expected grounding requirement"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance"
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance"
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Historical minimal-imposition exploration guidance"
+                },
+                {
+                  "context_key": "current_represented_artefact_request",
+                  "label": "Current item request for set fan-out child runs"
+                }
+              ],
+              "max_tool_invocations": 5,
+              "policy_stage": "represented_artefact_creation_plan",
+              "required_tools": [
+                "search_concepts"
+              ],
+              "response_contract_text": "Return JSON only. Resolve or fail closed before creation. A create decision must include a concrete parent_id and a one-item concepts array suitable for create_concepts. Never use #V#thing as parent. Prefer existing exact concept reuse when search verifies one. Use support types #V#workflow_marker, #V#workflow_label, #V#paper_suggestion_provenance_fact, #V#research_lab_artefact, #V#represented_artefact, or #V#predicate when grounded.",
+              "tool_argument_defaults": {
+                "fetch_concept": {
+                  "include_relations_any_arg": true,
+                  "include_text_relations_arg1": true,
+                  "limit": 50
+                },
+                "search_concepts": {
+                  "include_description": true,
+                  "include_hierarchy_path": true,
+                  "limit": 10,
+                  "match_type": "substring"
+                }
+              },
+              "tool_mode": "allowed"
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_decision_to_decision",
+                "tool_output_field": "validated_json.decision",
+                "context_key": "represented_artefact_decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_target_name_to_name",
+                "tool_output_field": "validated_json.target_name",
+                "context_key": "represented_artefact_name"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_target_code_to_code",
+                "tool_output_field": "validated_json.target_code",
+                "context_key": "represented_artefact_code"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_target_kind_to_kind",
+                "tool_output_field": "validated_json.target_kind",
+                "context_key": "represented_artefact_kind"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_parent_id_to_parent_id",
+                "tool_output_field": "validated_json.parent_id",
+                "context_key": "represented_artefact_parent_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_existing_concept_id_to_concept_id",
+                "tool_output_field": "validated_json.existing_concept_id",
+                "context_key": "represented_artefact_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_concepts_to_create_concepts",
+                "tool_output_field": "validated_json.concepts",
+                "context_key": "represented_artefact_create_concepts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_description_to_description_text",
+                "tool_output_field": "validated_json.description_text",
+                "context_key": "represented_artefact_description_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_parent_rationale_to_parent_rationale",
+                "tool_output_field": "validated_json.parent_rationale",
+                "context_key": "represented_artefact_parent_rationale"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_plan_blocking_reason_to_blocking_reason",
+                "tool_output_field": "validated_json.blocking_reason",
+                "context_key": "represented_artefact_blocking_reason"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_decision",
+              "represented_artefact_name",
+              "represented_artefact_code",
+              "represented_artefact_kind",
+              "represented_artefact_parent_id",
+              "represented_artefact_concept_id",
+              "represented_artefact_create_concepts",
+              "represented_artefact_description_text",
+              "represented_artefact_parent_rationale",
+              "represented_artefact_blocking_reason"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "assert_parent_relationship",
+                "reason": "reuse_existing_verified",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "represented_artefact_decision",
+                      "value": "reuse_existing"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_concept_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_concept_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "create_represented_artefact",
+                "reason": "grounded_parent_ready",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "represented_artefact_decision",
+                      "value": "create"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_cardinality",
+                      "key": "represented_artefact_create_concepts",
+                      "operator": ">",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "summarise_blocker",
+                "reason": "parent_resolution_failed_closed",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "create_represented_artefact",
+            "action_id": "create_concepts",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_parent_to_parent_id_parameter",
+                "context_key": "represented_artefact_parent_id",
+                "tool_param": "parent_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_concepts_to_concepts_parameter",
+                "context_key": "represented_artefact_create_concepts",
+                "tool_param": "concepts",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_user_to_created_by_parameter",
+                "context_key": "user_concept_id",
+                "tool_param": "created_by_concept_id",
+                "required": false
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_org_to_organisation_parameter",
+                "context_key": "org_concept_id",
+                "tool_param": "organisation_concept_id",
+                "required": false
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "scope_mode",
+                "value": "user_org_default"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_created_ids_to_created_ids",
+                "tool_output_field": "created_concept_ids",
+                "context_key": "represented_artefact_created_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_results_to_create_results",
+                "tool_output_field": "results",
+                "context_key": "represented_artefact_create_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_parent_used_to_parent_used",
+                "tool_output_field": "parent_id_used",
+                "context_key": "represented_artefact_parent_id_used"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_create_scope_to_scope_selection",
+                "tool_output_field": "scope_selection",
+                "context_key": "represented_artefact_scope_selection"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_created_concept_ids",
+              "represented_artefact_create_results",
+              "represented_artefact_parent_id_used",
+              "represented_artefact_scope_selection"
+            ],
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "represented_artefact_creation_additive_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "resolve_represented_artefact_id",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "resolve_represented_artefact_id",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "represented_artefact_concept_id",
+                    "preserve_existing": true,
+                    "value_from_context_options": [
+                      "represented_artefact_created_concept_ids.0",
+                      "represented_artefact_create_results.0.concept_id",
+                      "represented_artefact_create_results.0.canonical_concept_id",
+                      "represented_artefact_create_results.0.existing_concept_id"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_concept_id"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "assert_parent_relationship",
+                "reason": "represented_artefact_id_resolved",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_concept_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_concept_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "represented_artefact_parent_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "represented_artefact_parent_id",
+                      "expected": false
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "summarise_blocker",
+                "reason": "created_concept_id_missing",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "assert_parent_relationship",
+            "action_id": "add_relationship",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_assert_parent_source_to_source_id_parameter",
+                "context_key": "represented_artefact_concept_id",
+                "tool_param": "source_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_assert_parent_target_to_target_parameter",
+                "context_key": "represented_artefact_parent_id",
+                "tool_param": "target",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "instance_of"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_assert_parent_success_to_parent_relationship_success",
+                "tool_output_field": "success",
+                "context_key": "represented_artefact_parent_relationship_success"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_parent_relationship_success"
+            ],
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "represented_artefact_parent_membership_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "attach_description",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "attach_description",
+            "action_id": "upsert_singleton_text_relation",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_attach_concept_to_concept_id_parameter",
+                "context_key": "represented_artefact_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_attach_description_to_text_parameter",
+                "context_key": "represented_artefact_description_text",
+                "tool_param": "text",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "predicate",
+                "value": "hasDescription"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "policy",
+                "value": "replace_others"
+              }
+            ],
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "represented_artefact_description_text_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "read_back_concept",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "read_back_concept",
+            "action_id": "fetch_concept",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_read_back_concept_to_concept_id_parameter",
+                "context_key": "represented_artefact_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "include_relations_any_arg",
+                "value": true
+              },
+              {
+                "key": "include_text_relations_arg1",
+                "value": true
+              },
+              {
+                "key": "limit",
+                "value": 80
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_read_back_result_to_concept_readback",
+                "tool_output_field": "result",
+                "context_key": "represented_artefact_concept_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_concept_readback"
+            ],
+            "next_state": "read_back_text_relations",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "read_back_text_relations",
+            "action_id": "get_text_relations_summary",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_read_back_text_concept_to_concept_id_parameter",
+                "context_key": "represented_artefact_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "predicates",
+                "value": [
+                  "hasName",
+                  "hasDescription",
+                  "hasContent",
+                  "hasNote"
+                ]
+              },
+              {
+                "key": "max_relation_ids_per_group",
+                "value": 20
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_text_summary_to_text_summary",
+                "tool_output_field": "result",
+                "context_key": "represented_artefact_text_relation_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_represented_artefact_item_creation_text_groups_to_text_groups",
+                "tool_output_field": "groups",
+                "context_key": "represented_artefact_text_relation_groups"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_artefact_text_relation_summary",
+              "represented_artefact_text_relation_groups"
+            ],
+            "next_state": "summarise_success",
+            "on_failure_state": "summarise_blocker"
+          },
+          {
+            "state_id": "summarise_success",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "response_text",
+                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nMutation/read-back: add_relationship, fetch_concept, and get_text_relations_summary completed.",
                     "variables": {
                       "code": {
                         "default": "not supplied",
