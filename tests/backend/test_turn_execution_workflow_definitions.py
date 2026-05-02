@@ -49,9 +49,7 @@ def _build_stub_kb_postcondition_critic_definition() -> WorkflowDefinition:
         states={
             "evaluate": WorkflowStateSpec(
                 state_id="evaluate",
-                actions=(
-                    WorkflowActionInvocation(action_id="turn_execution.critic"),
-                ),
+                actions=(WorkflowActionInvocation(action_id="turn_execution.critic"),),
                 terminal=True,
                 metadata={
                     "writes_context_keys": [
@@ -190,7 +188,9 @@ def test_turn_completion_gate_workflow_fails_when_follow_up_is_required() -> Non
     )
 
 
-def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_gate() -> None:
+def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_gate() -> (
+    None
+):
     workflow = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
@@ -200,9 +200,7 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert prelude.actions[0].subworkflow_id == (
         WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
     )
-    assert any(
-        t.to_state == "expected_outcome_inference" for t in prelude.transitions
-    )
+    assert any(t.to_state == "expected_outcome_inference" for t in prelude.transitions)
     assert "expected_outcome_inference" in workflow.states
     assert "selector_preparation" in workflow.states
     assert "selector_decision" in workflow.states
@@ -229,6 +227,12 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert "expected_outcome_summary" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
+    assert "required_tools" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "required_tools" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("requested_prompt_concept_ids") == [
@@ -249,6 +253,15 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and mapping.get("context_key") == "turn_answering_guidance"
         and mapping.get("tool_output_field") == "validated_json.answering_guidance"
         for mapping in expected_outcome_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_required_tools"
+        and mapping.get("tool_output_field") == "validated_json.required_tools"
+        for mapping in expected_outcome_mappings
+    )
+    assert "turn_expected_required_tools" in (
+        expected_outcome.metadata.get("writes_context_keys") or []
     )
     assert any(
         t.to_state == "selector_preparation" and t.reason == "expected_outcome_inferred"
@@ -331,7 +344,9 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
 
     critic = workflow.states["critic"]
     assert critic.actions[0].action_id == "workflow_invoke_subworkflow"
-    assert critic.actions[0].subworkflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    assert (
+        critic.actions[0].subworkflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    )
     critic_inputs = critic.actions[0].inputs
     for input_key in (
         "prompt",
@@ -697,7 +712,9 @@ def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context
     assert custom_execution["terminal_success_evaluation"]["success"] is False
 
 
-def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement() -> None:
+def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement() -> (
+    None
+):
     workflow = build_authoritative_test_workflow_definition(
         KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
     )
@@ -714,8 +731,7 @@ def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement(
     assert build_evidence_action.action_id == "turn_execution.critic"
     assert build_evidence_action.inputs.get("emit_default_critic_verdict") is False
     assert any(
-        t.to_state == "evaluate_authoritative_prompt"
-        and t.reason == "evidence_built"
+        t.to_state == "evaluate_authoritative_prompt" and t.reason == "evidence_built"
         for t in build_evidence.transitions
     )
 
@@ -1044,7 +1060,9 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
             "completion_gate": WorkflowStateSpec(
                 state_id="completion_gate",
                 actions=(
-                    WorkflowActionInvocation(action_id="test.stub_retry_completion_gate"),
+                    WorkflowActionInvocation(
+                        action_id="test.stub_retry_completion_gate"
+                    ),
                 ),
                 transitions=workflow.states["completion_gate"].transitions,
                 terminal=False,

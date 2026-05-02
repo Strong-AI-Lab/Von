@@ -1086,6 +1086,7 @@ def _build_fail_closed_completion_gate_response(
 
 def _required_tools_from_turn_context(data: Mapping[str, Any]) -> list[str]:
     tools: list[str] = []
+    tools.extend(_dedupe_string_sequence(data.get("turn_expected_required_tools")))
     for surface in (
         data,
         data.get("completion_report"),
@@ -1658,9 +1659,11 @@ def build_turn_execution_selected_workflow_outputs(
             reason_source = (
                 "workflow required-effect"
                 if workflow_missing_tools and not contract_missing_tools
-                else "turn/workflow contract"
-                if workflow_missing_tools
-                else "turn contract"
+                else (
+                    "turn/workflow contract"
+                    if workflow_missing_tools
+                    else "turn contract"
+                )
             )
             outputs["missing_tool_call_retry_reason_override"] = (
                 f"{reason_source} required tool(s) not yet invoked successfully: "

@@ -28,6 +28,11 @@ TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING: dict[str, str] = {
     "answering_guidance": "turn_answering_guidance",
     "reasoning": "turn_expected_outcome_reasoning",
 }
+TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY = "turn_expected_required_tools"
+TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY = (
+    "turn_expected_target_concept_ids"
+)
+TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY = "turn_expected_target_type_ids"
 TURN_EXPECTED_OUTCOME_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "summary": ("expected_outcome_summary",),
     "grounding_requirement": (
@@ -45,10 +50,15 @@ TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES: dict[str, str] = {
     "get_predicate_extent": "get_predicate_incidence",
     "get_predicates_for_class": "get_predicate_incidence",
 }
+TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_FIELDS: tuple[str, ...] = (
+    "required_tools",
+    TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY,
+)
 TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_FIELDS: tuple[str, ...] = (
     "target_concept_id",
     "target_concept_ids",
     "target_concepts",
+    TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY,
     "focal_concept_id",
     "focal_concept_ids",
     "focal_concepts",
@@ -63,6 +73,7 @@ TURN_EXPECTED_OUTCOME_TARGET_TYPE_FIELDS: tuple[str, ...] = (
     "requested_extent_type_id",
     "requested_extent_type_ids",
     "required_target_type_ids",
+    TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY,
 )
 VONTOLOGY_CONCEPT_ID_PATTERN = re.compile(r"#V#[A-Za-z0-9_][A-Za-z0-9_.:/-]*")
 
@@ -240,11 +251,15 @@ class TurnExpectedOutcomeContract:
                     if candidate:
                         break
             field_values[field_name] = candidate
-        required_tools = _dedupe_required_tools(
-            payload.get("required_tools")
-            if "required_tools" in payload
-            else field_payload.get("required_tools")
-        )
+        required_tool_values: Any = None
+        for source_payload in (payload, field_payload):
+            for field_name in TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_FIELDS:
+                if field_name in source_payload:
+                    required_tool_values = source_payload.get(field_name)
+                    break
+            if required_tool_values is not None:
+                break
+        required_tools = _dedupe_required_tools(required_tool_values)
         target_concept_ids = _extract_target_concept_ids(
             payload=payload,
             field_payload=field_payload,
@@ -367,8 +382,22 @@ def build_turn_expected_outcome_boundary_payload(
         not contract_payload
         and not contract_object.required_tools
         and not contract_object.target_concept_ids
+        and not contract_object.target_type_ids
     ):
         return payload
+
+    if contract_object.required_tools:
+        payload[TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY] = list(
+            contract_object.required_tools
+        )
+    if contract_object.target_concept_ids:
+        payload[TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY] = list(
+            contract_object.target_concept_ids
+        )
+    if contract_object.target_type_ids:
+        payload[TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY] = list(
+            contract_object.target_type_ids
+        )
 
     if not profile_payload:
         profile_from_contract: dict[str, Any] = dict(contract_payload)

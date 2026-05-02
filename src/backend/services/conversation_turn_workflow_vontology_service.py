@@ -270,7 +270,11 @@ def _ensure_conversation_turn_prompt_support(
         or not prompt_concept_has_content(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
         or _prompt_seed_needs_refresh(
             _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
-            required_markers=("gmail_send_message", "external-system side effect"),
+            required_markers=(
+                "gmail_send_message",
+                "external-system side effect",
+                "represented labels, categories, tags, role markers",
+            ),
         )
     ):
         upsert_singleton_text_relation(
@@ -319,7 +323,11 @@ def _ensure_conversation_turn_prompt_support(
         or not prompt_concept_has_content(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
         or _prompt_seed_needs_refresh(
             _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
-            required_markers=("gmail_send_message", "external-system side effect"),
+            required_markers=(
+                "gmail_send_message",
+                "external-system side effect",
+                "represented labels, categories, tags, workflow markers",
+            ),
         )
     ):
         upsert_singleton_text_relation(

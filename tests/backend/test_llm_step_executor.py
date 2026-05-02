@@ -212,11 +212,13 @@ def test_execute_llm_step_applies_json_field_defaults_from_validation_policy() -
                 "expected_outcome_summary": "Answer from grounded evidence.",
                 "grounding_requirement": "Use authoritative context.",
                 "precision_policy": "State uncertainty when needed.",
+                "required_tools": [],
             },
             "required_json_fields": [
                 "expected_outcome_summary",
                 "grounding_requirement",
                 "precision_policy",
+                "required_tools",
             ],
         },
         workflow_state_id="expected_outcome_inference",
@@ -230,6 +232,7 @@ def test_execute_llm_step_applies_json_field_defaults_from_validation_policy() -
         "expected_outcome_summary": "Answer from grounded evidence.",
         "grounding_requirement": "Use authoritative context.",
         "precision_policy": "State uncertainty when needed.",
+        "required_tools": [],
     }
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["validation"]["json_object_defaulted_from_non_object"] is True
@@ -237,6 +240,7 @@ def test_execute_llm_step_applies_json_field_defaults_from_validation_policy() -
         "expected_outcome_summary",
         "grounding_requirement",
         "precision_policy",
+        "required_tools",
     ]
 
 

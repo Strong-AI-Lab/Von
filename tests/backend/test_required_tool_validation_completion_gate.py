@@ -10,7 +10,6 @@ from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
 )
 
-
 _CREATE_CONCEPTS_PARENT_ERROR = (
     "create_concepts: Missing required field 'parent_id' for create_concepts input: "
     "parent_id (str, parent concept_id), concepts (list of {name, kind?, "
@@ -100,6 +99,35 @@ def _build_record(*, required_prompt_tools: list[str]) -> dict[str, Any]:
     )
 
 
+def _build_kr_label_record(
+    *,
+    required_prompt_tools: list[str],
+    tool_invocations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return build_turn_execution_record(
+        request_id="req-represented-label-contract",
+        session_id="session-represented-label-contract",
+        namespace="#V#user@org",
+        actor_concept_id="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text=(
+            "Create represented workflow labels so Von can avoid repeating "
+            "completed KB work, then use the API to create any useful ones."
+        ),
+        response_text="The requested tool evidence is present.",
+        interaction_timestamp_utc="2026-05-02T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=tool_invocations,
+        aux_llm_calls=[],
+        required_prompt_tools=required_prompt_tools,
+    )
+
+
 def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -> None:
     record = _build_record(
         required_prompt_tools=["create_concepts", "add_relationship"],
@@ -133,7 +161,9 @@ def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -
     assert "schema_validation_failed" in gate["blocking_failure_codes"]
 
 
-def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools() -> None:
+def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools() -> (
+    None
+):
     data: dict[str, Any] = {
         "turn_execution_record": {
             "required_effects": [],
@@ -177,13 +207,139 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
 
     assert result.outputs["completion_gate_safe_to_claim_completion"] is False
     assert result.outputs["completion_gate_requires_follow_up"] is True
-    assert result.outputs["completion_gate_evidence_payload"][
-        "required_effect_count"
-    ] == 1
-    assert "schema_validation_failed" in result.outputs[
-        "completion_gate_blocking_failure_codes"
-    ]
+    assert (
+        result.outputs["completion_gate_evidence_payload"]["required_effect_count"] == 1
+    )
+    assert (
+        "schema_validation_failed"
+        in result.outputs["completion_gate_blocking_failure_codes"]
+    )
     assert any(
         entry.get("type") == "completion_gate_record_rebuilt"
         for entry in data["aux_llm_calls"]
+    )
+
+
+def test_kr_required_tools_block_completion_when_write_and_readback_are_absent() -> (
+    None
+):
+    record = _build_kr_label_record(
+        required_prompt_tools=[
+            "create_concepts",
+            "fetch_concept",
+            "get_text_relations_summary",
+        ],
+        tool_invocations=[],
+    )
+
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+
+    assert (
+        effect_by_id["effect_prompt_required_mutation_create_concepts_1"]["status"]
+        == "not_executed"
+    )
+    assert (
+        effect_by_id["effect_prompt_required_evidence_fetch_concept_1"]["status"]
+        == "not_executed"
+    )
+    assert (
+        effect_by_id["effect_prompt_required_evidence_get_text_relations_summary_2"][
+            "status"
+        ]
+        == "not_executed"
+    )
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+    assert "prompt_required_mutation_create_concepts_missing" in (
+        record["completion_gate"]["blocking_failure_codes"]
+    )
+
+
+def test_kr_required_tools_block_completion_when_write_lacks_readback() -> None:
+    record = _build_kr_label_record(
+        required_prompt_tools=[
+            "create_concepts",
+            "fetch_concept",
+            "get_text_relations_summary",
+        ],
+        tool_invocations=[
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "effective_arguments": {
+                    "parent_id": "#V#workflow_marker",
+                    "concepts": [{"name": "Already scanned marker"}],
+                },
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#already_scanned_marker",
+                },
+            }
+        ],
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is False
+    assert "prompt_required_evidence_fetch_concept_missing" in (
+        gate["blocking_failure_codes"]
+    )
+    assert "prompt_required_evidence_get_text_relations_summary_missing" in (
+        gate["blocking_failure_codes"]
+    )
+    assert any(
+        check.get("effect_id") == "mutation_1"
+        and check.get("verification_mode") == "state_requery_missing"
+        for check in record["postcondition_checks"]
+    )
+
+
+def test_kr_required_tools_allow_completion_after_write_and_readback() -> None:
+    record = _build_kr_label_record(
+        required_prompt_tools=[
+            "create_concepts",
+            "fetch_concept",
+            "get_text_relations_summary",
+        ],
+        tool_invocations=[
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "effective_arguments": {
+                    "parent_id": "#V#workflow_marker",
+                    "concepts": [{"name": "Already scanned marker"}],
+                },
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#already_scanned_marker",
+                },
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#already_scanned_marker",
+                },
+            },
+            {
+                "tool": "get_text_relations_summary",
+                "status": "ok",
+                "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#already_scanned_marker",
+                },
+            },
+        ],
+    )
+
+    assert record["completion_gate"]["safe_to_claim_completion"] is True
+    assert record["completion_gate"]["requires_follow_up"] is False
+    assert any(
+        check.get("effect_id") == "mutation_1"
+        and check.get("verification_mode") == "state_requery_observed"
+        and check.get("status") == "verified"
+        for check in record["postcondition_checks"]
     )

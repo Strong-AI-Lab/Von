@@ -100,6 +100,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`create_concepts`, `upsert_singleton_text_relation`" in (
         expected_outcome_text
     )
+    assert "represented labels, categories, tags, role markers" in (
+        expected_outcome_text
+    )
+    assert "Listing existing external-system labels" in expected_outcome_text
+    assert "write-only required tool list is not sufficient" in (expected_outcome_text)
     assert "Do not invent tools such as `diary_create`" in expected_outcome_text
     assert "Use `task_create` only when the user asks for a task" in (
         expected_outcome_text
@@ -136,6 +141,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "external-system side effect" in missing_tool_retry_text
     assert "`gmail_send_message`" in missing_tool_retry_text
     assert "Gmail list/read/label tools" in missing_tool_retry_text
+    assert "represented labels, categories, tags, workflow markers" in (
+        missing_tool_retry_text
+    )
+    assert "Do not substitute external label-listing tools" in (missing_tool_retry_text)
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
@@ -335,10 +344,31 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "expected_outcome_summary" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
+    assert "required_tools" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "required_tools" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+    )
+    expected_outcome_metadata = turn_definition.states[
+        expected_outcome_step_id
+    ].metadata
+    expected_outcome_mappings = (
+        expected_outcome_metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_required_tools"
+        and mapping.get("tool_output_field") == "validated_json.required_tools"
+        for mapping in expected_outcome_mappings
+    )
+    assert "turn_expected_required_tools" in (
+        expected_outcome_metadata.get("writes_context_keys") or []
     )
 
     selector_preparation_step_id = authority_service._step_concept_id(

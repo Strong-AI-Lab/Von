@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "9",
   "workflows": [
     {
       "publication_spec": {
@@ -1978,6 +1978,11 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_reasoning_to_turn_expected_outcome_reasoning",
                 "context_key": "turn_expected_outcome_reasoning",
                 "tool_output_field": "validated_json.reasoning"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_required_tools_to_turn_expected_required_tools",
+                "context_key": "turn_expected_required_tools",
+                "tool_output_field": "validated_json.required_tools"
               }
             ],
             "validation_policy": {
@@ -1986,6 +1991,7 @@
                 "expected_outcome_summary": "Answer the user's request accurately using available context and any required grounded tool evidence.",
                 "grounding_requirement": "Use available conversation context and authoritative tool evidence; avoid unsupported claims.",
                 "precision_policy": "Prefer a concise answer with explicit uncertainty over unsupported specificity.",
+                "required_tools": [],
                 "reasoning": "Fallback defaults applied because the expected-outcome inference omitted one or more contract fields.",
                 "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence."
               },
@@ -1996,7 +2002,8 @@
                 "precision_policy",
                 "selector_guidance",
                 "answering_guidance",
-                "reasoning"
+                "reasoning",
+                "required_tools"
               ]
             },
             "writes_context_keys": [
@@ -2006,7 +2013,8 @@
               "turn_expected_precision_policy",
               "turn_selector_guidance",
               "turn_answering_guidance",
-              "turn_expected_outcome_reasoning"
+              "turn_expected_outcome_reasoning",
+              "turn_expected_required_tools"
             ],
             "state_id": "expected_outcome_inference"
           },

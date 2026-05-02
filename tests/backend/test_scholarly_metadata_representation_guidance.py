@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SEED_DIR = _REPO_ROOT / "src" / "backend" / "workflows" / "repo_seed_bundles"
 
@@ -33,6 +32,40 @@ def test_expected_outcome_prompt_recognises_pasted_scholarly_metadata() -> None:
     assert "workflow_execute" in prompt_text
 
 
+def test_expected_outcome_prompt_requires_represented_labels_to_write_and_readback() -> (
+    None
+):
+    prompt_text = (
+        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "represented labels, categories, tags, role markers" in lowered
+    assert "workflow progress markers" in lowered
+    assert "ontology-native mutation plan and read-back" in lowered
+    assert "external label-list tool is not evidence" in lowered
+    assert "listing existing external-system labels" in lowered
+    assert "write-only required tool list is not sufficient" in lowered
+    assert "Represented label/marker creation example" in prompt_text
+    assert (
+        '"required_tools":["search_concepts","create_concepts","add_relationship",'
+        '"upsert_singleton_text_relation","fetch_concept",'
+        '"get_text_relations_summary"]'
+    ) in prompt_text
+
+
+def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> None:
+    prompt_text = (_SEED_DIR / "missing_tool_call_retry_prompt_seed.md").read_text(
+        encoding="utf-8"
+    )
+
+    lowered = prompt_text.lower()
+    assert "represented labels, categories, tags, workflow markers" in lowered
+    assert "vontology mutation plus read-back request" in lowered
+    assert "do not substitute external label-listing tools" in lowered
+    assert "get_text_relations_summary" in prompt_text
+
+
 def test_selector_prompt_treats_scholarly_metadata_continuations_as_authoring() -> None:
     prompt_text = (_SEED_DIR / "prompt_chat_turn_classifier_seed.md").read_text(
         encoding="utf-8"
@@ -44,7 +77,9 @@ def test_selector_prompt_treats_scholarly_metadata_continuations_as_authoring() 
     assert "abstract" in lowered
     assert "how about with this too" in lowered
     assert "authoring intent" in lowered
-    assert "specialised executable scholarly-metadata representation workflow" in lowered
+    assert (
+        "specialised executable scholarly-metadata representation workflow" in lowered
+    )
     assert "#V#tool_calling_workflow" in prompt_text
 
 

@@ -584,6 +584,10 @@ def test_selected_workflow_outputs_filters_turn_contract_tools_to_child_allowed_
     )
 
     assert outputs["required_prompt_tools"] == ["fetch_concept"]
+    assert outputs["turn_expected_required_tools"] == [
+        "fetch_concept",
+        "get_related_concepts",
+    ]
     assert outputs["missing_prompt_tools"] == []
     assert (
         "get_related_concepts"
