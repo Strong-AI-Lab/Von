@@ -185,6 +185,44 @@ def test_von_mcp_stdio_server_is_ignored_by_default(tmp_path: Path) -> None:
     assert result.ignored_agent_helpers == 1
 
 
+def test_bare_workspace_python_executable_path_is_ignored(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    result = assess_workspace_idle(
+        [
+            _proc(
+                107,
+                name="python.exe",
+                cmdline=(f"{workspace}\\.venv\\Scripts\\python.exe",),
+            )
+        ],
+        workspace_root=workspace,
+    )
+
+    assert result.answer == "YES"
+    assert not result.blockers
+    assert result.workspace_processes == 1
+
+
+def test_workspace_python_with_script_path_is_still_blocker(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    result = assess_workspace_idle(
+        [
+            _proc(
+                108,
+                name="python.exe",
+                cmdline=(
+                    f"{workspace}\\.venv\\Scripts\\python.exe",
+                    "tests\\backend\\test_example.py",
+                ),
+            )
+        ],
+        workspace_root=workspace,
+    )
+
+    assert result.answer == "NO"
+    assert result.blockers[0].reason == "active workspace command"
+
+
 def test_recent_repo_activity_marks_not_idle(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     activity = RepoActivityAssessment(

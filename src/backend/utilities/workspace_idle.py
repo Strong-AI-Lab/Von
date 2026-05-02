@@ -180,6 +180,24 @@ def _is_interactive_shell(process: ProcessSnapshot) -> bool:
     return not _has_active_command_marker(process)
 
 
+def _is_bare_workspace_python_interpreter_path(
+    process: ProcessSnapshot, workspace_root: str
+) -> bool:
+    """Return True for limited snapshots that only expose the venv Python path."""
+
+    if process.name.strip().lower() not in {"python.exe", "python3.exe"}:
+        return False
+    command = _cmdline_text(process.cmdline).strip().strip('"')
+    if not command:
+        return False
+    workspace = _normalise_fragment(str(Path(workspace_root).resolve()))
+    normalised_command = _normalise_fragment(command).strip('"')
+    return normalised_command in {
+        f"{workspace}/.venv/scripts/python.exe",
+        f"{workspace}/.venv/scripts/python3.exe",
+    }
+
+
 def _process_age_seconds(process: ProcessSnapshot, now: float | None) -> float | None:
     if now is None or process.create_time is None:
         return None
@@ -237,6 +255,9 @@ def assess_workspace_idle(
             reason = "agent helper process"
         elif _is_interactive_shell(process):
             ignored_interactive_shells += 1
+            continue
+        elif _is_bare_workspace_python_interpreter_path(process, workspace_root):
+            ignored_agent_helpers += 1
             continue
         elif _has_active_command_marker(process):
             reason = "active workspace command"
@@ -610,8 +631,10 @@ def iter_windows_get_processes(
 
     This source does not expose full command lines, but it is available in more
     restricted PowerShell contexts than CIM/WMI. It avoids reading slow process
-    properties for every process, and only tries executable paths for common
-    tool process names where a workspace-local virtualenv path is useful.
+    properties for every process, and only tries executable paths for direct
+    tool process names where the executable name alone is meaningful. A bare
+    workspace-local Python/Node/shell executable path is not enough to prove
+    active work because long-lived Von services use the same interpreter path.
     """
 
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
@@ -621,8 +644,7 @@ def iter_windows_get_processes(
     command = (
         "$ErrorActionPreference = 'SilentlyContinue'; "
         "$toolNames = @("
-        "'python','python3','node','git','pdm','pytest','ruff','powershell',"
-        "'pwsh','cmd','npm','npx','pyright','mypy','black','eslint','jest',"
+        "'git','pdm','pytest','ruff','npm','npx','pyright','mypy','black','eslint','jest',"
         "'vitest','playwright','prettier','tsc'"
         "); "
         "Get-Process | ForEach-Object { "
