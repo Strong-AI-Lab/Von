@@ -232,27 +232,75 @@ function Test-VenvPythonUsable {
     return $false
 }
 
+function Test-WritableDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Directory
+    )
+
+    try {
+        New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+        $probePath = Join-Path $Directory ".von_write_probe_$PID_$([guid]::NewGuid().ToString('N')).tmp"
+        Set-Content -LiteralPath $probePath -NoNewline -Encoding ascii -Value "ok"
+        Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        Write-Warn "Automation venv root is not writable: $Directory. Last error: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Resolve-AutomationVenvBase {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if ($AutomationVenvRoot) {
+        [void]$candidates.Add($AutomationVenvRoot)
+    }
+    if ($env:VON_CODEX_AUTOMATION_VENV_ROOT) {
+        [void]$candidates.Add($env:VON_CODEX_AUTOMATION_VENV_ROOT)
+    }
+    if ($env:CODEX_HOME) {
+        [void]$candidates.Add((Join-Path $env:CODEX_HOME "automations\python-envs"))
+    }
+    if ($env:USERPROFILE) {
+        [void]$candidates.Add((Join-Path $env:USERPROFILE ".codex\automations\python-envs"))
+    }
+    [void]$candidates.Add((Join-Path ([System.IO.Path]::GetTempPath()) "codex-automation-python-envs"))
+
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables($candidate)
+            $fullPath = [System.IO.Path]::GetFullPath($expanded)
+        }
+        catch {
+            Write-Warn "Skipping invalid automation venv root candidate: $candidate. Last error: $($_.Exception.Message)"
+            continue
+        }
+
+        if (-not $seen.Add($fullPath.ToLowerInvariant())) {
+            continue
+        }
+
+        if (Test-WritableDirectory -Directory $fullPath) {
+            return $fullPath
+        }
+    }
+
+    throw "No writable automation virtualenv root was found. Checked explicit root, CODEX_HOME, user .codex, and temp fallback."
+}
+
 function Resolve-AutomationVenvDir {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ResolvedRepoRoot
     )
 
-    if ($AutomationVenvRoot) {
-        $base = $AutomationVenvRoot
-    }
-    elseif ($env:VON_CODEX_AUTOMATION_VENV_ROOT) {
-        $base = $env:VON_CODEX_AUTOMATION_VENV_ROOT
-    }
-    elseif ($env:CODEX_HOME) {
-        $base = Join-Path $env:CODEX_HOME "automations\python-envs"
-    }
-    elseif ($env:USERPROFILE) {
-        $base = Join-Path $env:USERPROFILE ".codex\automations\python-envs"
-    }
-    else {
-        $base = Join-Path ([System.IO.Path]::GetTempPath()) "codex-automation-python-envs"
-    }
+    $base = Resolve-AutomationVenvBase
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
