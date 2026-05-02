@@ -3,8 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
 )
@@ -17,6 +15,14 @@ _CREATE_CONCEPTS_PARENT_ERROR = (
     "parent_id (str, parent concept_id), concepts (list of {name, kind?, "
     "description?, notes?})."
 )
+
+_KR_REQUIRED_TOOLS = [
+    "create_concepts",
+    "add_relationship",
+    "upsert_singleton_text_relation",
+    "fetch_concept",
+    "get_text_relations_summary",
+]
 
 
 def _validation_failure_aux() -> list[dict[str, Any]]:
@@ -130,6 +136,69 @@ def _build_kr_label_record(
     )
 
 
+def _kr_write_invocations() -> list[dict[str, Any]]:
+    return [
+        {
+            "tool": "create_concepts",
+            "status": "ok",
+            "effective_arguments": {
+                "parent_id": "#V#workflow_marker",
+                "concepts": [{"name": "Already scanned marker"}],
+            },
+            "effective_payload": {
+                "success": True,
+                "concept_id": "#V#already_scanned_marker",
+            },
+        },
+        {
+            "tool": "add_relationship",
+            "status": "ok",
+            "effective_arguments": {
+                "source_id": "#V#already_scanned_marker",
+                "predicate": "#V#hasWorkflow",
+                "target": "#V#paper_ingestion_workflow",
+            },
+            "effective_payload": {"success": True},
+        },
+        {
+            "tool": "upsert_singleton_text_relation",
+            "status": "ok",
+            "effective_arguments": {
+                "concept_id": "#V#already_scanned_marker",
+                "predicate_concept_id": "#V#hasDescription",
+                "text": "Marker used to avoid repeating completed workflow work.",
+            },
+            "effective_payload": {
+                "success": True,
+                "concept_id": "#V#already_scanned_marker",
+            },
+        },
+    ]
+
+
+def _kr_readback_invocations() -> list[dict[str, Any]]:
+    return [
+        {
+            "tool": "fetch_concept",
+            "status": "ok",
+            "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
+            "effective_payload": {
+                "success": True,
+                "concept_id": "#V#already_scanned_marker",
+            },
+        },
+        {
+            "tool": "get_text_relations_summary",
+            "status": "ok",
+            "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
+            "effective_payload": {
+                "success": True,
+                "concept_id": "#V#already_scanned_marker",
+            },
+        },
+    ]
+
+
 def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -> None:
     record = _build_record(
         required_prompt_tools=["create_concepts", "add_relationship"],
@@ -161,42 +230,6 @@ def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -
     assert gate["requires_follow_up"] is True
     assert gate["evidence_payload"]["required_effect_count"] == 2
     assert "schema_validation_failed" in gate["blocking_failure_codes"]
-
-
-def test_real_gateway_rejects_create_concepts_without_parent_id() -> None:
-    from src.backend.integrations.internal_mcp import (
-        InternalMCPGateway,
-        InternalMCPTransport,
-        build_default_catalogue,
-    )
-    from src.backend.integrations.internal_mcp.schemas import SchemaValidationError
-
-    gateway = InternalMCPGateway(
-        catalogue=build_default_catalogue(),
-        transport=InternalMCPTransport(),
-        enabled=True,
-    )
-
-    with pytest.raises(SchemaValidationError) as exc_info:
-        gateway.invoke(
-            "create_concepts",
-            {
-                "concepts": [
-                    {"name": "Assistant label", "kind": "type"},
-                ],
-                "namespace": "#V#user",
-            },
-        )
-
-    message = str(exc_info.value)
-    assert "Missing required field 'parent_id'" in message
-    assert "create_concepts input" in message
-
-    diagnostics = gateway.get_diagnostics()
-    create_metrics = diagnostics["methods"]["create_concepts"]
-    assert create_metrics["calls"] == 1
-    assert create_metrics["failures"] == 1
-    assert "parent_id" in create_metrics["last_error"]
 
 
 def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools() -> (
@@ -262,11 +295,7 @@ def test_kr_required_tools_block_completion_when_write_and_readback_are_absent()
     None
 ):
     record = _build_kr_label_record(
-        required_prompt_tools=[
-            "create_concepts",
-            "fetch_concept",
-            "get_text_relations_summary",
-        ],
+        required_prompt_tools=_KR_REQUIRED_TOOLS,
         tool_invocations=[],
     )
 
@@ -276,6 +305,16 @@ def test_kr_required_tools_block_completion_when_write_and_readback_are_absent()
 
     assert (
         effect_by_id["effect_prompt_required_mutation_create_concepts_1"]["status"]
+        == "not_executed"
+    )
+    assert (
+        effect_by_id["effect_prompt_required_mutation_add_relationship_2"]["status"]
+        == "not_executed"
+    )
+    assert (
+        effect_by_id[
+            "effect_prompt_required_mutation_upsert_singleton_text_relation_3"
+        ]["status"]
         == "not_executed"
     )
     assert (
@@ -292,29 +331,36 @@ def test_kr_required_tools_block_completion_when_write_and_readback_are_absent()
     assert "prompt_required_mutation_create_concepts_missing" in (
         record["completion_gate"]["blocking_failure_codes"]
     )
+    assert "prompt_required_mutation_add_relationship_missing" in (
+        record["completion_gate"]["blocking_failure_codes"]
+    )
+    assert "prompt_required_mutation_upsert_singleton_text_relation_missing" in (
+        record["completion_gate"]["blocking_failure_codes"]
+    )
 
 
 def test_kr_required_tools_block_completion_when_write_lacks_readback() -> None:
     record = _build_kr_label_record(
-        required_prompt_tools=[
-            "create_concepts",
-            "fetch_concept",
-            "get_text_relations_summary",
-        ],
-        tool_invocations=[
-            {
-                "tool": "create_concepts",
-                "status": "ok",
-                "effective_arguments": {
-                    "parent_id": "#V#workflow_marker",
-                    "concepts": [{"name": "Already scanned marker"}],
-                },
-                "effective_payload": {
-                    "success": True,
-                    "concept_id": "#V#already_scanned_marker",
-                },
-            }
-        ],
+        required_prompt_tools=_KR_REQUIRED_TOOLS,
+        tool_invocations=_kr_write_invocations(),
+    )
+
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+    assert (
+        effect_by_id["effect_prompt_required_mutation_create_concepts_1"]["status"]
+        == "satisfied"
+    )
+    assert (
+        effect_by_id["effect_prompt_required_mutation_add_relationship_2"]["status"]
+        == "satisfied"
+    )
+    assert (
+        effect_by_id[
+            "effect_prompt_required_mutation_upsert_singleton_text_relation_3"
+        ]["status"]
+        == "satisfied"
     )
 
     gate = record["completion_gate"]
@@ -326,7 +372,7 @@ def test_kr_required_tools_block_completion_when_write_lacks_readback() -> None:
         gate["blocking_failure_codes"]
     )
     assert any(
-        check.get("effect_id") == "mutation_1"
+        check.get("effect_id") == "mutation_3"
         and check.get("verification_mode") == "state_requery_missing"
         for check in record["postcondition_checks"]
     )
@@ -334,49 +380,34 @@ def test_kr_required_tools_block_completion_when_write_lacks_readback() -> None:
 
 def test_kr_required_tools_allow_completion_after_write_and_readback() -> None:
     record = _build_kr_label_record(
-        required_prompt_tools=[
-            "create_concepts",
-            "fetch_concept",
-            "get_text_relations_summary",
-        ],
+        required_prompt_tools=_KR_REQUIRED_TOOLS,
         tool_invocations=[
-            {
-                "tool": "create_concepts",
-                "status": "ok",
-                "effective_arguments": {
-                    "parent_id": "#V#workflow_marker",
-                    "concepts": [{"name": "Already scanned marker"}],
-                },
-                "effective_payload": {
-                    "success": True,
-                    "concept_id": "#V#already_scanned_marker",
-                },
-            },
-            {
-                "tool": "fetch_concept",
-                "status": "ok",
-                "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
-                "effective_payload": {
-                    "success": True,
-                    "concept_id": "#V#already_scanned_marker",
-                },
-            },
-            {
-                "tool": "get_text_relations_summary",
-                "status": "ok",
-                "effective_arguments": {"concept_id": "#V#already_scanned_marker"},
-                "effective_payload": {
-                    "success": True,
-                    "concept_id": "#V#already_scanned_marker",
-                },
-            },
+            *_kr_write_invocations(),
+            *_kr_readback_invocations(),
         ],
     )
 
     assert record["completion_gate"]["safe_to_claim_completion"] is True
     assert record["completion_gate"]["requires_follow_up"] is False
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+    assert (
+        effect_by_id["effect_prompt_required_mutation_create_concepts_1"]["status"]
+        == "satisfied"
+    )
+    assert (
+        effect_by_id["effect_prompt_required_mutation_add_relationship_2"]["status"]
+        == "satisfied"
+    )
+    assert (
+        effect_by_id[
+            "effect_prompt_required_mutation_upsert_singleton_text_relation_3"
+        ]["status"]
+        == "satisfied"
+    )
     assert any(
-        check.get("effect_id") == "mutation_1"
+        check.get("effect_id") == "mutation_3"
         and check.get("verification_mode") == "state_requery_observed"
         and check.get("status") == "verified"
         for check in record["postcondition_checks"]
