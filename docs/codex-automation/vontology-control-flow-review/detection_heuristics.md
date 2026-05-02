@@ -35,12 +35,6 @@ represented authority before filing Jira work.
 - Vontology profile services that fall back at runtime to canonical Python
   default decision policies, tool-risk classes, or profile blueprints are
   authority seams even when they also materialise those defaults into KB.
-- Startup/bootstrap services that refresh Vontology prompt `hasContent` from
-  repo seed files based on Python marker lists are strong prompt-authority
-  drift signals, especially when the seed file calls itself workflow authority.
-- Tests that assert Python-seeded domain parent/type policy in prompt text or
-  repo seed bundles pin the drift; rewrite them toward Vontology authority or
-  fail-closed behaviour when creating the fix task.
 
 ## 2026-04-30 Examples
 
@@ -54,8 +48,3 @@ represented authority before filing Jira work.
   `JVNAUTOSCI-2219`.
 - Concept-summary renderer panel policy: `JVNAUTOSCI-2234`.
 - File-copy semantic typing and route hints: `JVNAUTOSCI-2235`.
-
-## 2026-05-03 Examples
-
-- Represented-artefact creation prompt/workflow repo seed authority:
-  `JVNAUTOSCI-2260`.

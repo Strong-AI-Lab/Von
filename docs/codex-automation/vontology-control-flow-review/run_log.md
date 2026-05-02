@@ -65,21 +65,3 @@
   `scripts/publish_email_resource_link_extraction_workflow.py`; left them as
   watch items rather than filing new tasks this run.
 - No production code was changed.
-
-## 2026-05-03T03:10:04.7381244+12:00
-
-- Ran `python scripts\check_workflow_purity.py --verbose`; all counters were
-  zero and the workflow-purity gate passed.
-- Created `JVNAUTOSCI-2260` under `JVNAUTOSCI-1116` for represented-artefact
-  creation prompt/workflow authority in repo seed files and startup Python
-  repair. Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-2080`,
-  `JVNAUTOSCI-2249`, and `JVNAUTOSCI-2219`; added a visible Jira user-impact
-  comment.
-- Key evidence: `represented_artefact_creation_workflow_vontology_service.py`
-  refreshes prompt content from repo seed markers, the prompt seed declares
-  itself workflow authority, and tests assert Python-seeded parent policy.
-- Inspected `workflow_discovery_service.py` direct workflow-execute contract
-  fallback, `required_tool_obligation_service.py`, and the related-concepts
-  graph/text fallback in `catalogue.py`; left them as watch items rather than
-  filing new tasks this run.
-- No production code was changed.
