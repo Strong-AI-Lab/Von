@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
 )
@@ -159,6 +161,42 @@ def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -
     assert gate["requires_follow_up"] is True
     assert gate["evidence_payload"]["required_effect_count"] == 2
     assert "schema_validation_failed" in gate["blocking_failure_codes"]
+
+
+def test_real_gateway_rejects_create_concepts_without_parent_id() -> None:
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+    from src.backend.integrations.internal_mcp.schemas import SchemaValidationError
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    with pytest.raises(SchemaValidationError) as exc_info:
+        gateway.invoke(
+            "create_concepts",
+            {
+                "concepts": [
+                    {"name": "Assistant label", "kind": "type"},
+                ],
+                "namespace": "#V#user",
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "Missing required field 'parent_id'" in message
+    assert "create_concepts input" in message
+
+    diagnostics = gateway.get_diagnostics()
+    create_metrics = diagnostics["methods"]["create_concepts"]
+    assert create_metrics["calls"] == 1
+    assert create_metrics["failures"] == 1
+    assert "parent_id" in create_metrics["last_error"]
 
 
 def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools() -> (
