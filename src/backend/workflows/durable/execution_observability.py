@@ -168,6 +168,55 @@ def _mapping_list(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _coerce_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return None
+
+
+def _workflow_instance_appears_not_started(instance_payload: Mapping[str, Any]) -> bool:
+    status = _safe_str(instance_payload.get("status")).lower()
+    if status not in {"pending", "queued"}:
+        return False
+    started_at = _safe_str(instance_payload.get("started_at"))
+    if started_at:
+        return False
+    step_index = _coerce_int_or_none(instance_payload.get("step_index"))
+    if step_index not in (None, 0):
+        return False
+    current_state = _safe_str(instance_payload.get("current_state"))
+    if current_state and current_state.lower() not in {"pending", "queued", "initial"}:
+        return False
+    return True
+
+
+def _apply_not_started_timeout_projection(
+    payload: dict[str, Any],
+    workflow_execution: dict[str, Any],
+    *,
+    durable_system_status: Mapping[str, Any] | None,
+) -> None:
+    failure_code = "workflow_instance_never_started"
+    workflow_execution["execution_state"] = "not_started"
+    workflow_execution["failure_code"] = failure_code
+    workflow_execution["failure_reason"] = (
+        "Workflow instance remained pending or queued until the awaited "
+        "workflow_execute timeout elapsed."
+    )
+    if isinstance(durable_system_status, Mapping):
+        workflow_execution["durable_system_status"] = dict(durable_system_status)
+    payload["success"] = False
+    payload["error_code"] = failure_code
+    payload["error"] = workflow_execution["failure_reason"]
+    payload["message"] = workflow_execution["failure_reason"]
+
+
 def build_metadata_validation_summary(
     events: Sequence[Mapping[str, Any]],
     *,
@@ -269,6 +318,7 @@ def build_workflow_execution_response(
     timed_out: bool = False,
     include_step_result_envelopes: bool = False,
     include_trace: bool = False,
+    durable_system_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = build_verified_instance_launch_payload(
         submission,
@@ -318,6 +368,16 @@ def build_workflow_execution_response(
         if final_status:
             workflow_execution["final_status"] = final_status
             payload["final_status"] = final_status
+        if (
+            await_terminal
+            and timed_out
+            and _workflow_instance_appears_not_started(instance_payload)
+        ):
+            _apply_not_started_timeout_projection(
+                payload,
+                workflow_execution,
+                durable_system_status=durable_system_status,
+            )
     if await_terminal or timed_out:
         payload["timed_out"] = bool(timed_out)
 

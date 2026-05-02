@@ -831,6 +831,82 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_capability_index_build_in_progress_resolves_workflow_execute_contract_from_registry(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.return_value = []
+        mock_capability_state.return_value = {
+            "ready": False,
+            "build_in_progress": True,
+            "last_error": None,
+        }
+        mock_semantic.return_value = []
+        mock_vontology.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+        registry = SimpleNamespace(
+            all_workflow_ids=lambda: ["#V#arxiv_paper_representation_workflow"],
+            peek_registration=lambda workflow_id: SimpleNamespace(
+                workflow_id=workflow_id,
+                purpose="Canonical arXiv wrapper workflow.",
+                source="vontology",
+            ),
+        )
+
+        result = discover_workflows(
+            "https://arxiv.org/abs/2406.15341\n\n"
+            "Turn-intent routing guidance:\n"
+            "- Routing guidance: Route to the executable arXiv paper "
+            "representation workflow.\n"
+            "- Required tools: workflow_execute",
+            max_results=1,
+            workflow_registry=registry,
+        )
+
+        assert result.search_sources == [
+            "capability_index",
+            "contract_direct_workflow_resolution",
+        ]
+        assert [match.concept_id for match in result.matches] == [
+            "#V#arxiv_paper_representation_workflow"
+        ]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#arxiv_paper_representation_workflow"
+        ]
+        assert "capability_index_build_in_progress" in result.errors
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 1
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")

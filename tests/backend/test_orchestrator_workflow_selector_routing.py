@@ -9235,7 +9235,11 @@ def test_authoritative_arxiv_workflow_dispatch_resolves_deictic_grounded_target(
         "text_relation:#V#hasWorkflowLaunchInputContractJson"
     )
     assert launch_resolution.get("status") == "resolved"
-    assert launch_resolution.get("resolved_inputs") == ["arxiv_id", "prompt"]
+    assert launch_resolution.get("resolved_inputs") == [
+        "arxiv_id",
+        "arxiv_ids",
+        "prompt",
+    ]
     assert any(
         mapping.get("target_context_key") == "arxiv_id"
         and mapping.get("source_expression")

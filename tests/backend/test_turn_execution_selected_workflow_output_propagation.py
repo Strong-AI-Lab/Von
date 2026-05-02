@@ -553,6 +553,60 @@ def test_selected_workflow_outputs_derives_missing_tools_from_workflow_contract(
     ]
 
 
+def test_selected_workflow_outputs_exposes_required_step_envelope_as_invocation() -> (
+    None
+):
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+            }
+        ],
+    }
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#arxiv_paper_representation_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Paper represented.",
+            "arxiv_id": "2406.15341",
+            "workflow_step_result_envelopes": [
+                {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "verify_arxiv_path",
+                    "action_id": "scholarly_paper.verify_representation",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "scholarly_representation_verified": True,
+                        "paper_concept_id": "#V#paper_2406_15341",
+                        "file_copy_concept_id": "#V#file_copy_2406_15341",
+                    },
+                }
+            ],
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        rendered_child_response_text="Paper represented.",
+    )
+
+    invocations = outputs.get("invocations")
+    assert isinstance(invocations, list)
+    assert invocations[0]["tool"] == "scholarly_paper.verify_representation"
+    assert invocations[0]["workflow_step_evidence"] is True
+    assert invocations[0]["effective_payload"]["arxiv_id"] == "2406.15341"
+    assert invocations[0]["effective_payload"]["paper_concept_id"] == (
+        "#V#paper_2406_15341"
+    )
+    assert outputs["missing_prompt_tools"] == []
+
+
 def test_selected_workflow_outputs_filters_turn_contract_tools_to_child_allowed_policy() -> (
     None
 ):

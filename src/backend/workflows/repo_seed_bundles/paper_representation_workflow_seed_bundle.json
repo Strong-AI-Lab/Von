@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "9",
-  "source_tag": "JVNAUTOSCI-2211",
+  "seed_version": "11",
+  "source_tag": "JVNAUTOSCI-2251",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -1521,6 +1521,11 @@
           "lang": "en-NZ"
         },
         {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"contract_id\":\"arxiv_paper_representation_readback\",\"required_effects\":[{\"description\":\"Require verified paper concept and source/PDF artefact read-back for each arXiv target supplied to the workflow turn.\",\"effect_id\":\"arxiv_paper_representation\",\"effect_type\":\"scholarly_representation\",\"failed_failure_code\":\"arxiv_paper_representation_failed\",\"missing_failure_code\":\"arxiv_paper_representation_not_executed\",\"not_executed_reason\":\"No verified arXiv paper representation read-back was observed for this target.\",\"not_satisfied_reason\":\"ArXiv paper representation read-back did not verify for this target.\",\"required_payload_fields\":[\"paper_concept_id\",\"file_copy_concept_id\"],\"required_tools\":[\"scholarly_paper.verify_representation\"],\"targets_extractor\":\"arxiv_id_list\",\"targets_source_expressions\":[\"selected_workflow_trace.expected_outcome_contract_state.fields.summary\",\"completion_report.turn_expected_outcome_contract_state.fields.summary\",\"workflow_discovery_result.discovery_query_input\"],\"wrong_target_failure_code\":\"arxiv_paper_representation_wrong_target\"}],\"schema_version\":\"workflow_required_effects_contract.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
           "text": "{\n  \"schema_version\": \"workflow_routing_profile.v1\",\n  \"role\": \"execution\",\n  \"authoring_intent_required\": false,\n  \"prefer_existing_capability\": false\n}",
           "lang": "en-NZ"
@@ -1548,11 +1553,32 @@
             "target_context_key": "arxiv_id"
           },
           {
+            "description": "Carry through all already-normalised arXiv identifiers when the workflow is launched with a multi-paper target set.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.arxiv_ids",
+            "target_context_key": "arxiv_ids"
+          },
+          {
+            "description": "Resolve all arXiv identifiers from the request text so turn-level recovery can verify each supplied paper target.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.prompt",
+            "target_context_key": "arxiv_ids"
+          },
+          {
             "description": "Resolve an arXiv identifier from the turn expected-outcome contract when the current request is deictic but routing has already grounded the target paper.",
             "extractor": "arxiv_id",
             "required": false,
             "source_expression": "inputs.turn_expected_outcome_contract.summary",
             "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve all arXiv identifiers from the turn expected-outcome contract when routing has grounded multiple paper targets.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.turn_expected_outcome_contract.summary",
+            "target_context_key": "arxiv_ids"
           },
           {
             "description": "Resolve an arXiv identifier from the state-form expected-outcome contract when the current request is deictic but routing has already grounded the target paper.",
@@ -1562,11 +1588,25 @@
             "target_context_key": "arxiv_id"
           },
           {
+            "description": "Resolve all arXiv identifiers from the state-form expected-outcome contract when routing has grounded multiple paper targets.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.turn_expected_outcome_contract_state.fields.summary",
+            "target_context_key": "arxiv_ids"
+          },
+          {
             "description": "Resolve an arXiv identifier from the enriched discovery query used to select this workflow.",
             "extractor": "arxiv_id",
             "required": false,
             "source_expression": "inputs.workflow_discovery_result.discovery_query_input",
             "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve all arXiv identifiers from the enriched discovery query used to select this workflow.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.workflow_discovery_result.discovery_query_input",
+            "target_context_key": "arxiv_ids"
           },
           {
             "description": "Carry through an already-normalised arXiv source URL when the workflow is launched programmatically.",

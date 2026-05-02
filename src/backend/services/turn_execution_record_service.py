@@ -5731,6 +5731,191 @@ def _normalise_representation_target_tokens(*raw_values: Any) -> list[str]:
     return _dedupe_string_sequence([*direct_values, *arxiv_ids])
 
 
+def _resolve_required_effect_source_expression(
+    source_expression: str,
+    *,
+    context_surfaces: Mapping[str, Any] | None,
+) -> tuple[bool, Any]:
+    expression = _safe_str(source_expression)
+    if not expression or not isinstance(context_surfaces, Mapping):
+        return False, None
+
+    parts = [part for part in expression.split(".") if part]
+    if not parts:
+        return False, None
+
+    root = parts[0]
+    if root in context_surfaces:
+        current: Any = context_surfaces.get(root)
+        parts = parts[1:]
+    else:
+        current = context_surfaces
+
+    for part in parts:
+        if not isinstance(current, Mapping) or part not in current:
+            return False, None
+        current = current.get(part)
+    return True, current
+
+
+def _extract_required_effect_targets_with_extractor(
+    value: Any,
+    *,
+    extractor: str | None,
+) -> list[str]:
+    extractor_name = (_safe_str(extractor) or "identity").lower().replace("-", "_")
+    if extractor_name in {"arxiv_id", "arxiv_id_list", "arxiv_ids"}:
+        candidates = extract_arxiv_id_candidates(value)
+        if extractor_name == "arxiv_id":
+            return candidates[:1]
+        return candidates
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return _dedupe_string_sequence(value)
+    return _normalise_representation_target_tokens(value)
+
+
+def _lookup_required_effect_context_key_targets(
+    context_key: str,
+    *,
+    context_surfaces: Mapping[str, Any] | None,
+    extractor: str | None,
+) -> list[str]:
+    key = _safe_str(context_key)
+    if not key or not isinstance(context_surfaces, Mapping):
+        return []
+
+    candidate_values: list[Any] = []
+    for surface in context_surfaces.values():
+        if not isinstance(surface, Mapping):
+            continue
+        if key in surface:
+            candidate_values.append(surface.get(key))
+        for nested_key in (
+            "child_result_snapshot",
+            "result_snapshot",
+            "workflow_execution_summary",
+            "workflow_launch_inputs",
+            "workflow_continuation_launch_inputs",
+        ):
+            nested = surface.get(nested_key)
+            if isinstance(nested, Mapping) and key in nested:
+                candidate_values.append(nested.get(key))
+        for contract_key in (
+            "expected_outcome_contract_state",
+            "expected_outcome_contract",
+            "turn_expected_outcome_contract_state",
+            "turn_expected_outcome_contract",
+        ):
+            contract = surface.get(contract_key)
+            if isinstance(contract, Mapping):
+                if key in contract:
+                    candidate_values.append(contract.get(key))
+                fields = contract.get("fields")
+                if isinstance(fields, Mapping) and key in fields:
+                    candidate_values.append(fields.get(key))
+
+    targets: list[str] = []
+    for value in candidate_values:
+        targets.extend(
+            _extract_required_effect_targets_with_extractor(
+                value,
+                extractor=extractor,
+            )
+        )
+    return _dedupe_string_sequence(targets)
+
+
+def _dynamic_targets_for_required_effect_template(
+    template: Mapping[str, Any],
+    *,
+    context_surfaces: Mapping[str, Any] | None,
+) -> tuple[list[str], bool]:
+    source_expressions = _dedupe_string_sequence(
+        template.get("targets_source_expressions")
+        or template.get("target_source_expressions")
+        or []
+    )
+    context_key = _safe_str(template.get("targets_context_key"))
+    extractor = _safe_str(template.get("targets_extractor"))
+    dynamic_binding_declared = bool(source_expressions or context_key)
+    if not dynamic_binding_declared:
+        return [], False
+
+    targets: list[str] = []
+    for expression in source_expressions:
+        found, value = _resolve_required_effect_source_expression(
+            expression,
+            context_surfaces=context_surfaces,
+        )
+        if not found:
+            continue
+        targets.extend(
+            _extract_required_effect_targets_with_extractor(
+                value,
+                extractor=extractor,
+            )
+        )
+    if context_key:
+        targets.extend(
+            _lookup_required_effect_context_key_targets(
+                context_key,
+                context_surfaces=context_surfaces,
+                extractor=extractor,
+            )
+        )
+    return _dedupe_string_sequence(targets), True
+
+
+def _target_slug(target: str, *, index: int) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", target.lower()).strip("_")
+    return slug[:80] or str(index)
+
+
+def _expand_required_effect_templates_for_dynamic_targets(
+    raw_effects: Sequence[Any],
+    *,
+    context_surfaces: Mapping[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    expanded: list[Mapping[str, Any]] = []
+    for raw_effect in raw_effects:
+        if not isinstance(raw_effect, Mapping):
+            continue
+        targets, dynamic_binding_declared = (
+            _dynamic_targets_for_required_effect_template(
+                raw_effect,
+                context_surfaces=context_surfaces,
+            )
+        )
+        if not dynamic_binding_declared:
+            expanded.append(raw_effect)
+            continue
+
+        base_effect_id = _safe_str(raw_effect.get("effect_id")) or "required_effect"
+        if not targets:
+            unresolved_effect = dict(raw_effect)
+            unresolved_effect["targets"] = []
+            unresolved_effect["target_resolution_failed"] = True
+            unresolved_effect["target_resolution_failure_code"] = (
+                _safe_str(raw_effect.get("target_resolution_failure_code"))
+                or f"{_effect_failure_code_slug(raw_effect)}_target_unresolved"
+            )
+            expanded.append(unresolved_effect)
+            continue
+
+        for index, target in enumerate(targets, start=1):
+            effect = dict(raw_effect)
+            effect["effect_id"] = (
+                f"{base_effect_id}_{index}_{_target_slug(target, index=index)}"
+            )
+            effect["targets"] = [target]
+            effect["dynamic_target"] = target
+            expanded.append(effect)
+    return expanded
+
+
 def _collect_successful_tool_payloads(
     *,
     tool_invocations: Sequence[Mapping[str, Any]] | None,
@@ -5784,6 +5969,7 @@ def _evaluate_representation_effect_payloads(
     if tool_name_lower not in {
         "interpret_file_copy",
         "materialise_scholarly_representation_for_file_copy",
+        "scholarly_paper.verify_representation",
     }:
         return None
 
@@ -5792,11 +5978,20 @@ def _evaluate_representation_effect_payloads(
     if not payload_key:
         return None
 
-    domain_id = _safe_str(effect.get("representation_domain_id")) or "representation"
+    domain_id = (
+        _safe_str(effect.get("representation_domain_id"))
+        or _safe_str(effect.get("domain_profile_id"))
+        or (
+            "paper"
+            if _safe_str(effect.get("effect_type")) == "scholarly_representation"
+            else "representation"
+        )
+    )
     generic_reason = (
         "Required representation tool ran but the requested representation was "
         "not verified."
     )
+    required_readback_fields = _required_representation_readback_fields(effect)
 
     for payload in payloads:
         candidate_payloads: list[Mapping[str, Any]] = []
@@ -5808,9 +6003,50 @@ def _evaluate_representation_effect_payloads(
             and effect_type == "scholarly_representation"
         ):
             candidate_payloads.append(payload)
+        if (
+            tool_name_lower == "scholarly_paper.verify_representation"
+            and effect_type == "scholarly_representation"
+        ):
+            verification_payload = dict(payload)
+            if "verified" not in verification_payload:
+                verification_payload["verified"] = bool(
+                    payload.get("scholarly_representation_verified")
+                )
+            if "attempted" not in verification_payload:
+                verification_payload["attempted"] = True
+            if not verification_payload["verified"] and not _safe_str(
+                verification_payload.get("reason")
+            ):
+                failures = _dedupe_string_sequence(
+                    verification_payload.get("verification_failures") or []
+                )
+                if failures:
+                    verification_payload["reason"] = (
+                        "Scholarly representation verification failed: "
+                        + ", ".join(failures)
+                        + "."
+                    )
+            candidate_payloads.append(verification_payload)
 
         for candidate_payload in candidate_payloads:
             if bool(candidate_payload.get("verified")):
+                missing_readback_fields = _missing_representation_readback_fields(
+                    candidate_payload,
+                    required_fields=required_readback_fields,
+                )
+                if missing_readback_fields:
+                    return {
+                        "status": "not_satisfied",
+                        "status_reason": (
+                            "Required representation tool verified the operation "
+                            "but did not return the required read-back artefact IDs: "
+                            + ", ".join(missing_readback_fields)
+                            + "."
+                        ),
+                        "failure_codes": [
+                            f"{domain_id}_representation_readback_missing"
+                        ],
+                    }
                 return {
                     "status": "satisfied",
                     "status_reason": (
@@ -5839,6 +6075,58 @@ def _evaluate_representation_effect_payloads(
     return None
 
 
+def _required_representation_readback_fields(effect: Mapping[str, Any]) -> list[str]:
+    raw_fields = effect.get("required_payload_fields")
+    if isinstance(raw_fields, Sequence) and not isinstance(
+        raw_fields, (str, bytes, bytearray)
+    ):
+        fields = [
+            _safe_str(field)
+            for field in raw_fields
+            if isinstance(field, str) and _safe_str(field)
+        ]
+        if fields:
+            return fields
+    effect_type = _safe_str(effect.get("effect_type"))
+    if effect_type == "scholarly_representation":
+        return ["paper_concept_id", "file_copy_concept_id"]
+    return []
+
+
+def _payload_has_any_key(payload: Mapping[str, Any], keys: Sequence[str]) -> bool:
+    for key in keys:
+        if _safe_str(payload.get(key)):
+            return True
+    return False
+
+
+def _missing_representation_readback_fields(
+    payload: Mapping[str, Any],
+    *,
+    required_fields: Sequence[str],
+) -> list[str]:
+    missing: list[str] = []
+    for field in required_fields:
+        field_name = _safe_str(field)
+        if not field_name:
+            continue
+        if field_name == "file_copy_concept_id":
+            if _payload_has_any_key(
+                payload,
+                (
+                    "file_copy_concept_id",
+                    "computer_file_copy_concept_id",
+                    "source_file_copy_concept_id",
+                ),
+            ):
+                continue
+            missing.append(field_name)
+            continue
+        if not _safe_str(payload.get(field_name)):
+            missing.append(field_name)
+    return missing
+
+
 def _materialise_required_effects_from_contract(
     *,
     contract: Mapping[str, Any] | None,
@@ -5846,6 +6134,7 @@ def _materialise_required_effects_from_contract(
     failed_tools: Sequence[str],
     blocked_tools: Sequence[str],
     tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+    context_surfaces: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(contract, Mapping):
         return []
@@ -5877,7 +6166,11 @@ def _materialise_required_effects_from_contract(
         "evidence" if contract_intent == "evidence" else "representation"
     )
     required_effects: list[dict[str, Any]] = []
-    for template in raw_effects:
+    expanded_effects = _expand_required_effect_templates_for_dynamic_targets(
+        raw_effects,
+        context_surfaces=context_surfaces,
+    )
+    for template in expanded_effects:
         if not isinstance(template, Mapping):
             continue
         effect = dict(template)
@@ -5928,6 +6221,23 @@ def _materialise_required_effects_from_contract(
 
         targets = _dedupe_string_sequence(effect.get("targets") or [])
         effect_slug = _effect_failure_code_slug(effect)
+        if bool(effect.get("target_resolution_failed")):
+            target_failure_code = (
+                _safe_str(effect.get("target_resolution_failure_code"))
+                or f"{effect_slug}_target_unresolved"
+            )
+            effect["status"] = "not_executed"
+            effect["status_reason"] = (
+                _safe_str(effect.get("target_resolution_failure_reason"))
+                or "Required effect targets could not be resolved from the workflow-authored contract."
+            )
+            effect["failure_code"] = target_failure_code
+            effect["failure_codes"] = [target_failure_code]
+            if contract_source == "workflow_required_effects_contract":
+                effect.setdefault("intent_origin", "workflow_authored")
+            effect.setdefault("source", contract_source)
+            required_effects.append(effect)
+            continue
         is_representation_effect = contract_intent == "representation" or (
             _is_representation_effect_type(_safe_str(effect.get("effect_type")))
         )
@@ -6817,6 +7127,31 @@ def build_turn_execution_record(
     completion_report_payload = (
         dict(completion_report) if isinstance(completion_report, Mapping) else None
     )
+    workflow_required_effect_context_surfaces = {
+        "selected_workflow_trace": (
+            selected_workflow_trace_payload
+            if isinstance(selected_workflow_trace_payload, Mapping)
+            else {}
+        ),
+        "completion_report": (
+            completion_report_payload
+            if isinstance(completion_report_payload, Mapping)
+            else {}
+        ),
+        "turn_expected_outcome_contract": dict(turn_expected_outcome_contract_payload),
+        "turn_expected_outcome_contract_state": (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        ),
+        "workflow_discovery_result": (
+            {
+                str(key): value
+                for key, value in workflow_discovery.items()
+                if isinstance(key, str)
+            }
+            if isinstance(workflow_discovery, Mapping)
+            else {}
+        ),
+    }
     required_evidence_target_concept_ids = _derive_required_evidence_target_concept_ids(
         prompt_text=prompt_text,
         selected_workflow_id=selected_workflow_id,
@@ -7010,6 +7345,7 @@ def build_turn_execution_record(
         failed_tools=execution_surface_failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
+        context_surfaces=workflow_required_effect_context_surfaces,
     )
 
     required_effects: list[dict[str, Any]] = []

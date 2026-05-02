@@ -1297,6 +1297,45 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert payload.get("execution_trace", {}).get("execution_id") == "trace-1550"
 
 
+def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.startup.get_system_status",
+        lambda: {
+            "worker_running": False,
+            "scheduler_running": False,
+            "instances": {"pending": 1, "running": 0},
+        },
+    )
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        "workflow_execute",
+        {
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "inputs": {"arxiv_id": "2406.15341"},
+            "await_terminal": True,
+            "timeout_seconds": 0,
+            "poll_interval_seconds": 0,
+        },
+    ).payload
+
+    execution = payload.get("workflow_execution") or {}
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "workflow_instance_never_started"
+    assert execution.get("execution_state") == "not_started"
+    assert execution.get("current_status") == "pending"
+    assert execution.get("durable_system_status", {}).get("worker_running") is False
+
+
 def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
@@ -1340,6 +1379,41 @@ def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
     assert payload.get("success") is True
     assert payload.get("execution_id") == "trace-lookup-1"
     assert payload.get("execution_trace", {}).get("status") == "completed"
+
+
+def test_workflow_get_execution_trace_reports_unlinked_instance_state(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+        },
+    ).payload
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    payload = gateway.invoke(
+        "workflow_get_execution_trace",
+        {"instance_id": instance_id},
+    ).payload
+
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "workflow_execution_trace_not_linked"
+    details = payload.get("error_details") or {}
+    assert details.get("instance_id") == instance_id
+    assert details.get("workflow_id") == "#V#arxiv_paper_representation_workflow"
+    assert details.get("status") == "pending"
+    assert details.get("trace_missing_reason") == "instance_has_no_execution_trace_id"
 
 
 def test_turn_execution_get_critic_bundle_invokes_service(monkeypatch):

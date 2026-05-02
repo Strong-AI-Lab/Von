@@ -742,6 +742,23 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert any(
         isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_ids"
+        and item.get("source_expression") == "inputs.prompt"
+        and item.get("extractor") == "arxiv_id_list"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_ids"
+        and item.get("source_expression")
+        == "inputs.workflow_discovery_result.discovery_query_input"
+        and item.get("extractor") == "arxiv_id_list"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
         and item.get("target_context_key") == "source_uri"
         and item.get("source_expression") == "inputs.source_uri"
         and item.get("required") is False
@@ -1071,6 +1088,18 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         "inputs.turn_expected_outcome_contract_state.fields.summary",
         "inputs.workflow_discovery_result.discovery_query_input",
     }.issubset(arxiv_sources)
+    arxiv_list_sources = {
+        mapping.get("source_expression")
+        for mapping in refreshed_launch_contract.get("input_mappings") or []
+        if mapping.get("target_context_key") == "arxiv_ids"
+    }
+    assert {
+        "inputs.arxiv_ids",
+        "inputs.prompt",
+        "inputs.turn_expected_outcome_contract.summary",
+        "inputs.turn_expected_outcome_contract_state.fields.summary",
+        "inputs.workflow_discovery_result.discovery_query_input",
+    }.issubset(arxiv_list_sources)
 
     marker_rows = get_texts_for_concept(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
@@ -1082,7 +1111,27 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "9" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "11" for payload in marker_payloads)
+
+    refreshed_definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert refreshed_definition is not None
+    required_effects_contract = refreshed_definition.metadata.get(
+        "required_effects_contract"
+    )
+    assert isinstance(required_effects_contract, dict)
+    assert required_effects_contract.get("contract_id") == (
+        "arxiv_paper_representation_readback"
+    )
+    required_effect = required_effects_contract["required_effects"][0]
+    assert required_effect["required_tools"] == [
+        "scholarly_paper.verify_representation"
+    ]
+    assert required_effect["targets_extractor"] == "arxiv_id_list"
+    assert "workflow_discovery_result.discovery_query_input" in (
+        required_effect["targets_source_expressions"]
+    )
 
 
 def test_metadata_workflow_executes_direct_scholarly_article_representation(

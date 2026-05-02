@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -597,6 +598,186 @@ def _augment_query_with_file_copy_context(
         if parts:
             lines.append("- " + "; ".join(parts))
     return "\n".join(lines)
+
+
+_DIRECT_WORKFLOW_CONCEPT_PATTERN = re.compile(
+    r"#V#[A-Za-z0-9_:-]*workflow[A-Za-z0-9_:-]*",
+    re.IGNORECASE,
+)
+
+
+def _normalise_workflow_phrase(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("#v#"):
+        text = text[3:]
+    text = text.replace("_", " ")
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _query_has_workflow_execute_contract(query: str) -> bool:
+    lowered = str(query or "").lower()
+    return "workflow_execute" in lowered and (
+        "required tool" in lowered
+        or "required tools" in lowered
+        or "required_tools" in lowered
+        or "success requires" in lowered
+        or "grounding requirement" in lowered
+    )
+
+
+def _extract_direct_workflow_concept_ids(query: str) -> list[str]:
+    seen: set[str] = set()
+    concept_ids: list[str] = []
+    for match in _DIRECT_WORKFLOW_CONCEPT_PATTERN.finditer(str(query or "")):
+        concept_id = match.group(0).strip().rstrip(".,;:)]}")
+        lowered = concept_id.lower()
+        if not concept_id or lowered in seen:
+            continue
+        seen.add(lowered)
+        concept_ids.append(concept_id)
+    return concept_ids
+
+
+def _iter_registry_workflow_ids(workflow_registry: Any | None) -> list[str]:
+    registry = workflow_registry
+    if registry is None:
+        try:
+            from ..workflows.durable.registry_factory import (
+                get_shared_workflow_registry_read_only,
+            )
+
+            registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+        except Exception:
+            registry = None
+    if registry is None:
+        return []
+
+    for method_name in ("all_workflow_ids", "workflow_ids", "list_workflow_ids"):
+        method = getattr(registry, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            raw_ids = method()
+        except Exception:
+            continue
+        if isinstance(raw_ids, Sequence) and not isinstance(raw_ids, (str, bytes)):
+            return [
+                str(item).strip()
+                for item in raw_ids
+                if isinstance(item, str) and str(item).strip()
+            ]
+    return []
+
+
+def _peek_registry_workflow_metadata(
+    workflow_id: str,
+    *,
+    workflow_registry: Any | None,
+) -> tuple[str | None, str | None]:
+    registry = workflow_registry
+    if registry is None:
+        try:
+            from ..workflows.durable.registry_factory import (
+                get_shared_workflow_registry_read_only,
+            )
+
+            registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+        except Exception:
+            registry = None
+    if registry is None:
+        return None, None
+
+    registration = None
+    for method_name in ("peek_registration", "get_registration"):
+        method = getattr(registry, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            registration = method(workflow_id)
+        except Exception:
+            registration = None
+        if registration is not None:
+            break
+
+    purpose = ""
+    source = ""
+    definition = None
+    if registration is not None:
+        purpose = str(getattr(registration, "purpose", "") or "").strip()
+        source = str(getattr(registration, "source", "") or "").strip()
+        definition = getattr(registration, "definition", None)
+    if definition is None:
+        method = getattr(registry, "get", None)
+        if callable(method):
+            try:
+                definition = method(workflow_id)
+            except Exception:
+                definition = None
+    if definition is not None and not purpose:
+        purpose = str(getattr(definition, "purpose", "") or "").strip()
+    return purpose or None, source or None
+
+
+def _workflow_display_name_from_id(workflow_id: str) -> str:
+    phrase = _normalise_workflow_phrase(workflow_id)
+    if not phrase:
+        return workflow_id
+    return " ".join(part.capitalize() for part in phrase.split())
+
+
+def _resolve_contract_direct_workflow_candidates(
+    query: str,
+    *,
+    workflow_registry: Any | None,
+    limit: int,
+) -> list[WorkflowMatch]:
+    """Resolve directly grounded workflow candidates during index cold starts.
+
+    This is intentionally narrower than secondary semantic search: it only
+    acts when the turn already contains a structured workflow-execution
+    contract or an explicit workflow concept ID, and it only accepts direct ID
+    or exact label containment.
+    """
+
+    direct_ids = _extract_direct_workflow_concept_ids(query)
+    direct_lookup = {item.lower(): item for item in direct_ids}
+    if not direct_ids and not _query_has_workflow_execute_contract(query):
+        return []
+
+    query_phrase = f" {_normalise_workflow_phrase(query)} "
+    candidate_ids: list[str] = list(direct_ids)
+    seen = {item.lower() for item in candidate_ids}
+    for workflow_id in _iter_registry_workflow_ids(workflow_registry):
+        lowered = workflow_id.lower()
+        if lowered in seen:
+            continue
+        workflow_phrase = _normalise_workflow_phrase(workflow_id)
+        if not workflow_phrase:
+            continue
+        if f" {workflow_phrase} " not in query_phrase:
+            continue
+        seen.add(lowered)
+        candidate_ids.append(workflow_id)
+        if len(candidate_ids) >= max(1, int(limit)):
+            break
+
+    matches: list[WorkflowMatch] = []
+    for workflow_id in candidate_ids[: max(1, int(limit))]:
+        purpose, _source = _peek_registry_workflow_metadata(
+            workflow_id,
+            workflow_registry=workflow_registry,
+        )
+        explicit = workflow_id.lower() in direct_lookup
+        matches.append(
+            WorkflowMatch(
+                concept_id=workflow_id,
+                name=_workflow_display_name_from_id(workflow_id),
+                description=purpose,
+                relevance_score=1.0 if explicit else 0.97,
+                match_source="contract_direct_workflow_resolution",
+            )
+        )
+    return matches
 
 
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
@@ -1317,7 +1498,31 @@ def discover_workflows(
             )
             errors.extend(capability_unavailability_errors)
             if capability_unavailability_errors:
-                return _finalise_result(ranked_matches=[], routing_matches=[])
+                direct_resolution_started_at = time.perf_counter()
+                direct_matches = _resolve_contract_direct_workflow_candidates(
+                    search_query,
+                    workflow_registry=workflow_registry,
+                    limit=max_results * 2,
+                )
+                if direct_matches:
+                    search_sources.append("contract_direct_workflow_resolution")
+                    all_matches.extend(direct_matches)
+                    capability_matches_sufficient = _has_enough_capability_matches(
+                        direct_matches,
+                        threshold=relevance_threshold,
+                        max_results=max_results,
+                    )
+                    _record_discovery_stage_timing(
+                        stage_timings,
+                        stage="contract_direct_workflow_resolution",
+                        started_at=direct_resolution_started_at,
+                        status="completed",
+                        match_count=len(direct_matches),
+                        sufficient=capability_matches_sufficient,
+                        reason="capability_index_unavailable",
+                    )
+                else:
+                    return _finalise_result(ranked_matches=[], routing_matches=[])
     except Exception as e:
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")

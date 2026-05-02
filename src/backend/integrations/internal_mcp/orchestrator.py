@@ -40983,6 +40983,14 @@ class InternalMCPChatOrchestrator:
 
             invocations: list[Mapping[str, Any]] = []
             seen_signatures: set[str] = set()
+
+            def _append_invocation(value: Mapping[str, Any]) -> None:
+                signature = repr(sorted(value.items(), key=lambda item: str(item[0])))
+                if signature in seen_signatures:
+                    return
+                seen_signatures.add(signature)
+                invocations.append(value)
+
             for key in ("tool_invocations", "invocations"):
                 values = result_data.get(key)
                 if not isinstance(values, Sequence) or isinstance(
@@ -40992,26 +41000,49 @@ class InternalMCPChatOrchestrator:
                 for value in values:
                     if not isinstance(value, Mapping):
                         continue
-                    signature = repr(
-                        sorted(value.items(), key=lambda item: str(item[0]))
-                    )
-                    if signature in seen_signatures:
-                        continue
-                    seen_signatures.add(signature)
-                    invocations.append(value)
+                    _append_invocation(value)
+
+            for envelope in _workflow_execution_summary_mapping_list(
+                result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+            ):
+                action_id = _workflow_execution_summary_text(
+                    envelope.get("action_id")
+                )
+                if not action_id:
+                    continue
+                payload = (
+                    dict(envelope.get("output_payload"))
+                    if isinstance(envelope.get("output_payload"), Mapping)
+                    else {}
+                )
+                outcome = _workflow_execution_summary_text(
+                    envelope.get("action_outcome")
+                ) or _workflow_execution_summary_text(envelope.get("action_status"))
+                if outcome and "status" not in payload:
+                    payload["status"] = outcome
+                _append_invocation(
+                    {
+                        "tool": action_id,
+                        "payload": payload,
+                        "effective_payload": dict(payload),
+                        "workflow_step_evidence": True,
+                    }
+                )
             return invocations
 
         def _required_tools_from_custom_workflow_mapping(
             candidate: Mapping[str, Any],
-        ) -> list[str]:
-            for key in (
-                "required_prompt_tools",
-                "missing_prompt_tools",
-                "workflow_required_effects_required_tools",
-            ):
+        ) -> tuple[list[str], str | None]:
+            for key in ("required_prompt_tools", "missing_prompt_tools"):
                 tools = _normalise_tool_name_sequence(candidate.get(key))
                 if tools:
-                    return tools
+                    return tools, key
+
+            tools = _normalise_tool_name_sequence(
+                candidate.get("workflow_required_effects_required_tools")
+            )
+            if tools:
+                return tools, "workflow_required_effects_required_tools"
 
             for key in (
                 "turn_expected_outcome_contract_state",
@@ -41022,7 +41053,7 @@ class InternalMCPChatOrchestrator:
                 contract = TurnExpectedOutcomeContract.from_mapping(candidate.get(key))
                 tools = _normalise_tool_name_sequence(contract.required_tools)
                 if tools:
-                    return tools
+                    return tools, key
 
             tools = _workflow_required_tools_from_contract(
                 candidate.get("workflow_required_effects_contract")
@@ -41032,14 +41063,16 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             if tools:
-                return tools
+                return tools, "workflow_required_effects_contract"
 
-            return []
+            return [], None
 
-        def _custom_workflow_required_tools(result: Any) -> list[str]:
+        def _custom_workflow_required_tools(
+            result: Any,
+        ) -> tuple[list[str], str | None]:
             result_data = getattr(result, "data", None)
             if not isinstance(result_data, Mapping):
-                return []
+                return [], None
 
             for candidate in (
                 result_data,
@@ -41049,10 +41082,40 @@ class InternalMCPChatOrchestrator:
             ):
                 if not isinstance(candidate, Mapping):
                     continue
-                tools = _required_tools_from_custom_workflow_mapping(candidate)
+                tools, source = _required_tools_from_custom_workflow_mapping(candidate)
                 if tools:
-                    return tools
-            return []
+                    return tools, source
+            return [], None
+
+        def _filter_workflow_internal_required_effect_tools(
+            required_tools: Sequence[str],
+        ) -> list[str]:
+            tools = _normalise_tool_name_sequence(required_tools)
+            if not tools or not selected_workflow_id_text:
+                return tools
+            try:
+                _registration, selected_definition = (
+                    self._resolve_workflow_registration_and_definition(
+                        selected_workflow_id_text
+                    )
+                )
+            except Exception:
+                selected_definition = None
+            policy = _evaluate_workflow_required_effects_tool_policy(
+                selected_definition
+            )
+            direct_action_tools = {
+                str(item).strip().lower()
+                for item in (policy.get("direct_action_tools") or [])
+                if isinstance(item, str) and item.strip()
+            }
+            if not direct_action_tools:
+                return tools
+            return [
+                tool
+                for tool in tools
+                if tool.strip().lower() not in direct_action_tools
+            ]
 
         def _custom_workflow_missing_required_prompt_tools(
             result: Any,
@@ -41076,8 +41139,20 @@ class InternalMCPChatOrchestrator:
             required_tools = _normalise_tool_name_sequence(
                 routing_prompt_requirements.required_tools
             )
+            required_tools_source: str | None = (
+                "routing_prompt_requirements" if required_tools else None
+            )
             if not required_tools:
-                required_tools = _custom_workflow_required_tools(result)
+                required_tools, required_tools_source = (
+                    _custom_workflow_required_tools(result)
+                )
+            if required_tools_source in {
+                "workflow_required_effects_required_tools",
+                "workflow_required_effects_contract",
+            }:
+                required_tools = _filter_workflow_internal_required_effect_tools(
+                    required_tools
+                )
             if not required_tools:
                 return []
             invocations = _workflow_result_tool_invocations(result)

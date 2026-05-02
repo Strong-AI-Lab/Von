@@ -418,6 +418,7 @@ def test_continuation_context_representation_contract_can_be_satisfied_by_matchi
                         "attempted": True,
                         "verified": True,
                         "paper_concept_id": "#V#paper_on_arxiv_abc123",
+                        "file_copy_concept_id": "#V#uploaded_file_copy_abc123",
                     },
                 },
             }
@@ -434,6 +435,140 @@ def test_continuation_context_representation_contract_can_be_satisfied_by_matchi
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "completed"
     assert completion_gate.get("safe_to_claim_completion") is True
+
+
+def test_continuation_context_representation_contract_requires_readback_artefact_ids() -> (
+    None
+):
+    prior_contract = _paper_continuation_contract()
+    record = _build_record(
+        prompt_text="Please proceed.",
+        response_text="Representation completed.",
+        aux_llm_calls=[
+            {
+                "type": "workflow_continuation_context",
+                "applied": True,
+                "context": {
+                    "selected_workflow_id": "#V#scholarly_paper_representation_workflow",
+                    "requires_follow_up": True,
+                    "has_unresolved_required_effects": True,
+                    "required_effects_contract": prior_contract,
+                },
+            }
+        ],
+        tool_invocations=[
+            {
+                "tool": "materialise_scholarly_representation_for_file_copy",
+                "payload": {
+                    "success": True,
+                    "concept_id": "#V#uploaded_file_copy_abc123",
+                    "scholarly_representation": {
+                        "attempted": True,
+                        "verified": True,
+                        "paper_concept_id": "#V#paper_on_arxiv_abc123",
+                    },
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("status") == "not_satisfied"
+    assert "paper_representation_readback_missing" in (
+        effect.get("failure_codes") or []
+    )
+    assert "file_copy_concept_id" in (effect.get("status_reason") or "")
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+
+def test_workflow_required_representation_contract_expands_arxiv_targets() -> None:
+    workflow_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+                "targets_source_expressions": [
+                    "selected_workflow_trace.expected_outcome_contract_state.fields.summary"
+                ],
+                "targets_extractor": "arxiv_id_list",
+                "missing_failure_code": "arxiv_paper_representation_not_executed",
+                "wrong_target_failure_code": "arxiv_paper_representation_wrong_target",
+                "required_payload_fields": [
+                    "paper_concept_id",
+                    "file_copy_concept_id",
+                ],
+            }
+        ],
+    }
+    record = _build_record(
+        prompt_text=(
+            "Represent https://arxiv.org/abs/2406.15341 and "
+            "https://arxiv.org/abs/2507.21035"
+        ),
+        response_text="Only the first paper was represented.",
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "workflow_required_effects_contract": workflow_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+            "expected_outcome_contract_state": {
+                "fields": {
+                    "summary": (
+                        "Represent arXiv:2406.15341 and arXiv:2507.21035."
+                    )
+                }
+            },
+        },
+        tool_invocations=[
+            {
+                "tool": "scholarly_paper.verify_representation",
+                "effective_payload": {
+                    "success": True,
+                    "arxiv_id": "2406.15341",
+                    "scholarly_representation_verified": True,
+                    "paper_concept_id": "#V#paper_2406_15341",
+                    "file_copy_concept_id": "#V#file_copy_2406_15341",
+                },
+            }
+        ],
+    )
+
+    required_effects = [
+        effect
+        for effect in (record.get("required_effects") or [])
+        if isinstance(effect, dict)
+        and effect.get("intent_origin") == "workflow_authored"
+    ]
+    assert [effect.get("targets") for effect in required_effects] == [
+        ["2406.15341"],
+        ["2507.21035"],
+    ]
+    assert [effect.get("status") for effect in required_effects] == [
+        "satisfied",
+        "not_executed",
+    ]
+    assert required_effects[1].get("failure_code") == (
+        "arxiv_paper_representation_wrong_target"
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "arxiv_paper_representation_wrong_target" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
 
 
 def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_prompt_semantics() -> (

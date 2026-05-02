@@ -109,7 +109,7 @@ def test_download_paper_falls_back_when_not_authenticated(monkeypatch, tmp_path)
     }
 
 
-def test_download_paper_fails_closed_when_proxy_success_omits_file_path(
+def test_download_paper_registers_durable_storage_handle_when_file_path_missing(
     monkeypatch,
     tmp_path,
 ):
@@ -128,6 +128,8 @@ def test_download_paper_fails_closed_when_proxy_success_omits_file_path(
             return {
                 "success": True,
                 "arxiv_id": arxiv_id,
+                "size_bytes": 42,
+                "sha256": "cafebabe",
                 "storage": {
                     "backend": "swift",
                     "key": f"arxiv/papers/{arxiv_id}.pdf",
@@ -143,16 +145,38 @@ def test_download_paper_fails_closed_when_proxy_success_omits_file_path(
         _fake_get_proxy,
     )
 
+    recorded = {}
+
+    class _FakeRecord:
+        concept_id = "#V#computer_file_copy_storage_only"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    def _fake_create_instance(**kwargs):
+        recorded.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        _fake_create_instance,
+    )
+
     result = catalogue._download_paper(
         arxiv_id="2603.26499",
         namespace="#V#workflow_user@default",
     )
 
-    assert result["success"] is False
-    assert result["error_code"] == "acquisition_result_missing_artefact_handle"
-    assert result["error_details"]["missing_handle_fields"] == ["file_path"]
+    assert result["success"] is True
+    assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_storage_only"
+    assert result["acquisition_result_contract"]["satisfied"] is True
+    assert result["acquisition_result_contract"]["satisfied_handle_fields"] == [
+        "storage",
+        "sha256",
+        "size_bytes",
+    ]
     registration = cast(dict[str, Any], result["computer_file_copy_registration"])
-    assert registration["status"] == "skipped_unusable_download_payload"
+    assert registration["status"] == "registered"
+    assert recorded["metadata"]["original_path"] == ""
+    assert recorded["blob_key"] == "arxiv/papers/2603.26499.pdf"
 
 
 def test_download_paper_registers_file_copy_when_authenticated(monkeypatch, tmp_path):

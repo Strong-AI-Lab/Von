@@ -3386,14 +3386,32 @@ def _download_result_is_materially_successful(payload: Any) -> bool:
         return False
 
     file_path = str(payload.get("file_path") or "").strip()
+    storage_usable = _download_result_has_usable_storage_handle(payload)
+    if file_path and storage_usable:
+        return True
+    return bool(storage_usable and _download_result_has_durable_blob_metadata(payload))
+
+
+def _download_result_has_usable_storage_handle(payload: Mapping[str, Any]) -> bool:
     storage = payload.get("storage")
-    if not file_path or not isinstance(storage, Mapping):
+    if not isinstance(storage, Mapping):
         return False
 
     backend = str(storage.get("backend") or "").strip()
     key = str(storage.get("key") or "").strip()
     uri = str(storage.get("uri") or "").strip()
     return bool(backend and (key or uri))
+
+
+def _download_result_has_durable_blob_metadata(payload: Mapping[str, Any]) -> bool:
+    sha256 = str(payload.get("sha256") or "").strip()
+    if not sha256:
+        return False
+    try:
+        size_bytes = int(payload.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        return False
+    return size_bytes > 0
 
 
 def _normalise_acquisition_result_contract(
@@ -3419,17 +3437,36 @@ def _normalise_acquisition_result_contract(
     }
     normalised["acquisition_result_contract"] = contract_payload
     if materially_successful:
+        if str(normalised.get("file_path") or "").strip():
+            contract_payload["satisfied_handle_fields"] = ["file_path", "storage"]
+        else:
+            contract_payload["satisfied_handle_fields"] = [
+                "storage",
+                "sha256",
+                "size_bytes",
+            ]
         normalised.setdefault("success", True)
         return normalised
 
     if normalised.get("success") is True:
-        missing_fields = [
-            field_name
-            for field_name in required_handle_fields
-            if not str(normalised.get(field_name) or "").strip()
-        ]
-        if not isinstance(normalised.get("storage"), Mapping):
+        missing_fields: list[str] = []
+        if (
+            "file_path" in required_handle_fields
+            and not str(normalised.get("file_path") or "").strip()
+        ):
+            missing_fields.append("file_path")
+        storage_usable = _download_result_has_usable_storage_handle(normalised)
+        if "storage" in required_handle_fields and not storage_usable:
             missing_fields.append("storage")
+        if storage_usable and not str(normalised.get("file_path") or "").strip():
+            if not str(normalised.get("sha256") or "").strip():
+                missing_fields.append("sha256")
+            try:
+                size_bytes = int(normalised.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size_bytes = 0
+            if size_bytes <= 0:
+                missing_fields.append("size_bytes")
         normalised["success"] = False
         normalised["error_code"] = "acquisition_result_missing_artefact_handle"
         normalised["error"] = (
@@ -15294,6 +15331,9 @@ def _workflow_execute(**kwargs):
         await_workflow_terminal_state,
         build_workflow_execution_response,
     )
+    from ...workflows.durable.startup import (
+        get_system_status as get_durable_system_status,
+    )
     from ...workflows.durable.workflow_instance_submission_service import (
         submit_verified_workflow_instance,
     )
@@ -15391,6 +15431,7 @@ def _workflow_execute(**kwargs):
         instance = None
         poll_count: int | None = None
         timed_out = False
+        durable_system_status: Mapping[str, Any] | None = None
         instance_id = (
             submission.instance_id
             if isinstance(submission.instance_id, str)
@@ -15408,6 +15449,11 @@ def _workflow_execute(**kwargs):
                 instance = wait_result.instance
                 poll_count = wait_result.poll_count
                 timed_out = wait_result.timed_out
+                if timed_out:
+                    try:
+                        durable_system_status = get_durable_system_status()
+                    except Exception:
+                        durable_system_status = None
             else:
                 instance = manager.get_instance(instance_id)
         return build_workflow_execution_response(
@@ -15421,6 +15467,7 @@ def _workflow_execute(**kwargs):
             timed_out=timed_out,
             include_step_result_envelopes=include_step_result_envelopes,
             include_trace=include_trace,
+            durable_system_status=durable_system_status,
         )
     except Exception as e:
         return make_error_response(
@@ -15433,6 +15480,9 @@ def _workflow_get_execution_trace(**kwargs):
     """Get a persisted durable workflow execution trace by execution or instance ID."""
     from ...workflows import get_workflow_execution_trace
     from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.execution_observability import (
+        build_workflow_instance_payload,
+    )
 
     execution_id_raw = kwargs.get("execution_id")
     instance_id_raw = kwargs.get("instance_id")
@@ -15469,9 +15519,27 @@ def _workflow_get_execution_trace(**kwargs):
             else None
         )
         if execution_id is None:
+            instance_payload = build_workflow_instance_payload(
+                instance,
+                include_inputs=False,
+                include_outputs=False,
+                include_workflow_data=False,
+            )
             return make_error_response(
-                "not_found",
-                f"No execution trace is linked to instance: {instance_id}",
+                "workflow_execution_trace_not_linked",
+                f"No execution trace is linked to workflow instance: {instance_id}",
+                details={
+                    "instance_id": instance_id,
+                    "workflow_id": instance_payload.get("workflow_id"),
+                    "status": instance_payload.get("status"),
+                    "current_state": instance_payload.get("current_state"),
+                    "step_index": instance_payload.get("step_index"),
+                    "started_at": instance_payload.get("started_at"),
+                    "completed_at": instance_payload.get("completed_at"),
+                    "execution_trace_id": instance_payload.get("execution_trace_id"),
+                    "trace_missing_reason": "instance_has_no_execution_trace_id",
+                    "workflow_instance": instance_payload,
+                },
             )
 
     trace_doc = get_workflow_execution_trace(execution_id or "")

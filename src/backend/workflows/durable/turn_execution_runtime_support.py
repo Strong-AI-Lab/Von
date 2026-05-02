@@ -22,6 +22,7 @@ from ..definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
+from ..execution_contracts import WORKFLOW_STEP_RESULT_ENVELOPES_KEY
 from ..turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
@@ -473,6 +474,87 @@ def _required_tools_from_workflow_required_effects_contract(
             if isinstance(tool_name, str) and str(tool_name).strip()
         )
     return _dedupe_string_sequence(tools)
+
+
+def _derive_required_effect_invocations_from_workflow_steps(
+    *,
+    child_outputs: Mapping[str, Any],
+    required_tools: Sequence[str],
+) -> list[dict[str, Any]]:
+    required_lookup = {
+        tool_name.strip().lower()
+        for tool_name in required_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    if not required_lookup:
+        return []
+
+    raw_envelopes = child_outputs.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    if not isinstance(raw_envelopes, Sequence) or isinstance(
+        raw_envelopes,
+        (str, bytes, bytearray),
+    ):
+        return []
+
+    context_target_payload = {
+        key: child_outputs.get(key)
+        for key in (
+            "arxiv_id",
+            "source_uri",
+            "file_copy_concept_id",
+            "computer_file_copy_concept_id",
+            "source_file_copy_concept_id",
+            "paper_concept_id",
+            "concept_id",
+        )
+        if child_outputs.get(key) not in (None, "", [], {})
+    }
+    derived: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for envelope in raw_envelopes:
+        if not isinstance(envelope, Mapping):
+            continue
+        action_id = _safe_str(envelope.get("action_id"))
+        if not action_id or action_id.lower() not in required_lookup:
+            continue
+        output_payload = (
+            dict(envelope.get("output_payload"))
+            if isinstance(envelope.get("output_payload"), Mapping)
+            else {}
+        )
+        effective_payload = {**context_target_payload, **output_payload}
+        status_text = (
+            _safe_str(envelope.get("action_outcome"))
+            or _safe_str(envelope.get("action_status"))
+            or ""
+        ).lower()
+        diagnostics = (
+            envelope.get("diagnostics")
+            if isinstance(envelope.get("diagnostics"), Mapping)
+            else {}
+        )
+        error_text = _safe_str(diagnostics.get("error"))
+        status = "ok" if status_text in {"success", "succeeded", "ok"} else "failed"
+        fingerprint = (
+            action_id.lower(),
+            json.dumps(effective_payload, sort_keys=True, default=str),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        record: dict[str, Any] = {
+            "tool": action_id,
+            "status": status,
+            "payload": _bounded_snapshot(effective_payload),
+            "effective_payload": effective_payload,
+            "workflow_step_evidence": True,
+            "workflow_id": _safe_str(envelope.get("workflow_id")),
+            "workflow_state_id": _safe_str(envelope.get("state_id")),
+        }
+        if error_text:
+            record["error"] = error_text
+        derived.append(record)
+    return derived
 
 
 def _coerce_non_empty_text(value: Any) -> str | None:
@@ -1547,16 +1629,27 @@ def build_turn_execution_selected_workflow_outputs(
         "selected_workflow_user_response_available": bool(derived_user_response),
     }
     child_invocations = child_outputs_map.get("invocations")
-    if isinstance(child_invocations, list):
-        outputs["invocations"] = list(child_invocations)
     child_allowed_tools = _dedupe_string_sequence(
         child_outputs_map.get("llm_allowed_tools")
     )
-    child_invocation_maps = (
-        [item for item in child_invocations if isinstance(item, Mapping)]
-        if isinstance(child_invocations, list)
-        else []
+    workflow_required_tools = _filter_string_sequence_to_allowed(
+        _required_tools_from_workflow_required_effects_contract(
+            workflow_required_effects_contract_payload
+        ),
+        child_allowed_tools,
     )
+    derived_workflow_step_invocations = (
+        _derive_required_effect_invocations_from_workflow_steps(
+            child_outputs=child_outputs_map,
+            required_tools=workflow_required_tools,
+        )
+    )
+    child_invocation_maps = _merge_mapping_sequences(
+        child_invocations if isinstance(child_invocations, list) else [],
+        derived_workflow_step_invocations,
+    )
+    if child_invocation_maps:
+        outputs["invocations"] = list(child_invocation_maps)
     contract_required_tools = _filter_string_sequence_to_allowed(
         resolved_turn_expected_outcome_contract.required_tools,
         child_allowed_tools,
@@ -1564,12 +1657,6 @@ def build_turn_execution_selected_workflow_outputs(
     contract_missing_tools = _missing_required_tools_from_invocations(
         required_tools=contract_required_tools,
         invocations=child_invocation_maps,
-    )
-    workflow_required_tools = _filter_string_sequence_to_allowed(
-        _required_tools_from_workflow_required_effects_contract(
-            workflow_required_effects_contract_payload
-        ),
-        child_allowed_tools,
     )
     workflow_missing_tools = _missing_required_tools_from_invocations(
         required_tools=workflow_required_tools,

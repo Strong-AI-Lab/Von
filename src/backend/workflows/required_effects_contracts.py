@@ -196,6 +196,42 @@ def _normalise_required_effect_template(
             raw_effect.get("not_satisfied_reason") or raw_effect.get("failed_reason")
         ),
     }
+    required_payload_fields = _normalise_string_list(
+        raw_effect.get("required_payload_fields")
+        or raw_effect.get("readback_required_fields")
+    )
+    if required_payload_fields:
+        normalised["required_payload_fields"] = required_payload_fields
+    targets_source_expressions = _normalise_string_list(
+        raw_effect.get("targets_source_expressions")
+        or raw_effect.get("target_source_expressions")
+    )
+    single_targets_source_expression = _normalise_text(
+        raw_effect.get("targets_source_expression")
+        or raw_effect.get("target_source_expression")
+        or raw_effect.get("source_expression")
+    )
+    if single_targets_source_expression:
+        targets_source_expressions.append(single_targets_source_expression)
+    targets_source_expressions = _normalise_string_list(targets_source_expressions)
+    if targets_source_expressions:
+        normalised["targets_source_expressions"] = targets_source_expressions
+    targets_context_key = _normalise_text(
+        raw_effect.get("targets_context_key") or raw_effect.get("target_context_key")
+    )
+    if targets_context_key:
+        normalised["targets_context_key"] = targets_context_key
+    targets_extractor = _normalise_text(
+        raw_effect.get("targets_extractor") or raw_effect.get("target_extractor")
+    )
+    if targets_extractor:
+        normalised["targets_extractor"] = targets_extractor
+    target_resolution_failure_code = _normalise_text(
+        raw_effect.get("target_resolution_failure_code")
+        or raw_effect.get("targets_resolution_failure_code")
+    )
+    if target_resolution_failure_code:
+        normalised["target_resolution_failure_code"] = target_resolution_failure_code
     raw_recovery_strategies = (
         raw_effect.get("recovery_strategies")
         or raw_effect.get("recovery")

@@ -18,11 +18,13 @@ WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY = "identity"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT = "first_quoted_text"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST = "workflow_id_list"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID = "arxiv_id"
+WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST = "arxiv_id_list"
 _ALLOWED_EXTRACTORS: Tuple[str, ...] = (
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID,
+    WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST,
 )
 
 _QUOTED_TEXT_PATTERN = re.compile(
@@ -151,6 +153,24 @@ def _extract_arxiv_id(value: Any) -> tuple[bool, str | None]:
     return bool(arxiv_id), arxiv_id or None
 
 
+def _extract_arxiv_id_list(value: Any) -> tuple[bool, list[str] | None]:
+    try:
+        from src.backend.services.arxiv_paper_link_service import (
+            extract_arxiv_id_candidates,
+        )
+    except Exception:
+        return False, None
+
+    candidates = [
+        _normalise_text(candidate)
+        for candidate in extract_arxiv_id_candidates(value)
+        if _normalise_text(candidate)
+    ]
+    if not candidates:
+        return False, None
+    return True, candidates
+
+
 def _apply_extractor(
     *,
     extractor: str,
@@ -176,6 +196,9 @@ def _apply_extractor(
     if extractor_name == WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID:
         found, extracted = _extract_arxiv_id(value)
         return found, extracted, "resolved" if found else "arxiv_id_not_found"
+    if extractor_name == WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST:
+        found, extracted = _extract_arxiv_id_list(value)
+        return found, extracted, "resolved" if found else "arxiv_id_list_empty"
     return False, None, "extractor_invalid"
 
 
@@ -403,6 +426,7 @@ __all__ = [
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID",
+    "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST",
     "WorkflowLaunchInputResolution",
     "normalise_workflow_launch_input_contract",
     "resolve_workflow_launch_inputs",
