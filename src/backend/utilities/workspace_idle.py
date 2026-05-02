@@ -603,6 +603,61 @@ def iter_windows_wmi_processes(
     return _parse_windows_process_csv(completed.stdout or "")
 
 
+def iter_windows_get_processes(
+    *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
+) -> list[ProcessSnapshot]:
+    """Last-resort bounded Windows process snapshot using ``Get-Process``.
+
+    This source does not expose full command lines, but it is available in more
+    restricted PowerShell contexts than CIM/WMI. It avoids reading slow process
+    properties for every process, and only tries executable paths for common
+    tool process names where a workspace-local virtualenv path is useful.
+    """
+
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if not powershell:
+        return []
+
+    command = (
+        "$ErrorActionPreference = 'SilentlyContinue'; "
+        "$toolNames = @("
+        "'python','python3','node','git','pdm','pytest','ruff','powershell',"
+        "'pwsh','cmd','npm','npx','pyright','mypy','black','eslint','jest',"
+        "'vitest','playwright','prettier','tsc'"
+        "); "
+        "Get-Process | ForEach-Object { "
+        "$processName = if ($_.ProcessName) { [string]$_.ProcessName } else { '' }; "
+        "$name = if ($processName) { \"$processName.exe\" } else { '' }; "
+        "$commandLine = ''; "
+        "if ($toolNames -contains $processName.ToLowerInvariant()) { "
+        "try { $commandLine = [string]$_.Path } catch { $commandLine = '' } "
+        "} "
+        "[pscustomobject]@{"
+        "ProcessId=$_.Id;"
+        "Name=$name;"
+        "CommandLine=$commandLine;"
+        "CreateTimeUnix=''"
+        "} "
+        "} | ConvertTo-Csv -NoTypeInformation"
+    )
+    try:
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", command],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(0.5, timeout_seconds),
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    return _parse_windows_process_csv(completed.stdout or "")
+
+
 def iter_fast_local_processes(
     *, timeout_seconds: float = _WINDOWS_CIM_PROCESS_TIMEOUT_SECONDS
 ) -> list[ProcessSnapshot]:
@@ -612,7 +667,10 @@ def iter_fast_local_processes(
         rows = iter_windows_cim_processes(timeout_seconds=timeout_seconds)
         if rows:
             return rows
-        return iter_windows_wmi_processes(timeout_seconds=timeout_seconds)
+        rows = iter_windows_wmi_processes(timeout_seconds=timeout_seconds)
+        if rows:
+            return rows
+        return iter_windows_get_processes(timeout_seconds=timeout_seconds)
     return iter_local_processes(include_cwd=False)
 
 

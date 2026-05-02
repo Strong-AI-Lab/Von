@@ -290,6 +290,11 @@ def test_fast_windows_snapshot_does_not_fall_back_to_unbounded_scan(
         "iter_windows_wmi_processes",
         lambda *, timeout_seconds: [],
     )
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_windows_get_processes",
+        lambda *, timeout_seconds: [],
+    )
 
     def fail_full_scan(*, include_cwd: bool = False) -> list[ProcessSnapshot]:
         raise AssertionError("default Windows fast snapshot must not run psutil")
@@ -318,6 +323,41 @@ def test_fast_windows_snapshot_uses_bounded_wmi_fallback(monkeypatch) -> None:
         raise AssertionError("bounded Windows fallback should not use psutil")
 
     monkeypatch.setattr(workspace_idle, "iter_windows_wmi_processes", fake_wmi_processes)
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_windows_get_processes",
+        lambda *, timeout_seconds: pytest.fail("WMI rows should stop fallback"),
+    )
+    monkeypatch.setattr(workspace_idle, "iter_local_processes", fail_full_scan)
+
+    assert workspace_idle.iter_fast_local_processes() == rows
+    assert captured["timeout_seconds"] == 30.0
+
+
+def test_fast_windows_snapshot_uses_get_process_fallback(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+    rows = [ProcessSnapshot(pid=789, name="python.exe", cmdline=("python",))]
+
+    monkeypatch.setattr(workspace_idle.os, "name", "nt")
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_windows_cim_processes",
+        lambda *, timeout_seconds: [],
+    )
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_windows_wmi_processes",
+        lambda *, timeout_seconds: [],
+    )
+
+    def fake_get_processes(*, timeout_seconds: float) -> list[ProcessSnapshot]:
+        captured["timeout_seconds"] = timeout_seconds
+        return rows
+
+    def fail_full_scan(*, include_cwd: bool = False) -> list[ProcessSnapshot]:
+        raise AssertionError("bounded Windows fallback should not use psutil")
+
+    monkeypatch.setattr(workspace_idle, "iter_windows_get_processes", fake_get_processes)
     monkeypatch.setattr(workspace_idle, "iter_local_processes", fail_full_scan)
 
     assert workspace_idle.iter_fast_local_processes() == rows
@@ -584,6 +624,34 @@ def test_windows_wmi_snapshot_default_timeout_is_generous(monkeypatch) -> None:
     args = captured["args"]
     assert isinstance(args, list)
     assert "Get-WmiObject Win32_Process" in " ".join(args)
+
+
+def test_windows_get_process_snapshot_default_timeout_is_generous(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        workspace_idle.shutil,
+        "which",
+        lambda name: "powershell.exe" if name == "powershell.exe" else None,
+    )
+
+    def fake_run(args, **kwargs):
+        captured["timeout_seconds"] = kwargs["timeout"]
+        captured["args"] = args
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='"ProcessId","Name","CommandLine","CreateTimeUnix"\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(workspace_idle.subprocess, "run", fake_run)
+
+    assert workspace_idle.iter_windows_get_processes() == []
+    assert captured["timeout_seconds"] == 30.0
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert "Get-Process" in " ".join(args)
 
 
 @pytest.mark.skipif(not POWERSHELL_EXE, reason="PowerShell is required")
