@@ -6861,9 +6861,13 @@ def build_turn_execution_record(
         selected_workflow_trace_payload,
         completion_report_payload,
     )
+    tool_call_validation_failure_context = (
+        _extract_tool_call_validation_failure_context(aux_llm_calls)
+    )
     required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
         invocations=serialised_invocations,
+        tool_call_validation_failure_context=tool_call_validation_failure_context,
         existing_ledger=existing_required_tool_obligation_ledger,
     )
     execution_summary = _summarise_tool_execution_context(
@@ -7014,9 +7018,6 @@ def build_turn_execution_record(
     required_effects.extend(prompt_required_evidence_effects)
     required_effects.extend(workflow_required_effects)
 
-    tool_call_validation_failure_context = (
-        _extract_tool_call_validation_failure_context(aux_llm_calls)
-    )
     required_effects = _apply_tool_call_validation_failures_to_required_effects(
         required_effects=required_effects,
         validation_failure_context=tool_call_validation_failure_context,

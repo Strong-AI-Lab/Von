@@ -7,6 +7,7 @@ from src.backend.services.turn_execution_record_service import (
 )
 from src.backend.services.required_tool_obligation_service import (
     BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
+    BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
     BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
     build_required_tool_obligation_ledger,
 )
@@ -1846,4 +1847,77 @@ def test_turn_execution_record_preserves_required_tool_allowed_policy_blocker() 
     assert (
         BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY
         in diagnostics["dispatch"]["required_tool_obligation_blocking_failure_codes"]
+    )
+
+
+def test_turn_execution_record_projects_required_write_payload_validation_blocker() -> (
+    None
+):
+    message = "create_concepts: Missing required field 'parent_id'."
+
+    record = build_turn_execution_record(
+        request_id="req-kr-invalid-write",
+        session_id="session-1",
+        namespace="#V#user@test",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Represent these labels in the Vontology.",
+        response_text="The write payload was invalid.",
+        interaction_timestamp_utc="2026-05-02T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_seeking",
+        },
+        tool_invocations=[],
+        turn_expected_outcome_contract={
+            "required_tools": ["create_concepts", "fetch_concept"]
+        },
+        aux_llm_calls=[
+            {
+                "type": "tool_contract_attempt",
+                "stage": "tool_calling.validate",
+                "tool_calls": [
+                    {
+                        "tool": "create_concepts",
+                        "payload": {"concepts": [{"name": "Reusable marker"}]},
+                    }
+                ],
+                "validation_errors": [message],
+                "diagnostics": [
+                    {
+                        "tool": "create_concepts",
+                        "error_code": "schema_validation_failed",
+                        "message": message,
+                        "payload": {
+                            "concepts": [{"name": "Reusable marker"}],
+                        },
+                    }
+                ],
+            }
+        ],
+    )
+
+    summary = record["execution"]["summary"]
+    ledger = summary["required_tool_obligations"]
+    create_obligation = next(
+        obligation
+        for obligation in ledger["obligations"]
+        if obligation["tool_name"] == "create_concepts"
+    )
+    assert create_obligation["blocking_reason"] == (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+    )
+    assert create_obligation["last_attempt_status"] == "schema_validation_failed"
+    assert create_obligation["last_attempt_message"] == message
+    assert create_obligation["tool_call_validation_errors"][0]["message"] == message
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        summary["required_tool_obligation_blocking_failure_codes"]
+    )
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        record["completion_gate"]["blocking_failure_codes"]
+    )
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        record["workflow_routing_diagnostics"]["dispatch"][
+            "required_tool_obligation_blocking_failure_codes"
+        ]
     )

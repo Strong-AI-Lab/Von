@@ -6,6 +6,9 @@ from typing import Any
 from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
 )
+from src.backend.services.required_tool_obligation_service import (
+    BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
+)
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
 )
@@ -228,8 +231,33 @@ def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -
     gate = record["completion_gate"]
     assert gate["safe_to_claim_completion"] is False
     assert gate["requires_follow_up"] is True
-    assert gate["evidence_payload"]["required_effect_count"] == 2
+    assert gate["evidence_payload"]["required_effect_count"] == 3
     assert "schema_validation_failed" in gate["blocking_failure_codes"]
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in gate["blocking_failure_codes"]
+
+    summary = record["execution"]["summary"]
+    ledger = summary["required_tool_obligations"]
+    create_obligation = next(
+        obligation
+        for obligation in ledger["obligations"]
+        if obligation["tool_name"] == "create_concepts"
+    )
+    assert create_obligation["blocking_reason"] == (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+    )
+    assert create_obligation["last_attempt_status"] == "schema_validation_failed"
+    assert create_obligation["last_attempt_message"] == _CREATE_CONCEPTS_PARENT_ERROR
+    assert create_obligation["tool_call_validation_errors"][0]["message"] == (
+        _CREATE_CONCEPTS_PARENT_ERROR
+    )
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        summary["required_tool_obligation_blocking_failure_codes"]
+    )
+
+    dispatch = record["workflow_routing_diagnostics"]["dispatch"]
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        dispatch["required_tool_obligation_blocking_failure_codes"]
+    )
 
 
 def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools() -> (
@@ -279,11 +307,14 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
     assert result.outputs["completion_gate_safe_to_claim_completion"] is False
     assert result.outputs["completion_gate_requires_follow_up"] is True
     assert (
-        result.outputs["completion_gate_evidence_payload"]["required_effect_count"] == 1
+        result.outputs["completion_gate_evidence_payload"]["required_effect_count"] == 2
     )
     assert (
         "schema_validation_failed"
         in result.outputs["completion_gate_blocking_failure_codes"]
+    )
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
+        result.outputs["completion_gate_blocking_failure_codes"]
     )
     assert any(
         entry.get("type") == "completion_gate_record_rebuilt"

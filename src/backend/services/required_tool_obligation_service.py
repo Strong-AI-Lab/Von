@@ -238,12 +238,151 @@ def _existing_obligation_lookup(
     return lookup
 
 
+def _append_validation_errors(
+    lookup: dict[str, dict[str, Any]],
+    *,
+    tool_name: str,
+    errors: Sequence[Any],
+) -> None:
+    cleaned_tool = _safe_str(tool_name)
+    if not cleaned_tool:
+        return
+    lowered = cleaned_tool.lower()
+    entry = lookup.setdefault(lowered, {"tool": cleaned_tool, "errors": []})
+    serialised_errors = entry.setdefault("errors", [])
+    if not isinstance(serialised_errors, list):
+        serialised_errors = []
+        entry["errors"] = serialised_errors
+    for raw_error in errors:
+        if isinstance(raw_error, Mapping):
+            payload = {
+                str(key): value
+                for key, value in raw_error.items()
+                if isinstance(key, str)
+            }
+            payload.setdefault("tool", cleaned_tool)
+        else:
+            message = _safe_str(raw_error)
+            if not message:
+                continue
+            payload = {"tool": cleaned_tool, "message": message}
+        serialised_errors.append(payload)
+
+
+def _tool_name_from_validation_error(error: Mapping[str, Any]) -> str:
+    return (
+        _safe_str(error.get("tool"))
+        or _safe_str(error.get("planned_tool"))
+        or _safe_str(error.get("method"))
+        or _safe_str(error.get("name"))
+    )
+
+
+def _validation_failure_lookup(
+    *,
+    tool_call_validation_failure_context: Mapping[str, Any] | None = None,
+    tool_call_validation_errors: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+
+    if isinstance(tool_call_validation_failure_context, Mapping):
+        failures_by_tool = tool_call_validation_failure_context.get(
+            "failures_by_tool"
+        )
+        if isinstance(failures_by_tool, Mapping):
+            for raw_tool_key, raw_failure in failures_by_tool.items():
+                if not isinstance(raw_failure, Mapping):
+                    continue
+                tool_name = _safe_str(raw_failure.get("tool")) or _safe_str(
+                    raw_tool_key
+                )
+                errors = raw_failure.get("errors")
+                if isinstance(errors, Sequence) and not isinstance(
+                    errors, (str, bytes, bytearray)
+                ):
+                    _append_validation_errors(
+                        lookup,
+                        tool_name=tool_name,
+                        errors=list(errors),
+                    )
+                else:
+                    _append_validation_errors(
+                        lookup,
+                        tool_name=tool_name,
+                        errors=[raw_failure],
+                    )
+
+        for field_name in (
+            "tool_call_validation_required_tool_errors",
+            "tool_call_validation_errors",
+            "errors",
+        ):
+            raw_errors = tool_call_validation_failure_context.get(field_name)
+            if not isinstance(raw_errors, Sequence) or isinstance(
+                raw_errors, (str, bytes, bytearray)
+            ):
+                continue
+            for raw_error in raw_errors:
+                if not isinstance(raw_error, Mapping):
+                    continue
+                tool_name = _tool_name_from_validation_error(raw_error)
+                _append_validation_errors(
+                    lookup,
+                    tool_name=tool_name,
+                    errors=[raw_error],
+                )
+
+    for raw_error in tool_call_validation_errors or ():
+        if not isinstance(raw_error, Mapping):
+            continue
+        tool_name = _tool_name_from_validation_error(raw_error)
+        _append_validation_errors(lookup, tool_name=tool_name, errors=[raw_error])
+
+    return lookup
+
+
+def _validation_failure_status(failure: Mapping[str, Any] | None) -> str:
+    if not isinstance(failure, Mapping):
+        return ""
+    errors = failure.get("errors")
+    if not isinstance(errors, Sequence) or isinstance(
+        errors, (str, bytes, bytearray)
+    ):
+        return "tool_call_validation_failed"
+    for error in errors:
+        if not isinstance(error, Mapping):
+            continue
+        error_code = _safe_str(error.get("error_code"))
+        if error_code:
+            return error_code
+    return "tool_call_validation_failed"
+
+
+def _validation_failure_message(failure: Mapping[str, Any] | None) -> str:
+    if not isinstance(failure, Mapping):
+        return ""
+    errors = failure.get("errors")
+    if not isinstance(errors, Sequence) or isinstance(
+        errors, (str, bytes, bytearray)
+    ):
+        return ""
+    for error in errors:
+        if not isinstance(error, Mapping):
+            continue
+        message = _safe_str(error.get("message")) or _safe_str(error.get("error"))
+        if message:
+            return message
+    return ""
+
+
 def build_required_tool_obligation_ledger(
     *,
     required_tools: Sequence[Any] | None = None,
     required_tools_by_source: Mapping[str, Any] | None = None,
     invocations: Sequence[Mapping[str, Any]] | None = None,
     planned_tool_calls: Sequence[Mapping[str, Any]] | None = None,
+    tool_call_validation_failure_context: Mapping[str, Any] | None = None,
+    tool_call_validation_errors: Sequence[Mapping[str, Any]] | None = None,
     allowed_tools: Sequence[Any] | None = None,
     method_catalogue: Mapping[str, Any] | None = None,
     max_tool_invocations: int | None = None,
@@ -300,11 +439,36 @@ def build_required_tool_obligation_ledger(
                 planned_counts.get(tool_name.lower(), 0) + 1
             )
 
+    validation_failures_by_tool = _validation_failure_lookup(
+        tool_call_validation_failure_context=tool_call_validation_failure_context,
+        tool_call_validation_errors=tool_call_validation_errors,
+    )
     attempted_counts: dict[str, int] = {}
     successful_counts: dict[str, int] = {}
     last_status_by_tool: dict[str, str] = {}
     last_invocation_by_tool: dict[str, Mapping[str, Any]] = {}
     attempted_operation_classes: list[str] = []
+    for lowered, failure in validation_failures_by_tool.items():
+        tool_name = _safe_str(failure.get("tool"))
+        if not tool_name:
+            continue
+        errors = failure.get("errors")
+        error_count = (
+            len(errors)
+            if isinstance(errors, Sequence)
+            and not isinstance(errors, (str, bytes, bytearray))
+            else 1
+        )
+        planned_counts[lowered] = max(planned_counts.get(lowered, 0), 1)
+        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + max(
+            error_count,
+            1,
+        )
+        last_status_by_tool[lowered] = (
+            _validation_failure_status(failure) or "tool_call_validation_failed"
+        )
+        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
             continue
@@ -349,6 +513,7 @@ def build_required_tool_obligation_ledger(
         planned_count = planned_counts.get(lowered, 0)
         attempted_count = attempted_counts.get(lowered, 0)
         successful_count = successful_counts.get(lowered, 0)
+        validation_failure = validation_failures_by_tool.get(lowered)
         satisfied = (
             successful_count > 0
             and bool(allowed_by_policy)
@@ -366,7 +531,13 @@ def build_required_tool_obligation_ledger(
             blocking_reason = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
             failure_class = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
         elif not satisfied:
-            if attempted_count > 0:
+            if validation_failure is not None:
+                if operation_class == OPERATION_MUTATION_WRITE:
+                    blocking_reason = BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+                else:
+                    blocking_reason = BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
+                failure_class = blocking_reason
+            elif attempted_count > 0:
                 last_status = last_status_by_tool.get(lowered, "")
                 if last_status == "blocked":
                     blocking_reason = BLOCKER_WRITE_POLICY_DENIED_OR_UNCONFIRMED
@@ -381,23 +552,34 @@ def build_required_tool_obligation_ledger(
                 blocking_reason = BLOCKER_REQUIRED_TOOL_NOT_PLANNED
                 failure_class = blocking_reason
 
-        obligations.append(
-            {
-                "tool_name": cleaned_tool,
-                "source": sources[0] if sources else "required_tools",
-                "sources": list(sources),
-                "operation_class": operation_class,
-                "allowed_by_workflow_policy": bool(allowed_by_policy),
-                "available_on_gateway": available_on_gateway,
-                "planned_count": planned_count,
-                "attempted_count": attempted_count,
-                "successful_count": successful_count,
-                "last_attempt_status": last_status_by_tool.get(lowered, ""),
-                "blocking_reason": blocking_reason,
-                "failure_class": failure_class,
-                "satisfied": satisfied,
-            }
-        )
+        obligation = {
+            "tool_name": cleaned_tool,
+            "source": sources[0] if sources else "required_tools",
+            "sources": list(sources),
+            "operation_class": operation_class,
+            "allowed_by_workflow_policy": bool(allowed_by_policy),
+            "available_on_gateway": available_on_gateway,
+            "planned_count": planned_count,
+            "attempted_count": attempted_count,
+            "successful_count": successful_count,
+            "last_attempt_status": last_status_by_tool.get(lowered, ""),
+            "blocking_reason": blocking_reason,
+            "failure_class": failure_class,
+            "satisfied": satisfied,
+        }
+        if validation_failure is not None:
+            errors = validation_failure.get("errors")
+            if isinstance(errors, Sequence) and not isinstance(
+                errors, (str, bytes, bytearray)
+            ):
+                obligation["tool_call_validation_errors"] = [
+                    dict(error) for error in errors if isinstance(error, Mapping)
+                ]
+            if not satisfied:
+                message = _validation_failure_message(validation_failure)
+                if message:
+                    obligation["last_attempt_message"] = message
+        obligations.append(obligation)
 
     if max_tool_invocations is None and isinstance(existing_ledger, Mapping):
         raw_existing_cap = existing_ledger.get("max_tool_invocations")

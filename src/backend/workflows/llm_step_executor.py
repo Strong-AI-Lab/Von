@@ -105,6 +105,70 @@ def _coerce_tool_name_list(value: Any) -> list[str]:
     return items
 
 
+def _tool_call_validation_failure_context_from_data(
+    data: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    failures_by_tool: dict[str, dict[str, Any]] = {}
+
+    def add_error(raw_error: Mapping[str, Any]) -> None:
+        tool_name = (
+            _context_string(raw_error.get("tool"))
+            or _context_string(raw_error.get("planned_tool"))
+            or _context_string(raw_error.get("method"))
+            or _context_string(raw_error.get("name"))
+        )
+        if not tool_name:
+            return
+        key = tool_name.lower()
+        failure = failures_by_tool.setdefault(
+            key,
+            {"tool": tool_name, "errors": []},
+        )
+        errors = failure.setdefault("errors", [])
+        if isinstance(errors, list):
+            errors.append(
+                {
+                    str(error_key): error_value
+                    for error_key, error_value in raw_error.items()
+                    if isinstance(error_key, str)
+                }
+            )
+
+    for field_name in (
+        "tool_call_validation_required_tool_errors",
+        "tool_call_validation_diagnostics",
+    ):
+        raw_errors = data.get(field_name)
+        if not isinstance(raw_errors, Sequence) or isinstance(
+            raw_errors, (str, bytes, bytearray)
+        ):
+            continue
+        for raw_error in raw_errors:
+            if isinstance(raw_error, Mapping):
+                add_error(raw_error)
+
+    if not failures_by_tool:
+        return None
+
+    return {
+        "failures_by_tool": failures_by_tool,
+        "failed_tools": _coerce_tool_name_list(
+            data.get("tool_call_validation_required_failed_tools")
+            or data.get("tool_call_validation_failed_tools")
+            or []
+        ),
+        "repair_outcome": _context_string(data.get("tool_call_repair_outcome")),
+        "repair_stop_reason": _context_string(
+            data.get("tool_call_repair_stop_reason")
+        ),
+        "repair_decision": (
+            dict(data.get("tool_call_repair_decision"))
+            if isinstance(data.get("tool_call_repair_decision"), Mapping)
+            else None
+        ),
+    }
+
+
 def _filter_tool_names_to_allowed_set(
     tool_names: Sequence[str],
     allowed_tools: Sequence[str] | None,
@@ -1552,6 +1616,9 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     initial_required_tool_obligation_ledger = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
         invocations=invocations,
+        tool_call_validation_failure_context=(
+            _tool_call_validation_failure_context_from_data(request.data)
+        ),
         allowed_tools=allowed_tools,
         method_catalogue=(
             method_catalogue if isinstance(method_catalogue, Mapping) else None
@@ -1854,6 +1921,9 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         invocations=invocations,
         planned_tool_calls=(
             planned_tool_calls if isinstance(planned_tool_calls, list) else None
+        ),
+        tool_call_validation_failure_context=(
+            _tool_call_validation_failure_context_from_data(shared_data)
         ),
         allowed_tools=allowed_tools,
         method_catalogue=(

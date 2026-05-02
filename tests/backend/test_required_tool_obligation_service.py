@@ -2,6 +2,8 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
     BLOCKER_MUTATION_SUCCEEDED_READBACK_MISSING,
     BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
+    BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
+    BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
     BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
     build_required_tool_obligation_ledger,
     required_tool_obligation_effect,
@@ -27,6 +29,73 @@ def _obligation_for_tool(ledger: dict, tool_name: str) -> dict:
         if obligation["tool_name"] == tool_name:
             return obligation
     raise AssertionError(f"missing obligation for {tool_name}")
+
+
+def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> (
+    None
+):
+    message = "create_concepts: Missing required field 'parent_id'."
+
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={
+            "turn_expected_outcome_contract": ["create_concepts", "fetch_concept"]
+        },
+        planned_tool_calls=[
+            {
+                "tool": "create_concepts",
+                "payload": {"concepts": [{"name": "Reusable marker"}]},
+            }
+        ],
+        tool_call_validation_failure_context={
+            "failures_by_tool": {
+                "create_concepts": {
+                    "tool": "create_concepts",
+                    "errors": [
+                        {
+                            "tool": "create_concepts",
+                            "error_code": "schema_validation_failed",
+                            "message": message,
+                        }
+                    ],
+                }
+            }
+        },
+        allowed_tools=["create_concepts", "fetch_concept"],
+        method_catalogue=_catalogue(["create_concepts", "fetch_concept"]),
+    )
+
+    create_obligation = _obligation_for_tool(ledger, "create_concepts")
+    assert create_obligation["planned_count"] == 1
+    assert create_obligation["attempted_count"] == 1
+    assert create_obligation["successful_count"] == 0
+    assert create_obligation["last_attempt_status"] == "schema_validation_failed"
+    assert create_obligation["last_attempt_message"] == message
+    assert create_obligation["blocking_reason"] == (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+    )
+    assert create_obligation["failure_class"] == (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+    )
+    assert create_obligation["tool_call_validation_errors"][0]["message"] == message
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in ledger["blocking_failure_codes"]
+    )
+
+
+def test_absent_required_mutation_still_reports_not_planned() -> None:
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={"turn_expected_outcome_contract": ["create_concepts"]},
+        invocations=[],
+        allowed_tools=["create_concepts"],
+        method_catalogue=_catalogue(["create_concepts"]),
+    )
+
+    create_obligation = _obligation_for_tool(ledger, "create_concepts")
+    assert create_obligation["planned_count"] == 0
+    assert create_obligation["attempted_count"] == 0
+    assert create_obligation["blocking_reason"] == BLOCKER_REQUIRED_TOOL_NOT_PLANNED
+    assert ledger["blocking_failure_codes"] == [BLOCKER_REQUIRED_TOOL_NOT_PLANNED]
 
 
 def test_search_only_budget_exhaustion_marks_unsatisfied_kr_writes_and_readback() -> (
