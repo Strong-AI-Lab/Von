@@ -68,6 +68,7 @@ For frontend/browser user-view validation practice, also see
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
 6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
+   - Ignore Codex app connectors, including the Codex Gmail/email connector, when deciding what Von code or Von workflows should expose or use. Those connectors are assistant-side conveniences, not Von authority surfaces, canonical implementation paths, or evidence that internal MCP/tooling is redundant.
 8. Workflow-first / KB-authoritative is the default doctrine: if a durable behaviour or policy change can live cleanly in workflow, prompt, KB, or Vontology artefacts, prefer changing it there rather than encoding the policy in Python.
 9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, planning, and stage-specific context construction count as authored behaviour.
 10. Python should usually provide reusable support surfaces: execution, validation, tool wrappers, rendering, telemetry, persistence, safety checks, integrations, and genuinely missing reusable primitives.
