@@ -313,6 +313,39 @@ For minimum local and hosted environment sets, see
   stale" as an operational defect worth fixing, not as proof that the PATH
   problem is solved.
 
+### 5.2 Codex automation dependency bootstrap
+
+Codex app automations may run in a local sandbox or a dedicated worktree whose
+dependency state is not the same as the main interactive checkout. Do not assume
+the main checkout's `.venv`, `.pdm-python`, global `pdm`, or host shell PATH are
+usable inside an unattended automation run.
+
+For Von automation/worktree setup, use the repo-local bootstrap:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\setup_codex_automation_environment.ps1
+```
+
+The script creates or repairs the checkout-local `.venv`, installs PDM inside
+that venv, records the matching `.pdm-python`, and verifies core Python imports.
+For an existing usable `.venv`, it skips dependency installation to avoid
+rewriting locked packages under active local MCP/server processes. For a fresh
+or incomplete worktree environment, it runs PDM dependency installation from the
+repo root. It also avoids upgrading `pip` in an existing usable `.venv` unless
+`-UpgradePip` is passed. It intentionally does not read `.env` or perform
+machine-global setup such as MongoDB, Tesseract, uv tools, or VS Code
+configuration.
+
+Use the lighter smoke form when you only need to verify the already-prepared
+environment without reinstalling dependencies:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\setup_codex_automation_environment.ps1 -SkipDependencyInstall
+```
+
+Use `-ForceDependencyInstall` only when a run deliberately needs to refresh the
+checkout-local venv.
+
 ## 6. Preferred Tool and Access Pathways
 
 ### 6.1 Vontology and workflow behaviour
