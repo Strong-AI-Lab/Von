@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-04-29 (Pacific/Auckland)
+Last updated: 2026-05-03 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -214,7 +214,44 @@ Validation semantics:
 - write or destructive tools MUST declare an explicit represented write policy such as step `mutation_authority` or `workflow_execution_side_effect_policy`;
 - domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
 
-### 3.4b Tool Follow-Up Hint Resolution
+### 3.4b Wrapper Workflow Boundaries for External and Low-Level Tools
+
+When a low-level tool is brittle, source-specific, external, or only partially
+aligned with Von's durable artefact model, create or repair a wrapper workflow
+that owns the domain-specific acquisition, fallback, verification, and read-back
+policy. Downstream workflows SHOULD consume the wrapper's represented outputs
+rather than calling the low-level tool directly.
+
+Normative rules:
+
+- a wrapper workflow is the authority boundary around source-specific or
+  external-tool behaviour;
+- external MCP/tool failures SHOULD be normalised into structured telemetry and
+  typed context fields by support code, but fallback selection and recovery
+  sequencing SHOULD remain in the wrapper workflow;
+- do not hide fallback policy inside the low-level MCP tool merely because that
+  tool is where the failure was observed;
+- list-processing, email-ingestion, and discovery workflows that encounter many
+  source references SHOULD fan out to the relevant wrapper workflow for each
+  reference, then aggregate per-item results;
+- downstream workflows SHOULD use durable artefact identifiers produced by the
+  wrapper, such as a file-copy or represented-concept ID, for later reading,
+  extraction, linking, and verification;
+- downstream workflows MUST NOT bypass a wrapper by directly invoking the
+  source-specific low-level MCP tool unless the wrapper workflow is itself
+  unavailable and the fallback path is explicitly represented, audited, and
+  fail-closed;
+- step output contracts such as `writes_context_keys` MUST be declared only on
+  steps that actually produce the context key on that execution path. Decision,
+  pass-through, or routing steps MAY map optional pre-existing values forward,
+  but MUST NOT advertise those values as newly produced artefacts.
+
+This keeps transient tool defects, third-party server quirks, retry/wait
+interpretation, and direct HTTP/source recovery inside an inspectable VWL
+composition while preserving Python as support infrastructure for execution,
+telemetry, validation, and generic tool bridging.
+
+### 3.4c Tool Follow-Up Hint Resolution
 
 VWL workflows may resolve Vontology-authored tool follow-up hints through the generic durable action:
 
