@@ -162,9 +162,13 @@ def _authorise_sender_and_recipients_for_org(
     recipient_ids: list[str],
     organisation_concept_id: str,
 ) -> tuple[bool, list[str]]:
+    from ...security.access_control import bypass_access_control
     from ...services.organisation_membership_service import get_organisation_members
 
-    members = get_organisation_members(organisation_concept_id)
+    # Use bypass so that the shared org concept (and its members) are visible
+    # even when the current session org differs from organisation_concept_id.
+    with bypass_access_control():
+        members = get_organisation_members(organisation_concept_id)
     org_member_ids = {
         normalised
         for normalised in (
