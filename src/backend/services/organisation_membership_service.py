@@ -10,7 +10,7 @@ import logging
 from typing import Dict, Any, Optional, Set
 
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..security.access_control import can_access_concept
+from ..security.access_control import bypass_access_control, can_access_concept
 from ..services.text_value_service import upsert_text_for_concept
 
 logger = logging.getLogger(__name__)
@@ -126,10 +126,11 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
     if not user_concept_id or not isinstance(user_concept_id, str):
         raise ValueError("user_concept_id must be a non-empty string")
 
-    if not can_access_concept(user_concept_id):
-        raise PermissionError(f"Cannot access user concept '{user_concept_id}'")
-
-    user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
+    # Membership queries are an internal authority surface. Bypass the session-org
+    # access gate so cross-org user and org concepts can always be resolved by
+    # authenticated callers regardless of which org window is currently active.
+    with bypass_access_control():
+        user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
     if not user_concept:
         raise ValueError(f"User concept '{user_concept_id}' not found")
 
@@ -218,12 +219,11 @@ def get_organisation_members(
     if not organisation_concept_id or not isinstance(organisation_concept_id, str):
         raise ValueError("organisation_concept_id must be a non-empty string")
 
-    if not can_access_concept(organisation_concept_id):
-        raise PermissionError(
-            f"Cannot access organisation concept '{organisation_concept_id}'"
-        )
-
-    org_concept = ConceptsRepository.find_one({"concept_id": organisation_concept_id})
+    # Membership queries are an internal authority surface. Bypass the session-org
+    # access gate so cross-org org concepts can always be resolved by authenticated
+    # callers regardless of which org window is currently active.
+    with bypass_access_control():
+        org_concept = ConceptsRepository.find_one({"concept_id": organisation_concept_id})
     if not org_concept:
         raise ValueError(f"Organisation concept '{organisation_concept_id}' not found")
 
@@ -275,7 +275,11 @@ def get_organisation_members(
             },
         ]
     }
-    for doc in ConceptsRepository.find(membership_query, projection={"concept_id": 1}):
+    with bypass_access_control():
+        member_docs = list(
+            ConceptsRepository.find(membership_query, projection={"concept_id": 1})
+        )
+    for doc in member_docs:
         concept_id = doc.get("concept_id") if isinstance(doc, dict) else None
         if isinstance(concept_id, str) and concept_id.strip():
             user_ids.add(concept_id.strip())

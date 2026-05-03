@@ -293,13 +293,6 @@ class TestGetUserMemberships:
         ):
             get_user_memberships("")
 
-    def test_get_memberships_access_denied(self, mock_access_control):
-        """Test retrieval when user lacks access."""
-        mock_access_control.return_value = False
-
-        with pytest.raises(PermissionError, match="Cannot access user concept"):
-            get_user_memberships("#V#user")
-
 
 # --- Tests for get_organisation_members ---
 

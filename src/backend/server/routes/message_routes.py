@@ -162,13 +162,9 @@ def _authorise_sender_and_recipients_for_org(
     recipient_ids: list[str],
     organisation_concept_id: str,
 ) -> tuple[bool, list[str]]:
-    from ...security.access_control import bypass_access_control
     from ...services.organisation_membership_service import get_organisation_members
 
-    # Use bypass so that the shared org concept (and its members) are visible
-    # even when the current session org differs from organisation_concept_id.
-    with bypass_access_control():
-        members = get_organisation_members(organisation_concept_id)
+    members = get_organisation_members(organisation_concept_id)
     org_member_ids = {
         normalised
         for normalised in (
@@ -232,7 +228,6 @@ def _build_common_organisation_options(
     recipient_ids: list[str],
     exclude_organisation_concept_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    from ...security.access_control import bypass_access_control
     from ...services.organisation_membership_service import get_user_memberships
 
     membership_maps: list[dict[str, str]] = []
@@ -240,13 +235,7 @@ def _build_common_organisation_options(
 
     for user_concept_id in user_ids:
         try:
-            # Bypass the current-org access gate so we can resolve memberships
-            # for participants who are only visible through the shared org (not
-            # the session org that just rejected the send).  The result only
-            # surfaces orgs that the authenticated sender is already a member
-            # of, so no privilege escalation is possible.
-            with bypass_access_control():
-                memberships = get_user_memberships(user_concept_id)
+            memberships = get_user_memberships(user_concept_id)
         except Exception:
             return []
 
