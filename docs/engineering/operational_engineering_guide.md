@@ -341,7 +341,9 @@ inside a Codex automation sandbox, the bootstrap retries the probe and then uses
 a non-repo fallback venv under Codex automation storage rather than deleting the
 checkout `.venv`. This avoids breaking long-lived local Von services that may
 be using the checkout venv while still giving unattended automation a usable
-Python/PDM environment.
+Python/PDM environment. If Codex automation storage is not writable in the
+sandbox, the bootstrap probes candidate roots and falls back to a temp-directory
+automation venv.
 
 Use the lighter smoke form when you only need to verify the already-prepared
 environment without reinstalling dependencies:
