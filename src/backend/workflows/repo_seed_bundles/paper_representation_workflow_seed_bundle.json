@@ -1963,6 +1963,9 @@
                 "context_key": "file_copy_concept_id",
                 "tool_output_field": "result.computer_file_copy_concept_id"
               }
+            ],
+            "writes_context_keys": [
+              "file_copy_concept_id"
             ]
           },
           {
@@ -2074,6 +2077,9 @@
                 "context_key": "arxiv_mcp_failure_details",
                 "tool_output_field": "result.error_details"
               }
+            ],
+            "writes_context_keys": [
+              "file_copy_concept_id"
             ]
           },
           {
@@ -2176,6 +2182,9 @@
                 "context_key": "file_copy_storage",
                 "tool_output_field": "result.storage"
               }
+            ],
+            "writes_context_keys": [
+              "file_copy_concept_id"
             ]
           },
           {
