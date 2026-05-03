@@ -3360,7 +3360,17 @@ def get_relationships_extent_route():
 
         def _find_by_identifier(ident: str):
             if ident.startswith("#V#"):
-                return repo.find_one({"concept_id": ident})
+                doc = repo.find_one({"concept_id": ident})
+                if doc is not None:
+                    return doc
+                # The stored concept_id is always lowercased canonical form.
+                # Try the canonical form in case the caller passed a mixed-case
+                # variant (e.g. #V#VON_PAPER_ARXIV instead of #V#von_paper_arxiv).
+                from ...utils.concept_id_utils import canonicalise_vontology_concept_id
+                canonical = canonicalise_vontology_concept_id(ident)
+                if canonical and canonical != ident:
+                    return repo.find_one({"concept_id": canonical})
+                return None
             if ObjectId:
                 try:
                     oid = ObjectId(ident)
