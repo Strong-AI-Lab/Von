@@ -24,6 +24,9 @@ predicates, and KB assertions should own durable:
   workflow applicability;
 - minimal-imposition runtime profile policy, including decision rules,
   write-tool risk classes, and scenario/tool overrides;
+- knowledge-acquisition profile policy, including predicate priorities,
+  confidence thresholds, source adjustments, auto-apply rules, and question
+  limits for relation-completion workflows;
 - recommendation matching, feedback semantics, and delivery wording;
 - domain-specific workflow launch policy;
 - workflow-description semantics such as domain labels, capability wording,
@@ -45,6 +48,9 @@ Python can remain the surface for:
   specs and fetch requested Vontology fields;
 - generic file evidence extraction and typing-result persistence when the
   semantic typing/routing policy comes from represented artefacts;
+- generic knowledge-acquisition profile loading, validation, source telemetry,
+  confidence arithmetic, and canonical relation mutation support when the
+  policy values come from represented profile artefacts;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles are publication/migration artefacts, not normal runtime authority

@@ -47,6 +47,23 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   publication script for a Vontology workflow. File only if it becomes a normal
   runtime workflow source or recurring Python workflow authoring pathway.
 
+## Inspected, Not Filed On 2026-05-04
+
+- `scripts/repair_arxiv_email_paper_workflow_consistency.py`: one-shot
+  Vontology-authoring repair/audit for the `JVNAUTOSCI-2251` arXiv email
+  workflow alignment. File only if it becomes startup/runtime workflow
+  authority or a recurring Python workflow-authoring path.
+- `src/backend/security/role_resolver.py` plus the organisation-role fallback
+  in `src/backend/server/routes/von_routes.py`: old Phase-1 RBAC stub surface,
+  already covered historically by `JVNAUTOSCI-787` and future Vontology-driven
+  role inheritance in `JVNAUTOSCI-704`. File only if new workflow/KB policy
+  expands or depends on those hard-coded mappings after represented membership
+  authority exists.
+- `src/backend/integrations/internal_mcp/arxiv_proxy_mcp.py`: source-specific
+  low-level arXiv MCP adapter and cache/settlement support. File only if
+  arXiv fallback/recovery sequencing or user-facing paper policy moves from the
+  wrapper workflow back into this adapter.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.

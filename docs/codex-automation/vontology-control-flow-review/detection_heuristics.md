@@ -35,6 +35,10 @@ represented authority before filing Jira work.
 - Vontology profile services that fall back at runtime to canonical Python
   default decision policies, tool-risk classes, or profile blueprints are
   authority seams even when they also materialise those defaults into KB.
+- Predicate-specific profile tables such as `*_PRIORITY_POLICY`,
+  `*_AUTO_APPLY_POLICY`, source-adjustment maps, or confidence thresholds are
+  strong drift signals when normal workflow execution can load, merge, or
+  repair them from Python.
 
 ## 2026-04-30 Examples
 
@@ -48,3 +52,6 @@ represented authority before filing Jira work.
   `JVNAUTOSCI-2219`.
 - Concept-summary renderer panel policy: `JVNAUTOSCI-2234`.
 - File-copy semantic typing and route hints: `JVNAUTOSCI-2235`.
+- Represented-artefact repo-seed/startup authority: `JVNAUTOSCI-2260`.
+- Knowledge-acquisition profile predicate priorities and thresholds:
+  `JVNAUTOSCI-2262`.

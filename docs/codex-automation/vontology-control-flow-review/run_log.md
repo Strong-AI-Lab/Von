@@ -65,3 +65,25 @@
   `scripts/publish_email_resource_link_extraction_workflow.py`; left them as
   watch items rather than filing new tasks this run.
 - No production code was changed.
+
+## 2026-05-04T03:11:46.6211323+12:00
+
+- Read the required repo guidance and the repo-local drift-review memories,
+  then ran `python scripts\check_workflow_purity.py --verbose`; all counters
+  were zero and the workflow-purity gate passed.
+- Reviewed changed Python since the previous automation run, including arXiv
+  email workflow repair/alignment, represented-artefact startup bootstrap,
+  organisation membership/message-route fixes, and Vontology relationship
+  extent lookup.
+- Confirmed `JVNAUTOSCI-2260` already covers represented-artefact creation
+  prompt/workflow authority being repopulated from repo seed files and startup
+  Python repair; updated the memory index rather than filing a duplicate.
+- Created `JVNAUTOSCI-2262` for
+  `knowledge_acquisition_profile_vontology_service.py`: Python-authored
+  decision policy, predicate priorities, source confidence adjustments, and
+  auto-apply thresholds are loaded/bootstrapped into the rumination workflow.
+  Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-1985`, and `JVNAUTOSCI-2260`,
+  and added a visible Jira user-impact comment.
+- Inspected the arXiv repair script, role resolver stub, and low-level arXiv
+  proxy adapter; left them as watch items rather than new tasks.
+- No production code was changed.

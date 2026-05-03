@@ -39,6 +39,17 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-1985` - updated with minimal-imposition runtime profile fallback
   evidence; do not create a duplicate for Python default tool-risk classes.
 
+## 2026-05-03 Drift Tasks
+
+- `JVNAUTOSCI-2260` - represented-artefact creation prompt/workflow authority
+  repopulated from repo seed files and startup Python repair.
+
+## 2026-05-04 Drift Tasks
+
+- `JVNAUTOSCI-2262` - knowledge-acquisition profile decision policy, predicate
+  priorities, source confidence adjustments, and auto-apply thresholds in
+  Python before/runtime Vontology materialisation.
+
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to
 `JVNAUTOSCI-1913`.
