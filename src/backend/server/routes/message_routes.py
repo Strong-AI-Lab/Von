@@ -228,6 +228,7 @@ def _build_common_organisation_options(
     recipient_ids: list[str],
     exclude_organisation_concept_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    from ...security.access_control import bypass_access_control
     from ...services.organisation_membership_service import get_user_memberships
 
     membership_maps: list[dict[str, str]] = []
@@ -235,7 +236,13 @@ def _build_common_organisation_options(
 
     for user_concept_id in user_ids:
         try:
-            memberships = get_user_memberships(user_concept_id)
+            # Bypass the current-org access gate so we can resolve memberships
+            # for participants who are only visible through the shared org (not
+            # the session org that just rejected the send).  The result only
+            # surfaces orgs that the authenticated sender is already a member
+            # of, so no privilege escalation is possible.
+            with bypass_access_control():
+                memberships = get_user_memberships(user_concept_id)
         except Exception:
             return []
 
