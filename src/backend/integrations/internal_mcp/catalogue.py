@@ -2523,19 +2523,23 @@ def _download_paper(**kwargs):
 
             return stored
         except ArxivProxyError as e:
+            proxy_error_details = {
+                "arxiv_id": arxiv_id,
+                "exception_type": "ArxivProxyError",
+                "cache_state": cache_diagnostics.get("cache_state"),
+                "cache_diagnostics": cache_diagnostics,
+                "recommended_recovery_action": cache_recovery_action,
+                "partial_cache_recovery_attempted": partial_cache_recovery_attempted,
+                "partial_cache_markdown_deleted": partial_cache_markdown_deleted,
+                "partial_cache_recovery_error": partial_cache_recovery_error,
+            }
+            structured_details = getattr(e, "details", None)
+            if isinstance(structured_details, Mapping):
+                proxy_error_details.update(dict(structured_details))
             return make_error_response(
-                "arxiv_proxy_error",
+                str(getattr(e, "error_code", None) or "arxiv_proxy_error"),
                 str(e),
-                details={
-                    "arxiv_id": arxiv_id,
-                    "exception_type": "ArxivProxyError",
-                    "cache_state": cache_diagnostics.get("cache_state"),
-                    "cache_diagnostics": cache_diagnostics,
-                    "recommended_recovery_action": cache_recovery_action,
-                    "partial_cache_recovery_attempted": partial_cache_recovery_attempted,
-                    "partial_cache_markdown_deleted": partial_cache_markdown_deleted,
-                    "partial_cache_recovery_error": partial_cache_recovery_error,
-                },
+                details=proxy_error_details,
             )
         except Exception as e:
             return make_error_response(
@@ -7836,6 +7840,8 @@ def _download_paper_output_schema() -> Schema:
             "local_cache_deleted": (bool, type(None)),
             "local_cache_delete_error": (str, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
         description=(
@@ -7846,7 +7852,9 @@ def _download_paper_output_schema() -> Schema:
             "computer_file_copy_registration (dict telemetry about file-copy registration outcome), "
             "uploaded_at (iso str, optional), "
             "local_cache_deleted (bool, optional), local_cache_delete_error (str, optional), "
-            "or error (str) if failed"
+            "or error/error_code/error_details if failed. External third-party MCP "
+            "failures include structured provider, operation, provider status/message, "
+            "retryability, and recovery_hint fields in error_details."
         ),
     )
 

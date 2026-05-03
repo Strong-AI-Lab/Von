@@ -95,6 +95,70 @@ def test_executor_routes_failure_and_unknown_via_condition_spec(
     assert result.data.get(context_key) is True
 
 
+def test_executor_can_route_from_structured_failed_action_outputs() -> None:
+    condition_spec, condition_fn = build_transition_condition(
+        {
+            "kind": "context_value_equals",
+            "path": "last_action_outputs.result.error_details.provider",
+            "value": "external_third_party",
+        }
+    )
+    always_spec, always_fn = build_transition_condition({"kind": "always"})
+
+    definition = WorkflowDefinition(
+        workflow_id="#V#failed_output_routing_workflow",
+        initial_state="download",
+        states={
+            "download": WorkflowStateSpec(
+                state_id="download",
+                actions=(WorkflowActionInvocation(action_id="download.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="fallback",
+                        reason="on_failure",
+                        condition=condition_fn,
+                        condition_spec=condition_spec,
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="failed",
+                        reason="unrecoverable",
+                        condition=always_fn,
+                        condition_spec=always_spec,
+                    ),
+                ),
+            ),
+            "fallback": WorkflowStateSpec(state_id="fallback", terminal=True),
+            "failed": WorkflowStateSpec(state_id="failed", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="download.action",
+            handler=lambda _request: WorkflowActionResult(
+                status="failed",
+                error="external_arxiv_mcp_download_failed",
+                outputs={
+                    "result": {
+                        "success": False,
+                        "error_details": {"provider": "external_third_party"},
+                    }
+                },
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "fallback"
+
+
 @pytest.mark.parametrize(
     ("transition_result", "expected_state"),
     [(True, "yes"), (False, "no")],
@@ -274,6 +338,4 @@ def test_build_transition_condition_rejects_invalid_compare_operator() -> None:
                 "value": 1,
             }
         )
-    assert "workflow_condition_invalid:compare_operator_invalid" in str(
-        exc_info.value
-    )
+    assert "workflow_condition_invalid:compare_operator_invalid" in str(exc_info.value)

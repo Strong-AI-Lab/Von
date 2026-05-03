@@ -13,8 +13,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from src.backend.services.blob_store import (
     get_blob_store_from_env,
@@ -41,6 +39,17 @@ class ArxivProxyConfig:
 
 class ArxivProxyError(Exception):
     """Raised when arXiv proxy operations fail."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = dict(details or {})
 
 
 class ArxivMCPProxy:
@@ -153,7 +162,21 @@ class ArxivMCPProxy:
         except Exception as e:
             self._error_count += 1
             logger.error("%s Tool call failed: %s", _LOG_TAG, e)
-            raise ArxivProxyError(f"Request failed: {e}") from e
+            raise ArxivProxyError(
+                f"Request failed: {e}",
+                error_code="external_arxiv_mcp_call_failed",
+                details={
+                    "provider": "external_third_party",
+                    "external_provider": "arxiv-mcp-server",
+                    "external_provider_package": "arxiv-mcp-server",
+                    "external_provider_repository": "https://github.com/blazickjp/arxiv-mcp-server",
+                    "external_provider_operation": tool_name,
+                    "external_provider_failure_kind": "mcp_call_failed",
+                    "external_provider_message": str(e),
+                    "external_provider_retryable": True,
+                    "recovery_hint": "retry_or_use_authoritative_non_mcp_source",
+                },
+            ) from e
 
     async def search_arxiv(
         self,
@@ -274,72 +297,67 @@ class ArxivMCPProxy:
                         _LOG_TAG,
                         cached,
                     )
-                elif _download_result_reports_success(result):
-                    direct = _download_arxiv_pdf_directly(
-                        self._config.storage_path,
-                        arxiv_id=arxiv_id,
-                        timeout_sec=self._config.timeout_sec,
-                    )
-                    if direct is not None:
-                        direct_path, direct_source_url = direct
-                        file_path = str(direct_path)
-                        result = dict(result)
-                        result["file_path"] = file_path
-                        result["direct_pdf_fallback"] = True
-                        result["direct_pdf_source_url"] = direct_source_url
-                        logger.warning(
-                            "%s download_paper returned no file path; "
-                            "reacquired PDF directly from %s",
-                            _LOG_TAG,
-                            direct_source_url,
-                        )
-                    else:
+                else:
+                    if _download_result_indicates_async_settlement(result):
                         waited = _await_downloaded_pdf_in_cache(
                             self._config.storage_path,
                             arxiv_id=arxiv_id,
                             since=download_started_at,
                             timeout_sec=self._config.timeout_sec,
                             poll_interval_sec=0.5,
-                            allow_recent_fallback=_download_result_indicates_async_settlement(
-                                result
-                            ),
+                            allow_recent_fallback=True,
                         )
                         if waited is not None:
                             file_path = str(waited)
                             result = dict(result)
                             result["file_path"] = file_path
                             logger.warning(
-                                "%s download_paper returned no file path; settled on cached PDF at %s",
+                                "%s download_paper returned async status without a path; settled on cached PDF at %s",
                                 _LOG_TAG,
                                 waited,
                             )
                         else:
                             raise ArxivProxyError(
-                                "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                                "External arxiv-mcp-server reported asynchronous download/conversion but no PDF settled in cache",
+                                error_code="external_arxiv_mcp_async_settlement_timeout",
+                                details=_external_arxiv_mcp_failure_details(
+                                    operation="download_paper",
+                                    arxiv_id=arxiv_id,
+                                    result=result,
+                                    failure_kind="async_settlement_timeout",
+                                    recovery_hint="retry_or_import_pdf_url",
+                                    retryable=True,
+                                ),
                             )
-                else:
-                    waited = _await_downloaded_pdf_in_cache(
-                        self._config.storage_path,
-                        arxiv_id=arxiv_id,
-                        since=download_started_at,
-                        timeout_sec=self._config.timeout_sec,
-                        poll_interval_sec=0.5,
-                        allow_recent_fallback=_download_result_indicates_async_settlement(
-                            result
-                        ),
-                    )
-                    if waited is not None:
-                        file_path = str(waited)
-                        result = dict(result)
-                        result["file_path"] = file_path
-                        logger.warning(
-                            "%s download_paper returned no file path; settled on cached PDF at %s",
-                            _LOG_TAG,
-                            waited,
+                    elif _download_result_reports_success(result):
+                        raise ArxivProxyError(
+                            "arXiv download succeeded but no file path was returned by arxiv-mcp-server",
+                            error_code="external_arxiv_mcp_missing_file_path",
+                            details=_external_arxiv_mcp_failure_details(
+                                operation="download_paper",
+                                arxiv_id=arxiv_id,
+                                result=result,
+                                failure_kind="missing_file_path",
+                                recovery_hint="import_pdf_url",
+                                retryable=False,
+                            ),
                         )
                     else:
+                        message = _summarise_external_arxiv_mcp_result(result)
                         raise ArxivProxyError(
-                            "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                            (
+                                "External arxiv-mcp-server failed during "
+                                f"download_paper: {message}"
+                            ),
+                            error_code="external_arxiv_mcp_download_failed",
+                            details=_external_arxiv_mcp_failure_details(
+                                operation="download_paper",
+                                arxiv_id=arxiv_id,
+                                result=result,
+                                failure_kind="provider_error",
+                                recovery_hint="import_pdf_url",
+                                retryable=_external_arxiv_mcp_failure_retryable(result),
+                            ),
                         )
 
         path = Path(file_path)
@@ -512,7 +530,9 @@ def _infer_blob_backend(blob_store: Any) -> str:
         return "s3"
     if name == "LocalBlobStore":
         return "local"
-    if hasattr(blob_store, "_failed_over") and getattr(blob_store, "_failed_over", False):
+    if hasattr(blob_store, "_failed_over") and getattr(
+        blob_store, "_failed_over", False
+    ):
         return str(getattr(blob_store, "_secondary_name", "s3")).strip().lower()
     if hasattr(blob_store, "_primary_name"):
         return str(getattr(blob_store, "_primary_name", "swift")).strip().lower()
@@ -546,16 +566,14 @@ def _build_blob_uri(blob_store: Any, *, backend: str, key: str) -> str | None:
         return f"swift://{container}/{full_key}"
 
     if backend == "s3":
-        bucket = (
-            (os.environ.get("VON_S3_BUCKET") or "").strip()
-            or (os.environ.get("VON_SWIFT_CONTAINER") or "").strip()
-        )
+        bucket = (os.environ.get("VON_S3_BUCKET") or "").strip() or (
+            os.environ.get("VON_SWIFT_CONTAINER") or ""
+        ).strip()
         if not bucket:
             return None
-        prefix = (
-            (os.environ.get("VON_S3_PREFIX") or "").strip("/")
-            or (os.environ.get("VON_SWIFT_PREFIX") or "").strip("/")
-        )
+        prefix = (os.environ.get("VON_S3_PREFIX") or "").strip("/") or (
+            os.environ.get("VON_SWIFT_PREFIX") or ""
+        ).strip("/")
         public_base_url = os.environ.get("VON_S3_PUBLIC_BASE_URL")
         public_base_url = public_base_url.rstrip("/") if public_base_url else None
         endpoint_url = os.environ.get("VON_S3_ENDPOINT_URL")
@@ -743,6 +761,7 @@ def _download_result_indicates_async_settlement(result: Any) -> bool:
         str(result.get("status") or "").strip(),
         str(result.get("message") or "").strip(),
         str(result.get("stage") or "").strip(),
+        str(result.get("text") or "").strip(),
     ]
     combined = " ".join(part for part in text_parts if part).casefold()
     if not combined:
@@ -758,95 +777,97 @@ def _download_result_indicates_async_settlement(result: Any) -> bool:
 
 
 def _download_result_reports_success(result: Any) -> bool:
-    return isinstance(result, dict) and result.get("success") is True
-
-
-def _arxiv_pdf_url_candidates(arxiv_id: str) -> list[str]:
-    stable_id = _normalise_arxiv_id(arxiv_id)
-    candidate_ids = [stable_id]
-    version = _extract_arxiv_version(stable_id)
-    if version is not None and "v" in stable_id.lower():
-        base_id = stable_id[: stable_id.lower().rfind("v")]
-        if base_id and base_id not in candidate_ids:
-            candidate_ids.append(base_id)
-    urls: list[str] = []
-    for candidate_id in candidate_ids:
-        quoted_id = quote(candidate_id, safe="/")
-        url = f"https://arxiv.org/pdf/{quoted_id}.pdf"
-        if url not in urls:
-            urls.append(url)
-    return urls
-
-
-def _looks_like_pdf(data: bytes) -> bool:
-    if not data:
+    if not isinstance(result, dict):
         return False
-    return b"%PDF" in data[:1024]
+    if result.get("success") is True:
+        return True
+    text_parts = [
+        str(result.get("status") or "").strip(),
+        str(result.get("message") or "").strip(),
+        str(result.get("text") or "").strip(),
+    ]
+    combined = " ".join(part for part in text_parts if part).casefold()
+    if not combined:
+        return False
+    success_markers = (
+        "success",
+        "succeeded",
+        "downloaded",
+        "download complete",
+        "download completed",
+    )
+    failure_markers = ("error", "failed", "not found", "invalid")
+    return any(marker in combined for marker in success_markers) and not any(
+        marker in combined for marker in failure_markers
+    )
 
 
-def _download_arxiv_pdf_directly(
-    storage_path: Path,
+def _summarise_external_arxiv_mcp_result(result: Any) -> str:
+    if not isinstance(result, dict):
+        return f"unexpected_result_type:{type(result).__name__}"
+    for key in ("message", "error", "text", "status"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "no usable file path or provider message returned"
+
+
+def _external_arxiv_mcp_failure_retryable(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    text = " ".join(
+        str(result.get(key) or "").strip()
+        for key in ("status", "message", "error", "text")
+    ).casefold()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "too many requests",
+            "rate limit",
+            "timeout",
+            "temporarily",
+            "connection",
+        )
+    )
+
+
+def _external_arxiv_mcp_failure_details(
     *,
+    operation: str,
     arxiv_id: str,
-    timeout_sec: float,
-) -> tuple[Path, str] | None:
-    """Directly reacquire the PDF when arxiv-mcp-server loses the path."""
+    result: Any,
+    failure_kind: str,
+    recovery_hint: str,
+    retryable: bool,
+) -> dict[str, Any]:
+    provider_status = None
+    provider_message = None
+    provider_error = None
+    provider_text = None
+    if isinstance(result, dict):
+        provider_status = result.get("status")
+        provider_message = result.get("message")
+        provider_error = result.get("error")
+        provider_text = result.get("text")
 
-    try:
-        storage_path = Path(storage_path)
-        storage_path.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        return None
-
-    safe_id = _normalise_arxiv_id(arxiv_id).replace("/", "_")
-    if not safe_id:
-        return None
-    destination = storage_path / f"{safe_id}.pdf"
-    timeout = float(timeout_sec) if timeout_sec and timeout_sec > 0 else 30.0
-
-    for source_url in _arxiv_pdf_url_candidates(arxiv_id):
-        try:
-            request = Request(
-                source_url,
-                headers={
-                    "User-Agent": (
-                        "Von arXiv PDF acquisition fallback/1.0 "
-                        "(https://github.com/Strong-AI-Lab)"
-                    )
-                },
-            )
-            with urlopen(request, timeout=timeout) as response:
-                data = response.read()
-        except Exception as exc:
-            logger.debug(
-                "%s direct PDF fallback failed for %s: %s",
-                _LOG_TAG,
-                source_url,
-                exc,
-            )
-            continue
-
-        if not _looks_like_pdf(data):
-            logger.warning(
-                "%s direct PDF fallback from %s did not return PDF bytes",
-                _LOG_TAG,
-                source_url,
-            )
-            continue
-
-        try:
-            destination.write_bytes(data)
-        except Exception as exc:
-            logger.warning(
-                "%s direct PDF fallback could not write %s: %s",
-                _LOG_TAG,
-                destination,
-                exc,
-            )
-            return None
-        return destination, source_url
-
-    return None
+    return {
+        "provider": "external_third_party",
+        "external_provider": "arxiv-mcp-server",
+        "external_provider_package": "arxiv-mcp-server",
+        "external_provider_repository": "https://github.com/blazickjp/arxiv-mcp-server",
+        "external_provider_operation": operation,
+        "external_provider_failure_kind": failure_kind,
+        "external_provider_status": provider_status,
+        "external_provider_message": provider_message,
+        "external_provider_error": provider_error,
+        "external_provider_text": provider_text,
+        "external_provider_retryable": bool(retryable),
+        "recovery_hint": recovery_hint,
+        "arxiv_id": _normalise_arxiv_id(arxiv_id),
+    }
 
 
 def _await_downloaded_pdf_in_cache(

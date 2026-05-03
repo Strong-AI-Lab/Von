@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 
+import pytest
+
 
 def test_arxiv_list_papers_lists_cached_pdfs_without_calling_upstream(
     monkeypatch, tmp_path
@@ -132,14 +134,21 @@ def test_arxiv_store_downloaded_pdf_waits_for_async_cache_settlement(
             pdf_path.write_bytes(data)
         return pdf_path if pdf_path.exists() else None
 
-    monkeypatch.setattr(mod, "_find_cached_pdf_for_arxiv_id", _fake_find_cached_pdf_for_arxiv_id)
+    monkeypatch.setattr(
+        mod, "_find_cached_pdf_for_arxiv_id", _fake_find_cached_pdf_for_arxiv_id
+    )
     monkeypatch.setattr(mod, "_find_recent_pdf_in_cache", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
-    proxy = mod.ArxivMCPProxy(mod.ArxivProxyConfig(storage_path=cache_dir, timeout_sec=1.0))
+    proxy = mod.ArxivMCPProxy(
+        mod.ArxivProxyConfig(storage_path=cache_dir, timeout_sec=1.0)
+    )
 
     stored = proxy._store_downloaded_pdf(
-        result={"status": "converting", "message": "Paper downloaded, conversion started"},
+        result={
+            "status": "converting",
+            "message": "Paper downloaded, conversion started",
+        },
         arxiv_id="2603.21702",
         download_started_at=mod.time.time(),
     )
@@ -151,7 +160,7 @@ def test_arxiv_store_downloaded_pdf_waits_for_async_cache_settlement(
     assert attempts["count"] >= 3
 
 
-def test_arxiv_store_downloaded_pdf_directly_reacquires_when_server_omits_path(
+def test_arxiv_store_downloaded_pdf_reports_async_settlement_timeout(
     monkeypatch, tmp_path
 ):
     from src.backend.integrations.internal_mcp import arxiv_proxy_mcp as mod
@@ -162,43 +171,66 @@ def test_arxiv_store_downloaded_pdf_directly_reacquires_when_server_omits_path(
 
     cache_dir = tmp_path / "arxiv_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    data = b"%PDF-1.4\n%direct-fallback\n"
-    requests: list[tuple[str, float]] = []
+    monkeypatch.setattr(
+        mod, "_find_cached_pdf_for_arxiv_id", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(mod, "_find_recent_pdf_in_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
-    class _Response:
-        def __enter__(self):
-            return self
+    proxy = mod.ArxivMCPProxy(
+        mod.ArxivProxyConfig(storage_path=cache_dir, timeout_sec=0.01)
+    )
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+    with pytest.raises(mod.ArxivProxyError) as exc_info:
+        proxy._store_downloaded_pdf(
+            result={
+                "status": "converting",
+                "message": "Paper downloaded, conversion started",
+            },
+            arxiv_id="2603.21702",
+            download_started_at=mod.time.time(),
+        )
 
-        def read(self):
-            return data
+    exc = exc_info.value
+    assert exc.error_code == "external_arxiv_mcp_async_settlement_timeout"
+    assert exc.details["external_provider_status"] == "converting"
+    assert exc.details["external_provider_retryable"] is True
+    assert exc.details["recovery_hint"] == "retry_or_import_pdf_url"
 
-    def _fake_urlopen(request, timeout=0):
-        requests.append((request.full_url, timeout))
-        return _Response()
 
-    monkeypatch.setattr(mod, "urlopen", _fake_urlopen, raising=False)
+def test_arxiv_store_downloaded_pdf_exposes_external_provider_failure_when_no_path(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import arxiv_proxy_mcp as mod
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     proxy = mod.ArxivMCPProxy(mod.ArxivProxyConfig(storage_path=cache_dir))
 
-    stored = proxy._store_downloaded_pdf(
-        result={"success": True, "message": "Paper downloaded"},
-        arxiv_id="2603.26499",
-        download_started_at=mod.time.time(),
-    )
+    with pytest.raises(mod.ArxivProxyError) as exc_info:
+        proxy._store_downloaded_pdf(
+            result={
+                "status": "error",
+                "message": "Error: HTTP Error 429: Unknown Error",
+            },
+            arxiv_id="2603.26499",
+            download_started_at=mod.time.time(),
+        )
 
-    expected_path = cache_dir / "2603.26499.pdf"
-    assert stored["success"] is True
-    assert stored["file_path"] == str(expected_path)
-    assert expected_path.read_bytes() == data
-    assert stored["direct_pdf_fallback"] is True
-    assert stored["direct_pdf_source_url"] == "https://arxiv.org/pdf/2603.26499.pdf"
-    assert stored["size_bytes"] == len(data)
-    assert stored["sha256"] == hashlib.sha256(data).hexdigest()
-    assert stored["storage"]["key"].endswith("arxiv/papers/2603.26499.pdf")
-    assert requests == [("https://arxiv.org/pdf/2603.26499.pdf", 30.0)]
+    exc = exc_info.value
+    assert exc.error_code == "external_arxiv_mcp_download_failed"
+    assert "HTTP Error 429" in str(exc)
+    assert exc.details["provider"] == "external_third_party"
+    assert exc.details["external_provider"] == "arxiv-mcp-server"
+    assert exc.details["external_provider_operation"] == "download_paper"
+    assert exc.details["external_provider_status"] == "error"
+    assert exc.details["external_provider_retryable"] is True
+    assert exc.details["recovery_hint"] == "import_pdf_url"
 
 
 def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_path):

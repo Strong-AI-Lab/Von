@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Mapping, Sequence
 from .execution_contracts import (
     WORKFLOW_CONTROL_SIGNAL_ERROR,
     resolve_control_signal_from_outputs,
+    snapshot_workflow_mapping,
     stamp_control_signal_context,
 )
 
@@ -129,9 +130,7 @@ def _apply_action_outcome_context(
     outcome = normalise_action_outcome(result.status)
     context["last_action_id"] = action_target_id
     context["last_action_target_id"] = action_target_id
-    context["last_action_registry_action_id"] = (
-        resolved_action_id or action_target_id
-    )
+    context["last_action_registry_action_id"] = resolved_action_id or action_target_id
     context["last_action_contract_concept_id"] = contract_concept_id
     context["last_action_status"] = result.status
     context["last_action_outcome"] = outcome
@@ -143,6 +142,9 @@ def _apply_action_outcome_context(
     context["last_action_error"] = result.error
     context["last_action_call_id"] = result.call_id
     context["last_action_duration_ms"] = result.duration_ms
+    context["last_action_outputs"] = snapshot_workflow_mapping(result.outputs)
+    if outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
+        context["last_failed_action_outputs"] = context["last_action_outputs"]
 
     control_signal, control_scope, return_payload = resolve_control_signal_from_outputs(
         action_outcome=outcome,

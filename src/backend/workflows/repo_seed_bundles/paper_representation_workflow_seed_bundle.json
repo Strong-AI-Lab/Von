@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "11",
-  "source_tag": "JVNAUTOSCI-2251",
+  "seed_version": "12",
+  "source_tag": "JVNAUTOSCI-2251-repair",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -13,10 +13,13 @@
     "download_paper",
     "finalise_cached_paper",
     "get_paper_metadata",
+    "import_url_file_copy",
     "workflow_invoke_subworkflow",
     "scholarly_paper.enrich_from_metadata",
     "scholarly_paper.materialise_from_file_copy",
     "workflow_control.context_set",
+    "workflow_control.context_template",
+    "workflow_control.for_each",
     "create_concepts",
     "upsert_text_relation",
     "fetch_concept_content",
@@ -1629,8 +1632,123 @@
         "schema_version": "workflow_launch_input_contract.v1"
       },
       "publication_spec": {
-        "initial_state": "normalise_arxiv_source",
+        "initial_state": "route_arxiv_targets",
         "steps": [
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "arxiv_ids",
+                      "kind": "context_cardinality",
+                      "operator": "gt",
+                      "value": 1
+                    },
+                    {
+                      "expected": false,
+                      "key": "__workflow_for_each_parent_workflow_id",
+                      "kind": "context_exists"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "dispatch_multiple_arxiv_targets",
+                "to_state": "dispatch_arxiv_target_set"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "single_arxiv_target",
+                "to_state": "normalise_arxiv_source"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "failed",
+            "state_id": "route_arxiv_targets",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "arxiv_target_routing_checked",
+                    "value": true
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "action_id": "workflow_control.for_each",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "state_id": "dispatch_arxiv_target_set",
+            "static_input_bindings": [
+              [
+                "workflow_id",
+                "#V#arxiv_paper_representation_workflow"
+              ],
+              [
+                "items_context_key",
+                "arxiv_ids"
+              ],
+              [
+                "item_context_key",
+                "arxiv_id"
+              ],
+              [
+                "index_context_key",
+                "arxiv_index"
+              ],
+              [
+                "success_policy",
+                "all_must_succeed"
+              ],
+              [
+                "max_items",
+                20
+              ],
+              [
+                "max_concurrency",
+                1
+              ],
+              [
+                "max_transitions",
+                80
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_dispatch_arxiv_target_set_iteration_results_to_iteration_results",
+                "context_key": "iteration_results",
+                "tool_output_field": "iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_dispatch_arxiv_target_set_for_each_success_count_to_for_each_success_count",
+                "context_key": "for_each_success_count",
+                "tool_output_field": "for_each_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_dispatch_arxiv_target_set_for_each_error_count_to_for_each_error_count",
+                "context_key": "for_each_error_count",
+                "tool_output_field": "for_each_error_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_dispatch_arxiv_target_set_invocations_to_invocations",
+                "context_key": "invocations",
+                "tool_output_field": "invocations"
+              }
+            ],
+            "writes_context_keys": [
+              "iteration_results",
+              "for_each_success_count",
+              "for_each_error_count",
+              "invocations"
+            ]
+          },
           {
             "action_id": "arxiv.normalise_source",
             "context_input_mapping_specs": [
@@ -1879,6 +1997,48 @@
           },
           {
             "action_id": "download_paper",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "last_action_succeeded",
+                  "kind": "context_flag",
+                  "expected": true
+                },
+                "reason": "download_or_finalise_succeeded",
+                "to_state": "delegate_to_general_paper_workflow"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "last_action_failed",
+                      "kind": "context_flag",
+                      "expected": true
+                    },
+                    {
+                      "key": "last_action_outputs.result.error_details.provider",
+                      "kind": "context_value_equals",
+                      "value": "external_third_party"
+                    },
+                    {
+                      "key": "last_action_outputs.result.error_details.external_provider",
+                      "kind": "context_value_equals",
+                      "value": "arxiv-mcp-server"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "on_failure",
+                "to_state": "build_arxiv_pdf_import_request"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "download_or_finalise_unrecoverable",
+                "to_state": "failed"
+              }
+            ],
             "context_input_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_download_or_finalise_arxiv_id_to_arxiv_id_parameter",
@@ -1888,8 +2048,15 @@
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "delegate_to_general_paper_workflow",
-            "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "delay_ms": 1000,
+              "max_attempts": 2,
+              "retry_on_outcomes": [
+                "failure"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "download_or_finalise",
             "tool_output_mapping_specs": [
               {
@@ -1901,6 +2068,113 @@
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_computer_file_copy_concept_id_to_file_copy_concept_id",
                 "context_key": "file_copy_concept_id",
                 "tool_output_field": "result.computer_file_copy_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_error_details_to_arxiv_mcp_failure_details",
+                "context_key": "arxiv_mcp_failure_details",
+                "tool_output_field": "result.error_details"
+              }
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "import_arxiv_pdf_from_url",
+            "on_failure_state": "failed",
+            "state_id": "build_arxiv_pdf_import_request",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "arxiv_pdf_url",
+                    "template": "https://arxiv.org/pdf/{arxiv_id}.pdf",
+                    "variables": {
+                      "arxiv_id": {
+                        "value_from_context": "arxiv_id"
+                      }
+                    }
+                  },
+                  {
+                    "key": "arxiv_pdf_filename",
+                    "template": "{arxiv_id}.pdf",
+                    "variables": {
+                      "arxiv_id": {
+                        "value_from_context": "arxiv_id"
+                      }
+                    }
+                  },
+                  {
+                    "key": "arxiv_pdf_import_reason",
+                    "template": "{failure_kind}",
+                    "variables": {
+                      "failure_kind": {
+                        "default": "external_arxiv_mcp_failed",
+                        "value_from_context": "last_action_outputs.result.error_details.external_provider_failure_kind"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "action_id": "import_url_file_copy",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_arxiv_pdf_filename_to_filename_parameter",
+                "context_key": "arxiv_pdf_filename",
+                "required": false,
+                "tool_param": "filename"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_arxiv_pdf_url_to_url_parameter",
+                "context_key": "arxiv_pdf_url",
+                "required": true,
+                "tool_param": "url"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "delegate_to_general_paper_workflow",
+            "on_failure_state": "failed",
+            "state_id": "import_arxiv_pdf_from_url",
+            "static_input_bindings": [
+              [
+                "type_concept_id",
+                "#V#arxiv_pdf_file"
+              ],
+              [
+                "source_system",
+                "arxiv_pdf_url_workflow_fallback"
+              ],
+              [
+                "max_bytes",
+                104857600
+              ],
+              [
+                "max_redirects",
+                5
+              ],
+              [
+                "index_in_rag",
+                false
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_result_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_result_final_url_to_arxiv_pdf_import_final_url",
+                "context_key": "arxiv_pdf_import_final_url",
+                "tool_output_field": "result.final_url"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_result_storage_to_file_copy_storage",
+                "context_key": "file_copy_storage",
+                "tool_output_field": "result.storage"
               }
             ]
           },

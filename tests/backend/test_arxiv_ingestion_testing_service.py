@@ -165,6 +165,75 @@ def test_verify_arxiv_ingestion_result_exposes_all_cleanup_file_copy_targets(
     assert result["cleanup_targets"]["file_copy_concept_ids"] == file_copy_ids
 
 
+def test_verify_arxiv_ingestion_result_accepts_canonical_source_uri_relation(
+    monkeypatch,
+) -> None:
+    paper_concept_id = "#V#paper_on_arxiv_2603_21702"
+    file_copy_id = "#V#file_copy_pdf_2603_21702"
+    author_id = "#V#author_one"
+    topic_id = "#V#topic_cs_ai"
+    source_uri = "https://arxiv.org/abs/2603.21702"
+
+    monkeypatch.setattr(
+        mod,
+        "_get_concept_or_none",
+        lambda concept_id: (
+            {
+                "relationships": {
+                    "#V#authored_by": [author_id],
+                    "#V#about": [topic_id],
+                    "#V#propositional_information_thing_has_computer_file": [
+                        file_copy_id
+                    ],
+                }
+            }
+            if concept_id == paper_concept_id
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_get_text_values",
+        lambda concept_id, *, predicate, limit=50: {
+            (paper_concept_id, "hasName"): ["Obscure title", "2603.21702"],
+            (paper_concept_id, "hasDescription"): ["Obscure summary"],
+            (paper_concept_id, "#V#has_publication_date"): ["2026-03-25"],
+            (paper_concept_id, "#V#has_source_uri"): [source_uri],
+            (author_id, "hasName"): ["Author One"],
+        }.get((concept_id, predicate), []),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_concept_exists",
+        lambda concept_id: concept_id
+        in {paper_concept_id, file_copy_id, author_id, topic_id},
+    )
+
+    result = mod.verify_arxiv_paper_ingestion_test_result(
+        workflow_execution={
+            "final_status": "completed",
+            "outputs": {
+                "paper_concept_id": paper_concept_id,
+                "file_copy_concept_id": file_copy_id,
+            },
+        },
+        arxiv_id="2603.21702",
+        source_uri=source_uri,
+        expected_title="Obscure title",
+        expected_summary="Obscure summary",
+        expected_publication_date="2026-03-25",
+        expected_author_names=["Author One"],
+        expected_author_concept_ids=[author_id],
+        expected_topic_labels=["cs.AI"],
+        expected_topic_concept_ids=[topic_id],
+    )
+
+    assert result["verification_passed"] is True
+    metadata = result["metadata_verification"]
+    assert metadata["source_uri_preserved"] is True
+    assert metadata["represented_source_uri_values"] == [source_uri]
+
+
 def test_cleanup_arxiv_ingestion_artifacts_deletes_all_linked_file_copies(
     monkeypatch,
 ) -> None:

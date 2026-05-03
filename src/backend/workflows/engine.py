@@ -148,6 +148,7 @@ def resolve_action_inputs_from_context(
     ``{"$context_key": "target_type_id"}``. These are resolved to concrete
     payload values before action execution.
     """
+
     def _resolve_nested_input_value(value: Any) -> Any:
         symbol = _extract_context_binding_symbol(value)
         if symbol:
@@ -267,7 +268,9 @@ def _extract_tool_output_field_value(
             found, value = _lookup_nested_field(root, path_parts)
             if found:
                 joined = ".".join(path_parts)
-                resolved_path = joined if root_name == "outputs" else f"{root_name}.{joined}"
+                resolved_path = (
+                    joined if root_name == "outputs" else f"{root_name}.{joined}"
+                )
                 return True, value, resolved_path
 
     return False, None, None
@@ -451,6 +454,9 @@ def _apply_action_result_context(
     context["last_action_error"] = result.error
     context["last_action_call_id"] = result.call_id
     context["last_action_duration_ms"] = result.duration_ms
+    context["last_action_outputs"] = snapshot_workflow_mapping(result.outputs)
+    if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
+        context["last_failed_action_outputs"] = context["last_action_outputs"]
 
     control_signal, control_scope, return_payload = resolve_control_signal_from_outputs(
         action_outcome=action_outcome,
@@ -983,9 +989,7 @@ class WorkflowActionInvocation:
         if subworkflow_id:
             return subworkflow_id
         prompt_contract = (
-            self.prompt_contract
-            if isinstance(self.prompt_contract, Mapping)
-            else {}
+            self.prompt_contract if isinstance(self.prompt_contract, Mapping) else {}
         )
         resolved_prompt_id = str(
             prompt_contract.get("resolved_prompt_concept_id") or ""
@@ -1103,9 +1107,11 @@ def _normalise_retry_policy_spec(value: Any) -> Dict[str, Any] | None:
     if max_attempts < 1:
         raise ValueError("workflow_retry_policy_invalid:max_attempts_below_minimum")
 
-    backoff_policy = str(
-        value.get("backoff_policy") or value.get("backoff") or "none"
-    ).strip().lower()
+    backoff_policy = (
+        str(value.get("backoff_policy") or value.get("backoff") or "none")
+        .strip()
+        .lower()
+    )
     if backoff_policy not in {"none", "fixed", "exponential"}:
         raise ValueError("workflow_retry_policy_invalid:backoff_policy_invalid")
 
@@ -1195,7 +1201,9 @@ def _normalise_idempotency_policy_spec(value: Any) -> Dict[str, Any] | None:
             "workflow_idempotency_policy_invalid:schema_version_unsupported"
         )
 
-    raw_paths = value.get("key_paths") or value.get("context_keys") or value.get("paths")
+    raw_paths = (
+        value.get("key_paths") or value.get("context_keys") or value.get("paths")
+    )
     if not isinstance(raw_paths, Sequence) or isinstance(
         raw_paths, (str, bytes, bytearray)
     ):
@@ -1511,14 +1519,18 @@ class WorkflowExecutor:
                 reason="approval_required_with_on_approval_required_route",
                 mode=validation_mode,
             )
-        elif state_support.has_unknown_route and bool(context.get("last_action_unknown")):
+        elif state_support.has_unknown_route and bool(
+            context.get("last_action_unknown")
+        ):
             validation = skipped_metadata_validation(
                 state_id=state_id,
                 phase="post_action",
                 reason="action_unknown_with_on_unknown_route",
                 mode=validation_mode,
             )
-        elif state_support.has_failure_route and bool(context.get("last_action_failed")):
+        elif state_support.has_failure_route and bool(
+            context.get("last_action_failed")
+        ):
             validation = skipped_metadata_validation(
                 state_id=state_id,
                 phase="post_action",
@@ -1569,7 +1581,9 @@ class WorkflowExecutor:
         *,
         state_spec: WorkflowStateSpec,
     ) -> _WorkflowStateRuntimeSupport:
-        retry_policy = _normalise_retry_policy_spec(state_spec.metadata.get("retry_policy"))
+        retry_policy = _normalise_retry_policy_spec(
+            state_spec.metadata.get("retry_policy")
+        )
         approval_gate = _normalise_approval_gate_spec(
             state_spec.metadata.get("approval_gate")
         )
@@ -1578,7 +1592,9 @@ class WorkflowExecutor:
         )
 
         if retry_policy is not None and len(state_spec.actions) > 1:
-            raise ValueError("workflow_retry_policy_invalid:multi_action_state_unsupported")
+            raise ValueError(
+                "workflow_retry_policy_invalid:multi_action_state_unsupported"
+            )
         if idempotency_policy is not None and len(state_spec.actions) > 1:
             raise ValueError(
                 "workflow_idempotency_policy_invalid:multi_action_state_unsupported"
@@ -1826,12 +1842,14 @@ class WorkflowExecutor:
         raw_records = None
         existing_record = None
         if idempotency_policy is not None:
-            idempotency_key, raw_records, existing_record = self._lookup_idempotency_record(
-                definition=definition,
-                state_id=state_id,
-                action_id=action_id,
-                context=context,
-                idempotency_policy=idempotency_policy,
+            idempotency_key, raw_records, existing_record = (
+                self._lookup_idempotency_record(
+                    definition=definition,
+                    state_id=state_id,
+                    action_id=action_id,
+                    context=context,
+                    idempotency_policy=idempotency_policy,
+                )
             )
 
         if existing_record is not None and idempotency_key is not None:
@@ -2129,7 +2147,10 @@ class WorkflowExecutor:
         approval_blocked: bool,
     ) -> str | None:
         control_signal = get_last_control_signal(context)
-        if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_support.has_break_route:
+        if (
+            control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK
+            and not state_support.has_break_route
+        ):
             return "workflow_break_outside_loop_scope"
         if (
             control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
@@ -2149,9 +2170,8 @@ class WorkflowExecutor:
         for transition in state_spec.transitions:
             try:
                 condition_result = bool(transition.condition(context))
-                if (
-                    not condition_result
-                    and isinstance(transition.condition_spec, Mapping)
+                if not condition_result and isinstance(
+                    transition.condition_spec, Mapping
                 ):
                     condition_result = evaluate_transition_condition_spec(
                         context=context,

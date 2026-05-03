@@ -166,7 +166,9 @@ def test_download_paper_registers_durable_storage_handle_when_file_path_missing(
     )
 
     assert result["success"] is True
-    assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_storage_only"
+    assert (
+        result["computer_file_copy_concept_id"] == "#V#computer_file_copy_storage_only"
+    )
     assert result["acquisition_result_contract"]["satisfied"] is True
     assert result["acquisition_result_contract"]["satisfied_handle_fields"] == [
         "storage",
@@ -297,6 +299,56 @@ def test_download_paper_reports_partial_cache_diagnostics_on_proxy_failure(
     assert cache_diagnostics["partial_cache_without_pdf"] is True
 
 
+def test_download_paper_preserves_external_mcp_failure_details(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user_test",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.integrations.internal_mcp.arxiv_proxy_mcp import ArxivProxyError
+
+    class _Proxy:
+        async def download_paper(self, *, arxiv_id: str, filename=None):
+            raise ArxivProxyError(
+                "External arxiv-mcp-server failed during download_paper: HTTP 429",
+                error_code="external_arxiv_mcp_download_failed",
+                details={
+                    "provider": "external_third_party",
+                    "external_provider": "arxiv-mcp-server",
+                    "external_provider_operation": "download_paper",
+                    "external_provider_status": "error",
+                    "external_provider_message": "Error: HTTP Error 429: Unknown Error",
+                    "external_provider_retryable": True,
+                    "recovery_hint": "import_pdf_url",
+                },
+            )
+
+    async def _fake_get_proxy():
+        return _Proxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _fake_get_proxy,
+    )
+
+    result = catalogue._download_paper(arxiv_id="2406.15341")
+
+    assert result["success"] is False
+    assert result["error_code"] == "external_arxiv_mcp_download_failed"
+    details = cast(dict[str, Any], result["error_details"])
+    assert details["provider"] == "external_third_party"
+    assert details["external_provider"] == "arxiv-mcp-server"
+    assert details["external_provider_operation"] == "download_paper"
+    assert details["external_provider_status"] == "error"
+    assert details["external_provider_retryable"] is True
+    assert details["recovery_hint"] == "import_pdf_url"
+
+
 def test_download_paper_reacquires_pdf_after_partial_markdown_cache(
     monkeypatch, tmp_path
 ):
@@ -420,10 +472,7 @@ def test_materialise_scholarly_representation_for_file_copy_prefers_explicit_arx
     assert len(materialise_calls) == 1
     assert materialise_calls[0]["user_concept_id"] == "#V#user_test"
     assert materialise_calls[0]["arxiv_id"] == "2502.14996"
-    assert (
-        materialise_calls[0]["file_copy_concept_id"]
-        == "#V#computer_file_copy_test"
-    )
+    assert materialise_calls[0]["file_copy_concept_id"] == "#V#computer_file_copy_test"
 
 
 def test_materialise_scholarly_representation_for_file_copy_uses_generic_path_without_arxiv_id(
@@ -631,9 +680,7 @@ def test_download_paper_rehydrates_from_durable_blob_without_calling_proxy(
     assert Path(result["file_path"]).exists() is True
 
 
-def test_download_paper_reuses_existing_file_copy_registration(
-    monkeypatch, tmp_path
-):
+def test_download_paper_reuses_existing_file_copy_registration(monkeypatch, tmp_path):
     cache_dir = tmp_path / "arxiv_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
@@ -898,6 +945,4 @@ def test_get_paper_metadata_falls_back_when_proxy_returns_unknown_tool_payload(
     assert result["success"] is True
     assert result["id"] == "2603.21702"
     assert result["metadata_source"] == "arxiv_atom_api"
-    assert (
-        result["metadata_fallback_reason"] == "metadata_payload_unusable"
-    )
+    assert result["metadata_fallback_reason"] == "metadata_payload_unusable"

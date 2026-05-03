@@ -10,8 +10,8 @@ from .action_registry import WorkflowActionResult
 
 def _coerce_mcp_error_message(*, tool_name: str, payload: Mapping[str, Any]) -> str:
     error_text = str(
-        payload.get("error")
-        or payload.get("error_code")
+        payload.get("error_code")
+        or payload.get("error")
         or payload.get("message")
         or ""
     ).strip()
@@ -136,7 +136,9 @@ def apply_namespace_to_mcp_payload(
             "value_present": False,
         }
 
-    namespace = str(user_namespace or "").strip() if isinstance(user_namespace, str) else ""
+    namespace = (
+        str(user_namespace or "").strip() if isinstance(user_namespace, str) else ""
+    )
     if namespace and "namespace" not in payload:
         payload["namespace"] = namespace
         return {

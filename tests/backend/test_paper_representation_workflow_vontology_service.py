@@ -29,8 +29,19 @@ from src.backend.services.text_value_service import (
     get_texts_for_concept,
     upsert_singleton_text_relation,
 )
-from src.backend.workflows.action_registry import WorkflowEnvironment
-from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionRequest,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+)
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
 from src.backend.workflows.durable import registry_factory
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import (
@@ -41,7 +52,6 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
 )
-
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PAPER_REPO_SEED_ASSET_PATH = (
@@ -71,9 +81,7 @@ _LIVE_ARXIV_ACCEPTANCE_SAMPLE: tuple[str, ...] = (
 )
 _LIVE_ARXIV_ACCEPTANCE_USER_ID = "#V#michael_witbrock"
 _LIVE_ARXIV_ACCEPTANCE_ORG_ID = "#V#university_of_auckland_strong_ai_lab"
-_LIVE_ARXIV_ACCEPTANCE_NAMESPACE = (
-    f"{_LIVE_ARXIV_ACCEPTANCE_USER_ID}@{_LIVE_ARXIV_ACCEPTANCE_ORG_ID.removeprefix('#V#')}"
-)
+_LIVE_ARXIV_ACCEPTANCE_NAMESPACE = f"{_LIVE_ARXIV_ACCEPTANCE_USER_ID}@{_LIVE_ARXIV_ACCEPTANCE_ORG_ID.removeprefix('#V#')}"
 
 
 class _EvidenceSummaryLLM:
@@ -149,9 +157,7 @@ def _skip_live_acceptance(*, batch: bool = False) -> None:
         pytest.skip(
             f"Set {_LIVE_ARXIV_ACCEPTANCE_BATCH_RUN_ENV}=1 to run live arXiv batch acceptance."
         )
-    pytest.skip(
-        f"Set {_LIVE_ARXIV_ACCEPTANCE_RUN_ENV}=1 to run live arXiv acceptance."
-    )
+    pytest.skip(f"Set {_LIVE_ARXIV_ACCEPTANCE_RUN_ENV}=1 to run live arXiv acceptance.")
 
 
 def _dedupe_case_entries(entries: list[str]) -> list[str]:
@@ -262,7 +268,7 @@ def _execute_live_arxiv_acceptance_case(
         ).run(
             definition,
             environment=WorkflowEnvironment(
-                llm_client=None,
+                llm_client=_EvidenceSummaryLLM(),
                 user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
                 user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
                 org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
@@ -280,7 +286,15 @@ def _execute_live_arxiv_acceptance_case(
                 "completed": result.completed,
                 "final_state": result.final_state,
                 "error": result.error,
-                "final_status": "completed" if result.completed else "failed",
+                "final_status": (
+                    "completed"
+                    if result.final_state
+                    == authority_service._step_concept_id(
+                        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                        state_id="completed",
+                    )
+                    else "failed"
+                ),
                 "outputs": dict(result.data),
             },
             arxiv_id=fixture["arxiv_id"],
@@ -382,19 +396,14 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert counts.get("errors") == 0
     support_concepts = report.get("support_concepts") or {}
     assert support_concepts.get("errors") == []
-    assert "#V#scholarly_article" in (
-        support_concepts.get("created_concept_ids") or []
-    )
+    assert "#V#scholarly_article" in (support_concepts.get("created_concept_ids") or [])
     assert "#V#has_doi" in (support_concepts.get("created_concept_ids") or [])
-    assert "#V#has_source_uri" in (
-        support_concepts.get("created_concept_ids") or []
-    )
+    assert "#V#has_source_uri" in (support_concepts.get("created_concept_ids") or [])
     source_uri_predicate = concept_service.get_concept_by_concept_id(
         "#V#has_source_uri"
     )
     assert "#V#predicate" in (
-        (source_uri_predicate.get("relationships") or {}).get("is_an_instance_of")
-        or []
+        (source_uri_predicate.get("relationships") or {}).get("is_an_instance_of") or []
     )
     prompt_support = report.get("prompt_support") or {}
     assert prompt_support.get("success") is True
@@ -425,14 +434,46 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    route_arxiv_targets_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="route_arxiv_targets",
+    )
+    dispatch_arxiv_targets_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="dispatch_arxiv_target_set",
+    )
+    normalise_arxiv_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="normalise_arxiv_source",
+    )
+    assert arxiv_definition.initial_state == route_arxiv_targets_state_id
+    route_arxiv_targets_state = arxiv_definition.states[route_arxiv_targets_state_id]
+    assert (
+        route_arxiv_targets_state.actions[0].action_id == "workflow_control.context_set"
+    )
+    route_transitions = {
+        transition.reason: transition
+        for transition in route_arxiv_targets_state.transitions
+    }
+    assert route_transitions["dispatch_multiple_arxiv_targets"].to_state == (
+        dispatch_arxiv_targets_state_id
+    )
+    assert route_transitions["single_arxiv_target"].to_state == normalise_arxiv_state_id
+    dispatch_action = arxiv_definition.states[dispatch_arxiv_targets_state_id].actions[
+        0
+    ]
+    assert dispatch_action.action_id == "workflow_control.for_each"
+    assert (
+        dispatch_action.inputs["workflow_id"] == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert dispatch_action.inputs["items_context_key"] == "arxiv_ids"
+    assert dispatch_action.inputs["item_context_key"] == "arxiv_id"
     metadata_terminal_contract = metadata_definition.metadata.get(
         "terminal_success_contract"
     )
     assert isinstance(metadata_terminal_contract, dict)
     assert metadata_terminal_contract.get("success_statuses") == ["completed"]
-    metadata_launch_contract = metadata_definition.metadata.get(
-        "launch_input_contract"
-    )
+    metadata_launch_contract = metadata_definition.metadata.get("launch_input_contract")
     assert isinstance(metadata_launch_contract, dict)
     assert metadata_launch_contract.get("schema_version") == (
         "workflow_launch_input_contract.v1"
@@ -471,9 +512,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             decide_metadata_state_id
         ].transitions
     }
-    assert decide_metadata_transitions[
-        "prompt_text_available"
-    ].to_state == extract_metadata_state_id
+    assert (
+        decide_metadata_transitions["prompt_text_available"].to_state
+        == extract_metadata_state_id
+    )
     extract_metadata_action = metadata_definition.states[
         extract_metadata_state_id
     ].actions[0]
@@ -483,9 +525,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "#V#prompt_scholarly_article_metadata_extraction"
     ]
     extract_mappings = (
-        metadata_definition.states[
-            extract_metadata_state_id
-        ].metadata.get("tool_output_context_mappings")
+        metadata_definition.states[extract_metadata_state_id].metadata.get(
+            "tool_output_context_mappings"
+        )
         or []
     )
     assert any(
@@ -557,9 +599,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             decide_arxiv_identity_state_id
         ].transitions
     }
-    assert decide_arxiv_transitions[
-        "arxiv_id_present"
-    ].to_state == attach_arxiv_identity_state_id
+    assert (
+        decide_arxiv_transitions["arxiv_id_present"].to_state
+        == attach_arxiv_identity_state_id
+    )
     assert decide_arxiv_transitions["arxiv_id_present"].condition_spec == {
         "kind": "all",
         "conditions": [
@@ -654,9 +697,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "#V#prompt_scholarly_article_representation_evidence_summary"
     ]
     summary_mappings = (
-        metadata_definition.states[
-            summary_state_id
-        ].metadata.get("tool_output_context_mappings")
+        metadata_definition.states[summary_state_id].metadata.get(
+            "tool_output_context_mappings"
+        )
         or []
     )
     assert any(
@@ -675,9 +718,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert isinstance(scholarly_terminal_contract, dict)
     assert scholarly_terminal_contract.get("success_statuses") == ["completed"]
-    arxiv_terminal_contract = arxiv_definition.metadata.get(
-        "terminal_success_contract"
-    )
+    arxiv_terminal_contract = arxiv_definition.metadata.get("terminal_success_contract")
     assert isinstance(arxiv_terminal_contract, dict)
     assert arxiv_terminal_contract.get("success_statuses") == ["completed"]
     explicit_launch_contract = arxiv_definition.metadata.get("launch_contract")
@@ -783,9 +824,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert routing_source.startswith("text_relation:")
     assert isinstance(routing_profile.get("role"), str)
     assert isinstance(routing_profile.get("authoring_intent_required"), bool)
-    assert isinstance(
-        routing_profile.get("explicit_workflow_context_required"), bool
-    )
+    assert isinstance(routing_profile.get("explicit_workflow_context_required"), bool)
 
     discovery_exemplars, discovery_source = resolve_workflow_discovery_exemplars(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -854,6 +893,64 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     download_action = arxiv_definition.states[download_state_id].actions[0]
     assert "materialise_scholarly_representation" not in download_action.inputs
+    build_pdf_import_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="build_arxiv_pdf_import_request",
+    )
+    import_pdf_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="import_arxiv_pdf_from_url",
+    )
+    download_state = arxiv_definition.states[download_state_id]
+    assert download_state.metadata["retry_policy"]["max_attempts"] == 2
+    download_transitions = {
+        transition.reason: transition for transition in download_state.transitions
+    }
+    assert download_transitions["download_or_finalise_succeeded"].to_state == (
+        delegate_state_id
+    )
+    assert download_transitions["on_failure"].to_state == build_pdf_import_state_id
+    assert download_transitions["on_failure"].condition_spec == {
+        "conditions": [
+            {
+                "expected": True,
+                "key": "last_action_failed",
+                "kind": "context_flag",
+            },
+            {
+                "key": "last_action_outputs.result.error_details.provider",
+                "kind": "context_value_equals",
+                "value": "external_third_party",
+            },
+            {
+                "key": "last_action_outputs.result.error_details.external_provider",
+                "kind": "context_value_equals",
+                "value": "arxiv-mcp-server",
+            },
+        ],
+        "kind": "all",
+    }
+    build_pdf_import_action = arxiv_definition.states[
+        build_pdf_import_state_id
+    ].actions[0]
+    assert build_pdf_import_action.action_id == "workflow_control.context_template"
+    assert build_pdf_import_action.inputs["assignments"][0]["key"] == "arxiv_pdf_url"
+    import_pdf_action = arxiv_definition.states[import_pdf_state_id].actions[0]
+    assert import_pdf_action.action_id == "import_url_file_copy"
+    assert import_pdf_action.inputs["url"] == {
+        "$context_key": "arxiv_pdf_url",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_import_arxiv_pdf_from_url_arxiv_pdf_url_to_url_parameter",
+        "$required": True,
+    }
+    assert import_pdf_action.inputs["type_concept_id"] == "#V#arxiv_pdf_file"
+    import_pdf_mappings = arxiv_definition.states[import_pdf_state_id].metadata[
+        "tool_output_context_mappings"
+    ]
+    assert any(
+        mapping["tool_output_field"] == "result.concept_id"
+        and mapping["context_key"] == "file_copy_concept_id"
+        for mapping in import_pdf_mappings
+    )
     decide_acquisition_mode_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="decide_acquisition_mode",
@@ -884,13 +981,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             decide_acquisition_mode_state_id
         ].transitions
     }
-    assert decide_transitions["existing_file_copy_available"].to_state == delegate_state_id
+    assert (
+        decide_transitions["existing_file_copy_available"].to_state == delegate_state_id
+    )
     assert decide_transitions["existing_file_copy_available"].condition_spec == {
         "key": "acquisition_mode",
         "kind": "context_value_equals",
         "value": "existing_file_copy",
     }
-    assert decide_transitions["finalise_cached_pdf"].to_state == finalise_cached_pdf_state_id
+    assert (
+        decide_transitions["finalise_cached_pdf"].to_state
+        == finalise_cached_pdf_state_id
+    )
     assert decide_transitions["recover_partial_cache"].to_state == (
         recover_partial_cache_state_id
     )
@@ -932,7 +1034,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="verify_representation",
     )
-    scholarly_verify_action = scholarly_definition.states[scholarly_verify_state_id].actions[0]
+    scholarly_verify_action = scholarly_definition.states[
+        scholarly_verify_state_id
+    ].actions[0]
     assert scholarly_verify_action.inputs.get("publication_date") == {
         "$context_key": "publication_date",
         "$mapping_concept_id": "#V#workflow_mapping_scholarly_paper_representation_workflow_verify_representation_publication_date_to_publication_date_parameter",
@@ -963,7 +1067,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     step_concept = concept_service.get_concept_by_concept_id(delegate_state_id)
     assert step_concept is not None
-    step_types = (step_concept.get("relationships") or {}).get("is_an_instance_of") or []
+    step_types = (step_concept.get("relationships") or {}).get(
+        "is_an_instance_of"
+    ) or []
     assert "#V#workflow_step" in step_types
 
 
@@ -1064,18 +1170,17 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
         version_gate.get("refresh_workflow_ids") or []
     )
-    status = (
-        (preflight.get("repo_seed_version_gate") or {})
-        .get("status_by_workflow_id", {})
-        .get(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
-        or {}
-    )
+    status = (preflight.get("repo_seed_version_gate") or {}).get(
+        "status_by_workflow_id", {}
+    ).get(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID) or {}
     assert status.get("reason") == "repo_seed_version_newer"
 
     refreshed_launch_contract, refreshed_launch_source = (
         resolve_workflow_launch_input_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
     )
-    assert refreshed_launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    assert (
+        refreshed_launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    )
     assert isinstance(refreshed_launch_contract, dict)
     arxiv_sources = {
         mapping.get("source_expression")
@@ -1111,7 +1216,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "11" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "12" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -1132,6 +1237,180 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert "workflow_discovery_result.discovery_query_input" in (
         required_effect["targets_source_expressions"]
     )
+
+
+def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    download_calls: list[dict[str, Any]] = []
+    import_calls: list[dict[str, Any]] = []
+    subworkflow_calls: list[dict[str, Any]] = []
+    verify_calls: list[dict[str, Any]] = []
+
+    def _normalise_source(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": request.inputs.get("arxiv_id"),
+                "source_uri": request.inputs.get("source_uri"),
+                "verification_profile": "arxiv",
+            },
+        )
+
+    def _get_metadata(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "id": "2406.15341",
+                    "title": "GenoTEX",
+                    "summary": "Benchmark for automated gene expression analysis.",
+                    "authors": ["Haoyang Liu"],
+                    "categories": ["cs.LG"],
+                    "publication_date": "2024-06-21",
+                    "source_uri": "https://arxiv.org/abs/2406.15341",
+                }
+            },
+        )
+
+    def _decide_acquisition(
+        _request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "acquisition_mode": "download_from_source",
+                "acquisition_required": True,
+                "arxiv_id": "2406.15341",
+            },
+        )
+
+    def _download_failure(request: WorkflowActionRequest) -> WorkflowActionResult:
+        download_calls.append(dict(request.inputs))
+        return WorkflowActionResult(
+            status="failed",
+            error="external_arxiv_mcp_download_failed",
+            outputs={
+                "result": {
+                    "success": False,
+                    "error_code": "external_arxiv_mcp_download_failed",
+                    "error_details": {
+                        "provider": "external_third_party",
+                        "external_provider": "arxiv-mcp-server",
+                        "external_provider_operation": "download_paper",
+                        "external_provider_failure_kind": "provider_error",
+                        "external_provider_retryable": True,
+                        "recovery_hint": "import_pdf_url",
+                    },
+                }
+            },
+        )
+
+    def _import_url(request: WorkflowActionRequest) -> WorkflowActionResult:
+        import_calls.append(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "concept_id": "#V#arxiv_pdf_file_from_workflow_url_import",
+                    "final_url": request.inputs.get("url"),
+                    "storage": {"backend": "test"},
+                }
+            },
+        )
+
+    def _delegate_to_scholarly(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        subworkflow_calls.append(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#paper_on_arxiv_2406_15341_test",
+                    "author_concept_ids": ["#V#person_haoyang_liu_test"],
+                    "topic_concept_ids": ["#V#research_topic_cs_lg_test"],
+                    "article_readback": {
+                        "concept_id": "#V#paper_on_arxiv_2406_15341_test"
+                    },
+                }
+            },
+        )
+
+    def _verify_representation(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        verify_calls.append(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": True,
+                "paper_concept_id": request.inputs.get("paper_concept_id"),
+                "file_copy_concept_id": request.inputs.get("file_copy_concept_id"),
+                "scholarly_representation_verified": True,
+                "verification_failures": [],
+            },
+        )
+
+    for action_id, handler in {
+        "arxiv.normalise_source": _normalise_source,
+        "get_paper_metadata": _get_metadata,
+        "arxiv.decide_acquisition_mode": _decide_acquisition,
+        "download_paper": _download_failure,
+        "import_url_file_copy": _import_url,
+        "workflow_invoke_subworkflow": _delegate_to_scholarly,
+        "scholarly_paper.verify_representation": _verify_representation,
+    }.items():
+        registry.register(ActionSpec(action_id=action_id, handler=handler))
+
+    result = WorkflowExecutor(registry=registry, max_transitions=20).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "prompt": "https://arxiv.org/abs/2406.15341",
+            "arxiv_id": "2406.15341",
+            "source_uri": "https://arxiv.org/abs/2406.15341",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state.endswith("_completed")
+    assert len(download_calls) == 2
+    assert import_calls == [
+        {
+            "filename": "2406.15341.pdf",
+            "index_in_rag": False,
+            "max_bytes": 104857600,
+            "max_redirects": 5,
+            "source_system": "arxiv_pdf_url_workflow_fallback",
+            "type_concept_id": "#V#arxiv_pdf_file",
+            "url": "https://arxiv.org/pdf/2406.15341.pdf",
+        }
+    ]
+    assert subworkflow_calls[0]["file_copy_concept_id"] == (
+        "#V#arxiv_pdf_file_from_workflow_url_import"
+    )
+    assert subworkflow_calls[0]["paper_metadata"]["title"] == "GenoTEX"
+    assert verify_calls[0]["file_copy_concept_id"] == (
+        "#V#arxiv_pdf_file_from_workflow_url_import"
+    )
+    assert result.data["arxiv_pdf_url"] == "https://arxiv.org/pdf/2406.15341.pdf"
+    assert result.data["arxiv_pdf_import_reason"] == "provider_error"
 
 
 def test_metadata_workflow_executes_direct_scholarly_article_representation(
@@ -1212,9 +1491,7 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
             limit=5,
         )
     ]
-    assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in (
-        source_uri_values
-    )
+    assert "https://dl.acm.org/doi/full/10.1145/3743093.3770985" in (source_uri_values)
     text_relation_summary = result.data.get("article_text_relations_summary")
     assert isinstance(text_relation_summary, dict)
     summary_predicates = {
@@ -1473,8 +1750,8 @@ def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stal
     )
     assert repaired_launch_source.startswith("text_relation:")
     assert repaired_launch_contract == updated_launch_contract
-    repaired_routing_profile, repaired_routing_source = resolve_workflow_routing_profile(
-        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    repaired_routing_profile, repaired_routing_source = (
+        resolve_workflow_routing_profile(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
     )
     assert repaired_routing_source.startswith("text_relation:")
     assert repaired_routing_profile == {
@@ -1576,15 +1853,10 @@ def test_bootstrap_repairs_missing_required_launch_metadata_surfaces(
     assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
         preflight.get("drift_workflow_ids") or []
     )
-    assert "required_authority_surface_missing" in (
-        preflight.get("issue_codes") or []
-    )
-    workflow_status = (
-        (preflight.get("workflow_status_by_id") or {}).get(
-            ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
-        )
-        or {}
-    )
+    assert "required_authority_surface_missing" in (preflight.get("issue_codes") or [])
+    workflow_status = (preflight.get("workflow_status_by_id") or {}).get(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    ) or {}
     assert workflow_status.get("status") == "required_authority_surface_missing"
     assert sorted(workflow_status.get("missing_authority_surfaces") or []) == [
         "launch_contract",
@@ -1667,7 +1939,9 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
         payload={
             "schema_version": "workflow_discovery_exemplars.v1",
             "keywords": ["arxiv", "paper", "authority-export"],
-            "examples": ["Refresh the repo seed from authoritative paper workflow state."],
+            "examples": [
+                "Refresh the repo seed from authoritative paper workflow state."
+            ],
         },
     )
 

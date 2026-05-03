@@ -210,6 +210,15 @@ def test_step_result_envelope_preserves_failed_action_outputs() -> None:
     assert isinstance(envelopes, list)
     assert len(envelopes) == 1
     assert envelopes[0]["action_outcome"] == "failure"
-    assert envelopes[0]["output_payload"]["cache_state"] == "markdown_only_partial_cache"
+    assert (
+        envelopes[0]["output_payload"]["cache_state"] == "markdown_only_partial_cache"
+    )
     assert envelopes[0]["output_payload"]["partial_cache_without_pdf"] is True
     assert "cache_state" not in result.data
+    assert (
+        result.data["last_action_outputs"]["cache_state"]
+        == "markdown_only_partial_cache"
+    )
+    assert (
+        result.data["last_failed_action_outputs"]["partial_cache_without_pdf"] is True
+    )

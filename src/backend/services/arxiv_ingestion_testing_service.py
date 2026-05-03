@@ -32,6 +32,7 @@ _AUTHORED_BY_PREDICATE_ID = "#V#authored_by"
 _ABOUT_PREDICATE_ID = "#V#about"
 _FILE_COPY_LINK_PREDICATE_ID = "#V#propositional_information_thing_has_computer_file"
 _PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
+_SOURCE_URI_PREDICATE_ID = "#V#has_source_uri"
 
 
 def _safe_str(value: Any) -> str:
@@ -508,6 +509,11 @@ def verify_arxiv_paper_ingestion_test_result(
         predicate=_PUBLICATION_DATE_PREDICATE_ID,
         limit=10,
     )
+    source_uri_values = _get_text_values(
+        resolved_paper_concept_id,
+        predicate=_SOURCE_URI_PREDICATE_ID,
+        limit=10,
+    )
 
     title_matched = _first_matching_text(name_values, expected=expected_title)
     summary_matched = _first_matching_text(description_values, expected=expected_summary)
@@ -520,7 +526,7 @@ def verify_arxiv_paper_ingestion_test_result(
     expected_source_uri_text = _normalise_text(source_uri)
     provenance_identifiers = {
         item.casefold()
-        for item in name_values
+        for item in [*name_values, *source_uri_values]
         if _normalise_text(item)
     }
     id_preserved = bool(expected_arxiv_id) and expected_arxiv_id.casefold() in provenance_identifiers
@@ -648,6 +654,7 @@ def verify_arxiv_paper_ingestion_test_result(
         "author_name_matches": author_name_matches,
         "represented_topic_concept_ids": represented_topic_concept_ids,
         "represented_file_copy_ids": represented_file_copy_ids,
+        "represented_source_uri_values": source_uri_values,
     }
 
     return {

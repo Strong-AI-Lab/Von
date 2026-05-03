@@ -686,12 +686,14 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
                     "payload": {
                         "success": True,
                         "concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7",
+                        "file_copy_concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7",
                         "verified": True,
                         "paper_concept_id": "#V#paper_on_arxiv_76c1c13f",
                         "scholarly_representation": {
                             "attempted": True,
                             "verified": True,
                             "paper_concept_id": "#V#paper_on_arxiv_76c1c13f",
+                            "file_copy_concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7",
                         },
                     },
                 }
