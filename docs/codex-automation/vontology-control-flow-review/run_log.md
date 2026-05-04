@@ -87,3 +87,23 @@
 - Inspected the arXiv repair script, role resolver stub, and low-level arXiv
   proxy adapter; left them as watch items rather than new tasks.
 - No production code was changed.
+
+## 2026-05-05T03:07:28.7273604+12:00
+
+- Read required repo guidance and repo-local drift-review memories; the global
+  automation memory file was absent.
+- Ran `python scripts\check_workflow_purity.py --verbose`; all counters were
+  zero and the workflow-purity gate passed.
+- Reviewed Python changes since the last run: per-model LLM timeout/settings
+  plumbing and model-family prompt variant resolution.
+- Treated model-family prompt variants as generic Vontology-authored prompt
+  selection support, not a new drift task.
+- Updated `JVNAUTOSCI-1957` with current evidence that structural predicate
+  metadata is only partially migrated: Python defaults still merge/fallback
+  when Vontology metadata is missing or partial.
+- Created `JVNAUTOSCI-2264` for task-status event trigger filtering in
+  `workflow_event_integration_service.py`: Python/env status allow-lists decide
+  whether `task.status_changed` reaches persisted event bindings. Linked it to
+  `JVNAUTOSCI-1913` and `JVNAUTOSCI-1605`, and added a visible user-impact
+  comment.
+- No production code was changed.

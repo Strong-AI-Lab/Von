@@ -64,6 +64,23 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   arXiv fallback/recovery sequencing or user-facing paper policy moves from the
   wrapper workflow back into this adapter.
 
+## Inspected, Not Filed On 2026-05-05
+
+- `src/backend/workflows/prompt_metadata_resolution.py` and
+  `src/backend/workflows/llm_step_executor.py` model-family prompt variants:
+  current evidence is generic support for Vontology-authored prompt variant
+  concepts and telemetry. File only if model-family/capability semantics or
+  prompt wording become Python-authored rather than represented metadata.
+- `src/backend/services/concept_predicate_metadata_service.py` structural
+  predicate fallback/defaults: do not file a duplicate; update
+  `JVNAUTOSCI-1957` unless new evidence shows a separate predicate-policy
+  surface.
+- `src/backend/services/workflow_event_integration_service.py` episode
+  evaluation autotrigger/depth guards: existing actor/critic/event-trigger work
+  already covers this family historically. File only with fresh evidence that a
+  specific trigger policy cannot be expressed by persisted bindings/VWL and is
+  not covered by `JVNAUTOSCI-1605` or later follow-ups.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.

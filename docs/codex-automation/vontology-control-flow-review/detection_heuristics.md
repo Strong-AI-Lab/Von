@@ -39,6 +39,14 @@ represented authority before filing Jira work.
   `*_AUTO_APPLY_POLICY`, source-adjustment maps, or confidence thresholds are
   strong drift signals when normal workflow execution can load, merge, or
   repair them from Python.
+- Event-emission helpers that filter process events by hard-coded or env-var
+  status/type allow-lists before persisted event bindings or VWL conditions run
+  are workflow-control drift. Python should emit structured events and let
+  represented binding/workflow policy decide relevance.
+- Vontology-backed metadata services that merge Python defaults when authority
+  is missing or partial should be checked against existing migration tasks
+  before filing. The remaining defect is often fail-open fallback, not absence
+  of a service.
 
 ## 2026-04-30 Examples
 
@@ -55,3 +63,5 @@ represented authority before filing Jira work.
 - Represented-artefact repo-seed/startup authority: `JVNAUTOSCI-2260`.
 - Knowledge-acquisition profile predicate priorities and thresholds:
   `JVNAUTOSCI-2262`.
+- Task-status event trigger status filtering before represented event bindings:
+  `JVNAUTOSCI-2264`.

@@ -27,6 +27,8 @@ predicates, and KB assertions should own durable:
 - knowledge-acquisition profile policy, including predicate priorities,
   confidence thresholds, source adjustments, auto-apply rules, and question
   limits for relation-completion workflows;
+- event-binding and workflow-trigger policy, including which organisational
+  process states or event payload values should cause a workflow to launch;
 - recommendation matching, feedback semantics, and delivery wording;
 - domain-specific workflow launch policy;
 - workflow-description semantics such as domain labels, capability wording,
@@ -48,6 +50,8 @@ Python can remain the surface for:
   specs and fetch requested Vontology fields;
 - generic file evidence extraction and typing-result persistence when the
   semantic typing/routing policy comes from represented artefacts;
+- generic event emission, event payload normalisation, persisted binding lookup,
+  workflow instance submission, idempotency, and telemetry;
 - generic knowledge-acquisition profile loading, validation, source telemetry,
   confidence arithmetic, and canonical relation mutation support when the
   policy values come from represented profile artefacts;
