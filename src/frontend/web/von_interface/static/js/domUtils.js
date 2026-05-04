@@ -1,6 +1,6 @@
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
-import { applyLocalModelPreferenceOverlay } from './utils/localModelPreferences.js';
+import { applyLocalModelPreferenceOverlay, getEffectiveLocalModelPreference } from './utils/localModelPreferences.js';
 
 export const elements = {};
 
@@ -902,6 +902,15 @@ export async function setModelInfoFooterText() {
     readinessIssues.add('settings');
   }
   const activeLlm = settings.active_llm;
+
+  // Prefer the local model preference over the server-resolved setting for display
+  // and status checks. This ensures the footer immediately reflects the user's
+  // local choice (e.g. Ollama when premium is disabled) rather than the DB value.
+  const localModelPref = getEffectiveLocalModelPreference();
+  const effectiveLlm = localModelPref.requestedLlm
+    ? { provider: localModelPref.requestedLlm.provider, model: localModelPref.requestedLlm.model }
+    : activeLlm;
+
   const userInfo = await getCurrentUserInfo(settings);
   const orgInfo = await getCurrentOrganisationInfo(settings);
 
@@ -912,6 +921,9 @@ export async function setModelInfoFooterText() {
     const llmParams = new URLSearchParams();
     if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
     if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
+    // Pass the effective provider so the status check reflects the user's local model
+    // preference rather than always checking the DB-stored (e.g. OpenAI) provider.
+    if (effectiveLlm?.provider) llmParams.set('effective_provider', effectiveLlm.provider);
     const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
     llmInfo = await fetchJsonWithTimeout(llmUrl, {
       cache: 'no-store',
@@ -1042,11 +1054,11 @@ export async function setModelInfoFooterText() {
   }
 
   {
-    const configuredProvider = (typeof activeLlm?.provider === 'string' && activeLlm.provider.trim())
-      ? activeLlm.provider.trim()
+    const configuredProvider = (typeof effectiveLlm?.provider === 'string' && effectiveLlm.provider.trim())
+      ? effectiveLlm.provider.trim()
       : ((typeof llmInfo?.provider === 'string' && llmInfo.provider.trim()) ? llmInfo.provider.trim() : '');
-    const configuredModel = (typeof activeLlm?.model === 'string' && activeLlm.model.trim())
-      ? activeLlm.model.trim()
+    const configuredModel = (typeof effectiveLlm?.model === 'string' && effectiveLlm.model.trim())
+      ? effectiveLlm.model.trim()
       : '';
     const requestedModel = executionTelemetry?.requestedModel || configuredModel;
     const actualModel = executionTelemetry?.actualModel || '';

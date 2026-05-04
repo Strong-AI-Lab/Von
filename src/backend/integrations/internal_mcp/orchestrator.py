@@ -174,6 +174,7 @@ from src.backend.services.settings_service import (
     INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
     INTERNAL_MCP_TOOL_BATCH_CAP_MAX,
     INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
+    get_model_llm_timeout,
 )
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
@@ -290,6 +291,37 @@ def _conversation_turn_llm_timeout_override_sec_from_data(
     return _coerce_conversation_turn_llm_timeout_override_sec(
         data.get(_CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY)
     )
+
+
+def _resolve_model_llm_timeout_override_sec(
+    llm_client: Any,
+    model: str | None,
+) -> float | None:
+    """Look up the per-model timeout from settings; fall back to the env-var default.
+
+    The provider is inferred from the LLM client's class name so we avoid
+    importing the concrete client classes here.
+    """
+    if isinstance(model, str) and model.strip():
+        try:
+            class_name = type(llm_client).__name__.lower()
+            if "ollama" in class_name:
+                provider = "ollama"
+            elif "openai" in class_name:
+                provider = "openai"
+            elif "gemini" in class_name:
+                provider = "gemini"
+            elif "anthropic" in class_name or "claude" in class_name:
+                provider = "anthropic"
+            else:
+                provider = None
+            if provider:
+                saved = get_model_llm_timeout(provider, model.strip())
+                if saved is not None:
+                    return saved
+        except Exception:
+            pass
+    return _default_conversation_turn_llm_timeout_override_sec()
 
 
 @dataclass(frozen=True)
@@ -34067,7 +34099,7 @@ class InternalMCPChatOrchestrator:
             step_callback=_step_callback,
         )
         conversation_turn_llm_timeout_override_sec = (
-            _default_conversation_turn_llm_timeout_override_sec()
+            _resolve_model_llm_timeout_override_sec(llm_client=llm_client, model=model)
         )
 
         workflow_inputs = {

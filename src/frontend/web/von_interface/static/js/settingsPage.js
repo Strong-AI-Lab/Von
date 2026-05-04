@@ -99,6 +99,7 @@ const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
 const INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
+const DEFAULT_MODEL_LLM_TIMEOUT_SEC = 45;
 
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
@@ -2828,6 +2829,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
+    // Load the saved timeout for the newly selected Ollama model
+    const selectedOllamaSelection = resolveOllamaSelection(false);
+    const selectedModel = selectedOllamaSelection?.model || selectedOllamaSelection?.value || '';
+    await loadModelLlmTimeout('ollama', selectedModel);
+  });
+  document.getElementById('saveModelLlmTimeoutButton')?.addEventListener('click', async () => {
+    const ollamaSelection = resolveOllamaSelection(false);
+    const model = ollamaSelection?.model || ollamaSelection?.value || '';
+    if (!model) {
+      showStatusMessage('settingsStatusMessage', 'Select an Ollama model first.', true);
+      return;
+    }
+    const input = document.getElementById('modelLlmTimeoutSec');
+    const rawValue = (input?.value || '').trim();
+    const timeoutSec = rawValue ? parseFloat(rawValue) : null;
+    try {
+      const result = await postJson('/api/settings/model_timeout', {
+        provider: 'ollama',
+        model,
+        timeout_sec: timeoutSec,
+      });
+      if (result?.success) {
+        const msg = timeoutSec
+          ? `Timeout saved: ${timeoutSec}s for ${model}`
+          : `Timeout cleared for ${model}`;
+        showStatusMessage('settingsStatusMessage', msg, false);
+      } else {
+        showStatusMessage('settingsStatusMessage', 'Failed to save timeout.', true);
+      }
+    } catch (e) {
+      showStatusMessage('settingsStatusMessage', 'Error saving timeout.', true);
+    }
   });
   document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
     const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
@@ -3006,11 +3039,21 @@ document.getElementById('loadOllamaModelsButton')?.addEventListener('click', loa
 document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', verifyOpenAiApiKey);
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 
+// Sync visibility of the remote hosts section based on the disable-scan toggle
+function syncOllamaRemoteHostsVisibility() {
+  const toggle = document.getElementById('disableRemoteOllamaScanToggle');
+  const section = document.getElementById('ollamaRemoteHostsSection');
+  if (toggle && section) {
+    section.style.display = toggle.checked ? 'none' : '';
+  }
+}
+
 // Add event listener for disable remote Ollama scan toggle
 document.addEventListener('DOMContentLoaded', () => {
   const disableRemoteOllamaScanToggle = document.getElementById('disableRemoteOllamaScanToggle');
   if (disableRemoteOllamaScanToggle) {
     disableRemoteOllamaScanToggle.addEventListener('change', async () => {
+      syncOllamaRemoteHostsVisibility();
       try {
         await saveAllSettings();
         showStatusMessage('settingsStatusMessage', 'Ollama scan setting saved successfully!', false);
@@ -3176,6 +3219,26 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
   }
 });
 
+async function loadModelLlmTimeout(provider, model) {
+  const input = document.getElementById('modelLlmTimeoutSec');
+  if (!input) return;
+  if (!provider || !model) {
+    input.value = '';
+    return;
+  }
+  try {
+    const resp = await fetch(
+      `/api/settings/model_timeout?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
+    );
+    if (!resp.ok) { input.value = ''; return; }
+    const data = await resp.json();
+    input.value = data.timeout_sec != null ? String(data.timeout_sec) : '';
+  } catch (e) {
+    console.warn('Failed to load model LLM timeout', e);
+    input.value = '';
+  }
+}
+
 async function loadAndDisplaySettings() {
   try {
     // Pass user context to get properly resolved LLM setting (user > org > global precedence)
@@ -3262,6 +3325,15 @@ async function loadAndDisplaySettings() {
 
     // Populate Ollama models and select the saved one
     await populateModelDropdown('globalModelSelect', currentOllamaModel);
+
+    // Load saved timeout for the currently active Ollama model
+    try {
+      const activeOllamaSelection = resolveOllamaSelection(false);
+      const activeModel = activeOllamaSelection?.model || activeOllamaSelection?.value || '';
+      if (activeModel) {
+        await loadModelLlmTimeout('ollama', activeModel);
+      }
+    } catch (_e) { /* non-critical */ }
 
     // Try to populate OpenAI models directly (without verification, if API key is already configured)
     if (preferredOpenAiModel) {
@@ -3450,6 +3522,7 @@ async function loadAndDisplaySettings() {
       if (remoteScanToggleEl) {
         const flag = Object.prototype.hasOwnProperty.call(settings, 'disable_remote_ollama_scan') ? !!settings.disable_remote_ollama_scan : false;
         remoteScanToggleEl.checked = !!flag;
+        syncOllamaRemoteHostsVisibility();
       }
     } catch { }
 

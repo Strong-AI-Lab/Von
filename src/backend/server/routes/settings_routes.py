@@ -52,6 +52,10 @@ from ...services.settings_service import (
     set_rag_embedder_setting,
     set_rag_llm_setting,
     set_server_default_llm_setting,
+    get_model_llm_timeout_overrides,
+    get_model_llm_timeout,
+    set_model_llm_timeout,
+    _make_model_timeout_key,
 )
 from ...services.feature_flags import (
     get_expert_footer_enabled,
@@ -578,6 +582,13 @@ def get_llm_info():
         active_llm = resolved or {}
         provider = active_llm.get("provider")
         model = active_llm.get("model")
+
+        # Allow the client to pass the effective provider when a local model preference
+        # overrides the DB-stored setting (e.g. premium disabled, Ollama selected locally).
+        # Only 'openai' and 'ollama' are accepted; any other value is ignored.
+        effective_provider_override = request.args.get("effective_provider")
+        if effective_provider_override in ("openai", "ollama"):
+            provider = effective_provider_override
 
         status = "unknown"
         error_message = None
@@ -3102,6 +3113,37 @@ def test_openai_model():
                 "reason": reason,
             }
         )
+
+
+@settings_bp.route("/model_timeout", methods=["GET"])
+def get_model_timeout_route():
+    """Return the saved LLM call timeout for a specific model, or all overrides."""
+    provider = str(request.args.get("provider") or "").strip().lower()
+    model = str(request.args.get("model") or "").strip()
+    overrides = get_model_llm_timeout_overrides()
+    if provider and model:
+        key = _make_model_timeout_key(provider, model)
+        timeout_sec = overrides.get(key)
+    else:
+        timeout_sec = None
+    return jsonify({"timeout_sec": timeout_sec, "overrides": overrides})
+
+
+@settings_bp.route("/model_timeout", methods=["POST"])
+def set_model_timeout_route():
+    """Save or clear the per-model LLM call timeout override."""
+    body = request.get_json(force=True) or {}
+    provider = str(body.get("provider") or "").strip().lower()
+    model = str(body.get("model") or "").strip()
+    if not provider or not model:
+        return jsonify({"error": "provider and model are required"}), 400
+    timeout_sec = body.get("timeout_sec")
+    try:
+        timeout_float = None if timeout_sec is None else float(timeout_sec)
+    except (TypeError, ValueError):
+        return jsonify({"error": "timeout_sec must be a number or null"}), 400
+    success = set_model_llm_timeout(provider, model, timeout_float)
+    return jsonify({"success": success})
 
 
 # To make this blueprint usable, it needs to be registered in your main Flask app,

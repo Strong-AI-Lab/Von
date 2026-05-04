@@ -41,6 +41,10 @@ AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME = (
     "auto_proceed_minimal_imposition_enabled"
 )
 
+# Per-model LLM call timeout overrides (Settings → Models section).
+# Stored as a dict mapping "{provider}:{model}" keys to timeout seconds (float).
+MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME = "model_llm_timeout_overrides"
+
 # Internal MCP orchestrator caps (Settings → Agent Configuration)
 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocations"
 INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
@@ -308,6 +312,7 @@ def get_all_settings_batch() -> Dict[str, Any]:
         INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME,
         DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME,
         REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME,
+        MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME,
     ]
 
     raw = get_settings_batch(setting_names)
@@ -364,6 +369,17 @@ def get_all_settings_batch() -> Dict[str, Any]:
         "require_human_review_for_high_impact_kb_writes": _coerce_bool(
             raw.get(REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME),
             default=False,
+        ),
+        "model_llm_timeout_overrides": (
+            {
+                k: v
+                for k, v in raw.get(
+                    MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME, {}
+                ).items()
+                if isinstance(k, str) and isinstance(v, (int, float)) and float(v) > 0
+            }
+            if isinstance(raw.get(MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME), dict)
+            else {}
         ),
     }
 
@@ -1921,6 +1937,65 @@ def set_preferred_language(lang_code: str) -> bool:
             pass
 
     return result
+
+
+# Per-model LLM call timeout overrides
+
+
+def _make_model_timeout_key(provider: str, model: str) -> str:
+    """Canonical dict key for per-model timeout storage: ``"{provider}:{model}"``."""
+    clean_provider = str(provider or "").strip().lower()
+    clean_model = str(model or "").strip()
+    return f"{clean_provider}:{clean_model}"
+
+
+def get_model_llm_timeout_overrides() -> dict[str, float]:
+    """Return the full per-model timeout override dict (``provider:model`` → seconds)."""
+    raw = get_setting(MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME)
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            continue
+        if coerced > 0:
+            result[key] = coerced
+    return result
+
+
+def get_model_llm_timeout(provider: str, model: str) -> float | None:
+    """Return the saved LLM call timeout for a specific model, or ``None`` if not set."""
+    overrides = get_model_llm_timeout_overrides()
+    key = _make_model_timeout_key(provider, model)
+    return overrides.get(key)
+
+
+def set_model_llm_timeout(provider: str, model: str, timeout_sec: float | None) -> bool:
+    """Save or clear the per-model LLM call timeout override (seconds)."""
+    from ..workflows.conversation_turn_llm_timeout import (
+        coerce_conversation_turn_llm_timeout_sec,
+    )
+
+    key = _make_model_timeout_key(provider, model)
+    if not key.replace(":", "").strip():
+        logger.error(
+            "set_model_llm_timeout requires non-empty provider and model"
+        )
+        return False
+    overrides = get_model_llm_timeout_overrides()
+    if timeout_sec is None:
+        overrides.pop(key, None)
+    else:
+        coerced = coerce_conversation_turn_llm_timeout_sec(timeout_sec)
+        if coerced is None:
+            overrides.pop(key, None)
+        else:
+            overrides[key] = coerced
+    return update_setting(MODEL_LLM_TIMEOUT_OVERRIDES_SETTING_NAME, overrides)
 
 
 # --- COMPATIBILITY FUNCTIONS ---

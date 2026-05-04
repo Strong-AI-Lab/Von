@@ -271,44 +271,47 @@
             <!-- Ollama Hosts Management -->
             <div id="ollamaHostsContainer">
                 <h3>Ollama Hosts</h3>
-                <p class="settings-note">
-                    Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
-                    comma-separated URLs,
-                    or add them manually below.
-                </p>
 
-                <div id="ollamaHostsList">
-                    <!-- Hosts will be populated here -->
+                <!-- Remote Host Scanning Control -->
+                <div class="inline-form inline-form-tight mb-1">
+                    <input type="checkbox" id="disableRemoteOllamaScanToggle"
+                        aria-describedby="disableRemoteOllamaScanHelp" />
+                    <label for="disableRemoteOllamaScanToggle" class="ml-1"
+                        title="When enabled, only local Ollama hosts (localhost/127.0.0.1) will be scanned for models; remote hosts will be skipped to avoid slow timeouts.">Disable
+                        remote Ollama host scanning</label>
+                </div>
+                <div class="mb-2">
+                    <small id="disableRemoteOllamaScanHelp" class="settings-note">Enable this to prevent slow timeouts when
+                        scanning remote Ollama hosts. Only local hosts (localhost/127.0.0.1) will be scanned for
+                        available models.</small>
                 </div>
 
-                <div class="inline-form">
-                    <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
-                    <button id="addOllamaHostButton" class="btn-azure">
-                        Add Host
+                <!-- Remote hosts section — hidden when remote scanning is disabled -->
+                <div id="ollamaRemoteHostsSection">
+                    <p class="settings-note">
+                        Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
+                        comma-separated URLs, or add them manually below.
+                    </p>
+
+                    <div id="ollamaHostsList">
+                        <!-- Hosts will be populated here -->
+                    </div>
+
+                    <div class="inline-form">
+                        <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
+                        <button id="addOllamaHostButton" class="btn-azure">
+                            Add Host
+                        </button>
+                    </div>
+
+                    <button id="refreshOllamaHostsButton" class="btn-success mr-1">
+                        Refresh from Environment
+                    </button>
+
+                    <button id="loadOllamaModelsButton" class="btn-info">
+                        Load All Models
                     </button>
                 </div>
-
-                <button id="refreshOllamaHostsButton" class="btn-success mr-1">
-                    Refresh from Environment
-                </button>
-
-                <button id="loadOllamaModelsButton" class="btn-info">
-                    Load All Models
-                </button>
-            </div>
-
-            <!-- Remote Host Scanning Control -->
-            <div class="inline-form inline-form-tight mb-2 mt-3">
-                <input type="checkbox" id="disableRemoteOllamaScanToggle"
-                    aria-describedby="disableRemoteOllamaScanHelp" />
-                <label for="disableRemoteOllamaScanToggle" class="ml-1"
-                    title="When enabled, only local Ollama hosts (localhost/127.0.0.1) will be scanned for models; remote hosts will be skipped to avoid slow timeouts.">Disable
-                    remote Ollama host scanning</label>
-            </div>
-            <div>
-                <small id="disableRemoteOllamaScanHelp" class="settings-note">Enable this to prevent slow timeouts when
-                    scanning remote Ollama hosts. Only local hosts (localhost/127.0.0.1) will be scanned for available
-                    models.</small>
             </div>
 
             <!-- Model Selection -->
@@ -316,6 +319,21 @@
             <select id="globalModelSelect" name="global_ollama_model">
                 <option value="">Loading models...</option>
             </select>
+
+            <!-- Per-model LLM call timeout -->
+            <div class="inline-form inline-form-tight mb-2 mt-3">
+                <label for="modelLlmTimeoutSec">LLM call timeout (seconds):</label>
+                <input type="number" id="modelLlmTimeoutSec" min="5" max="600"
+                       placeholder="45 (default)"
+                       aria-describedby="modelLlmTimeoutSecHelp" />
+                <button id="saveModelLlmTimeoutButton" class="btn-azure">Save timeout</button>
+            </div>
+            <div>
+                <small id="modelLlmTimeoutSecHelp" class="settings-note">
+                    Default: 45 seconds. Saved per model — applies to the currently selected Ollama
+                    model above. Leave blank to clear the override and use the default.
+                </small>
+            </div>
 
             <div id="settingsStatusMessage" class="status-message" role="alert">
                 <!-- Messages will appear here -->
