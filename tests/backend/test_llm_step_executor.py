@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from src.backend.services import prompt_template_service as pts
 from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
     WorkflowEnvironment,
@@ -11,6 +12,7 @@ from src.backend.workflows.conversation_turn_llm_timeout import (
 )
 from src.backend.workflows.llm_step_executor import execute_llm_step
 from src.backend.workflows.llm_step_executor import _compose_llm_prompt
+from src.backend.workflows import prompt_metadata_resolution as pmr
 
 
 def _build_request(*, llm_response: str) -> WorkflowActionRequest:
@@ -278,6 +280,117 @@ def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["validation"]["status"] == "failed"
     assert "json_parse_failed" in str(envelope["validation"]["reason"] or "")
+
+
+def test_execute_llm_step_falls_back_to_defaults_when_json_unparseable_and_defaults_exist() -> None:
+    """When the model returns unparseable prose but all required fields have defaults,
+    the step should succeed using those defaults rather than failing the turn."""
+    llm_client = MagicMock()
+    llm_client.generate.return_value = "Sure, I can help with that!"  # not JSON
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={},
+        prompt_contract={"prompt_text": "Return the expected-outcome JSON."},
+        validation_policy={
+            "output_format": "json_value",
+            "json_field_defaults": {
+                "expected_outcome_summary": "Answer the user's request accurately.",
+                "grounding_requirement": "Use available context.",
+                "required_tools": [],
+            },
+            "required_json_fields": [
+                "expected_outcome_summary",
+                "grounding_requirement",
+                "required_tools",
+            ],
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    validated = result.outputs["validated_json"]
+    assert validated["expected_outcome_summary"] == "Answer the user's request accurately."
+    assert validated["grounding_requirement"] == "Use available context."
+    assert validated["required_tools"] == []
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["status"] == "success"
+    assert envelope["validation"].get("json_object_defaulted_from_non_object") is True
+
+
+def test_execute_llm_step_uses_model_family_prompt_variant(monkeypatch) -> None:
+    texts = {
+        "#V#tool_prompt": [
+            {"predicate": "#V#hasContent", "text": "Base tool prompt for {task}"},
+        ],
+        "#V#ollama_tool_prompt": [
+            {
+                "predicate": "#V#hasContent",
+                "text": "Ollama tool prompt for {task}",
+            },
+            {"predicate": "#V#forModelFamily", "text": "ollama"},
+        ],
+    }
+    docs = {
+        "#V#tool_prompt": {
+            "concept_id": "#V#tool_prompt",
+            "relationships": {
+                "#V#hasModelPromptVariant": ["#V#ollama_tool_prompt"],
+            },
+        },
+        "#V#ollama_tool_prompt": {
+            "concept_id": "#V#ollama_tool_prompt",
+            "relationships": {},
+        },
+    }
+
+    def _fake_find_one(query, projection=None):
+        concept_id = query.get("concept_id") if isinstance(query, dict) else None
+        if concept_id not in docs:
+            return None
+        if projection == {"_id": 1}:
+            return {"_id": concept_id}
+        return docs[concept_id]
+
+    monkeypatch.setattr(pmr.ConceptsRepository, "find_one", _fake_find_one)
+    monkeypatch.setattr(
+        pmr,
+        "get_texts_for_concept",
+        lambda concept_id, *args, **kwargs: texts.get(concept_id, []),
+    )
+    monkeypatch.setattr(
+        pts,
+        "get_texts_for_concept",
+        lambda concept_id, *args, **kwargs: texts.get(concept_id, []),
+    )
+    llm_client = MagicMock()
+    llm_client.generate.return_value = '{"ok": true}'
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            model="local-reasoner:7b",
+        ),
+        data={"task": "workflow tools", "requested_client_type": "ollama"},
+        prompt_contract={"requested_prompt_concept_ids": ["#V#tool_prompt"]},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    llm_client.generate.assert_called_once()
+    assert llm_client.generate.call_args.args[0] == "Ollama tool prompt for workflow tools"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["base_prompt_id"] == "#V#tool_prompt"
+    assert envelope["selected_prompt_id"] == "#V#ollama_tool_prompt"
+    assert envelope["selected_prompt_source"] == "prompt_contract:model_variant"
+    assert envelope["prompt_variant_selection"]["match_reason"] == "model_family"
+    assert envelope["prompt_variant_selection"]["fallback_reason"] is None
 
 
 def test_execute_llm_step_passes_context_lineage_to_gateway_llm(

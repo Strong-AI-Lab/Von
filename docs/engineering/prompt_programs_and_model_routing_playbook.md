@@ -135,6 +135,13 @@ When a model-specific prompt variant appears useful, represent it as a prompt
 concept with lineage and replay evidence. Do not hide the variant in Python
 branches keyed by provider or model name.
 
+Model- or model-family-specific prompt variants should be linked from the base
+prompt concept through represented Vontology metadata. Runtime support may
+select variants by exact model, then model family or capability profile, but
+the base prompt remains the default. If no matching variant exists, execution
+must continue with the base prompt and record the fallback in telemetry rather
+than treating the missing variant as a turn failure.
+
 ## 8. Workflow routing guardrails
 
 When workflow discovery, continuation, and selector preparation interact, keep

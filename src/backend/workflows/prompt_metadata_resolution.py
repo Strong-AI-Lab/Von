@@ -85,6 +85,62 @@ _MODEL_PREFERENCE_PREDICATES: tuple[str, ...] = (
     "#V#uses_llm_model",
     "uses_llm_model",
 )
+_MODEL_PROMPT_VARIANT_PREDICATES: tuple[str, ...] = (
+    "#V#hasModelPromptVariant",
+    "hasModelPromptVariant",
+    "#V#has_model_prompt_variant",
+    "has_model_prompt_variant",
+    "#V#hasModelSpecificPromptVariant",
+    "hasModelSpecificPromptVariant",
+    "#V#has_model_specific_prompt_variant",
+    "has_model_specific_prompt_variant",
+    "#V#hasPromptVariant",
+    "hasPromptVariant",
+    "#V#has_prompt_variant",
+    "has_prompt_variant",
+)
+_MODEL_PROMPT_VARIANT_MODEL_PREDICATES: tuple[str, ...] = (
+    "#V#forModel",
+    "forModel",
+    "#V#for_model",
+    "for_model",
+    "#V#targetsModel",
+    "targetsModel",
+    "#V#targets_model",
+    "targets_model",
+    "#V#matchesModel",
+    "matchesModel",
+    "#V#matches_model",
+    "matches_model",
+)
+_MODEL_PROMPT_VARIANT_FAMILY_PREDICATES: tuple[str, ...] = (
+    "#V#forModelFamily",
+    "forModelFamily",
+    "#V#for_model_family",
+    "for_model_family",
+    "#V#targetsModelFamily",
+    "targetsModelFamily",
+    "#V#targets_model_family",
+    "targets_model_family",
+    "#V#forModelProvider",
+    "forModelProvider",
+    "#V#for_model_provider",
+    "for_model_provider",
+)
+_MODEL_PROMPT_VARIANT_CAPABILITY_PREDICATES: tuple[str, ...] = (
+    "#V#forModelCapability",
+    "forModelCapability",
+    "#V#for_model_capability",
+    "for_model_capability",
+    "#V#forModelCapabilityProfile",
+    "forModelCapabilityProfile",
+    "#V#for_model_capability_profile",
+    "for_model_capability_profile",
+    "#V#targetsModelCapability",
+    "targetsModelCapability",
+    "#V#targets_model_capability",
+    "targets_model_capability",
+)
 _ALLOWED_TOOL_PREDICATES: tuple[str, ...] = (
     "#V#allowsTool",
     "allowsTool",
@@ -122,6 +178,7 @@ _PROMPT_METADATA_ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
     "argument_hint": _ARGUMENT_HINT_PREDICATES,
     "agent_profile_ids": _AGENT_PROFILE_PREDICATES,
     "model_preference": _MODEL_PREFERENCE_PREDICATES,
+    "model_prompt_variant_ids": _MODEL_PROMPT_VARIANT_PREDICATES,
     "allowed_tools": _ALLOWED_TOOL_PREDICATES,
     "prompt_scope": _PROMPT_SCOPE_PREDICATES,
     "prompt_variables": _PROMPT_VARIABLES_PREDICATES,
@@ -131,6 +188,7 @@ _PROMPT_METADATA_ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
 
 _LIST_METADATA_FIELDS: tuple[str, ...] = (
     "agent_profile_ids",
+    "model_prompt_variant_ids",
     "allowed_tools",
     "prompt_variables",
     "tool_resolution_priority",
@@ -155,6 +213,16 @@ class WorkflowPromptResolution:
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class WorkflowPromptVariantResolution:
+    base_prompt_concept_id: str | None = None
+    selected_prompt_concept_id: str | None = None
+    prompt_text: str | None = None
+    rendered_variables: Mapping[str, Any] = field(default_factory=dict)
+    match_reason: str = "base_prompt"
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -165,6 +233,14 @@ def _normalise_predicate_key(value: Any) -> str:
         text = text[3:]
     text = re.sub(r"[-\s]+", "_", text)
     return text.lower()
+
+
+def _normalise_match_token(value: Any) -> str:
+    text = _safe_text(value).lower().replace(": ", ":")
+    if text.startswith("#v#"):
+        text = text[3:]
+    text = re.sub(r"\s+", "_", text)
+    return text
 
 
 def _ordered_unique_strings(values: Iterable[Any] | Any) -> list[str]:
@@ -181,6 +257,16 @@ def _ordered_unique_strings(values: Iterable[Any] | Any) -> list[str]:
         seen.add(text)
         ordered.append(text)
     return ordered
+
+
+def _ordered_unique_tokens(values: Iterable[Any] | Any) -> list[str]:
+    return [
+        token
+        for token in (
+            _normalise_match_token(value) for value in _ordered_unique_strings(values)
+        )
+        if token
+    ]
 
 
 def _is_nonempty_value(value: Any) -> bool:
@@ -221,7 +307,9 @@ def _coerce_multi_value_text(value: Any) -> list[str]:
 def _detect_template_variables(prompt_text: str | None) -> list[str]:
     if not isinstance(prompt_text, str):
         return []
-    return _ordered_unique_strings(match.group(1) for match in _PROMPT_VARIABLE_RE.finditer(prompt_text))
+    return _ordered_unique_strings(
+        match.group(1) for match in _PROMPT_VARIABLE_RE.finditer(prompt_text)
+    )
 
 
 def _normalise_validation_policy(value: Any) -> str:
@@ -374,6 +462,356 @@ def _load_concept_metadata(concept_id: str) -> tuple[dict[str, Any], dict[str, A
         "metadata_sources": sources,
     }
     return metadata, diagnostics
+
+
+def _select_variant_values(
+    *,
+    concept_id: str,
+    aliases: Sequence[str],
+) -> list[str]:
+    rows = _load_text_rows(concept_id)
+    relationship_index = _load_relationship_index(concept_id)
+    text_values, _text_predicates = _select_text_values(rows, aliases)
+    relationship_values, _relationship_predicates = _select_relationship_values(
+        relationship_index,
+        aliases,
+    )
+    return _ordered_unique_strings([*text_values, *relationship_values])
+
+
+def _load_model_prompt_variant_candidates(
+    base_prompt_concept_id: str,
+) -> list[dict[str, Any]]:
+    variant_ids = _select_variant_values(
+        concept_id=base_prompt_concept_id,
+        aliases=_MODEL_PROMPT_VARIANT_PREDICATES,
+    )
+    candidates: list[dict[str, Any]] = []
+    for variant_id in variant_ids:
+        if not variant_id:
+            continue
+        candidates.append(
+            {
+                "prompt_concept_id": variant_id,
+                "model_ids": _select_variant_values(
+                    concept_id=variant_id,
+                    aliases=_MODEL_PROMPT_VARIANT_MODEL_PREDICATES,
+                ),
+                "model_families": _select_variant_values(
+                    concept_id=variant_id,
+                    aliases=_MODEL_PROMPT_VARIANT_FAMILY_PREDICATES,
+                ),
+                "model_capabilities": _select_variant_values(
+                    concept_id=variant_id,
+                    aliases=_MODEL_PROMPT_VARIANT_CAPABILITY_PREDICATES,
+                ),
+            }
+        )
+    return candidates
+
+
+def _provider_from_model_token(model: str) -> tuple[str | None, str]:
+    cleaned = _safe_text(model).replace(": ", ":")
+    if ":" not in cleaned:
+        return None, cleaned
+    provider, remainder = cleaned.split(":", 1)
+    provider_token = _normalise_match_token(provider)
+    if provider_token in {"openai", "anthropic", "gemini", "ollama", "deepseek"}:
+        return provider_token, remainder.strip()
+    return None, cleaned
+
+
+def _model_family_tokens(model: str) -> list[str]:
+    _provider, bare_model = _provider_from_model_token(model)
+    tokens: list[str] = []
+    bare_token = _normalise_match_token(bare_model)
+    if bare_token:
+        tokens.append(bare_token)
+    if ":" in bare_model:
+        family = bare_model.split(":", 1)[0]
+        family_token = _normalise_match_token(family)
+        if family_token:
+            tokens.append(family_token)
+    if "-" in bare_model:
+        parts = [part for part in bare_model.split("-") if part]
+        for index in range(len(parts), 0, -1):
+            token = _normalise_match_token("-".join(parts[:index]))
+            if token:
+                tokens.append(token)
+    return _ordered_unique_tokens(tokens)
+
+
+def _registry_model_entries(
+    registry_snapshot: Mapping[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    if not isinstance(registry_snapshot, Mapping):
+        return []
+    models = registry_snapshot.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, (str, bytes, bytearray)):
+        return []
+    return [entry for entry in models if isinstance(entry, Mapping)]
+
+
+def _entry_matches_selected_model(
+    entry: Mapping[str, Any],
+    selected_model: str,
+) -> bool:
+    selected_tokens = set(_ordered_unique_tokens([selected_model]))
+    provider, bare_model = _provider_from_model_token(selected_model)
+    selected_tokens.update(_ordered_unique_tokens([bare_model]))
+    if provider:
+        selected_tokens.add(f"{provider}:{_normalise_match_token(bare_model)}")
+
+    entry_tokens = _ordered_unique_tokens(
+        [
+            entry.get("model_id"),
+            entry.get("concept_id"),
+            entry.get("registry_entry_id"),
+        ]
+    )
+    aliases = entry.get("model_aliases")
+    if isinstance(aliases, Sequence) and not isinstance(
+        aliases,
+        (str, bytes, bytearray),
+    ):
+        entry_tokens.extend(_ordered_unique_tokens(aliases))
+    entry_provider = _normalise_match_token(entry.get("provider"))
+    for token in list(entry_tokens):
+        if entry_provider:
+            entry_tokens.append(f"{entry_provider}:{token}")
+    return bool(set(entry_tokens) & selected_tokens)
+
+
+def _model_match_context(
+    *,
+    selected_model: str | None,
+    selected_candidate: Mapping[str, Any] | None = None,
+    registry_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    model_tokens = _ordered_unique_tokens([selected_model])
+    family_tokens: list[str] = []
+    capability_tokens: list[str] = []
+
+    provider, bare_model = _provider_from_model_token(selected_model or "")
+    if bare_model and bare_model != selected_model:
+        model_tokens.extend(_ordered_unique_tokens([bare_model]))
+    if provider:
+        model_tokens.extend(_ordered_unique_tokens([f"{provider}:{bare_model}"]))
+        family_tokens.extend(_ordered_unique_tokens([provider, f"provider:{provider}"]))
+    family_tokens.extend(_model_family_tokens(bare_model or selected_model or ""))
+
+    candidate = selected_candidate if isinstance(selected_candidate, Mapping) else {}
+    candidate_provider = _normalise_match_token(candidate.get("provider"))
+    candidate_locality = _normalise_match_token(candidate.get("locality"))
+    if candidate_provider:
+        family_tokens.extend(
+            _ordered_unique_tokens([candidate_provider, f"provider:{candidate_provider}"])
+        )
+    if candidate_locality:
+        family_tokens.extend(
+            _ordered_unique_tokens([candidate_locality, f"locality:{candidate_locality}"])
+        )
+
+    for key in (
+        "capability_profile",
+        "capability_profiles",
+        "capabilities",
+        "model_capabilities",
+        "api_surface",
+    ):
+        capability_tokens.extend(_ordered_unique_tokens(candidate.get(key)))
+
+    for entry in _registry_model_entries(registry_snapshot):
+        if selected_model and not _entry_matches_selected_model(entry, selected_model):
+            continue
+        entry_provider = _normalise_match_token(entry.get("provider"))
+        entry_locality = _normalise_match_token(entry.get("locality"))
+        if entry_provider:
+            family_tokens.extend(
+                _ordered_unique_tokens([entry_provider, f"provider:{entry_provider}"])
+            )
+        if entry_locality:
+            family_tokens.extend(
+                _ordered_unique_tokens([entry_locality, f"locality:{entry_locality}"])
+            )
+        model_tokens.extend(
+            _ordered_unique_tokens(
+                [entry.get("model_id"), entry.get("concept_id"), entry.get("registry_entry_id")]
+            )
+        )
+        api_profiles = entry.get("api_profiles")
+        if isinstance(api_profiles, Sequence) and not isinstance(
+            api_profiles,
+            (str, bytes, bytearray),
+        ):
+            for profile in api_profiles:
+                if isinstance(profile, Mapping):
+                    capability_tokens.extend(
+                        _ordered_unique_tokens(
+                            [profile.get("profile_concept_id"), profile.get("api_surface")]
+                        )
+                    )
+
+    return {
+        "model_tokens": _ordered_unique_tokens(model_tokens),
+        "family_tokens": _ordered_unique_tokens(family_tokens),
+        "capability_tokens": _ordered_unique_tokens(capability_tokens),
+    }
+
+
+def _match_variant_candidate(
+    candidate: Mapping[str, Any],
+    model_context: Mapping[str, Sequence[str]],
+) -> tuple[str | None, list[str]]:
+    exact_matches = sorted(
+        set(_ordered_unique_tokens(candidate.get("model_ids")))
+        & set(_ordered_unique_tokens(model_context.get("model_tokens")))
+    )
+    if exact_matches:
+        return "exact_model", exact_matches
+
+    family_matches = sorted(
+        set(_ordered_unique_tokens(candidate.get("model_families")))
+        & set(_ordered_unique_tokens(model_context.get("family_tokens")))
+    )
+    if family_matches:
+        return "model_family", family_matches
+
+    capability_matches = sorted(
+        set(_ordered_unique_tokens(candidate.get("model_capabilities")))
+        & set(_ordered_unique_tokens(model_context.get("capability_tokens")))
+    )
+    if capability_matches:
+        return "model_capability", capability_matches
+    return None, []
+
+
+def resolve_model_prompt_variant(
+    *,
+    base_prompt_concept_id: str | None,
+    base_prompt_text: str | None,
+    variables: Mapping[str, Any] | None = None,
+    selected_model: str | None = None,
+    selected_candidate: Mapping[str, Any] | None = None,
+    registry_snapshot: Mapping[str, Any] | None = None,
+    max_chars: int = 24000,
+) -> WorkflowPromptVariantResolution:
+    base_prompt_id = _safe_text(base_prompt_concept_id) or None
+    base_text = base_prompt_text if isinstance(base_prompt_text, str) else None
+    render_variables = dict(variables) if isinstance(variables, Mapping) else {}
+    diagnostics: dict[str, Any] = {
+        "base_prompt_concept_id": base_prompt_id,
+        "selected_model": _safe_text(selected_model) or None,
+        "variant_count": 0,
+        "match_reason": "base_prompt",
+        "fallback_reason": None,
+    }
+
+    if not base_prompt_id:
+        diagnostics["fallback_reason"] = "base_prompt_concept_id_missing"
+        return WorkflowPromptVariantResolution(
+            base_prompt_concept_id=base_prompt_id,
+            selected_prompt_concept_id=base_prompt_id,
+            prompt_text=base_text,
+            rendered_variables=render_variables,
+            diagnostics=diagnostics,
+        )
+
+    candidates = _load_model_prompt_variant_candidates(base_prompt_id)
+    model_context = _model_match_context(
+        selected_model=selected_model,
+        selected_candidate=selected_candidate,
+        registry_snapshot=registry_snapshot,
+    )
+    diagnostics["variant_count"] = len(candidates)
+    diagnostics["model_context"] = model_context
+    diagnostics["candidate_prompt_ids"] = [
+        candidate.get("prompt_concept_id") for candidate in candidates
+    ]
+
+    if not candidates:
+        diagnostics["fallback_reason"] = "no_prompt_variants_declared"
+        return WorkflowPromptVariantResolution(
+            base_prompt_concept_id=base_prompt_id,
+            selected_prompt_concept_id=base_prompt_id,
+            prompt_text=base_text,
+            rendered_variables=render_variables,
+            diagnostics=diagnostics,
+        )
+
+    matched_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        match_reason, matched_tokens = _match_variant_candidate(candidate, model_context)
+        if not match_reason:
+            continue
+        matched = dict(candidate)
+        matched["match_reason"] = match_reason
+        matched["matched_tokens"] = matched_tokens
+        matched_candidates.append(matched)
+
+    reason_order = {"exact_model": 0, "model_family": 1, "model_capability": 2}
+    matched_candidates.sort(key=lambda item: reason_order.get(str(item.get("match_reason")), 99))
+
+    prompt_service = PromptTemplateService(default_max_chars=max_chars)
+    render_warnings: list[dict[str, Any]] = []
+    for candidate in matched_candidates:
+        variant_id = _safe_text(candidate.get("prompt_concept_id"))
+        if not variant_id:
+            continue
+        try:
+            rendered = prompt_service.render_prompt(
+                [variant_id],
+                variables=render_variables,
+                fallback=None,
+                max_chars=max_chars,
+            )
+        except Exception as exc:
+            render_warnings.append(
+                {
+                    "prompt_concept_id": variant_id,
+                    "error": str(exc),
+                }
+            )
+            continue
+        if rendered is None or not rendered.text.strip():
+            render_warnings.append(
+                {
+                    "prompt_concept_id": variant_id,
+                    "error": "prompt_text_missing_or_empty",
+                }
+            )
+            continue
+
+        match_reason = _safe_text(candidate.get("match_reason")) or "model_variant"
+        diagnostics.update(
+            {
+                "selected_prompt_concept_id": rendered.prompt_id or variant_id,
+                "match_reason": match_reason,
+                "matched_tokens": list(candidate.get("matched_tokens") or []),
+                "fallback_reason": None,
+                "render_warnings": render_warnings,
+            }
+        )
+        return WorkflowPromptVariantResolution(
+            base_prompt_concept_id=base_prompt_id,
+            selected_prompt_concept_id=rendered.prompt_id or variant_id,
+            prompt_text=rendered.text,
+            rendered_variables=dict(rendered.variables),
+            match_reason=match_reason,
+            diagnostics=diagnostics,
+        )
+
+    diagnostics["fallback_reason"] = (
+        "matched_variants_unrenderable" if matched_candidates else "no_matching_variant"
+    )
+    diagnostics["render_warnings"] = render_warnings
+    return WorkflowPromptVariantResolution(
+        base_prompt_concept_id=base_prompt_id,
+        selected_prompt_concept_id=base_prompt_id,
+        prompt_text=base_text,
+        rendered_variables=render_variables,
+        diagnostics=diagnostics,
+    )
 
 
 def normalise_prompt_metadata_defaults(
@@ -593,7 +1031,9 @@ def resolve_workflow_prompt_metadata(
         merged_metadata["allowed_tools"] = resolved_allowed_tools
 
     available_tool_set = frozenset(
-        _ordered_unique_strings(available_tools) if available_tools is not None else _default_available_tool_names()
+        _ordered_unique_strings(available_tools)
+        if available_tools is not None
+        else _default_available_tool_names()
     )
     unavailable_tools = [
         tool
@@ -679,8 +1119,10 @@ __all__ = [
     "PROMPT_VALIDATION_POLICY_WARN",
     "WORKFLOW_STEP_PROMPT_LINK_PREDICATE_ALIASES",
     "WorkflowPromptResolution",
+    "WorkflowPromptVariantResolution",
     "build_workflow_prompt_contract",
     "normalise_prompt_metadata_defaults",
     "normalise_prompt_validation_policy",
+    "resolve_model_prompt_variant",
     "resolve_workflow_prompt_metadata",
 ]

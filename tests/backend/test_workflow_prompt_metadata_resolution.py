@@ -136,3 +136,73 @@ def test_resolve_workflow_prompt_metadata_warns_for_unavailable_tools():
     assert resolution.diagnostics["warnings"] == [
         "prompt_allowed_tools_unavailable:missing.tool"
     ]
+
+
+def test_resolve_model_prompt_variant_prefers_exact_model_then_base_fallback():
+    texts = {
+        "#V#base_prompt": [
+            {"predicate": "#V#hasContent", "text": "Base prompt for {task}"},
+        ],
+        "#V#family_prompt": [
+            {"predicate": "#V#hasContent", "text": "Family prompt for {task}"},
+            {"predicate": "#V#forModelFamily", "text": "ollama"},
+        ],
+        "#V#exact_prompt": [
+            {"predicate": "#V#hasContent", "text": "Exact prompt for {task}"},
+            {"predicate": "#V#forModel", "text": "ollama:local-reasoner:7b"},
+        ],
+    }
+    docs = {
+        "#V#base_prompt": {
+            "concept_id": "#V#base_prompt",
+            "relationships": {
+                "#V#hasModelPromptVariant": [
+                    "#V#family_prompt",
+                    "#V#exact_prompt",
+                ],
+            },
+        },
+        "#V#family_prompt": {
+            "concept_id": "#V#family_prompt",
+            "relationships": {},
+        },
+        "#V#exact_prompt": {
+            "concept_id": "#V#exact_prompt",
+            "relationships": {},
+        },
+    }
+
+    patches = _install_prompt_resolution_fixtures(texts=texts, docs=docs)
+    with patches[0], patches[1], patches[2]:
+        resolution = pmr.resolve_workflow_prompt_metadata(
+            prompt_concept_ids=["#V#base_prompt"],
+            available_tools=[],
+        )
+        exact = pmr.resolve_model_prompt_variant(
+            base_prompt_concept_id="#V#base_prompt",
+            base_prompt_text=resolution.prompt_text,
+            variables={"task": "tool use"},
+            selected_model="ollama:local-reasoner:7b",
+            selected_candidate={"provider": "ollama", "locality": "local"},
+        )
+        fallback = pmr.resolve_model_prompt_variant(
+            base_prompt_concept_id="#V#base_prompt",
+            base_prompt_text="Base prompt for tool use",
+            variables={"task": "tool use"},
+            selected_model="openai:gpt-test",
+            selected_candidate={"provider": "openai", "locality": "external"},
+        )
+
+    assert resolution.metadata["model_prompt_variant_ids"] == [
+        "#V#family_prompt",
+        "#V#exact_prompt",
+    ]
+    assert exact.selected_prompt_concept_id == "#V#exact_prompt"
+    assert exact.prompt_text == "Exact prompt for tool use"
+    assert exact.match_reason == "exact_model"
+    assert exact.diagnostics["base_prompt_concept_id"] == "#V#base_prompt"
+    assert exact.diagnostics["match_reason"] == "exact_model"
+    assert fallback.selected_prompt_concept_id == "#V#base_prompt"
+    assert fallback.prompt_text == "Base prompt for tool use"
+    assert fallback.diagnostics["match_reason"] == "base_prompt"
+    assert fallback.diagnostics["fallback_reason"] == "no_matching_variant"

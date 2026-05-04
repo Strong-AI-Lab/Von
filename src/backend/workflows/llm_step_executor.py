@@ -24,6 +24,7 @@ from ..services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
     classify_required_tool_operation,
 )
+from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_timeout_sec,
@@ -150,6 +151,7 @@ def _tool_call_validation_failure_context_from_data(
     if not failures_by_tool:
         return None
 
+    repair_decision = data.get("tool_call_repair_decision")
     return {
         "failures_by_tool": failures_by_tool,
         "failed_tools": _coerce_tool_name_list(
@@ -162,9 +164,7 @@ def _tool_call_validation_failure_context_from_data(
             data.get("tool_call_repair_stop_reason")
         ),
         "repair_decision": (
-            dict(data.get("tool_call_repair_decision"))
-            if isinstance(data.get("tool_call_repair_decision"), Mapping)
-            else None
+            dict(repair_decision) if isinstance(repair_decision, Mapping) else None
         ),
     }
 
@@ -839,7 +839,15 @@ def _build_validated_json_outputs(
     from .durable.planning_workflow import _extract_json_payload
 
     parsed_payload, parse_mode = _extract_json_payload(response_text)
-    if parsed_payload is None:
+
+    validation_policy_map = (
+        validation_policy if isinstance(validation_policy, Mapping) else {}
+    )
+    field_defaults = _json_field_defaults(validation_policy_map)
+    required_fields = _json_required_fields(validation_policy_map)
+    defaultable_object_contract = bool(field_defaults)
+
+    if parsed_payload is None and not defaultable_object_contract:
         return (
             {},
             {
@@ -849,14 +857,10 @@ def _build_validated_json_outputs(
             },
         )
 
-    validation_policy_map = (
-        validation_policy if isinstance(validation_policy, Mapping) else {}
-    )
-    field_defaults = _json_field_defaults(validation_policy_map)
-    required_fields = _json_required_fields(validation_policy_map)
-    defaultable_object_contract = bool(field_defaults)
     coerced_non_object = False
-    if not isinstance(parsed_payload, Mapping) and defaultable_object_contract:
+    if (
+        parsed_payload is None or not isinstance(parsed_payload, Mapping)
+    ) and defaultable_object_contract:
         parsed_payload = {}
         coerced_non_object = True
 
@@ -1098,6 +1102,62 @@ def _build_gateway_runtime(
     )
 
 
+def _selected_candidate_context_from_request(
+    request: WorkflowActionRequest,
+) -> dict[str, Any] | None:
+    candidate: dict[str, Any] = {}
+    provider = _context_string(
+        request.data.get("requested_client_type")
+        or request.data.get("selected_model_provider")
+        or request.data.get("model_provider")
+    )
+    if provider:
+        candidate["provider"] = provider
+        if provider.lower() == "ollama":
+            candidate.setdefault("locality", "local")
+    return candidate or None
+
+
+def _select_model_context_for_prompt_variant(
+    *,
+    request: WorkflowActionRequest,
+    stage: str,
+) -> tuple[str | None, Mapping[str, Any] | None, Mapping[str, Any] | None, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "source": "environment_default",
+        "stage": stage,
+    }
+    selected_model = request.environment.model
+    selected_candidate = _selected_candidate_context_from_request(request)
+    registry_snapshot: Mapping[str, Any] | None = None
+
+    if not request.environment.gateway:
+        return selected_model, selected_candidate, registry_snapshot, diagnostics
+
+    try:
+        orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
+            _build_gateway_runtime(request)
+        )
+        selector = getattr(orchestrator, "_select_model_for_stage", None)
+        if callable(selector):
+            selector_model = selector(
+                stage=stage,
+                default_model=request.environment.model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                prefer_default_model=_prefer_default_model_for_request(request),
+            )
+            selected_model = _context_string(selector_model) or selected_model
+            diagnostics["source"] = "workflow_model_selector"
+    except Exception as exc:
+        diagnostics["source"] = "environment_default_after_selector_error"
+        diagnostics["selector_error"] = str(exc)
+
+    return selected_model, selected_candidate, registry_snapshot, diagnostics
+
+
 def _build_result(
     *,
     request: WorkflowActionRequest,
@@ -1116,6 +1176,7 @@ def _build_result(
     required_prompt_tools: Sequence[str] | None = None,
     required_tool_obligation_ledger: Mapping[str, Any] | None = None,
     max_tool_invocations: int | None = None,
+    prompt_variant_selection: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     validated_outputs, validation_summary = _apply_validation_policy(
         request=request,
@@ -1128,6 +1189,11 @@ def _build_result(
     llm_step_envelope = {
         "execution_mode": "llm",
         "action_id": request.action_id,
+        "base_prompt_id": (
+            prompt_variant_selection.get("base_prompt_concept_id")
+            if isinstance(prompt_variant_selection, Mapping)
+            else prompt_id
+        ),
         "selected_prompt_id": prompt_id,
         "selected_prompt_source": prompt_source,
         "selected_model": selected_model,
@@ -1160,6 +1226,10 @@ def _build_result(
         )
     if max_tool_invocations is not None:
         llm_step_envelope["max_tool_invocations"] = int(max_tool_invocations)
+    if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
+        llm_step_envelope["prompt_variant_selection"] = dict(
+            prompt_variant_selection
+        )
 
     outputs = {
         "final_response": response_text,
@@ -1186,6 +1256,8 @@ def _build_result(
             outputs["missing_prompt_tools"] = list(unsatisfied_tools)
     if max_tool_invocations is not None:
         outputs["max_tool_invocations"] = int(max_tool_invocations)
+    if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
+        outputs["prompt_variant_selection"] = dict(prompt_variant_selection)
     outputs.update(validated_outputs)
     validation_status = _context_string(validation_summary.get("status")).lower()
     if validation_status == "failed":
@@ -1210,6 +1282,7 @@ def _build_timeout_failure_result(
     selected_model: str | None,
     llm_calls: Sequence[Mapping[str, Any]],
     aux_llm_calls: Sequence[Mapping[str, Any]],
+    prompt_variant_selection: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     llm_step_envelope = {
         "execution_mode": "llm",
@@ -1234,6 +1307,13 @@ def _build_timeout_failure_result(
         "timeout_stage": stage,
         "timeout_detail": timeout_detail,
     }
+    if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
+        llm_step_envelope["base_prompt_id"] = prompt_variant_selection.get(
+            "base_prompt_concept_id"
+        )
+        llm_step_envelope["prompt_variant_selection"] = dict(
+            prompt_variant_selection
+        )
     return WorkflowActionResult(
         status="failed",
         outputs={
@@ -1255,6 +1335,7 @@ def _run_direct_llm_step(
     rendered_variables: Mapping[str, Any],
     llm_policy_map: Mapping[str, Any],
     validation_policy_map: Mapping[str, Any],
+    prompt_variant_selection: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     llm_client = request.environment.llm_client
     if llm_client is None or not hasattr(llm_client, "generate"):
@@ -1300,6 +1381,7 @@ def _run_direct_llm_step(
         tool_messages=(),
         llm_calls=request.data.get("llm_calls") or [],
         aux_llm_calls=request.data.get("aux_llm_calls") or [],
+        prompt_variant_selection=prompt_variant_selection,
     )
 
 
@@ -1313,6 +1395,7 @@ def _run_gateway_llm_step_no_tools(
     rendered_variables: Mapping[str, Any],
     llm_policy_map: Mapping[str, Any],
     validation_policy_map: Mapping[str, Any],
+    prompt_variant_selection: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
         _build_gateway_runtime(request)
@@ -1402,6 +1485,7 @@ def _run_gateway_llm_step_no_tools(
             selected_model=request.environment.model,
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
+            prompt_variant_selection=prompt_variant_selection,
         )
 
     return _build_result(
@@ -1418,6 +1502,7 @@ def _run_gateway_llm_step_no_tools(
         tool_messages=(),
         llm_calls=llm_calls,
         aux_llm_calls=aux_llm_calls,
+        prompt_variant_selection=prompt_variant_selection,
     )
 
 
@@ -1446,6 +1531,37 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             error="workflow_llm_step_prompt_render_failed",
         )
 
+    stage = _llm_stage(llm_policy_map, request)
+    (
+        prompt_variant_model,
+        prompt_variant_candidate,
+        prompt_variant_registry,
+        prompt_variant_model_selection,
+    ) = _select_model_context_for_prompt_variant(request=request, stage=stage)
+    prompt_variant_resolution = resolve_model_prompt_variant(
+        base_prompt_concept_id=prompt_id,
+        base_prompt_text=base_prompt_text,
+        variables=rendered_variables,
+        selected_model=prompt_variant_model,
+        selected_candidate=prompt_variant_candidate,
+        registry_snapshot=prompt_variant_registry,
+    )
+    prompt_variant_selection = dict(prompt_variant_resolution.diagnostics)
+    prompt_variant_selection["model_selection"] = dict(prompt_variant_model_selection)
+    if (
+        isinstance(prompt_variant_resolution.prompt_text, str)
+        and prompt_variant_resolution.prompt_text.strip()
+    ):
+        base_prompt_text = prompt_variant_resolution.prompt_text
+        rendered_variables = dict(prompt_variant_resolution.rendered_variables)
+        selected_variant_prompt_id = _context_string(
+            prompt_variant_resolution.selected_prompt_concept_id
+        )
+        if selected_variant_prompt_id:
+            prompt_id = selected_variant_prompt_id
+        if prompt_variant_resolution.match_reason != "base_prompt":
+            prompt_source = f"{prompt_source or 'prompt'}:model_variant"
+
     rendered_prompt = _compose_llm_prompt(
         base_prompt=base_prompt_text,
         llm_policy=llm_policy_map,
@@ -1457,7 +1573,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             error="workflow_llm_step_prompt_render_failed",
         )
 
-    stage = _llm_stage(llm_policy_map, request)
     missing_narration_tools = _missing_prompt_tools_for_completion_report_narration(
         request,
         prompt_id=prompt_id,
@@ -1500,6 +1615,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             rendered_variables=rendered_variables,
             llm_policy_map=llm_policy_map,
             validation_policy_map=validation_policy_map,
+            prompt_variant_selection=prompt_variant_selection,
         )
 
     if _tool_mode(llm_policy_map) != "allowed":
@@ -1512,6 +1628,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             rendered_variables=rendered_variables,
             llm_policy_map=llm_policy_map,
             validation_policy_map=validation_policy_map,
+            prompt_variant_selection=prompt_variant_selection,
         )
 
     allowed_tools_raw = llm_policy_map.get("allowed_tools")
@@ -1889,6 +2006,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             selected_model=request.environment.model,
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
+            prompt_variant_selection=prompt_variant_selection,
         )
 
     orchestrator_result = shared_data.get("orchestrator_result")
@@ -1960,6 +2078,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         required_prompt_tools=required_obligation_tools,
         required_tool_obligation_ledger=final_required_tool_obligation_ledger,
         max_tool_invocations=max_tool_invocations,
+        prompt_variant_selection=prompt_variant_selection,
     )
 
 
