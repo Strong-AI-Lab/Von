@@ -14,6 +14,8 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-2172` - generic Vontology-backed entity profiles.
 - `JVNAUTOSCI-2177` - repo seed overwrite protection.
 - `JVNAUTOSCI-1971` - broad buttonify prose-extraction heuristic cleanup.
+- `JVNAUTOSCI-1957` - structural predicate metadata. Update for remaining
+  Python fallback/default evidence rather than creating a duplicate.
 
 ## 2026-04-30 Drift Tasks
 
@@ -49,6 +51,13 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-2262` - knowledge-acquisition profile decision policy, predicate
   priorities, source confidence adjustments, and auto-apply thresholds in
   Python before/runtime Vontology materialisation.
+
+## 2026-05-05 Drift Tasks
+
+- `JVNAUTOSCI-2264` - task-status event trigger filtering by Python/env
+  allow-list before represented event bindings or VWL conditions can decide.
+- `JVNAUTOSCI-1957` - updated with current partial-migration evidence for
+  structural predicate metadata fallback defaults.
 
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to
