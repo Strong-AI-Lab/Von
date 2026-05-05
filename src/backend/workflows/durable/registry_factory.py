@@ -1172,6 +1172,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .jira_task_incremental_import_workflow import (
         register_jira_task_incremental_import_actions,
     )
+    from .model_selection_workflow import register_model_selection_actions
     from .multilingual_concept_enrichment_workflow import (
         register_multilingual_concept_enrichment_actions,
     )
@@ -1218,6 +1219,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_entity_representation_actions(registry)
     register_jira_task_incremental_import_actions(registry)
     register_jira_task_full_reconciliation_actions(registry)
+    register_model_selection_actions(registry)
     register_multilingual_concept_enrichment_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)

@@ -151,6 +151,7 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
 
     monkeypatch.setenv("VON_INTERNAL_MCP_ENABLE", "0")
     monkeypatch.setenv("VON_PREWARM_DISABLE", "1")
+    monkeypatch.setenv("VON_CONCEPT_SUMMARY_FIELD_BOOTSTRAP_ENABLE", "0")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0")
 

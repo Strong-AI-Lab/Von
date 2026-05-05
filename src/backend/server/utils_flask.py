@@ -465,6 +465,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.talk_representation_workflow_vontology_service import (
             bootstrap_canonical_talk_representation_workflows,
         )
+        from ..services.workflow_model_selection_workflow_vontology_service import (
+            bootstrap_canonical_workflow_model_selection_workflow,
+        )
         from ..services.workflow_capability_service import (
             run_workflow_capability_index_startup_check,
         )
@@ -550,6 +553,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 bootstrap_fn=bootstrap_canonical_turn_pipeline_monitoring_workflows,
             )
         )
+        workflow_model_selection_bootstrap_report = _run_workflow_family_bootstrap(
+            label="workflow model-selection workflow",
+            bootstrap_fn=bootstrap_canonical_workflow_model_selection_workflow,
+        )
 
         workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
             app_logger
@@ -617,6 +624,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
         result["turn_pipeline_monitoring_workflow_bootstrap"] = (
             turn_pipeline_monitoring_workflow_bootstrap_report
+        )
+        result["workflow_model_selection_bootstrap"] = (
+            workflow_model_selection_bootstrap_report
         )
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
         result["workflow_capability_index_startup_check"] = (
@@ -721,6 +731,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] turn-pipeline monitoring workflow bootstrap failed: %s",
                 turn_pipeline_monitoring_workflow_bootstrap_report,
+            )
+        if not bool(workflow_model_selection_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] workflow model-selection bootstrap failed: %s",
+                workflow_model_selection_bootstrap_report,
             )
         if not bool(workflow_authority_bootstrap_report.get("success", False)):
             app_logger.warning(

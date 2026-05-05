@@ -105,6 +105,62 @@ def test_policy_candidate_prefers_active_llm_primary_before_enabled_models():
     assert candidates[0].raw == "active_llm"
 
 
+def test_workflow_specific_policy_candidate_precedes_global_stage_policy():
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
+
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "planner": {
+                    "primary": "active_llm",
+                    "fallback": [],
+                }
+            },
+            "workflows": {
+                "#V#specialised_research_workflow": {
+                    "stages": {
+                        "planner": {
+                            "primary": "openai:gpt-5.2-chat-latest",
+                            "fallback": ["active_llm"],
+                        }
+                    }
+                }
+            },
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+
+    candidates = orchestrator._stage_model_candidates(
+        stage="planner",
+        default_model="gemma4:26b",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        workflow_id="#V#specialised_research_workflow",
+    )
+
+    assert candidates, "Expected at least one candidate"
+    assert candidates[0].source == "policy"
+    assert candidates[0].provider == "openai"
+    assert candidates[0].model == "gpt-5.2-chat-latest"
+
+    metadata = orchestrator._build_stage_model_selection_metadata(
+        stage="planner",
+        policy_stage="planner",
+        selected_candidate=candidates[0],
+        default_model="gemma4:26b",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        workflow_id="#V#specialised_research_workflow",
+    )
+
+    assert metadata["policy_scope"] == "workflow"
+    assert metadata["policy_workflow_id"] == "#V#specialised_research_workflow"
+    assert metadata["selection_mode"] == "policy_primary_override"
+
+
 def test_model_stage_suitability_evidence_blocks_single_case_certification():
     evidence = build_model_stage_suitability_evidence(
         model="gemma4:26b",

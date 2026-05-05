@@ -15578,6 +15578,88 @@ class InternalMCPChatOrchestrator:
         return left_identity[1:] == right_identity[1:]
 
     @staticmethod
+    def _normalise_workflow_policy_key(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        return text.lower()
+
+    @classmethod
+    def _stage_model_config_from_scope(
+        cls,
+        scope: Mapping[str, Any],
+        *,
+        stage: str,
+    ) -> Mapping[str, Any] | None:
+        stage_text = str(stage or "").strip()
+        if not stage_text:
+            return None
+
+        stages = scope.get("stages")
+        if not isinstance(stages, Mapping):
+            return None
+
+        direct_config = stages.get(stage_text)
+        if isinstance(direct_config, Mapping):
+            return direct_config
+
+        stage_key = stage_text.lower()
+        for candidate_stage, config in stages.items():
+            if (
+                isinstance(candidate_stage, str)
+                and candidate_stage.strip().lower() == stage_key
+                and isinstance(config, Mapping)
+            ):
+                return config
+        return None
+
+    @classmethod
+    def _resolve_stage_model_policy_config(
+        cls,
+        policy: Mapping[str, Any] | None,
+        *,
+        stage: str,
+        workflow_id: str | None = None,
+    ) -> tuple[Mapping[str, Any] | None, str | None, str | None]:
+        """Resolve workflow-specific stage policy, then global stage policy.
+
+        Model-routing policy remains represented in the workflow model policy.
+        Python only resolves a generic optional workflow override envelope before
+        falling back to the established global ``stages`` block.
+        """
+
+        if not isinstance(policy, Mapping):
+            return None, None, None
+
+        workflow_key = cls._normalise_workflow_policy_key(workflow_id)
+        if workflow_key:
+            for envelope_key in ("workflows", "workflow_overrides"):
+                workflow_scopes = policy.get(envelope_key)
+                if not isinstance(workflow_scopes, Mapping):
+                    continue
+                for candidate_workflow_id, workflow_scope in workflow_scopes.items():
+                    if (
+                        cls._normalise_workflow_policy_key(candidate_workflow_id)
+                        != workflow_key
+                    ):
+                        continue
+                    if not isinstance(workflow_scope, Mapping):
+                        continue
+                    config = cls._stage_model_config_from_scope(
+                        workflow_scope,
+                        stage=stage,
+                    )
+                    if config is not None:
+                        return config, "workflow", str(candidate_workflow_id)
+
+        config = cls._stage_model_config_from_scope(policy, stage=stage)
+        if config is not None:
+            return config, "global", None
+        return None, None, None
+
+    @staticmethod
     def _infer_provider_from_model_reference(model_ref: str | None) -> str | None:
         if not isinstance(model_ref, str) or not model_ref.strip():
             return None
@@ -15607,6 +15689,7 @@ class InternalMCPChatOrchestrator:
         default_model: str | None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None,
+        workflow_id: str | None = None,
         prefer_default_model: bool = False,
     ) -> dict[str, Any]:
         requested_model = (
@@ -15620,6 +15703,8 @@ class InternalMCPChatOrchestrator:
             metadata["requested_model"] = requested_model
         if requested_provider:
             metadata["requested_provider"] = requested_provider
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            metadata["workflow_id"] = workflow_id.strip()
         metadata["prefer_default_model"] = bool(prefer_default_model)
 
         if selected_candidate is None:
@@ -15628,17 +15713,15 @@ class InternalMCPChatOrchestrator:
         effective_stage = policy_stage or stage
         primary_candidate: _ModelCandidate | None = None
         fallback_candidates: list[_ModelCandidate] = []
+        policy_scope: str | None = None
+        policy_workflow_id: str | None = None
         if policy_state.enabled and isinstance(policy_state.policy, Mapping):
-            stages = (
-                policy_state.policy.get("stages")
-                if isinstance(policy_state.policy.get("stages"), Mapping)
-                else None
-            )
-            stage_config = (
-                stages.get(effective_stage)
-                if isinstance(stages, Mapping)
-                and isinstance(stages.get(effective_stage), Mapping)
-                else None
+            stage_config, policy_scope, policy_workflow_id = (
+                self._resolve_stage_model_policy_config(
+                    policy_state.policy,
+                    stage=effective_stage,
+                    workflow_id=workflow_id,
+                )
             )
             if isinstance(stage_config, Mapping):
                 resolved_primary = self._resolve_registry_model_candidate(
@@ -15658,6 +15741,11 @@ class InternalMCPChatOrchestrator:
                         )
                         if fallback_candidate is not None:
                             fallback_candidates.append(fallback_candidate)
+
+        if policy_scope:
+            metadata["policy_scope"] = policy_scope
+        if policy_workflow_id:
+            metadata["policy_workflow_id"] = policy_workflow_id
 
         follows_active_llm = selected_candidate.source == "active_llm"
         explicit_stage_override = False
@@ -15723,6 +15811,7 @@ class InternalMCPChatOrchestrator:
         default_model: Optional[str],
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
+        workflow_id: Optional[str] = None,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
         prefer_default_model: bool = False,
@@ -15779,18 +15868,15 @@ class InternalMCPChatOrchestrator:
             if not prefer_default_model:
                 candidates.append(active_llm_candidate)
         else:
-            stages = None
-            if policy_state.policy and isinstance(
-                policy_state.policy.get("stages"), Mapping
-            ):
-                stages = policy_state.policy.get("stages")
-
-            stage_config = None
-            if isinstance(stages, Mapping):
-                stage_config = stages.get(stage)
-
             primary = None
             fallback = None
+            stage_config, _policy_scope, _policy_workflow_id = (
+                self._resolve_stage_model_policy_config(
+                    policy_state.policy,
+                    stage=stage,
+                    workflow_id=workflow_id,
+                )
+            )
             if isinstance(stage_config, Mapping):
                 primary = stage_config.get("primary")
                 fallback = stage_config.get("fallback")
@@ -16432,6 +16518,7 @@ class InternalMCPChatOrchestrator:
         default_model: Optional[str],
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
+        workflow_id: Optional[str] = None,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
         prefer_default_model: bool = False,
@@ -16441,6 +16528,7 @@ class InternalMCPChatOrchestrator:
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
+            workflow_id=workflow_id,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             prefer_default_model=prefer_default_model,
@@ -16826,6 +16914,7 @@ class InternalMCPChatOrchestrator:
         prefer_default_model: bool = False,
         timeout_override_sec: float | None = None,
         workflow_stage_id: str | None = None,
+        workflow_id: str | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: ``workflow_stage_id`` is the canonical
         # workflow-path stage identifier (e.g. ``tool_plan``,
@@ -16847,6 +16936,7 @@ class InternalMCPChatOrchestrator:
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
+            workflow_id=workflow_id,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             prefer_default_model=prefer_default_model,
@@ -17100,6 +17190,7 @@ class InternalMCPChatOrchestrator:
                     default_model=default_model,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
+                    workflow_id=workflow_id,
                     prefer_default_model=prefer_default_model,
                 )
                 aux_log.append(
@@ -17199,6 +17290,7 @@ class InternalMCPChatOrchestrator:
                 default_model=default_model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                workflow_id=workflow_id,
                 prefer_default_model=prefer_default_model,
             )
             aux_log.append(
@@ -17954,6 +18046,7 @@ class InternalMCPChatOrchestrator:
                     default_model=default_model,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
+                    workflow_id=workflow_id,
                     prefer_default_model=prefer_default_model,
                 )
                 aux_log.append(
@@ -18070,6 +18163,7 @@ class InternalMCPChatOrchestrator:
                 default_model=default_model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                workflow_id=workflow_id,
                 prefer_default_model=prefer_default_model,
             )
             aux_log.append(

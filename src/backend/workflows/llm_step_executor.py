@@ -1145,6 +1145,7 @@ def _select_model_context_for_prompt_variant(
                 default_model=request.environment.model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                workflow_id=request.workflow_id,
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
                 prefer_default_model=_prefer_default_model_for_request(request),

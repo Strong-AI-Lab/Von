@@ -180,6 +180,50 @@ Example explicit stage override (deliberate and telemetry-visible):
 }
 ```
 
+Workflow-specific overrides may be represented under `workflows` (preferred) or
+the legacy-compatible alias `workflow_overrides`. A workflow override has the
+same `stages` shape as the global policy and is resolved before the global
+stage block. If no matching workflow/stage override exists, runtime selection
+falls back to the global `stages` block and then to enabled settings/active LLM
+as before.
+
+```json
+{
+  "stages": {
+    "planner": {"primary": "active_llm", "fallback": []}
+  },
+  "workflows": {
+    "#V#specialised_research_workflow": {
+      "stages": {
+        "planner": {
+          "primary": "openai:gpt-5.2-chat-latest",
+          "fallback": ["active_llm"]
+        }
+      }
+    }
+  }
+}
+```
+
+## Workflow-aware model selection subworkflow
+
+`#V#workflow_model_selection_workflow` is the canonical subworkflow for
+resolving model selection as workflow-visible context. It invokes the generic
+durable support action `workflow_model.select_stage_model` and writes:
+
+- `model_selection` - full `workflow_model_selection.v1` payload
+- `selected_model`
+- `selected_model_provider`
+- `selected_candidate`
+- `model_candidate_pool`
+- `enabled_model_pool`
+- `workflow_model_policy`
+- `selection_metadata`
+
+The subworkflow does not author model-routing policy in Python. It exposes the
+enabled model pool and applies represented workflow model policy so downstream
+VWL workflows can inspect, pass, or persist the selected model context.
+
 ## Model registry JSON (draft)
 ```json
 {
