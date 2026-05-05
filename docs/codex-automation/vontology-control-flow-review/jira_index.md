@@ -59,6 +59,14 @@ Use this before creating new drift-review tasks.
 - `JVNAUTOSCI-1957` - updated with current partial-migration evidence for
   structural predicate metadata fallback defaults.
 
+## 2026-05-06 Drift Tasks
+
+- `JVNAUTOSCI-2271` - Python-authored KR materialisation workflow publisher:
+  `scripts/publish_kr_materialisation_workflows.py` embeds workflow prompts,
+  routing/discovery metadata, required-effect contracts, control flow, and
+  response templates before publishing them into Vontology. Linked to
+  `JVNAUTOSCI-1913` and `JVNAUTOSCI-2268`.
+
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to
 `JVNAUTOSCI-1913`.
