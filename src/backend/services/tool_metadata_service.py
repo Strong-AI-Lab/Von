@@ -454,6 +454,19 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "jira",
         "display_template": "Transitions: {key}",
+        "description": (
+            "List available Jira workflow transitions/status changes for an "
+            "issue key. Use this to get the transition list and transition IDs "
+            "before calling jira_transition."
+        ),
+        "planner_hint": (
+            "Use when the user asks for a Jira transition list, available "
+            "status changes, or the transition IDs needed before calling "
+            "jira_transition."
+        ),
+        "dispatch_surface_family": "jira",
+        "evidence_surface_family": "jira",
+        "external_surface": True,
     },
     "gmail_list_messages": {
         "salience": "medium",
@@ -1362,6 +1375,7 @@ def _refresh_cache_if_needed() -> None:
                 tool_name=tool_name,
                 salience=defaults.get("salience", "medium"),
                 display_template=defaults.get("display_template"),
+                description=defaults.get("description"),
                 category=defaults.get("category"),
                 planner_hint=defaults.get("planner_hint"),
                 dispatch_surface_family=defaults.get("dispatch_surface_family"),

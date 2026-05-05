@@ -57,3 +57,28 @@ def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
         assert surface.external_surface is True
     finally:
         service.invalidate_cache()
+
+
+def test_jira_get_transitions_metadata_is_discoverable(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        metadata = service.get_tool_metadata("jira_get_transitions")
+        surface = service.get_tool_dispatch_surface_metadata("jira_get_transitions")
+
+        assert metadata.category == "jira"
+        assert metadata.operation_category == "read"
+        assert metadata.evidence_role == "verification"
+        assert metadata.description is not None
+        assert "transition list" in metadata.description
+        assert metadata.planner_hint is not None
+        assert "transition list" in metadata.planner_hint
+        assert "transition IDs" in metadata.planner_hint
+        assert surface is not None
+        assert surface.surface_family == "jira"
+        assert surface.evidence_surface_family == "jira"
+        assert surface.external_surface is True
+    finally:
+        service.invalidate_cache()

@@ -16859,7 +16859,10 @@ def _jira_get_transitions_input_schema() -> Schema:
         required={"issue_key": str},
         optional={},
         allow_unknown=True,
-        description="jira_get_transitions input: issue_key (str, required)",
+        description=(
+            "jira_get_transitions input: issue_key (str, required). Returns the "
+            "available Jira transition list and transition IDs for that issue."
+        ),
     )
 
 
@@ -28502,7 +28505,11 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             output_schema=jira_get_transitions_output_schema,
             category="read",
             timeout_sec=15.0,
-            description="List available transitions for a Jira issue key and return transition IDs required by jira_transition.",
+            description=(
+                "List available Jira workflow transitions/status changes for an "
+                "issue key. Use this to get the transition list and transition "
+                "IDs before calling jira_transition."
+            ),
         ),
         MethodDefinition(
             name="jira_add_comment",

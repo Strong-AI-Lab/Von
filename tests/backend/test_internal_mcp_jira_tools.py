@@ -123,6 +123,13 @@ def test_jira_methods_registered_in_catalogue():
     assert "jira_get_myself" in names
     assert "jira_get_auth_config" in names
 
+    transitions_definition = catalogue.get("jira_get_transitions")
+    assert transitions_definition.description is not None
+    assert "transition list" in transitions_definition.description
+    assert "transition IDs" in transitions_definition.description
+    assert transitions_definition.input_schema.description is not None
+    assert "transition list" in transitions_definition.input_schema.description
+
 
 def test_jira_handlers_require_minimum_fields():
     # Missing required params should return a friendly error and not raise

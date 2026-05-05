@@ -60,3 +60,12 @@ def test_vontology_mcp_manifest_includes_jira_tools():
         jira_get_project_issue_types.get("inputSchema", {}).get("properties", {})
     )
     assert "project_key" in project_issue_types_properties
+
+    jira_get_transitions = next(
+        tool
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name") == "jira_get_transitions"
+    )
+    transitions_description = jira_get_transitions.get("description") or ""
+    assert "transition list" in transitions_description
+    assert "transition IDs" in transitions_description

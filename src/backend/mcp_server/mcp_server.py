@@ -889,7 +889,11 @@ async def list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="jira_get_transitions",
-            description="List available workflow transitions for a Jira issue.",
+            description=(
+                "List available Jira workflow transitions/status changes for an "
+                "issue key. Use this to get the transition list and transition "
+                "IDs before calling jira_transition."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
