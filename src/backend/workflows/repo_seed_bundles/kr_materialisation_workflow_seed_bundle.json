@@ -1,0 +1,1953 @@
+{
+  "family_id": "#V#kr_design_materialisation_workflow_family",
+  "managed_by": "kr_materialisation_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "JVNAUTOSCI-2271",
+  "source_tag": "JVNAUTOSCI-2271",
+  "supported_action_ids": [
+    "llm.action",
+    "workflow_control.context_set",
+    "workflow_control.context_template",
+    "workflow_control.for_each",
+    "workflow_mcp.invoke_tool"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#kr_design_concept_materialisation_item_workflow",
+      "display_name": "Kr Design Concept Materialisation Item Workflow",
+      "description": "Materialise one bounded KR concept specification into Vontology, including the correct type or instance parent edge, description text, and read-back evidence.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"JVNAUTOSCI-2268 initial KR materialisation workflow publication\", \"review_state\": \"approved\", \"reviewed_by\": \"GitHub Copilot\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"contract_id\": \"kr_concept_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"Each concept item must create or reuse a concept, assert the resolved type/instance parent relation, attach a description, and read back concept plus text relation evidence before success.\", \"effect_id\": \"kr_concept_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_concept_mutation_readback_failed\", \"missing_failure_code\": \"kr_concept_mutation_readback_missing\", \"not_executed_reason\": \"Concept materialisation or read-back did not run.\", \"not_satisfied_reason\": \"Concept materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"require_completed_true\": true, \"require_completion_gate_safe_to_claim_completion\": false, \"require_final_state\": true, \"require_terminal_status\": true, \"required_summary_fields\": [\"workflow_id\", \"terminal_status\", \"final_state\", \"completed\"], \"schema_version\": \"workflow_terminal_success_contract.v1\", \"success_statuses\": [\"completed\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "launch_input_contract": {
+        "input_mappings": [
+          {
+            "description": "Concept item passed by the parent for-each workflow.",
+            "extractor": "identity",
+            "required": true,
+            "source_expression": "inputs.current_kr_concept_spec",
+            "target_context_key": "current_kr_concept_spec"
+          },
+          {
+            "description": "Optional authenticated user concept for additive writes.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.user_concept_id",
+            "target_context_key": "user_concept_id"
+          },
+          {
+            "description": "Optional authenticated organisation concept for additive writes.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.org_concept_id",
+            "target_context_key": "org_concept_id"
+          }
+        ],
+        "required_inputs": [
+          "current_kr_concept_spec"
+        ],
+        "schema_version": "workflow_launch_input_contract.v1"
+      },
+      "publication_spec": {
+        "initial_state": "initialise_from_concept_spec",
+        "steps": [
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "kr_concept_decision",
+                      "kind": "context_value_equals",
+                      "value": "reuse_existing"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "reuse_existing_concept_ready",
+                "to_state": "route_parent_assertion"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "kr_concept_decision",
+                      "kind": "context_value_equals",
+                      "value": "create"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "key": "kr_concept_create_concepts",
+                      "kind": "context_cardinality",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "create_concept_parent_ready",
+                "to_state": "create_concept"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "concept_spec_not_materialisable",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "state_id": "initialise_from_concept_spec",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_concept_key",
+                    "value_from_context_options": [
+                      "current_kr_concept_spec.key",
+                      "current_kr_concept_spec.target_key",
+                      "current_kr_concept_spec.target_name",
+                      "current_kr_concept_spec.name"
+                    ]
+                  },
+                  {
+                    "key": "kr_concept_decision",
+                    "value_from_context": "current_kr_concept_spec.decision"
+                  },
+                  {
+                    "key": "kr_concept_name",
+                    "value_from_context_options": [
+                      "current_kr_concept_spec.target_name",
+                      "current_kr_concept_spec.name"
+                    ]
+                  },
+                  {
+                    "key": "kr_concept_kind",
+                    "value_from_context_options": [
+                      "current_kr_concept_spec.target_kind",
+                      "current_kr_concept_spec.kind",
+                      "current_kr_concept_spec.kind_hint"
+                    ]
+                  },
+                  {
+                    "key": "kr_concept_parent_id",
+                    "value_from_context": "current_kr_concept_spec.parent_id"
+                  },
+                  {
+                    "key": "kr_concept_id",
+                    "skip_if_unresolved": true,
+                    "value_from_context_options": [
+                      "current_kr_concept_spec.existing_concept_id",
+                      "current_kr_concept_spec.concept_id"
+                    ]
+                  },
+                  {
+                    "key": "kr_concept_create_concepts",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "current_kr_concept_spec.concepts"
+                  },
+                  {
+                    "key": "kr_concept_description_text",
+                    "value_from_context_options": [
+                      "current_kr_concept_spec.description_text",
+                      "current_kr_concept_spec.description"
+                    ]
+                  },
+                  {
+                    "key": "kr_concept_parent_rationale",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "current_kr_concept_spec.parent_rationale"
+                  },
+                  {
+                    "key": "kr_concept_blocking_reason",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "current_kr_concept_spec.blocking_reason"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_concept_key",
+              "kr_concept_decision",
+              "kr_concept_name",
+              "kr_concept_kind",
+              "kr_concept_parent_id",
+              "kr_concept_id",
+              "kr_concept_create_concepts",
+              "kr_concept_description_text",
+              "kr_concept_parent_rationale",
+              "kr_concept_blocking_reason"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_kr_concept_create_concepts_to_concepts_parameter",
+                "context_key": "kr_concept_create_concepts",
+                "required": true,
+                "tool_param": "concepts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_user_concept_id_to_created_by_concept_id_parameter",
+                "context_key": "user_concept_id",
+                "required": false,
+                "tool_param": "created_by_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_org_concept_id_to_organisation_concept_id_parameter",
+                "context_key": "org_concept_id",
+                "required": false,
+                "tool_param": "organisation_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_kr_concept_parent_id_to_parent_id_parameter",
+                "context_key": "kr_concept_parent_id",
+                "required": true,
+                "tool_param": "parent_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "kr_concept_additive_create",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "resolve_concept_id",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "create_concept",
+            "static_input_bindings": [
+              [
+                "allow_duplicate_instances",
+                false
+              ],
+              [
+                "scope_mode",
+                "user_org_default"
+              ],
+              [
+                "tool_name",
+                "create_concepts"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_create_concept_created_concept_ids_to_kr_concept_created_ids",
+                "context_key": "kr_concept_created_ids",
+                "tool_output_field": "created_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_create_concept_parent_id_used_to_kr_concept_parent_id_used",
+                "context_key": "kr_concept_parent_id_used",
+                "tool_output_field": "parent_id_used"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_create_concept_results_to_kr_concept_create_results",
+                "context_key": "kr_concept_create_results",
+                "tool_output_field": "results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_create_concept_scope_selection_to_kr_concept_scope_selection",
+                "context_key": "kr_concept_scope_selection",
+                "tool_output_field": "scope_selection"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_concept_created_ids",
+              "kr_concept_create_results",
+              "kr_concept_parent_id_used",
+              "kr_concept_scope_selection"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "concept_id_resolved",
+                "to_state": "route_parent_assertion"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "concept_id_missing_after_create",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "resolve_concept_id",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_concept_id",
+                    "preserve_existing": true,
+                    "value_from_context_options": [
+                      "kr_concept_created_ids.0",
+                      "kr_concept_create_results.0.concept_id",
+                      "kr_concept_create_results.0.canonical_concept_id",
+                      "kr_concept_create_results.0.existing_concept_id"
+                    ]
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_concept_id"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "key": "kr_concept_kind",
+                          "kind": "context_value_equals",
+                          "value": "instance"
+                        },
+                        {
+                          "key": "kr_concept_kind",
+                          "kind": "context_value_equals",
+                          "value": "individual"
+                        },
+                        {
+                          "key": "kr_concept_kind",
+                          "kind": "context_value_equals",
+                          "value": "predicate"
+                        }
+                      ],
+                      "kind": "any"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "instance_or_predicate_parent_edge",
+                "to_state": "assert_instance_parent_relationship"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_concept_parent_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "key": "kr_concept_kind",
+                      "kind": "context_value_equals",
+                      "value": "type"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "type_parent_edge",
+                "to_state": "assert_type_parent_relationship"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "concept_kind_not_supported",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "route_parent_assertion",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_concept_parent_id",
+                    "preserve_existing": true,
+                    "skip_if_unresolved": true,
+                    "value_from_context": "kr_concept_parent_id_used"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_concept_parent_id"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_assert_type_parent_relationship_kr_concept_id_to_source_id_parameter",
+                "context_key": "kr_concept_id",
+                "required": true,
+                "tool_param": "source_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_assert_type_parent_relationship_kr_concept_parent_id_to_target_parameter",
+                "context_key": "kr_concept_parent_id",
+                "required": true,
+                "tool_param": "target"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "kr_type_parent_relationship_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "attach_description",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "assert_type_parent_relationship",
+            "static_input_bindings": [
+              [
+                "predicate",
+                "type_of"
+              ],
+              [
+                "tool_name",
+                "add_relationship"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_type_parent_relationship_predicate_to_kr_parent_relationship_predicate",
+                "context_key": "kr_parent_relationship_predicate",
+                "tool_output_field": "predicate"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_type_parent_relationship_success_to_kr_parent_relationship_success",
+                "context_key": "kr_parent_relationship_success",
+                "tool_output_field": "success"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_type_parent_relationship_target_to_kr_parent_relationship_target",
+                "context_key": "kr_parent_relationship_target",
+                "tool_output_field": "target"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_parent_relationship_success",
+              "kr_parent_relationship_predicate",
+              "kr_parent_relationship_target"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_assert_instance_parent_relationship_kr_concept_id_to_source_id_parameter",
+                "context_key": "kr_concept_id",
+                "required": true,
+                "tool_param": "source_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_assert_instance_parent_relationship_kr_concept_parent_id_to_target_parameter",
+                "context_key": "kr_concept_parent_id",
+                "required": true,
+                "tool_param": "target"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "kr_instance_parent_relationship_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "attach_description",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "assert_instance_parent_relationship",
+            "static_input_bindings": [
+              [
+                "predicate",
+                "instance_of"
+              ],
+              [
+                "tool_name",
+                "add_relationship"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_instance_parent_relationship_predicate_to_kr_parent_relationship_predicate",
+                "context_key": "kr_parent_relationship_predicate",
+                "tool_output_field": "predicate"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_instance_parent_relationship_success_to_kr_parent_relationship_success",
+                "context_key": "kr_parent_relationship_success",
+                "tool_output_field": "success"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_assert_instance_parent_relationship_target_to_kr_parent_relationship_target",
+                "context_key": "kr_parent_relationship_target",
+                "tool_output_field": "target"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_parent_relationship_success",
+              "kr_parent_relationship_predicate",
+              "kr_parent_relationship_target"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_attach_description_kr_concept_id_to_concept_id_parameter",
+                "context_key": "kr_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_attach_description_kr_concept_description_text_to_text_parameter",
+                "context_key": "kr_concept_description_text",
+                "required": true,
+                "tool_param": "text"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "kr_concept_description_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "read_back_concept",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "attach_description",
+            "static_input_bindings": [
+              [
+                "garbage_collect",
+                true
+              ],
+              [
+                "language",
+                "en-NZ"
+              ],
+              [
+                "policy",
+                "replace_others"
+              ],
+              [
+                "predicate",
+                "hasDescription"
+              ],
+              [
+                "tool_name",
+                "upsert_singleton_text_relation"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_attach_description_relation_id_to_kr_description_relation_id",
+                "context_key": "kr_description_relation_id",
+                "tool_output_field": "relation_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_attach_description_text_value_id_to_kr_description_text_value_id",
+                "context_key": "kr_description_text_value_id",
+                "tool_output_field": "text_value_id"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_description_relation_id",
+              "kr_description_text_value_id"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_read_back_concept_kr_concept_id_to_concept_id_parameter",
+                "context_key": "kr_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "read_back_text_relations",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "read_back_concept",
+            "static_input_bindings": [
+              [
+                "include_relations_any_arg",
+                true
+              ],
+              [
+                "include_text_relations_arg1",
+                true
+              ],
+              [
+                "limit",
+                40
+              ],
+              [
+                "tool_name",
+                "fetch_concept"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_concept_concept_id_to_kr_readback_concept_id",
+                "context_key": "kr_readback_concept_id",
+                "tool_output_field": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_concept_relationships_to_kr_readback_relationships",
+                "context_key": "kr_readback_relationships",
+                "tool_output_field": "relationships"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_readback_concept_id",
+              "kr_readback_relationships"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_read_back_text_relations_kr_concept_id_to_concept_id_parameter",
+                "context_key": "kr_concept_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "emit_concept_payload",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "read_back_text_relations",
+            "static_input_bindings": [
+              [
+                "languages",
+                [
+                  "en-NZ"
+                ]
+              ],
+              [
+                "max_relation_ids_per_group",
+                10
+              ],
+              [
+                "predicates",
+                [
+                  "hasDescription"
+                ]
+              ],
+              [
+                "tool_name",
+                "get_text_relations_summary"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_groups_to_kr_text_relation_groups",
+                "context_key": "kr_text_relation_groups",
+                "tool_output_field": "groups"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_groups_found_to_kr_text_relation_groups_found",
+                "context_key": "kr_text_relation_groups_found",
+                "tool_output_field": "groups_found"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_text_relation_groups",
+              "kr_text_relation_groups_found"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "emit_concept_payload",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_concept_key",
+                    "value_from_context": "kr_concept_key"
+                  },
+                  {
+                    "key": "kr_concept_id",
+                    "value_from_context": "kr_concept_id"
+                  },
+                  {
+                    "key": "kr_concept_name",
+                    "value_from_context": "kr_concept_name"
+                  },
+                  {
+                    "key": "kr_concept_kind",
+                    "value_from_context": "kr_concept_kind"
+                  },
+                  {
+                    "key": "kr_concept_parent_id",
+                    "value_from_context": "kr_concept_parent_id"
+                  },
+                  {
+                    "key": "kr_parent_relationship_predicate",
+                    "value_from_context": "kr_parent_relationship_predicate"
+                  },
+                  {
+                    "key": "kr_description_relation_id",
+                    "value_from_context": "kr_description_relation_id"
+                  },
+                  {
+                    "key": "kr_readback_concept_id",
+                    "value_from_context": "kr_readback_concept_id"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_concept_key",
+              "kr_concept_id",
+              "kr_concept_name",
+              "kr_concept_kind",
+              "kr_concept_parent_id",
+              "kr_parent_relationship_predicate",
+              "kr_description_relation_id",
+              "kr_readback_concept_id"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "failed",
+            "on_failure_state": "failed",
+            "state_id": "summarise_blocker",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "response_text",
+                    "template": "KR concept item was not materialised. Concept: {name}. Blocker: {blocker}.",
+                    "variables": {
+                      "blocker": {
+                        "default": "materialisation_preconditions_not_met",
+                        "value_from_context_options": [
+                          "kr_concept_blocking_reason",
+                          "last_action_error"
+                        ]
+                      },
+                      "name": {
+                        "default": "unresolved",
+                        "value_from_context": "kr_concept_name"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      },
+      "type_ids": [
+        "#V#ai_workflow"
+      ]
+    },
+    {
+      "workflow_id": "#V#kr_design_relationship_assertion_item_workflow",
+      "display_name": "Kr Design Relationship Assertion Item Workflow",
+      "description": "Assert one resolved KR relationship specification as a Vontology concept-to-concept edge and read back both endpoints.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"JVNAUTOSCI-2268 initial KR materialisation workflow publication\", \"review_state\": \"approved\", \"reviewed_by\": \"GitHub Copilot\", \"rollout_state\": \"published\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"contract_id\": \"kr_relationship_assertion_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"Each relationship item must assert a concept-to-concept edge with add_relationship and read back both endpoints before success.\", \"effect_id\": \"kr_relationship_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_relationship_mutation_readback_failed\", \"missing_failure_code\": \"kr_relationship_mutation_readback_missing\", \"not_executed_reason\": \"Relationship assertion or endpoint read-back did not run.\", \"not_satisfied_reason\": \"Relationship assertion was not verified from endpoint read-back.\", \"required_tools\": [\"add_relationship\", \"fetch_concept\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"require_completed_true\": true, \"require_completion_gate_safe_to_claim_completion\": false, \"require_final_state\": true, \"require_terminal_status\": true, \"required_summary_fields\": [\"workflow_id\", \"terminal_status\", \"final_state\", \"completed\"], \"schema_version\": \"workflow_terminal_success_contract.v1\", \"success_statuses\": [\"completed\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "launch_input_contract": {
+        "input_mappings": [
+          {
+            "description": "Relationship item passed by the parent for-each workflow.",
+            "extractor": "identity",
+            "required": true,
+            "source_expression": "inputs.current_kr_relationship_spec",
+            "target_context_key": "current_kr_relationship_spec"
+          },
+          {
+            "description": "Optional authenticated user concept for additive writes.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.user_concept_id",
+            "target_context_key": "user_concept_id"
+          },
+          {
+            "description": "Optional authenticated organisation concept for additive writes.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.org_concept_id",
+            "target_context_key": "org_concept_id"
+          }
+        ],
+        "required_inputs": [
+          "current_kr_relationship_spec"
+        ],
+        "schema_version": "workflow_launch_input_contract.v1"
+      },
+      "publication_spec": {
+        "initial_state": "initialise_from_relationship_spec",
+        "steps": [
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_relationship_source_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_relationship_source_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_relationship_predicate",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_relationship_predicate",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    },
+                    {
+                      "conditions": [
+                        {
+                          "expected": true,
+                          "key": "kr_relationship_target_id",
+                          "kind": "context_exists"
+                        },
+                        {
+                          "expected": false,
+                          "key": "kr_relationship_target_id",
+                          "kind": "context_is_null"
+                        }
+                      ],
+                      "kind": "all"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "relationship_spec_ready",
+                "to_state": "assert_relationship"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "relationship_spec_unresolved",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "initialise_from_relationship_spec",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_relationship_key",
+                    "skip_if_unresolved": true,
+                    "value_from_context_options": [
+                      "current_kr_relationship_spec.key",
+                      "current_kr_relationship_spec.relationship_key"
+                    ]
+                  },
+                  {
+                    "key": "kr_relationship_source_id",
+                    "value_from_context": "current_kr_relationship_spec.source_id"
+                  },
+                  {
+                    "key": "kr_relationship_predicate",
+                    "value_from_context": "current_kr_relationship_spec.predicate"
+                  },
+                  {
+                    "key": "kr_relationship_target_id",
+                    "value_from_context": "current_kr_relationship_spec.target_id"
+                  },
+                  {
+                    "key": "kr_relationship_rationale",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "current_kr_relationship_spec.rationale"
+                  },
+                  {
+                    "key": "kr_relationship_blocking_reason",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "current_kr_relationship_spec.blocking_reason"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_relationship_key",
+              "kr_relationship_source_id",
+              "kr_relationship_predicate",
+              "kr_relationship_target_id",
+              "kr_relationship_rationale",
+              "kr_relationship_blocking_reason"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_relationship_assertion_item_workflow_assert_relationship_kr_relationship_predicate_to_predicate_parameter",
+                "context_key": "kr_relationship_predicate",
+                "required": true,
+                "tool_param": "predicate"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_relationship_assertion_item_workflow_assert_relationship_kr_relationship_source_id_to_source_id_parameter",
+                "context_key": "kr_relationship_source_id",
+                "required": true,
+                "tool_param": "source_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_relationship_assertion_item_workflow_assert_relationship_kr_relationship_target_id_to_target_parameter",
+                "context_key": "kr_relationship_target_id",
+                "required": true,
+                "tool_param": "target"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "kr_relationship_assertion_write",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "read_back_source",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "assert_relationship",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "add_relationship"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_assert_relationship_added_to_kr_relationship_assert_added",
+                "context_key": "kr_relationship_assert_added",
+                "tool_output_field": "added"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_assert_relationship_predicate_to_kr_relationship_assert_predicate",
+                "context_key": "kr_relationship_assert_predicate",
+                "tool_output_field": "predicate"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_assert_relationship_success_to_kr_relationship_assert_success",
+                "context_key": "kr_relationship_assert_success",
+                "tool_output_field": "success"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_assert_relationship_target_to_kr_relationship_assert_target",
+                "context_key": "kr_relationship_assert_target",
+                "tool_output_field": "target"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_relationship_assert_success",
+              "kr_relationship_assert_predicate",
+              "kr_relationship_assert_target",
+              "kr_relationship_assert_added"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_relationship_assertion_item_workflow_read_back_source_kr_relationship_source_id_to_concept_id_parameter",
+                "context_key": "kr_relationship_source_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "read_back_target",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "read_back_source",
+            "static_input_bindings": [
+              [
+                "include_relations_any_arg",
+                true
+              ],
+              [
+                "limit",
+                40
+              ],
+              [
+                "tool_name",
+                "fetch_concept"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_read_back_source_concept_id_to_kr_relationship_source_readback_id",
+                "context_key": "kr_relationship_source_readback_id",
+                "tool_output_field": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_read_back_source_relationships_to_kr_relationship_source_readback_relationships",
+                "context_key": "kr_relationship_source_readback_relationships",
+                "tool_output_field": "relationships"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_relationship_source_readback_id",
+              "kr_relationship_source_readback_relationships"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_relationship_assertion_item_workflow_read_back_target_kr_relationship_target_id_to_concept_id_parameter",
+                "context_key": "kr_relationship_target_id",
+                "required": true,
+                "tool_param": "concept_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "emit_relationship_payload",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "read_back_target",
+            "static_input_bindings": [
+              [
+                "include_relations_any_arg",
+                true
+              ],
+              [
+                "limit",
+                40
+              ],
+              [
+                "tool_name",
+                "fetch_concept"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_read_back_target_concept_id_to_kr_relationship_target_readback_id",
+                "context_key": "kr_relationship_target_readback_id",
+                "tool_output_field": "concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_relationship_assertion_item_workflow_read_back_target_relationships_to_kr_relationship_target_readback_relationships",
+                "context_key": "kr_relationship_target_readback_relationships",
+                "tool_output_field": "relationships"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_relationship_target_readback_id",
+              "kr_relationship_target_readback_relationships"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "emit_relationship_payload",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "kr_relationship_key",
+                    "value_from_context": "kr_relationship_key"
+                  },
+                  {
+                    "key": "kr_relationship_source_id",
+                    "value_from_context": "kr_relationship_source_id"
+                  },
+                  {
+                    "key": "kr_relationship_predicate",
+                    "value_from_context": "kr_relationship_predicate"
+                  },
+                  {
+                    "key": "kr_relationship_target_id",
+                    "value_from_context": "kr_relationship_target_id"
+                  },
+                  {
+                    "key": "kr_relationship_assert_success",
+                    "value_from_context": "kr_relationship_assert_success"
+                  },
+                  {
+                    "key": "kr_relationship_assert_added",
+                    "value_from_context": "kr_relationship_assert_added"
+                  },
+                  {
+                    "key": "kr_relationship_source_readback_id",
+                    "value_from_context": "kr_relationship_source_readback_id"
+                  },
+                  {
+                    "key": "kr_relationship_target_readback_id",
+                    "value_from_context": "kr_relationship_target_readback_id"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "kr_relationship_key",
+              "kr_relationship_source_id",
+              "kr_relationship_predicate",
+              "kr_relationship_target_id",
+              "kr_relationship_assert_success",
+              "kr_relationship_assert_added",
+              "kr_relationship_source_readback_id",
+              "kr_relationship_target_readback_id"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "failed",
+            "on_failure_state": "failed",
+            "state_id": "summarise_blocker",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "response_text",
+                    "template": "KR relationship item was not asserted. Source: {source}. Predicate: {predicate}. Target: {target}. Blocker: {blocker}.",
+                    "variables": {
+                      "blocker": {
+                        "default": "relationship_preconditions_not_met",
+                        "value_from_context_options": [
+                          "kr_relationship_blocking_reason",
+                          "last_action_error"
+                        ]
+                      },
+                      "predicate": {
+                        "default": "unresolved",
+                        "value_from_context": "kr_relationship_predicate"
+                      },
+                      "source": {
+                        "default": "unresolved",
+                        "value_from_context": "kr_relationship_source_id"
+                      },
+                      "target": {
+                        "default": "unresolved",
+                        "value_from_context": "kr_relationship_target_id"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      },
+      "type_ids": [
+        "#V#ai_workflow"
+      ]
+    },
+    {
+      "workflow_id": "#V#kr_design_materialisation_workflow",
+      "display_name": "Kr Design Materialisation Workflow",
+      "description": "Extract a bounded KR design from a user request, materialise its concepts and relationships into Vontology through generic write primitives, and verify durable read-back evidence before success.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"examples\": [\"Materialise this KR design into Vontology concepts and relationships.\", \"Create the ontology taxonomy from this design and verify it in Vontology.\", \"Turn the proposed knowledge representation into durable Vontology structure.\"], \"keywords\": [\"KR materialisation\", \"knowledge representation design\", \"ontology design\", \"create Vontology concepts\", \"create Vontology relationships\", \"materialise taxonomy\", \"materialise ontology\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowLifecycleJson",
+          "text": "{\"approval_required\": false, \"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"review_reason\": \"JVNAUTOSCI-2268 initial KR materialisation workflow publication\", \"review_state\": \"approved\", \"reviewed_by\": \"GitHub Copilot\", \"rollout_state\": \"published\", \"routing_eligible\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"contract_id\": \"kr_design_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"The workflow must materialise KR concepts through create_concepts, assert type/instance and requested relationship edges, attach descriptions, and carry read-back evidence before it may claim success.\", \"effect_id\": \"kr_design_concept_and_relationship_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_design_materialisation_evidence_failed\", \"missing_failure_code\": \"kr_design_materialisation_evidence_missing\", \"not_executed_reason\": \"KR concept/relationship mutation or read-back did not run.\", \"not_satisfied_reason\": \"KR materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"require_completed_true\": true, \"require_completion_gate_safe_to_claim_completion\": false, \"require_final_state\": true, \"require_terminal_status\": true, \"required_summary_fields\": [\"workflow_id\", \"terminal_status\", \"final_state\", \"completed\"], \"schema_version\": \"workflow_terminal_success_contract.v1\", \"success_statuses\": [\"completed\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "launch_input_contract": {
+        "input_mappings": [
+          {
+            "description": "KR design text or instruction to materialise.",
+            "extractor": "identity",
+            "required": true,
+            "source_expression": "inputs.prompt",
+            "target_context_key": "prompt"
+          },
+          {
+            "description": "Alias for prompt-aware tooling.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.prompt",
+            "target_context_key": "user_prompt"
+          }
+        ],
+        "required_inputs": [
+          "prompt"
+        ],
+        "schema_version": "workflow_launch_input_contract.v1"
+      },
+      "publication_spec": {
+        "initial_state": "extract_kr_materialisation_plan",
+        "steps": [
+          {
+            "action_id": "llm.action",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "conditions": [
+                        {
+                          "key": "kr_materialisation_decision",
+                          "kind": "context_value_equals",
+                          "value": "materialise"
+                        },
+                        {
+                          "key": "kr_materialisation_decision",
+                          "kind": "context_value_equals",
+                          "value": "create"
+                        }
+                      ],
+                      "kind": "any"
+                    },
+                    {
+                      "key": "kr_concept_specs",
+                      "kind": "context_cardinality",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "materialisation_plan_ready",
+                "to_state": "materialise_concepts"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "materialisation_plan_blocked",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "allowed_tools": [
+                "search_concepts",
+                "fetch_concept"
+              ],
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "User KR design request"
+                },
+                {
+                  "context_key": "user_prompt",
+                  "label": "User prompt alias"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated user concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "turn_expected_outcome_contract_state",
+                  "label": "Expected outcome contract"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Expected grounding requirement"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance"
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance"
+                }
+              ],
+              "max_tool_invocations": 12,
+              "policy_stage": "kr_design_materialisation_plan",
+              "required_tools": [
+                "search_concepts"
+              ],
+              "selection_policy": "adaptive",
+              "tool_argument_defaults": {
+                "fetch_concept": {
+                  "include_relations_any_arg": true,
+                  "include_text_relations_arg1": true,
+                  "limit": 50
+                },
+                "search_concepts": {
+                  "include_description": true,
+                  "include_hierarchy_path": true,
+                  "limit": 10,
+                  "match_type": "substring"
+                }
+              },
+              "tool_mode": "allowed"
+            },
+            "on_failure_state": "summarise_blocker",
+            "prompt_concept_ids": [
+              "#V#prompt_kr_design_materialisation_plan"
+            ],
+            "state_id": "extract_kr_materialisation_plan",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_extract_kr_materialisation_plan_validated_json_blocking_reason_to_kr_materialisation_blocking_reason",
+                "context_key": "kr_materialisation_blocking_reason",
+                "tool_output_field": "validated_json.blocking_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_extract_kr_materialisation_plan_validated_json_concept_specs_to_kr_concept_specs",
+                "context_key": "kr_concept_specs",
+                "tool_output_field": "validated_json.concept_specs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_extract_kr_materialisation_plan_validated_json_decision_to_kr_materialisation_decision",
+                "context_key": "kr_materialisation_decision",
+                "tool_output_field": "validated_json.decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_extract_kr_materialisation_plan_validated_json_relationship_specs_to_kr_relationship_specs",
+                "context_key": "kr_relationship_specs",
+                "tool_output_field": "validated_json.relationship_specs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_extract_kr_materialisation_plan_validated_json_summary_to_kr_materialisation_plan_summary",
+                "context_key": "kr_materialisation_plan_summary",
+                "tool_output_field": "validated_json.summary"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "kr_materialisation_decision",
+              "kr_concept_specs",
+              "kr_relationship_specs",
+              "kr_materialisation_plan_summary",
+              "kr_materialisation_blocking_reason"
+            ]
+          },
+          {
+            "action_id": "workflow_control.for_each",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "kr_concept_error_count",
+                      "kind": "context_compare",
+                      "operator": "eq",
+                      "value": 0
+                    },
+                    {
+                      "key": "kr_relationship_specs",
+                      "kind": "context_cardinality",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "concepts_verified_relationships_requested",
+                "to_state": "resolve_relationship_specs"
+              },
+              {
+                "condition_spec": {
+                  "key": "kr_concept_error_count",
+                  "kind": "context_compare",
+                  "operator": "eq",
+                  "value": 0
+                },
+                "reason": "concepts_verified_no_requested_relationships",
+                "to_state": "summarise_success"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "concept_materialisation_failed",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "materialise_concepts",
+            "static_input_bindings": [
+              [
+                "index_context_key",
+                "kr_concept_index"
+              ],
+              [
+                "item_context_key",
+                "current_kr_concept_spec"
+              ],
+              [
+                "items_context_key",
+                "kr_concept_specs"
+              ],
+              [
+                "max_concurrency",
+                1
+              ],
+              [
+                "max_items",
+                24
+              ],
+              [
+                "max_transitions",
+                40
+              ],
+              [
+                "success_policy",
+                "all_must_succeed"
+              ],
+              [
+                "workflow_id",
+                "#V#kr_design_concept_materialisation_item_workflow"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_materialise_concepts_for_each_error_count_to_kr_concept_error_count",
+                "context_key": "kr_concept_error_count",
+                "tool_output_field": "for_each_error_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_materialise_concepts_for_each_item_count_to_kr_concept_item_count",
+                "context_key": "kr_concept_item_count",
+                "tool_output_field": "for_each_item_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_materialise_concepts_for_each_success_count_to_kr_concept_success_count",
+                "context_key": "kr_concept_success_count",
+                "tool_output_field": "for_each_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_materialise_concepts_invocations_to_invocations",
+                "context_key": "invocations",
+                "tool_output_field": "invocations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_materialise_concepts_iteration_results_to_kr_concept_iteration_results",
+                "context_key": "kr_concept_iteration_results",
+                "tool_output_field": "iteration_results"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_concept_success_count",
+              "kr_concept_error_count",
+              "kr_concept_item_count",
+              "kr_concept_iteration_results",
+              "invocations"
+            ]
+          },
+          {
+            "action_id": "llm.action",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "key": "kr_relationship_resolution_decision",
+                      "kind": "context_value_equals",
+                      "value": "assert"
+                    },
+                    {
+                      "key": "kr_resolved_relationship_specs",
+                      "kind": "context_cardinality",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "relationships_resolved",
+                "to_state": "assert_relationships"
+              },
+              {
+                "condition_spec": {
+                  "key": "kr_relationship_resolution_decision",
+                  "kind": "context_value_equals",
+                  "value": "skip"
+                },
+                "reason": "relationship_resolution_skipped",
+                "to_state": "summarise_success"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "relationship_resolution_blocked",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "allowed_tools": [
+                "search_concepts",
+                "fetch_concept"
+              ],
+              "context_fields": [
+                {
+                  "context_key": "kr_relationship_specs",
+                  "label": "Requested relationship specs"
+                },
+                {
+                  "context_key": "kr_concept_iteration_results",
+                  "label": "Verified concept materialisation results"
+                },
+                {
+                  "context_key": "kr_materialisation_plan_summary",
+                  "label": "Materialisation plan summary"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Original KR design request"
+                }
+              ],
+              "max_tool_invocations": 12,
+              "policy_stage": "kr_relationship_endpoint_resolution",
+              "selection_policy": "adaptive",
+              "tool_argument_defaults": {
+                "fetch_concept": {
+                  "include_relations_any_arg": true,
+                  "include_text_relations_arg1": true,
+                  "limit": 50
+                },
+                "search_concepts": {
+                  "include_description": true,
+                  "include_hierarchy_path": true,
+                  "limit": 10,
+                  "match_type": "substring"
+                }
+              },
+              "tool_mode": "allowed"
+            },
+            "on_failure_state": "summarise_blocker",
+            "prompt_concept_ids": [
+              "#V#prompt_kr_relationship_endpoint_resolution"
+            ],
+            "state_id": "resolve_relationship_specs",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_blocking_reason_to_kr_relationship_resolution_blocking_reason",
+                "context_key": "kr_relationship_resolution_blocking_reason",
+                "tool_output_field": "validated_json.blocking_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_decision_to_kr_relationship_resolution_decision",
+                "context_key": "kr_relationship_resolution_decision",
+                "tool_output_field": "validated_json.decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_resolve_relationship_specs_validated_json_resolved_relationship_specs_to_kr_resolved_relationship_specs",
+                "context_key": "kr_resolved_relationship_specs",
+                "tool_output_field": "validated_json.resolved_relationship_specs"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "kr_relationship_resolution_decision",
+              "kr_resolved_relationship_specs",
+              "kr_relationship_resolution_blocking_reason"
+            ]
+          },
+          {
+            "action_id": "workflow_control.for_each",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "kr_relationship_error_count",
+                  "kind": "context_compare",
+                  "operator": "eq",
+                  "value": 0
+                },
+                "reason": "relationships_verified",
+                "to_state": "summarise_success"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "relationship_assertion_failed",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "assert_relationships",
+            "static_input_bindings": [
+              [
+                "index_context_key",
+                "kr_relationship_index"
+              ],
+              [
+                "item_context_key",
+                "current_kr_relationship_spec"
+              ],
+              [
+                "items_context_key",
+                "kr_resolved_relationship_specs"
+              ],
+              [
+                "max_concurrency",
+                1
+              ],
+              [
+                "max_items",
+                40
+              ],
+              [
+                "max_transitions",
+                24
+              ],
+              [
+                "success_policy",
+                "all_must_succeed"
+              ],
+              [
+                "workflow_id",
+                "#V#kr_design_relationship_assertion_item_workflow"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_assert_relationships_for_each_error_count_to_kr_relationship_error_count",
+                "context_key": "kr_relationship_error_count",
+                "tool_output_field": "for_each_error_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_assert_relationships_for_each_item_count_to_kr_relationship_item_count",
+                "context_key": "kr_relationship_item_count",
+                "tool_output_field": "for_each_item_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_assert_relationships_for_each_success_count_to_kr_relationship_success_count",
+                "context_key": "kr_relationship_success_count",
+                "tool_output_field": "for_each_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_assert_relationships_invocations_to_invocations",
+                "context_key": "invocations",
+                "tool_output_field": "invocations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_assert_relationships_iteration_results_to_kr_relationship_iteration_results",
+                "context_key": "kr_relationship_iteration_results",
+                "tool_output_field": "iteration_results"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_relationship_success_count",
+              "kr_relationship_error_count",
+              "kr_relationship_item_count",
+              "kr_relationship_iteration_results",
+              "invocations"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "summarise_success",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "response_text",
+                    "template": "KR design materialisation verified. Concepts: {concept_count}; relationships: {relationship_count}. Evidence tools included create_concepts, add_relationship, upsert_singleton_text_relation, fetch_concept, and get_text_relations_summary.",
+                    "variables": {
+                      "concept_count": {
+                        "default": 0,
+                        "value_from_context": "kr_concept_success_count"
+                      },
+                      "relationship_count": {
+                        "default": 0,
+                        "value_from_context": "kr_relationship_success_count"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "failed",
+            "on_failure_state": "failed",
+            "state_id": "summarise_blocker",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "response_text",
+                    "template": "KR design materialisation did not complete. Blocker: {blocker}.",
+                    "variables": {
+                      "blocker": {
+                        "default": "materialisation_preconditions_not_met",
+                        "value_from_context_options": [
+                          "kr_materialisation_blocking_reason",
+                          "kr_relationship_resolution_blocking_reason",
+                          "last_action_error"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      },
+      "type_ids": [
+        "#V#ai_workflow"
+      ]
+    }
+  ]
+}

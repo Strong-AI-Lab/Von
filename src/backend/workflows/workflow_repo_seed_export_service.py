@@ -44,6 +44,8 @@ _SKIPPED_TEXT_RELATION_PREDICATES = {
     "#V#hasContent",
     "hasNote",
     "#V#hasNote",
+    "hasWorkflowRepoSeedVersionJson",
+    "#V#hasWorkflowRepoSeedVersionJson",
     *{
         predicate
         for aliases in WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE_PRECEDENCE
@@ -305,6 +307,42 @@ def _serialise_static_input_bindings(
     ]
 
 
+def _serialise_llm_policy_for_seed_bundle(
+    *,
+    llm_policy: Any,
+    prompt_concept_ids: Sequence[str],
+) -> Any:
+    serialised_policy = _stable_json_like(llm_policy)
+    if not isinstance(serialised_policy, Mapping):
+        return serialised_policy
+    policy = dict(serialised_policy)
+    requested_prompt_ids = [
+        str(item).strip()
+        for item in prompt_concept_ids
+        if isinstance(item, str) and str(item).strip()
+    ]
+    if not requested_prompt_ids:
+        return policy
+
+    policy.pop("prompt_text", None)
+    prompt_candidates = policy.get("prompt_candidates")
+    if isinstance(prompt_candidates, Sequence) and not isinstance(
+        prompt_candidates,
+        str,
+    ):
+        normalised_candidates = [
+            str(item).strip()
+            for item in prompt_candidates
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if normalised_candidates == requested_prompt_ids:
+            policy.pop("prompt_candidates", None)
+    selected_prompt_id = str(policy.get("selected_prompt_id") or "").strip()
+    if selected_prompt_id in set(requested_prompt_ids):
+        policy.pop("selected_prompt_id", None)
+    return policy
+
+
 def _build_publication_spec_payload_from_definition(
     *,
     workflow_id: str,
@@ -439,7 +477,10 @@ def _build_publication_spec_payload_from_definition(
                     "effects": [],
                     "execution_mode": execution_mode,
                     "invoked_workflow_id": invoked_workflow_id,
-                    "llm_policy": _stable_json_like(runtime_details.llm_policy),
+                    "llm_policy": _serialise_llm_policy_for_seed_bundle(
+                        llm_policy=runtime_details.llm_policy,
+                        prompt_concept_ids=prompt_concept_ids,
+                    ),
                     "mutation_authority": _stable_json_like(
                         runtime_details.mutation_authority
                     ),
