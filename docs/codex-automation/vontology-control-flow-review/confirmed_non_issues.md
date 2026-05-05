@@ -81,6 +81,27 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   specific trigger policy cannot be expressed by persisted bindings/VWL and is
   not covered by `JVNAUTOSCI-1605` or later follow-ups.
 
+## Inspected, Not Filed On 2026-05-06
+
+- `src/backend/workflows/model_execution_budget_policy.py`: current evidence is
+  Vontology text-relation loading, bounded coercion, and telemetry for model
+  execution budget hints. File only if cost/locality/latency semantics or model
+  preference policy become Python-authored rather than represented model
+  metadata.
+- `src/backend/workflows/durable/model_selection_workflow.py` and
+  `src/backend/services/workflow_model_selection_workflow_vontology_service.py`:
+  watch as a small deterministic subworkflow bootstrap. Current evidence points
+  to generic candidate-pool/policy-resolution support for represented workflow
+  model policy. File if the Python authoring spec grows prompts, stage policy,
+  workflow-specific model choices, or user-facing model-selection semantics.
+- Paper recommendation policy authority after `JVNAUTOSCI-2194`: represented
+  policy loading is materially improved. The remaining embedding-only fallback
+  and prompt-unavailable path is not a new duplicate today because
+  `JVNAUTOSCI-2194`, `JVNAUTOSCI-1679`, and `JVNAUTOSCI-2199` already cover
+  the broader recommender authority/fail-closed family. Re-file only with fresh
+  live evidence that the current fallback sends or materialises recommendations
+  contrary to represented prompt/workflow policy.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.
