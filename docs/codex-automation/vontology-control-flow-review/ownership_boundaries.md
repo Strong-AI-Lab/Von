@@ -33,6 +33,10 @@ predicates, and KB assertions should own durable:
 - domain-specific workflow launch policy;
 - workflow-description semantics such as domain labels, capability wording,
   maturity/cost, and success-likelihood claims.
+- production workflow-family prompt text, discovery exemplars, routing
+  metadata, transition/control definitions, required-effect contracts, and
+  response templates, even when a Python script later publishes them into
+  Vontology.
 
 ## Python Support
 
@@ -59,3 +63,7 @@ Python can remain the surface for:
 
 Seed bundles are publication/migration artefacts, not normal runtime authority
 after Vontology authority exists.
+
+Workflow publisher scripts are acceptable only as bounded migration, export, or
+verification tooling. They should not become the durable workflow source or the
+template for future workflow-family authoring.
