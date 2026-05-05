@@ -5168,7 +5168,7 @@ class InternalMCPChatOrchestrator:
         )
 
     def _action_missing_tool_call_retry(self, request: Any) -> WorkflowActionResult:
-        data = request.data
+        data = cast(MutableMapping[str, Any], request.data)
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
         tool_invocation_sequence = cast(
@@ -5758,7 +5758,9 @@ class InternalMCPChatOrchestrator:
             retry_suppressed = True
             retry_attempts = max(retry_attempts, retry_budget)
             retries_remaining_after = 0
-            data["missing_tool_call_retry_attempts"] = retry_attempts
+            cast(MutableMapping[str, Any], data)[
+                "missing_tool_call_retry_attempts"
+            ] = retry_attempts
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -7823,7 +7825,7 @@ class InternalMCPChatOrchestrator:
             orchestrator_result (OrchestratorResult | None): Pre-built error
                 result if a parse error terminates the flow early.
         """
-        data = request.data
+        data = cast(MutableMapping[str, Any], request.data)
         env = request.environment
         llm_client = env.llm_client
         prompt = data["prompt"]
@@ -7833,6 +7835,18 @@ class InternalMCPChatOrchestrator:
         user_concept_id = data.get("user_concept_id")
         org_concept_id = data.get("org_concept_id")
         model_for_stage = data["model_for_stage"]
+
+        def _data_sequence_or_none(key: str) -> Sequence[Any] | None:
+            value = data.get(key)
+            if isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return value
+            return None
+
+        def _data_list(key: str) -> list[Any]:
+            value = data.get(key)
+            return value.copy() if isinstance(value, list) else []
         record_llm_call = data["record_llm_call"]
         emit_progress_raw = data.get("emit_progress")
         emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
@@ -7967,6 +7981,12 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
         )
+        allowed_tools_sequence = _data_sequence_or_none("llm_allowed_tools")
+        allowed_tools_tuple = (
+            tuple(allowed_tools_sequence)
+            if allowed_tools_sequence is not None
+            else None
+        )
         prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=prompt_requirements,
             turn_expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
@@ -7977,14 +7997,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
-            allowed_tools=(
-                tuple(data.get("llm_allowed_tools"))
-                if isinstance(data.get("llm_allowed_tools"), Sequence)
-                and not isinstance(
-                    data.get("llm_allowed_tools"), (str, bytes, bytearray)
-                )
-                else None
-            ),
+            allowed_tools=allowed_tools_tuple,
             tool_invocations=(),
         )
         prompt_requirements = self._merge_prompt_requirements_with_existing_tool_policy(
@@ -8216,38 +8229,15 @@ class InternalMCPChatOrchestrator:
                         ).strip()
                         else None
                     ),
-                    missing_required_tools=(
-                        list(data.get("missing_prompt_tools"))
-                        if isinstance(data.get("missing_prompt_tools"), list)
-                        else []
+                    missing_required_tools=_data_list("missing_prompt_tools"),
+                    missing_required_fetch_concept_ids=_data_list(
+                        "missing_prompt_fetch_concept_ids"
                     ),
-                    missing_required_fetch_concept_ids=(
-                        list(data.get("missing_prompt_fetch_concept_ids"))
-                        if isinstance(
-                            data.get("missing_prompt_fetch_concept_ids"), list
-                        )
-                        else []
+                    missing_required_read_file_copy_ids=_data_list(
+                        "missing_prompt_read_file_copy_ids"
                     ),
-                    missing_required_read_file_copy_ids=(
-                        list(data.get("missing_prompt_read_file_copy_ids"))
-                        if isinstance(
-                            data.get("missing_prompt_read_file_copy_ids"), list
-                        )
-                        else []
-                    ),
-                    missing_required_scholarly_representation_file_copy_ids=(
-                        list(
-                            data.get(
-                                "missing_prompt_scholarly_representation_for_file_copy_ids"
-                            )
-                        )
-                        if isinstance(
-                            data.get(
-                                "missing_prompt_scholarly_representation_for_file_copy_ids"
-                            ),
-                            list,
-                        )
-                        else []
+                    missing_required_scholarly_representation_file_copy_ids=_data_list(
+                        "missing_prompt_scholarly_representation_for_file_copy_ids"
                     ),
                     required_create_type_name=(
                         str(data.get("required_prompt_create_type_name")).strip()
@@ -8379,13 +8369,20 @@ class InternalMCPChatOrchestrator:
                         except Exception:
                             pass
 
-        data["missing_tool_call_retry_attempts"] = missing_tool_call_retry_attempts
-        data["missing_tool_call_retry_budget"] = missing_tool_call_retry_budget
-        data["missing_tool_call_retry_suppressed"] = missing_tool_call_retry_suppressed
-        data["missing_tool_call_retry_stop_reason"] = (
+        data_updates = cast(MutableMapping[str, Any], data)
+        data_updates["missing_tool_call_retry_attempts"] = (
+            missing_tool_call_retry_attempts
+        )
+        data_updates["missing_tool_call_retry_budget"] = missing_tool_call_retry_budget
+        data_updates["missing_tool_call_retry_suppressed"] = (
+            missing_tool_call_retry_suppressed
+        )
+        data_updates["missing_tool_call_retry_stop_reason"] = (
             missing_tool_call_retry_stop_reason
         )
-        data["missing_tool_call_recovery_outcome"] = missing_tool_call_recovery_outcome
+        data_updates["missing_tool_call_recovery_outcome"] = (
+            missing_tool_call_recovery_outcome
+        )
         missing_tool_call_retry_remaining = max(
             0, missing_tool_call_retry_budget - missing_tool_call_retry_attempts
         )
@@ -10603,19 +10600,20 @@ class InternalMCPChatOrchestrator:
                         )
                         else None
                     )
-                    data["missing_tool_call_retry_attempts"] = (
+                    data_updates = cast(MutableMapping[str, Any], data)
+                    data_updates["missing_tool_call_retry_attempts"] = (
                         missing_tool_call_retry_attempts
                     )
-                    data["missing_tool_call_retry_budget"] = (
+                    data_updates["missing_tool_call_retry_budget"] = (
                         missing_tool_call_retry_budget
                     )
-                    data["missing_tool_call_retry_suppressed"] = (
+                    data_updates["missing_tool_call_retry_suppressed"] = (
                         missing_tool_call_retry_suppressed
                     )
-                    data["missing_tool_call_retry_stop_reason"] = (
+                    data_updates["missing_tool_call_retry_stop_reason"] = (
                         missing_tool_call_retry_stop_reason
                     )
-                    data["missing_tool_call_recovery_outcome"] = (
+                    data_updates["missing_tool_call_recovery_outcome"] = (
                         missing_tool_call_recovery_outcome
                     )
                     if recovered_calls:
@@ -27899,43 +27897,36 @@ class InternalMCPChatOrchestrator:
         row: Mapping[str, Any],
         profile: Mapping[str, Any],
     ) -> bool:
+        def _profile_sequence(key: str) -> Sequence[Any]:
+            value = profile.get(key)
+            if isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return value
+            return ()
+
         predicate_id = cls._normalise_concept_id_candidate(
             row.get("predicate_concept_id")
         )
-        predicate_ids = {
-            concept_id.lower()
-            for concept_id in (
-                cls._normalise_concept_id_candidate(item)
-                for key in ("predicate_ids", "preferred_predicate_ids")
-                for item in (
-                    profile.get(key)
-                    if isinstance(profile.get(key), Sequence)
-                    and not isinstance(profile.get(key), (str, bytes, bytearray))
-                    else []
-                )
-            )
-            if concept_id
-        }
-        type_ids = {
-            concept_id.lower()
-            for concept_id in (
-                cls._normalise_concept_id_candidate(item)
-                for key in (
-                    "type_ids",
-                    "target_type_ids",
-                    "preferred_type_ids",
-                    "preferred_argument_type_ids",
-                    "preferred_result_type_ids",
-                )
-                for item in (
-                    profile.get(key)
-                    if isinstance(profile.get(key), Sequence)
-                    and not isinstance(profile.get(key), (str, bytes, bytearray))
-                    else []
-                )
-            )
-            if concept_id
-        }
+        predicate_ids: set[str] = set()
+        for key in ("predicate_ids", "preferred_predicate_ids"):
+            for item in _profile_sequence(key):
+                concept_id = cls._normalise_concept_id_candidate(item)
+                if concept_id:
+                    predicate_ids.add(concept_id.lower())
+
+        type_ids: set[str] = set()
+        for key in (
+            "type_ids",
+            "target_type_ids",
+            "preferred_type_ids",
+            "preferred_argument_type_ids",
+            "preferred_result_type_ids",
+        ):
+            for item in _profile_sequence(key):
+                concept_id = cls._normalise_concept_id_candidate(item)
+                if concept_id:
+                    type_ids.add(concept_id.lower())
         predicate_matches = bool(
             predicate_id and predicate_ids and predicate_id.lower() in predicate_ids
         )
@@ -41042,11 +41033,11 @@ class InternalMCPChatOrchestrator:
                 )
                 if not action_id:
                     continue
-                payload = (
-                    dict(envelope.get("output_payload"))
-                    if isinstance(envelope.get("output_payload"), Mapping)
-                    else {}
-                )
+                raw_output_payload = envelope.get("output_payload")
+                payload: dict[str, Any] = {}
+                if isinstance(raw_output_payload, Mapping):
+                    for key, value in raw_output_payload.items():
+                        payload[str(key)] = value
                 outcome = _workflow_execution_summary_text(
                     envelope.get("action_outcome")
                 ) or _workflow_execution_summary_text(envelope.get("action_status"))

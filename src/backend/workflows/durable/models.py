@@ -70,6 +70,7 @@ class EventWorkflowBinding:
     event_type: str
     workflow_id: str
     input_mapping: dict[str, str] = field(default_factory=dict)
+    condition: dict[str, Any] | None = None
     enabled: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -84,6 +85,7 @@ class EventWorkflowBinding:
         event_type: str,
         workflow_id: str,
         input_mapping: dict[str, str] | None = None,
+        condition: dict[str, Any] | None = None,
         enabled: bool = True,
         actor: str | None = None,
     ) -> "EventWorkflowBinding":
@@ -93,11 +95,16 @@ class EventWorkflowBinding:
             event_type=str(event_type or "").strip(),
             workflow_id=str(workflow_id or "").strip(),
             input_mapping=dict(input_mapping or {}),
+            condition=dict(condition) if isinstance(condition, dict) else None,
             enabled=bool(enabled),
             created_at=now,
             updated_at=now,
-            created_by=actor.strip() if isinstance(actor, str) and actor.strip() else None,
-            updated_by=actor.strip() if isinstance(actor, str) and actor.strip() else None,
+            created_by=actor.strip()
+            if isinstance(actor, str) and actor.strip()
+            else None,
+            updated_by=actor.strip()
+            if isinstance(actor, str) and actor.strip()
+            else None,
             revision=1,
         )
 
@@ -107,6 +114,9 @@ class EventWorkflowBinding:
             "event_type": self.event_type,
             "workflow_id": self.workflow_id,
             "input_mapping": dict(self.input_mapping),
+            "condition": dict(self.condition)
+            if isinstance(self.condition, dict)
+            else None,
             "enabled": bool(self.enabled),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -132,11 +142,15 @@ class EventWorkflowBinding:
                 if key and value:
                     input_mapping[key] = value
 
+        raw_condition = doc.get("condition")
+        condition = dict(raw_condition) if isinstance(raw_condition, dict) else None
+
         return cls(
             binding_id=str(doc.get("binding_id") or ""),
             event_type=str(doc.get("event_type") or ""),
             workflow_id=str(doc.get("workflow_id") or ""),
             input_mapping=input_mapping,
+            condition=condition,
             enabled=bool(doc.get("enabled", True)),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
@@ -151,6 +165,9 @@ class EventWorkflowBinding:
             "event_type": self.event_type,
             "workflow_id": self.workflow_id,
             "input_mapping": dict(self.input_mapping),
+            "condition": dict(self.condition)
+            if isinstance(self.condition, dict)
+            else None,
             "enabled": bool(self.enabled),
             "created_at": self.created_at.isoformat()
             if isinstance(self.created_at, datetime)

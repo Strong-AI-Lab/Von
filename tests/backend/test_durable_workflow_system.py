@@ -573,8 +573,9 @@ class TestWorkflowInstanceManager:
 
         monkeypatch.setattr(
             "src.backend.services.workflow_event_integration_service.maybe_launch_episode_evaluation_for_workflow_terminal",
-            lambda **kwargs: launches.append(dict(kwargs))
-            or {"success": True, "triggered": True},
+            lambda **kwargs: (
+                launches.append(dict(kwargs)) or {"success": True, "triggered": True}
+            ),
         )
 
         instance_id = manager.create_instance(
@@ -972,7 +973,9 @@ class TestWorkflowInstanceManager:
 
         task_ids = {instance.instance_id for instance in task_instances}
         message_ids = {instance.instance_id for instance in message_instances}
-        event_id_filtered_ids = {instance.instance_id for instance in event_id_instances}
+        event_id_filtered_ids = {
+            instance.instance_id for instance in event_id_instances
+        }
 
         assert id1 in task_ids
         assert id1 in event_id_filtered_ids
@@ -1001,6 +1004,32 @@ class TestWorkflowInstanceManager:
         assert len(listed) == 1
         assert listed[0].binding_id == binding.binding_id
 
+    def test_upsert_event_binding_condition_without_input_mapping(self) -> None:
+        """Condition-only event bindings should persist represented policy."""
+        manager = WorkflowInstanceManager()
+
+        condition = {
+            "kind": "context_value_equals",
+            "key": "event.new_status",
+            "value": "completed",
+        }
+        binding, created, updated = manager.upsert_event_binding(
+            event_type="task.status_changed",
+            workflow_id="#V#task_status_workflow",
+            condition=condition,
+            enabled=True,
+            actor="test_user",
+        )
+
+        assert created is True
+        assert updated is False
+        assert binding.input_mapping == {}
+        assert binding.condition == condition
+
+        listed = manager.list_event_bindings(event_type="task.status_changed")
+        assert len(listed) == 1
+        assert listed[0].condition == condition
+
     def test_upsert_event_binding_invalidates_runnable_verification_cache(
         self, monkeypatch
     ) -> None:
@@ -1021,7 +1050,10 @@ class TestWorkflowInstanceManager:
         )
 
         assert invalidations
-        assert invalidations[-1].get("workflow_id") == "#V#salient_predicate_governance_workflow"
+        assert (
+            invalidations[-1].get("workflow_id")
+            == "#V#salient_predicate_governance_workflow"
+        )
         assert invalidations[-1].get("reason") == "event_binding_mutated"
 
     def test_upsert_event_binding_conflict_requires_replace(self) -> None:
@@ -1114,7 +1146,10 @@ class TestWorkflowInstanceManager:
         assert deleted.binding_id == binding.binding_id
         assert manager.get_event_binding(binding.binding_id) is None
         assert invalidations
-        assert invalidations[-1].get("workflow_id") == "#V#file_copy_upload_handler_workflow"
+        assert (
+            invalidations[-1].get("workflow_id")
+            == "#V#file_copy_upload_handler_workflow"
+        )
         assert invalidations[-1].get("reason") == "event_binding_mutated"
 
     def test_find_and_claim_instance(self) -> None:

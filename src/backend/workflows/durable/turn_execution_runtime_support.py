@@ -517,22 +517,23 @@ def _derive_required_effect_invocations_from_workflow_steps(
         action_id = _safe_str(envelope.get("action_id"))
         if not action_id or action_id.lower() not in required_lookup:
             continue
-        output_payload = (
-            dict(envelope.get("output_payload"))
-            if isinstance(envelope.get("output_payload"), Mapping)
-            else {}
+        raw_output_payload = envelope.get("output_payload")
+        output_payload: dict[str, Any] = (
+            {}
         )
+        if isinstance(raw_output_payload, Mapping):
+            for key, value in raw_output_payload.items():
+                output_payload[str(key)] = value
         effective_payload = {**context_target_payload, **output_payload}
         status_text = (
             _safe_str(envelope.get("action_outcome"))
             or _safe_str(envelope.get("action_status"))
             or ""
         ).lower()
-        diagnostics = (
-            envelope.get("diagnostics")
-            if isinstance(envelope.get("diagnostics"), Mapping)
-            else {}
-        )
+        raw_diagnostics = envelope.get("diagnostics")
+        diagnostics: Mapping[str, Any] = {}
+        if isinstance(raw_diagnostics, Mapping):
+            diagnostics = raw_diagnostics
         error_text = _safe_str(diagnostics.get("error"))
         status = "ok" if status_text in {"success", "succeeded", "ok"} else "failed"
         fingerprint = (

@@ -5811,8 +5811,9 @@ def _list_recent_screenshots(**kwargs):
 
     # Newest first before optional clipboard re-ranking.
     candidate_items.sort(
-        key=lambda item: item.get("modified_at_dt")
-        or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda item: (
+            item.get("modified_at_dt") or datetime.min.replace(tzinfo=timezone.utc)
+        ),
         reverse=True,
     )
 
@@ -15001,6 +15002,7 @@ def _workflow_bind_event(**kwargs):
         build_durable_workflow_registry_read_only,
     )
     from ...services.workflow_event_integration_service import (
+        _normalise_event_binding_condition,
         resolve_event_actor_context,
     )
 
@@ -15022,6 +15024,7 @@ def _workflow_bind_event(**kwargs):
     event_type = event_type_raw.strip()
     workflow_id = workflow_id_raw.strip()
     input_mapping_raw = kwargs.get("input_mapping")
+    condition_raw = kwargs.get("condition")
     enabled = kwargs.get("enabled", True)
     replace_existing = kwargs.get("replace_existing", False)
     actor = kwargs.get("actor")
@@ -15033,6 +15036,19 @@ def _workflow_bind_event(**kwargs):
             value_clean = str(value or "").strip()
             if key_clean and value_clean:
                 input_mapping[key_clean] = value_clean
+
+    try:
+        condition = _normalise_event_binding_condition(condition_raw)
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_binding_condition",
+            str(exc),
+            details={"event_type": event_type, "workflow_id": workflow_id},
+            suggestions=[
+                "Use the workflow condition language, for example "
+                "{'kind':'context_value_equals','key':'event.new_status','value':'completed'}."
+            ],
+        )
 
     if not isinstance(enabled, bool):
         enabled = bool(enabled)
@@ -15057,6 +15073,7 @@ def _workflow_bind_event(**kwargs):
             event_type=event_type,
             workflow_id=workflow_id,
             input_mapping=input_mapping,
+            condition=condition,
             enabled=enabled,
             actor=actor_clean,
             replace_existing=replace_existing,
@@ -19961,6 +19978,8 @@ def _gmail_exception_status_code(exc: Exception) -> int | None:
     status = getattr(response, "status", None)
     if status is None:
         status = getattr(exc, "status_code", None)
+    if status is None:
+        return None
     try:
         return int(status)
     except Exception:  # noqa: BLE001
@@ -28178,9 +28197,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_external_integration_definitions() -> List[
+    MethodDefinition
+]:
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -28677,9 +28696,9 @@ def _build_default_catalogue_external_integration_definitions() -> (
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
+    MethodDefinition
+]:
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",
@@ -31056,12 +31075,13 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 required={"event_type": str, "workflow_id": str},
                 optional={
                     "input_mapping": (dict, type(None)),
+                    "condition": (dict, type(None)),
                     "enabled": bool,
                     "replace_existing": bool,
                     "actor": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="Create or update an event -> workflow binding.",
+                description="Create or update an event -> workflow binding with optional workflow-condition metadata.",
             ),
             output_schema=Schema(
                 required={"success": bool},
@@ -31079,7 +31099,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             ),
             category="write",
             description=(
-                "Register or update an event-to-workflow binding with optional input mapping. "
+                "Register or update an event-to-workflow binding with optional input mapping and represented condition metadata. "
                 "Set replace_existing=true to overwrite an existing conflicting binding."
             ),
         ),

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...languagemodels.llm_interface import get_llm_client
@@ -745,11 +745,10 @@ def _handle_generate_translations(
         minimum=0.5,
         maximum=0.999,
     )
-    missing_slots = (
-        summary.get("missing_target_slots")
-        if isinstance(summary.get("missing_target_slots"), Mapping)
-        else {}
-    )
+    raw_missing_slots = summary.get("missing_target_slots")
+    missing_slots: Mapping[str, Sequence[str]] = {}
+    if isinstance(raw_missing_slots, Mapping):
+        missing_slots = cast(Mapping[str, Sequence[str]], raw_missing_slots)
     prompt_payload = {
         "workflow_id": MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
         "concept_id": concept_id,

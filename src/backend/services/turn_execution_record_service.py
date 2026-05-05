@@ -6080,11 +6080,13 @@ def _required_representation_readback_fields(effect: Mapping[str, Any]) -> list[
     if isinstance(raw_fields, Sequence) and not isinstance(
         raw_fields, (str, bytes, bytearray)
     ):
-        fields = [
-            _safe_str(field)
-            for field in raw_fields
-            if isinstance(field, str) and _safe_str(field)
-        ]
+        fields: list[str] = []
+        for field in raw_fields:
+            if not isinstance(field, str):
+                continue
+            field_text = _safe_str(field)
+            if isinstance(field_text, str) and field_text:
+                fields.append(field_text)
         if fields:
             return fields
     effect_type = _safe_str(effect.get("effect_type"))

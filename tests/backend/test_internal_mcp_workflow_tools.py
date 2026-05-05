@@ -373,21 +373,26 @@ class _StubWorkflowManager:
         event_type: str,
         workflow_id: str,
         input_mapping: dict[str, str] | None = None,
+        condition: dict[str, object] | None = None,
         enabled: bool = True,
         actor: str | None = None,
         replace_existing: bool = False,
     ) -> tuple[EventWorkflowBinding, bool, bool]:
         key = (event_type, workflow_id)
         mapping = dict(input_mapping or {})
+        condition_clean = dict(condition) if isinstance(condition, dict) else None
         existing = self.bindings.get(key)
         if existing is not None:
-            if existing.input_mapping == mapping and bool(existing.enabled) == bool(
-                enabled
+            if (
+                existing.input_mapping == mapping
+                and existing.condition == condition_clean
+                and bool(existing.enabled) == bool(enabled)
             ):
                 return existing, False, False
             if not replace_existing:
                 raise ValueError("binding_conflict")
             existing.input_mapping = mapping
+            existing.condition = condition_clean
             existing.enabled = bool(enabled)
             existing.updated_by = actor
             existing.revision += 1
@@ -397,6 +402,7 @@ class _StubWorkflowManager:
             event_type=event_type,
             workflow_id=workflow_id,
             input_mapping=mapping,
+            condition=condition_clean,
             enabled=bool(enabled),
             actor=actor,
         )
@@ -852,15 +858,17 @@ def test_workflow_list_definitions_requests_pending_inventory_when_snapshot_abse
     )
     monkeypatch.setattr(
         "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
-        lambda **kwargs: calls.update(kwargs)
-        or {
-            "build_state": "pending_background_build",
-            "counts": {},
-            "summary_text": "pending",
-            "diagnostics": {"reason_codes": ["inventory_pending_background_build"]},
-            "parity_policy": {"mode": "fail", "drift_detected": False},
-            "workflow_purity": {"counters": {}, "baseline": {}},
-        },
+        lambda **kwargs: (
+            calls.update(kwargs)
+            or {
+                "build_state": "pending_background_build",
+                "counts": {},
+                "summary_text": "pending",
+                "diagnostics": {"reason_codes": ["inventory_pending_background_build"]},
+                "parity_policy": {"mode": "fail", "drift_detected": False},
+                "workflow_purity": {"counters": {}, "baseline": {}},
+            }
+        ),
     )
     monkeypatch.setattr(
         "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
@@ -2162,7 +2170,9 @@ def test_workflow_concept_parity_audit_gateway_invoke_success_path(monkeypatch):
             "summary": {"audited_count": 1},
             "concepts": [
                 {
-                    "concept_id": (kwargs.get("concept_ids") or ["#V#alpha_workflow"])[0],
+                    "concept_id": (kwargs.get("concept_ids") or ["#V#alpha_workflow"])[
+                        0
+                    ],
                     "diagnostic_state": "authority_drift",
                 }
             ],
@@ -2184,9 +2194,9 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     methods = set(build_default_catalogue().list_methods())
     tracked = set(tracked_workflow_surface_tool_names())
     missing = sorted(tracked - methods)
-    assert (
-        not missing
-    ), f"Tracked workflow surface tools missing from catalogue: {missing}"
+    assert not missing, (
+        f"Tracked workflow surface tools missing from catalogue: {missing}"
+    )
 
 
 def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
@@ -2208,6 +2218,7 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
             "event_type": "concept.created",
             "workflow_id": "#V#enrichment_workflow",
             "input_mapping": {"concept_id": "event.concept_id"},
+            "condition": {"kind": "context_exists", "key": "event.concept_id"},
         },
     ).payload
     assert bind_payload.get("success") is True
@@ -2215,6 +2226,11 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     binding = bind_payload.get("binding") or {}
     assert binding.get("event_type") == "concept.created"
     assert binding.get("workflow_id") == "#V#enrichment_workflow"
+    assert binding.get("condition") == {
+        "kind": "context_exists",
+        "key": "event.concept_id",
+        "expected": True,
+    }
 
     listed = gateway.invoke(
         "workflow_list_event_bindings",
@@ -2223,6 +2239,7 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     assert listed.get("success") is True
     assert listed.get("count") == 1
     assert listed.get("bindings")[0]["workflow_id"] == "#V#enrichment_workflow"
+    assert listed.get("bindings")[0]["condition"] == binding.get("condition")
     assert listed.get("diagnostics") == []
     assert listed.get("has_conflicts") is False
 

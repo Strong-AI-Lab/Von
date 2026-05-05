@@ -1265,8 +1265,22 @@ Persistent event-to-workflow bindings include:
 - `event_type`
 - `workflow_id`
 - `input_mapping`
+- `condition` (optional workflow condition spec evaluated against the event payload)
 - `enabled`
 - revision/actor metadata.
+
+Event-binding conditions use the same condition language as workflow transitions.
+The evaluation context exposes the event payload both at top level and under
+`event`, plus launch inputs under `inputs`. For example, a task-status binding
+that should launch only for completed tasks can declare:
+
+```json
+{"kind":"context_value_equals","key":"event.new_status","value":"completed"}
+```
+
+This represented condition is the authority for status/event selection. Python
+emits structured events and evaluates the stored condition; it must not encode
+task-status trigger policy in environment allow-lists or code-side status sets.
 
 ## 12. Runnability and Safety Gates
 

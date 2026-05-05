@@ -12,7 +12,7 @@ import hashlib
 import logging
 import os
 from time import perf_counter
-from typing import Any
+from typing import Any, Mapping
 
 from .episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_AUTOTRIGGER_ENV,
@@ -38,6 +38,10 @@ from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
+from ..workflows.engine import (
+    compile_transition_condition_spec,
+    evaluate_transition_condition_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +61,6 @@ EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
-
-
-def _task_status_trigger_values() -> set[str]:
-    raw = os.getenv(
-        "VON_EVENT_TASK_STATUS_TRIGGER_VALUES",
-        "in_progress,completed,blocked,cancelled",
-    )
-    values = {item.strip().lower() for item in raw.split(",") if item.strip()}
-    if values:
-        return values
-    return {"in_progress", "completed", "blocked", "cancelled"}
 
 
 def _clean_text(value: Any) -> str | None:
@@ -213,7 +206,9 @@ def resolve_event_actor_context(
     resolved_user = (
         user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
     )
-    resolved_org = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+    resolved_org = (
+        org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+    )
     namespace_user, namespace_org = _derive_actor_context_from_namespace(namespace)
     if resolved_user is None and namespace_user is not None:
         resolved_user = namespace_user
@@ -285,6 +280,9 @@ def _fetch_persistent_bindings(
                     "event_type": item.event_type,
                     "workflow_id": item.workflow_id,
                     "input_mapping": dict(item.input_mapping),
+                    "condition": dict(item.condition)
+                    if isinstance(item.condition, dict)
+                    else None,
                     "enabled": bool(item.enabled),
                     "created_at": item.created_at.isoformat()
                     if item.created_at
@@ -431,6 +429,52 @@ def _resolve_bindings_for_event(event_type: str) -> list[dict[str, Any]]:
         for binding in all_bindings
         if str(binding.get("event_type") or "").strip() == event_type
     ]
+
+
+def _normalise_event_binding_condition(
+    condition: Any,
+) -> dict[str, Any] | None:
+    if condition is None:
+        return None
+    if not isinstance(condition, Mapping):
+        raise ValueError("event_binding_condition_invalid:condition_not_mapping")
+    return compile_transition_condition_spec(condition)
+
+
+def _build_event_binding_condition_context(
+    *,
+    event_payload: dict[str, Any],
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    context = dict(event_payload)
+    context.setdefault("event", event_payload)
+    context.setdefault("inputs", inputs)
+    return context
+
+
+def _evaluate_event_binding_condition(
+    *,
+    binding: dict[str, Any],
+    event_payload: dict[str, Any],
+    inputs: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None, str | None]:
+    raw_condition = binding.get("condition")
+    if raw_condition is None:
+        return True, None, None
+    try:
+        condition = _normalise_event_binding_condition(raw_condition)
+        if condition is None:
+            return True, None, None
+        matched = evaluate_transition_condition_spec(
+            context=_build_event_binding_condition_context(
+                event_payload=event_payload,
+                inputs=inputs,
+            ),
+            condition_spec=condition,
+        )
+    except ValueError as exc:
+        return False, None, str(exc)
+    return bool(matched), condition, None
 
 
 def _extract_path_value(payload: dict[str, Any], path: str) -> tuple[bool, Any]:
@@ -793,7 +837,9 @@ def _launch_single_event_binding(
             "retry_after_seconds": cadence_gate.get("retry_after_seconds"),
             "next_allowed_at": cadence_gate.get("next_allowed_at"),
             "latest_instance_id": cadence_gate.get("latest_instance_id"),
-            "latest_instance_created_at": cadence_gate.get("latest_instance_created_at"),
+            "latest_instance_created_at": cadence_gate.get(
+                "latest_instance_created_at"
+            ),
             "launch_check_timings_ms": {
                 **launch_check_timings_ms,
                 "total_ms": round((perf_counter() - launch_checks_started) * 1000.0, 3),
@@ -975,6 +1021,52 @@ def launch_event_workflow(
         binding_workflow_id = str(binding.get("workflow_id") or "").strip()
         if not binding_workflow_id:
             continue
+        condition_matched, condition, condition_error = (
+            _evaluate_event_binding_condition(
+                binding=binding,
+                event_payload=raw_event_payload,
+                inputs=dict(inputs or {}),
+            )
+        )
+        if condition_error is not None:
+            launches.append(
+                {
+                    "success": False,
+                    "triggered": False,
+                    "outcome": "not_triggered",
+                    "event_type": event_type,
+                    "event_id": safe_event_id,
+                    "workflow_id": binding_workflow_id,
+                    "binding_source": binding.get("source"),
+                    "binding_id": binding.get("binding_id"),
+                    "binding_condition_result": "invalid",
+                    "binding_condition_error": condition_error,
+                    "reason": "binding_condition_invalid",
+                    "hint": "Repair the represented event binding condition metadata.",
+                    "error_code": "binding_condition_invalid",
+                    "unresolved_input_mappings": [],
+                }
+            )
+            continue
+        if not condition_matched:
+            launches.append(
+                {
+                    "success": True,
+                    "triggered": False,
+                    "outcome": "not_triggered",
+                    "event_type": event_type,
+                    "event_id": safe_event_id,
+                    "workflow_id": binding_workflow_id,
+                    "binding_source": binding.get("source"),
+                    "binding_id": binding.get("binding_id"),
+                    "binding_condition": condition,
+                    "binding_condition_result": False,
+                    "reason": "binding_condition_not_matched",
+                    "hint": "Represented event binding condition rejected this event payload.",
+                    "unresolved_input_mappings": [],
+                }
+            )
+            continue
         input_mapping = _normalise_event_binding_mapping(
             binding.get("input_mapping")
             if isinstance(binding.get("input_mapping"), dict)
@@ -998,6 +1090,8 @@ def launch_event_workflow(
             )
             launch["binding_source"] = binding.get("source")
             launch["binding_id"] = binding.get("binding_id")
+            launch["binding_condition"] = condition
+            launch["binding_condition_result"] = True if condition else None
             launch["unresolved_input_mappings"] = unresolved_targets
             launches.append(launch)
         except Exception as exc:  # pragma: no cover - defensive
@@ -1145,17 +1239,6 @@ def maybe_launch_task_status_workflow(
     organisation_concept_id: str | None,
     namespace: str | None = None,
 ) -> dict[str, Any]:
-    # "Key status changes" are configurable and default to high-signal states.
-    if new_status.strip().lower() not in _task_status_trigger_values():
-        return {
-            "success": False,
-            "triggered": False,
-            "outcome": "not_triggered",
-            "event_type": EVENT_TYPE_TASK_STATUS_CHANGED,
-            "reason": "status_not_configured_for_trigger",
-            "hint": "Update VON_EVENT_TASK_STATUS_TRIGGER_VALUES to include this status if a trigger is expected.",
-        }
-
     # Include timestamp so different real transitions can still trigger while
     # replay of the same event remains idempotent.
     event_id = f"{task_concept_id}:{previous_status or 'unknown'}->{new_status}:{updated_at_iso or 'na'}"
@@ -1194,9 +1277,7 @@ def maybe_launch_effort_unit_completed_workflow(
 ) -> dict[str, Any]:
     """Emit an effort_unit.completed event for lifecycle workflows."""
 
-    event_id = (
-        f"{effort_unit_concept_id}:completed:{completed_at_iso or 'na'}"
-    )
+    event_id = f"{effort_unit_concept_id}:completed:{completed_at_iso or 'na'}"
     return launch_event_workflow(
         event_type=EVENT_TYPE_EFFORT_UNIT_COMPLETED,
         event_id=event_id,
@@ -1350,9 +1431,8 @@ def maybe_launch_vontology_mutation_workflow(
     )
 
     return {
-        "success": bool(specific_result.get("success")) and bool(
-            catch_all_result.get("success")
-        ),
+        "success": bool(specific_result.get("success"))
+        and bool(catch_all_result.get("success")),
         "triggered": bool(specific_result.get("triggered"))
         or bool(catch_all_result.get("triggered")),
         "mutation_event_type": mutation_type,
@@ -1493,9 +1573,9 @@ def maybe_launch_episode_evaluation_for_workflow_terminal(
     request_id = _clean_text(inputs_mapping.get("turn_id")) or _clean_text(
         inputs_mapping.get("request_id")
     )
-    session_id = _clean_text(inputs_mapping.get("conversation_session_id")) or _clean_text(
-        inputs_mapping.get("session_id")
-    )
+    session_id = _clean_text(
+        inputs_mapping.get("conversation_session_id")
+    ) or _clean_text(inputs_mapping.get("session_id"))
     launch_inputs = {
         "instance_id": instance_id,
         "request_id": request_id,

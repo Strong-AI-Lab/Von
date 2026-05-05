@@ -294,12 +294,9 @@ class WorkflowInstanceManager:
         """Reserve running or paused visibility when pending backlog is present."""
         if not status_values:
             return False
-        return (
-            WorkflowInstanceStatus.PENDING.value in status_values
-            and (
-                WorkflowInstanceStatus.RUNNING.value in status_values
-                or WorkflowInstanceStatus.PAUSED.value in status_values
-            )
+        return WorkflowInstanceStatus.PENDING.value in status_values and (
+            WorkflowInstanceStatus.RUNNING.value in status_values
+            or WorkflowInstanceStatus.PAUSED.value in status_values
         )
 
     @staticmethod
@@ -364,9 +361,7 @@ class WorkflowInstanceManager:
         status_values = self._normalise_status_filter(status)
         if status_values:
             query["status"] = (
-                status_values[0]
-                if len(status_values) == 1
-                else {"$in": status_values}
+                status_values[0] if len(status_values) == 1 else {"$in": status_values}
             )
 
         if workflow_id:
@@ -829,9 +824,7 @@ class WorkflowInstanceManager:
             if len(selected_docs) < limit:
                 for status_value in self._monitor_snapshot_status_order(status_values):
                     cursor = coll.find(
-                        self._build_exact_status_query(
-                            query, status_value=status_value
-                        )
+                        self._build_exact_status_query(query, status_value=status_value)
                     ).sort("created_at", -1)
                     for doc in cursor:
                         if len(selected_docs) >= limit:
@@ -844,9 +837,7 @@ class WorkflowInstanceManager:
                     if len(selected_docs) >= limit:
                         break
 
-            return [
-                WorkflowInstance.status_dict_from_doc(doc) for doc in selected_docs
-            ]
+            return [WorkflowInstance.status_dict_from_doc(doc) for doc in selected_docs]
 
         pipeline = [
             {"$match": query},
@@ -855,7 +846,8 @@ class WorkflowInstanceManager:
             {"$project": dict(_WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION)},
         ]
         return [
-            WorkflowInstance.status_dict_from_doc(doc) for doc in coll.aggregate(pipeline)
+            WorkflowInstance.status_dict_from_doc(doc)
+            for doc in coll.aggregate(pipeline)
         ]
 
     # -------------------------------------------------------------------------
@@ -1481,6 +1473,7 @@ class WorkflowInstanceManager:
         event_type: str,
         workflow_id: str,
         input_mapping: dict[str, str] | None = None,
+        condition: dict[str, Any] | None = None,
         enabled: bool = True,
         actor: str | None = None,
         replace_existing: bool = False,
@@ -1516,6 +1509,8 @@ class WorkflowInstanceManager:
                 if key_clean and value_clean:
                     mapping_clean[key_clean] = value_clean
 
+        condition_clean = dict(condition) if isinstance(condition, dict) else None
+
         actor_clean = (
             actor.strip() if isinstance(actor, str) and actor.strip() else None
         )
@@ -1525,6 +1520,7 @@ class WorkflowInstanceManager:
             existing = EventWorkflowBinding.from_doc(existing_doc)
             if (
                 existing.input_mapping == mapping_clean
+                and existing.condition == condition_clean
                 and bool(existing.enabled) == bool(enabled)
             ):
                 return existing, False, False
@@ -1539,6 +1535,7 @@ class WorkflowInstanceManager:
                 {
                     "$set": {
                         "input_mapping": mapping_clean,
+                        "condition": condition_clean,
                         "enabled": bool(enabled),
                         "updated_at": now,
                         "updated_by": actor_clean,
@@ -1559,6 +1556,7 @@ class WorkflowInstanceManager:
             event_type=event_type_clean,
             workflow_id=workflow_id_clean,
             input_mapping=mapping_clean,
+            condition=condition_clean,
             enabled=bool(enabled),
             actor=actor_clean,
         )
@@ -1574,6 +1572,7 @@ class WorkflowInstanceManager:
             existing = EventWorkflowBinding.from_doc(existing_doc)
             if (
                 existing.input_mapping == mapping_clean
+                and existing.condition == condition_clean
                 and bool(existing.enabled) == bool(enabled)
             ):
                 return existing, False, False
@@ -1586,6 +1585,7 @@ class WorkflowInstanceManager:
                 {
                     "$set": {
                         "input_mapping": mapping_clean,
+                        "condition": condition_clean,
                         "enabled": bool(enabled),
                         "updated_at": now,
                         "updated_by": actor_clean,
