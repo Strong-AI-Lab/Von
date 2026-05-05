@@ -28,8 +28,9 @@
     satisfies the verification imports.
 
 .PARAMETER UpgradePip
-    Upgrade pip even when reusing an existing .venv. Fresh venvs always upgrade
-    pip before installing PDM.
+    Upgrade pip even when reusing an existing .venv. Fresh checkout-local venvs
+    upgrade pip before installing PDM; fresh automation fallback venvs skip the
+    network upgrade unless this switch is passed.
 
 .PARAMETER SyncClean
     Use 'pdm sync --clean' instead of 'pdm install'. This may remove extra
@@ -44,6 +45,15 @@
 .PARAMETER AutomationVenvRoot
     Optional root for fallback automation virtual environments. Used only when
     the checkout-local .venv Python exists but cannot be executed.
+
+.PARAMETER PipNetworkTimeoutSeconds
+    Timeout passed to pip for package-index network operations.
+
+.PARAMETER PipNetworkRetries
+    Retry count passed to pip for package-index network operations.
+
+.PARAMETER DependencyInstallTimeoutSeconds
+    Wall-clock timeout for the PDM dependency installation step.
 
 .EXAMPLE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\setup_codex_automation_environment.ps1
@@ -81,7 +91,19 @@ param(
     [string]$AutomationVenvRoot,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$VerifyImports = @("flask", "pymongo", "pytest", "mcp")
+    [string[]]$VerifyImports = @("flask", "pymongo", "pytest", "mcp"),
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 600)]
+    [int]$PipNetworkTimeoutSeconds = 45,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 10)]
+    [int]$PipNetworkRetries = 2,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(30, 3600)]
+    [int]$DependencyInstallTimeoutSeconds = 240
 )
 
 $ErrorActionPreference = "Stop"
@@ -361,6 +383,151 @@ function Invoke-Checked {
     }
 }
 
+function ConvertTo-WindowsProcessArgument {
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Argument
+    )
+
+    if ($null -eq $Argument -or $Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $result = '"'
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes += 1
+        }
+        elseif ($character -eq [char]34) {
+            $result += ('\' * (($backslashes * 2) + 1))
+            $result += '"'
+            $backslashes = 0
+        }
+        else {
+            if ($backslashes -gt 0) {
+                $result += ('\' * $backslashes)
+                $backslashes = 0
+            }
+            $result += $character
+        }
+    }
+    if ($backslashes -gt 0) {
+        $result += ('\' * ($backslashes * 2))
+    }
+    $result += '"'
+    return $result
+}
+
+function Join-WindowsProcessArguments {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @()
+    )
+
+    return (@($Arguments) | ForEach-Object { ConvertTo-WindowsProcessArgument -Argument $_ }) -join " "
+}
+
+function Invoke-CheckedExternalWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @(),
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    Write-Step "$Description (timeout ${TimeoutSeconds}s)"
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo.FileName = $FilePath
+    $process.StartInfo.Arguments = Join-WindowsProcessArguments -Arguments $Arguments
+    $process.StartInfo.WorkingDirectory = (Get-Location).Path
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+
+    try {
+        if (-not $process.Start()) {
+            throw "$Description failed to start"
+        }
+
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "$Description timed out after $TimeoutSeconds seconds"
+        }
+        $process.WaitForExit()
+
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+
+        if ($stdout) {
+            Write-Host $stdout.TrimEnd()
+        }
+        if ($stderr) {
+            Write-Host $stderr.TrimEnd()
+        }
+
+        if ($process.ExitCode -ne 0) {
+            throw "$Description failed with exit code $($process.ExitCode)"
+        }
+    }
+    finally {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        $process.Dispose()
+    }
+}
+
+function Invoke-PipInstall {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Packages,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Upgrade
+    )
+
+    $pipArgs = @(
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--timeout",
+        [string]$PipNetworkTimeoutSeconds,
+        "--retries",
+        [string]$PipNetworkRetries
+    )
+    if ($Upgrade) {
+        $pipArgs += "--upgrade"
+    }
+    $pipArgs += $Packages
+
+    $pipInstallTimeoutSeconds = [Math]::Max(30, (($PipNetworkRetries + 1) * ($PipNetworkTimeoutSeconds + 15)))
+    Invoke-CheckedExternalWithTimeout `
+        -Description $Description `
+        -FilePath $venvPython `
+        -Arguments $pipArgs `
+        -TimeoutSeconds $pipInstallTimeoutSeconds
+}
+
 $root = Resolve-RepoRoot
 Set-Location -LiteralPath $root
 
@@ -429,23 +596,29 @@ else {
     Write-Ok "pip is available: $($pipVersion[0])"
 }
 
-if ($venvCreated -or $UpgradePip) {
-    Invoke-Checked "Upgrading pip" {
-        & $venvPython -m pip install --upgrade pip
-    }
+$shouldUpgradePip = $UpgradePip -or ($venvCreated -and -not $venvIsAutomationFallback)
+if ($shouldUpgradePip) {
+    Invoke-PipInstall -Description "Upgrading pip" -Packages @("pip") -Upgrade
 }
 else {
-    Write-Ok "Skipping pip upgrade for existing .venv"
+    if ($venvIsAutomationFallback -and $venvCreated) {
+        Write-Ok "Skipping pip upgrade for fresh automation fallback venv"
+    }
+    else {
+        Write-Ok "Skipping pip upgrade for existing selected virtualenv"
+    }
 }
 
-$pdmInstalled = & $venvPython -m pip show pdm 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $pdmInstalled) {
-    Invoke-Checked "Installing PDM inside .venv" {
-        & $venvPython -m pip install pdm
-    }
+$pdmProbe = Invoke-ExternalWithRetry `
+    -FilePath $venvPython `
+    -Arguments @("-m", "pip", "show", "pdm") `
+    -Description "Checking PDM inside selected virtualenv" `
+    -Attempts 1
+if (-not $pdmProbe.Succeeded -or -not $pdmProbe.Output) {
+    Invoke-PipInstall -Description "Installing PDM inside selected virtualenv" -Packages @("pdm")
 }
 else {
-    Write-Ok "PDM is already installed inside .venv"
+    Write-Ok "PDM is already installed inside selected virtualenv"
 }
 
 if (-not (Test-Path -LiteralPath $venvPdm)) {
@@ -553,9 +726,11 @@ if ($shouldInstallDependencies) {
         $pdmArgs += "--verbose"
     }
 
-    Invoke-Checked "Installing Python dependencies with PDM" {
-        & $venvPdm @pdmPrefixArgs @pdmArgs
-    }
+    Invoke-CheckedExternalWithTimeout `
+        -Description "Installing Python dependencies with PDM" `
+        -FilePath $venvPdm `
+        -Arguments (@($pdmPrefixArgs) + @($pdmArgs)) `
+        -TimeoutSeconds $DependencyInstallTimeoutSeconds
 }
 elseif ($SkipDependencyInstall) {
     Write-Warn "Skipping PDM dependency installation by request"

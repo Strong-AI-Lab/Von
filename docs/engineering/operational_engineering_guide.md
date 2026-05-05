@@ -332,7 +332,12 @@ For an existing usable `.venv`, it skips dependency installation to avoid
 rewriting locked packages under active local MCP/server processes. For a fresh
 or incomplete worktree environment, it runs PDM dependency installation from the
 repo root. It also avoids upgrading `pip` in an existing usable `.venv` unless
-`-UpgradePip` is passed. It intentionally does not read `.env` or perform
+`-UpgradePip` is passed. Fresh checkout-local venvs still upgrade `pip`, but
+fresh automation fallback venvs skip that nonessential network step unless
+`-UpgradePip` is explicitly passed. Pip package-index calls use bounded timeout
+and retry settings, and the PDM dependency installation step has a wall-clock
+timeout so unattended automation fails closed before the outer automation run
+times out. The script intentionally does not read `.env` or perform
 machine-global setup such as MongoDB, Tesseract, uv tools, or VS Code
 configuration.
 
