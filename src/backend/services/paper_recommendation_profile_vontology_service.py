@@ -14,6 +14,10 @@ from typing import Any, Mapping, Sequence
 
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
+from .paper_recommendation_policy_authority_service import (
+    normalise_profile_fields,
+    resolve_paper_recommendation_policy,
+)
 from .relationship_write_service import add_relationship
 from .paper_recommendation_vontology_service import (
     persist_subject_paper_matching_profile,
@@ -433,21 +437,18 @@ def _empty_profile(
     subject_concept_id: str,
     profile_concept_id: str,
 ) -> dict[str, Any]:
-    return {
+    policy = resolve_paper_recommendation_policy()
+    profile = {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "profile_id": _safe_str(profile_concept_id) or profile_concept_id,
         "subject_concept_id": subject_concept_id,
         "owner_subject_concept_id": subject_concept_id,
         "owner_person_concept_id": subject_concept_id,
         "profile_concept_id": profile_concept_id,
-        "project_description": "",
-        "stated_interest_terms": [],
-        "negative_interest_terms": [],
-        "preferred_authors": [],
-        "preferred_venues": [],
-        "notes": "",
         "updated_at": None,
     }
+    profile.update(normalise_profile_fields({}, policy=policy))
+    return profile
 
 
 def _normalise_profile_payload(
@@ -463,20 +464,12 @@ def _normalise_profile_payload(
     if not isinstance(raw_profile, Mapping):
         return base
 
-    base["project_description"] = _safe_str(raw_profile.get("project_description"))
-    base["stated_interest_terms"] = _normalise_string_list(
-        raw_profile.get("stated_interest_terms")
+    base.update(
+        normalise_profile_fields(
+            raw_profile,
+            policy=resolve_paper_recommendation_policy(),
+        )
     )
-    base["negative_interest_terms"] = _normalise_string_list(
-        raw_profile.get("negative_interest_terms")
-    )
-    base["preferred_authors"] = _normalise_string_list(
-        raw_profile.get("preferred_authors")
-    )
-    base["preferred_venues"] = _normalise_string_list(
-        raw_profile.get("preferred_venues")
-    )
-    base["notes"] = _safe_str(raw_profile.get("notes"))
     base["updated_at"] = _safe_str(raw_profile.get("updated_at")) or None
     return base
 

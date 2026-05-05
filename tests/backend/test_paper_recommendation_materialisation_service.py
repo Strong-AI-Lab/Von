@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 import src.backend.services.paper_recommendation_materialisation_service as service
+from tests.backend.paper_recommendation_policy_test_helpers import (
+    patch_paper_recommendation_policy,
+)
+
+
+@pytest.fixture(autouse=True)
+def _represented_policy(monkeypatch):
+    patch_paper_recommendation_policy(monkeypatch, service)
 
 
 def test_materialise_paper_recommendations_for_subject_persists_ranked_and_inactive(
@@ -9,7 +19,7 @@ def test_materialise_paper_recommendations_for_subject_persists_ranked_and_inact
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#project_alpha",
             "profile_concept_id": "#V#paper_recommendation_profile_for_project_alpha",
@@ -175,8 +185,8 @@ def test_materialise_paper_recommendations_from_event_refreshes_generic_subject_
     assert len(captured) == 1
     assert captured[0]["subject_concept_id"] == "#V#project_alpha"
     assert captured[0]["candidate_paper_concept_ids"] is None
-    assert captured[0]["candidate_limit"] == service.DEFAULT_CANDIDATE_RECALL_LIMIT
-    assert captured[0]["max_results"] == service.DEFAULT_MAX_RESULTS
+    assert captured[0]["candidate_limit"] is None
+    assert captured[0]["max_results"] is None
     assert captured[0]["include_all_candidates"] is False
     assert captured[0]["trigger_source"] == "test"
 
@@ -219,7 +229,7 @@ def test_materialise_paper_recommendations_for_subject_uses_bounded_fallback_sho
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
@@ -329,7 +339,7 @@ def test_score_candidates_with_embeddings_falls_back_to_local_text_hashing(
     monkeypatch.setattr(
         service,
         "_build_paper_bundle",
-        lambda paper_concept_id, lookup_cache=None: {
+        lambda paper_concept_id, **_kwargs: {
             "paper_concept_id": paper_concept_id,
             "paper_title": paper_concept_id,
             "representation_complete": True,
@@ -348,6 +358,7 @@ def test_score_candidates_with_embeddings_falls_back_to_local_text_hashing(
             "matching_text": "knowledge reasoning agents",
         },
         candidate_ids=["#V#paper_2", "#V#paper_1"],
+        policy=service.resolve_paper_recommendation_policy(),
     )
 
     assert diagnostics["embedding_backend"] == "local_text_hashing_fallback"
@@ -419,8 +430,17 @@ def test_build_paper_bundle_reuses_lookup_cache(monkeypatch):
     monkeypatch.setattr(service, "get_texts_for_concept", _fake_get_texts_for_concept)
 
     lookup_cache = service._LookupCache()
-    first = service._build_paper_bundle("#V#paper_1", lookup_cache=lookup_cache)
-    second = service._build_paper_bundle("#V#paper_1", lookup_cache=lookup_cache)
+    policy = service.resolve_paper_recommendation_policy()
+    first = service._build_paper_bundle(
+        "#V#paper_1",
+        policy=policy,
+        lookup_cache=lookup_cache,
+    )
+    second = service._build_paper_bundle(
+        "#V#paper_1",
+        policy=policy,
+        lookup_cache=lookup_cache,
+    )
 
     assert first == second
     assert concept_calls == 1
@@ -433,7 +453,7 @@ def test_materialise_paper_recommendations_for_subject_uses_authoritative_ration
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
@@ -525,7 +545,7 @@ def test_materialise_paper_recommendations_for_subject_does_not_persist_placehol
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
@@ -607,7 +627,7 @@ def test_materialise_paper_recommendations_for_subject_deduplicates_recalled_can
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
@@ -671,7 +691,7 @@ def test_materialise_paper_recommendations_for_subject_skips_semantic_recall_aft
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id, lookup_cache=None: {
+        lambda _subject_id, **_kwargs: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",

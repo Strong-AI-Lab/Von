@@ -15,6 +15,9 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
 )
+from .paper_recommendation_policy_authority_service import (
+    ensure_paper_recommendation_policy_authority,
+)
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_event_integration_service import (
     EVENT_TYPE_RELATIONSHIP_ADDED,
@@ -226,6 +229,7 @@ def bootstrap_canonical_paper_recommendation_workflow(
     """Publish prompt support, workflow authority, and event bindings."""
 
     prompt_support = _ensure_paper_recommendation_prompt_support()
+    policy_support = ensure_paper_recommendation_policy_authority()
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,
         publish_context_manager_factory=suspend_event_workflow_integration,
@@ -234,11 +238,13 @@ def bootstrap_canonical_paper_recommendation_workflow(
     event_bindings = _ensure_paper_recommendation_event_bindings()
     return {
         "success": bool(prompt_support.get("success"))
+        and bool(policy_support.get("success"))
         and bool(event_bindings.get("success"))
         and int((publication.get("publication") or {}).get("counts", {}).get("errors") or 0)
         == 0,
         "workflow_ids": [PAPER_RECOMMENDATION_WORKFLOW_ID],
         "prompt_support": prompt_support,
+        "policy_support": policy_support,
         "publication": publication.get("publication"),
         "typed_workflow_ids": publication.get("typed_workflow_ids") or [],
         "typed_step_ids": publication.get("typed_step_ids") or [],

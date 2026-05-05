@@ -14,6 +14,10 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
 )
+from .paper_recommendation_policy_authority_service import (
+    PaperRecommendationPolicy,
+    resolve_paper_recommendation_policy,
+)
 from .paper_recommendation_vontology_service import (
     list_subject_concept_ids_with_paper_matching_profiles,
     load_materialised_paper_recommendations,
@@ -32,12 +36,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RECOMMENDATIONS_PER_MESSAGE = 3
 _MAX_DELIVERY_PROMPT_CHARS = 12000
-_RESEARCHER_TYPE_ID = "#V#researcher"
-_VON_USER_TYPE_ID = "#V#von_user"
-_ORGANISATION_PREDICATE_ID = "#V#member_of_organisation"
-_RATIONALE_UNAVAILABLE_TEXT = (
-    "No authoritative relevance explanation was available for this recommendation yet."
-)
 
 
 def _safe_str(value: Any) -> str:
@@ -117,53 +115,51 @@ def is_paper_recommendation_delivery_subject(
     subject_concept_id: str,
     *,
     concept_doc: Mapping[str, Any] | None = None,
+    policy: PaperRecommendationPolicy | None = None,
+    type_memo_by_target: dict[str, dict[str, bool]] | None = None,
     user_type_memo: dict[str, bool] | None = None,
     researcher_type_memo: dict[str, bool] | None = None,
 ) -> bool:
-    """Return True for Von users that are researchers (directly or by subtype)."""
+    """Return True when the represented delivery profile says a subject is eligible."""
 
+    active_policy = policy or resolve_paper_recommendation_policy()
     subject_doc = concept_doc if isinstance(concept_doc, Mapping) else load_concept(subject_concept_id)
     type_ids = _type_ids_for_concept(subject_doc)
-    effective_user_type_memo = (
-        user_type_memo if isinstance(user_type_memo, dict) else {}
-    )
-    if not any(
-        _type_is_or_inherits(
-            type_id,
-            target_type_id=_VON_USER_TYPE_ID,
-            memo=effective_user_type_memo,
-        )
-        for type_id in type_ids
-    ):
+    if not type_ids:
         return False
-
-    effective_researcher_type_memo = (
-        researcher_type_memo if isinstance(researcher_type_memo, dict) else {}
-    )
-    return any(
-        _type_is_or_inherits(
-            type_id,
-            target_type_id=_RESEARCHER_TYPE_ID,
-            memo=effective_researcher_type_memo,
-        )
-        for type_id in type_ids
-    )
+    memo_by_target = type_memo_by_target if isinstance(type_memo_by_target, dict) else {}
+    required_type_ids = active_policy.delivery_required_type_ids
+    for required_type_id in required_type_ids:
+        memo = memo_by_target.setdefault(required_type_id, {})
+        if not any(
+            _type_is_or_inherits(
+                type_id,
+                target_type_id=required_type_id,
+                memo=memo,
+            )
+            for type_id in type_ids
+        ):
+            return False
+    return True
 
 
 def list_paper_recommendation_delivery_subject_ids(*, limit: int = 200) -> list[str]:
     """List researcher-user subjects eligible for recommendation delivery."""
 
+    policy = resolve_paper_recommendation_policy()
     safe_limit = max(1, int(limit))
+    seed_type_id = policy.delivery_candidate_seed_type_id or (
+        policy.delivery_required_type_ids[0] if policy.delivery_required_type_ids else ""
+    )
     subject_cursor = ConceptsRepository.find(
-        {"relationships.is_an_instance_of": _VON_USER_TYPE_ID},
+        {"relationships.is_an_instance_of": seed_type_id},
         projection={"concept_id": 1, "relationships.is_an_instance_of": 1},
         limit=max(200, safe_limit * 20),
     )
 
     rows: list[str] = []
     seen: set[str] = set()
-    user_type_memo: dict[str, bool] = {}
-    researcher_type_memo: dict[str, bool] = {}
+    type_memo_by_target: dict[str, dict[str, bool]] = {}
     for row in subject_cursor:
         if not isinstance(row, Mapping):
             continue
@@ -174,8 +170,8 @@ def list_paper_recommendation_delivery_subject_ids(*, limit: int = 200) -> list[
         if is_paper_recommendation_delivery_subject(
             subject_id,
             concept_doc=row,
-            user_type_memo=user_type_memo,
-            researcher_type_memo=researcher_type_memo,
+            policy=policy,
+            type_memo_by_target=type_memo_by_target,
         ):
             rows.append(subject_id)
         if len(rows) >= safe_limit:
@@ -190,8 +186,8 @@ def list_paper_recommendation_delivery_subject_ids(*, limit: int = 200) -> list[
         seen.add(subject_id)
         if is_paper_recommendation_delivery_subject(
             subject_id,
-            user_type_memo=user_type_memo,
-            researcher_type_memo=researcher_type_memo,
+            policy=policy,
+            type_memo_by_target=type_memo_by_target,
         ):
             rows.append(subject_id)
         if len(rows) >= safe_limit:
@@ -203,9 +199,16 @@ def _subject_display_name(subject_id: str, subject_doc: Mapping[str, Any] | None
     return _safe_str((subject_doc or {}).get("name")) or subject_id
 
 
-def _primary_org_id(subject_doc: Mapping[str, Any] | None) -> str | None:
+def _primary_org_id(
+    subject_doc: Mapping[str, Any] | None,
+    *,
+    policy: PaperRecommendationPolicy,
+) -> str | None:
+    organisation_predicate_id = policy.delivery_organisation_predicate_id
+    if not organisation_predicate_id:
+        return None
     org_ids = normalise_relationship_targets(
-        (subject_doc or {}).get("relationships", {}).get(_ORGANISATION_PREDICATE_ID)
+        (subject_doc or {}).get("relationships", {}).get(organisation_predicate_id)
     )
     return org_ids[0] if org_ids else None
 
@@ -232,7 +235,11 @@ def _resolve_delivery_subject_ids(
     return rows
 
 
-def _user_facing_rationale_text(recommendation: Mapping[str, Any]) -> str:
+def _user_facing_rationale_text(
+    recommendation: Mapping[str, Any],
+    *,
+    policy: PaperRecommendationPolicy,
+) -> str:
     summary = _safe_str(recommendation.get("rationale_summary"))
     if summary:
         return summary
@@ -255,15 +262,20 @@ def _user_facing_rationale_text(recommendation: Mapping[str, Any]) -> str:
         else {}
     )
     if rationale_generation.get("status") == "unavailable":
-        return _RATIONALE_UNAVAILABLE_TEXT
+        return policy.rationale_unavailable_text
     return ""
 
 
-def _format_recommendation_block(index: int, recommendation: Mapping[str, Any]) -> str:
+def _format_recommendation_block(
+    index: int,
+    recommendation: Mapping[str, Any],
+    *,
+    policy: PaperRecommendationPolicy,
+) -> str:
     paper_title = _safe_str(recommendation.get("paper_title")) or _safe_str(
         recommendation.get("paper_concept_id")
     )
-    rationale_summary = _user_facing_rationale_text(recommendation)
+    rationale_summary = _user_facing_rationale_text(recommendation, policy=policy)
     paper_representation = (
         recommendation.get("evaluation", {}).get("paper_representation")
         if isinstance(recommendation.get("evaluation"), Mapping)
@@ -281,18 +293,24 @@ def _format_recommendation_block(index: int, recommendation: Mapping[str, Any]) 
     score = float(recommendation.get("score") or 0.0)
     paper_concept_id = _safe_str(recommendation.get("paper_concept_id"))
 
+    field_values = {
+        "rationale_text": rationale_summary,
+        "score": f"{score:.2f}",
+        "author_names": author_names,
+        "topic_labels": topic_labels,
+        "publication_date": publication_date,
+        "paper_concept_id": paper_concept_id,
+    }
     lines = [f"{index}. {paper_title}"]
-    if rationale_summary:
-        lines.append(f"Why it looks relevant: {rationale_summary}")
-    lines.append(f"Recommendation score: {score:.2f}")
-    if author_names:
-        lines.append(f"Authors: {author_names}")
-    if topic_labels:
-        lines.append(f"Topics: {topic_labels}")
-    if publication_date:
-        lines.append(f"Publication date: {publication_date}")
-    if paper_concept_id:
-        lines.append(f"Paper concept ID: {paper_concept_id}")
+    for field_spec in policy.delivery_item_fields():
+        field_name = _safe_str(field_spec.get("field"))
+        label = _safe_str(field_spec.get("label"))
+        if not field_name or not label:
+            continue
+        value = _safe_str(field_values.get(field_name))
+        if not value and not bool(field_spec.get("include_if_empty")):
+            continue
+        lines.append(f"{label}: {value}")
     return "\n".join(lines)
 
 
@@ -301,10 +319,11 @@ def _render_delivery_message(
     recipient_display_name: str,
     recommendations: Sequence[Mapping[str, Any]],
     trigger_source: str | None,
+    policy: PaperRecommendationPolicy,
 ) -> tuple[str | None, dict[str, Any]]:
     recommendation_count = len(recommendations)
     recommendation_items = "\n\n".join(
-        _format_recommendation_block(index, recommendation)
+        _format_recommendation_block(index, recommendation, policy=policy)
         for index, recommendation in enumerate(recommendations, start=1)
     )
     resolved_prompt_id = resolve_linked_prompt_concept_id(
@@ -318,16 +337,13 @@ def _render_delivery_message(
         variables={
             "recipient_display_name": recipient_display_name,
             "recommendation_count": recommendation_count,
-            "recommendation_noun": (
-                "paper recommendation" if recommendation_count == 1 else "paper recommendations"
+            "recommendation_noun": policy.delivery_recommendation_noun(
+                recommendation_count
             ),
             "recommendation_items": recommendation_items,
-            "review_hint": (
-                "Open this recommendation message to review usefulness and "
-                "explanation quality, and update the relevant concept tab profile "
-                "when you want to steer future recommendations."
-            ),
-            "trigger_source": _safe_str(trigger_source) or "paper_recommendation_refresh",
+            "review_hint": policy.delivery_review_hint,
+            "trigger_source": _safe_str(trigger_source)
+            or policy.delivery_trigger_source_default,
         },
         max_chars=_MAX_DELIVERY_PROMPT_CHARS,
         error_prefix="paper_recommendation_delivery_message",
@@ -342,7 +358,7 @@ def deliver_paper_recommendation_messages(
     refresh_reports: Sequence[Mapping[str, Any]] | None = None,
     subject_concept_ids: Sequence[str] | None = None,
     trigger_source: str | None = None,
-    max_recommendations_per_message: int = DEFAULT_MAX_RECOMMENDATIONS_PER_MESSAGE,
+    max_recommendations_per_message: int | None = None,
 ) -> dict[str, Any]:
     """Create direct Von messages for newly active materialised recommendations."""
 
@@ -362,7 +378,17 @@ def deliver_paper_recommendation_messages(
             "subject_reports": [],
         }
 
-    safe_max_per_message = max(1, min(int(max_recommendations_per_message or 1), 10))
+    policy = resolve_paper_recommendation_policy()
+    safe_max_per_message = max(
+        1,
+        min(
+            int(
+                max_recommendations_per_message
+                or policy.default_max_recommendations_per_message
+            ),
+            policy.max_recommendations_per_message,
+        ),
+    )
     delivered_message_ids: list[str] = []
     delivered_subject_ids: list[str] = []
     subject_reports: list[dict[str, Any]] = []
@@ -371,12 +397,16 @@ def deliver_paper_recommendation_messages(
 
     for subject_id in resolved_subject_ids:
         subject_doc = load_concept(subject_id)
-        if not is_paper_recommendation_delivery_subject(subject_id, concept_doc=subject_doc):
+        if not is_paper_recommendation_delivery_subject(
+            subject_id,
+            concept_doc=subject_doc,
+            policy=policy,
+        ):
             subject_reports.append(
                 {
                     "subject_concept_id": subject_id,
                     "triggered": False,
-                    "reason": "subject_not_researcher_user",
+                    "reason": "subject_not_delivery_eligible",
                 }
             )
             continue
@@ -420,6 +450,7 @@ def deliver_paper_recommendation_messages(
             recipient_display_name=_subject_display_name(subject_id, subject_doc),
             recommendations=recommendations,
             trigger_source=trigger_source,
+            policy=policy,
         )
         if not message_body:
             error = _safe_str(prompt_diagnostics.get("error")) or "delivery_prompt_unavailable"
@@ -434,11 +465,7 @@ def deliver_paper_recommendation_messages(
             )
             continue
 
-        message_subject = (
-            "New paper recommendation from Von"
-            if len(recommendations) == 1
-            else "New paper recommendations from Von"
-        )
+        message_subject = policy.delivery_message_subject(len(recommendations))
         assertion_ids = [
             _safe_str(row.get("assertion_concept_id"))
             for row in recommendations
@@ -454,12 +481,15 @@ def deliver_paper_recommendation_messages(
             recipient_ids=[subject_id],
             content=message_body,
             subject=message_subject,
-            org_id=_primary_org_id(subject_doc),
+            org_id=_primary_org_id(subject_doc, policy=policy),
             metadata={
                 "attribution": "Sent by Von",
                 "delivery_channel": "paper_recommendation_message",
                 "intent": "paper_recommendation",
-                "trigger_source": _safe_str(trigger_source) or "paper_recommendation_refresh",
+                "trigger_source": _safe_str(trigger_source)
+                or policy.delivery_trigger_source_default,
+                "paper_recommendation_policy_version": policy.policy_version,
+                "paper_recommendation_policy_concept_id": policy.concept_id,
                 "recommendation_subject_concept_id": subject_id,
                 "recommendation_assertion_ids": assertion_ids,
                 "recommendation_paper_concept_ids": paper_ids,
@@ -516,6 +546,7 @@ def deliver_paper_recommendation_messages(
         "delivered_assertion_count": delivered_assertion_count,
         "delivered_message_ids": delivered_message_ids,
         "delivered_subject_concept_ids": delivered_subject_ids,
+        "policy": dict(policy.diagnostics),
         "subject_reports": subject_reports,
         "errors": errors,
     }

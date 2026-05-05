@@ -1,0 +1,199 @@
+{
+  "schema_version": "paper_recommendation_policy_profile.v1",
+  "policy_version": "paper_recommendation_policy.v3.vontology_authority",
+  "profile_fields": [
+    {
+      "field": "project_description",
+      "kind": "text",
+      "label": "Project description"
+    },
+    {
+      "field": "stated_interest_terms",
+      "kind": "string_list",
+      "label": "Stated interest terms"
+    },
+    {
+      "field": "negative_interest_terms",
+      "kind": "string_list",
+      "label": "Negative interest terms"
+    },
+    {
+      "field": "preferred_authors",
+      "kind": "string_list",
+      "label": "Preferred authors"
+    },
+    {
+      "field": "preferred_venues",
+      "kind": "string_list",
+      "label": "Preferred venues"
+    },
+    {
+      "field": "notes",
+      "kind": "text",
+      "label": "Notes"
+    }
+  ],
+  "feedback_labels": [
+    {
+      "label": "not_useful",
+      "score": -1.0,
+      "aliases": [
+        "bad",
+        "negative",
+        "no",
+        "not helpful",
+        "not useful",
+        "unhelpful",
+        "useless",
+        "-1"
+      ]
+    },
+    {
+      "label": "partly_useful",
+      "score": 0.0,
+      "aliases": [
+        "0",
+        "mixed",
+        "neutral",
+        "partial",
+        "partly",
+        "partly useful",
+        "somewhat"
+      ]
+    },
+    {
+      "label": "useful",
+      "score": 1.0,
+      "aliases": [
+        "1",
+        "good",
+        "helpful",
+        "positive",
+        "very useful",
+        "yes"
+      ]
+    }
+  ],
+  "matching": {
+    "subject_context_labels": {
+      "subject_concept": "Subject concept",
+      "concept_id": "Concept ID",
+      "relation": "Relation",
+      "research_interests": "Research interests",
+      "organisations": "Organisations",
+      "profile_overlay": "Profile overlay"
+    },
+    "paper_context_labels": {
+      "paper_title": "Paper title",
+      "paper_concept_id": "Paper concept ID",
+      "summary": "Abstract or summary",
+      "authors": "Authors",
+      "topics": "Topics",
+      "publication_date": "Publication date"
+    },
+    "paper_text_predicates": {
+      "summary": [
+        "hasDescription",
+        "hasContent"
+      ],
+      "publication_date": [
+        "#V#has_publication_date"
+      ],
+      "topic_labels": [
+        "#V#has_topic_labels"
+      ]
+    },
+    "relationship_exclusion_predicates": [
+      "is_a_type_of",
+      "has_subtype",
+      "is_an_instance_of",
+      "has_instance",
+      "linked_to"
+    ],
+    "visibility_exclusion_predicates": [
+      "#V#specific_to_user",
+      "#V#specific_to_organisation"
+    ],
+    "relationship_per_predicate_limit": 6,
+    "author_relation_predicates": [
+      "#V#authored_by"
+    ],
+    "topic_relation_predicates": [
+      "#V#about"
+    ],
+    "affecting_subject_relationship_predicates": [
+      "#V#has_research_interest",
+      "#V#member_of_organisation",
+      "#V#has_project",
+      "#V#working_on_project"
+    ],
+    "affecting_paper_text_predicates": [
+      "hasName",
+      "hasDescription",
+      "hasContent",
+      "#V#has_topic_labels",
+      "#V#has_publication_date"
+    ]
+  },
+  "recommendation": {
+    "default_candidate_recall_limit": 24,
+    "max_candidate_recall_limit": 100,
+    "default_max_results": 10,
+    "max_max_results": 50,
+    "default_llm_candidate_limit": 12,
+    "min_score": 0.55,
+    "embedding_only_active_limit": 3,
+    "summary_excerpt_chars": 280,
+    "paper_context_excerpt_chars": 4000,
+    "placeholder_rationale_summary": "Selected by semantic embedding similarity between the subject context and the paper representation."
+  },
+  "delivery": {
+    "candidate_seed_type_id": "#V#von_user",
+    "recipient_required_type_ids": [
+      "#V#von_user",
+      "#V#researcher"
+    ],
+    "organisation_predicate_id": "#V#member_of_organisation",
+    "default_max_recommendations_per_message": 3,
+    "max_recommendations_per_message": 10,
+    "recommendation_noun_singular": "paper recommendation",
+    "recommendation_noun_plural": "paper recommendations",
+    "trigger_source_default": "paper_recommendation_refresh",
+    "message_subject_singular": "New paper recommendation from Von",
+    "message_subject_plural": "New paper recommendations from Von",
+    "rationale_unavailable_text": "No authoritative relevance explanation was available for this recommendation yet.",
+    "review_hint": "Open this recommendation message to review usefulness and explanation quality, and update the relevant concept tab profile when you want to steer future recommendations.",
+    "item_fields": [
+      {
+        "field": "rationale_text",
+        "label": "Why it looks relevant",
+        "include_if_empty": false
+      },
+      {
+        "field": "score",
+        "label": "Recommendation score",
+        "include_if_empty": true
+      },
+      {
+        "field": "author_names",
+        "label": "Authors",
+        "include_if_empty": false
+      },
+      {
+        "field": "topic_labels",
+        "label": "Topics",
+        "include_if_empty": false
+      },
+      {
+        "field": "publication_date",
+        "label": "Publication date",
+        "include_if_empty": false
+      },
+      {
+        "field": "paper_concept_id",
+        "label": "Paper concept ID",
+        "include_if_empty": false
+      }
+    ]
+  }
+}

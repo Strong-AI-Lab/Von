@@ -3,9 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from src.backend.services import paper_recommendation_delivery_service as service
+from tests.backend.paper_recommendation_policy_test_helpers import (
+    make_test_paper_recommendation_policy,
+    patch_paper_recommendation_policy,
+)
 
 
 def test_deliver_paper_recommendation_messages_creates_digest_message(monkeypatch):
+    patch_paper_recommendation_policy(monkeypatch, service)
     subject_doc = {
         "name": "Michael Witbrock",
         "relationships": {
@@ -150,6 +155,7 @@ def test_deliver_paper_recommendation_messages_creates_digest_message(monkeypatc
 def test_deliver_paper_recommendation_messages_skips_non_new_recommendations(
     monkeypatch,
 ):
+    patch_paper_recommendation_policy(monkeypatch, service)
     subject_doc = {
         "name": "Lu Yunli",
         "relationships": {
@@ -195,6 +201,7 @@ def test_deliver_paper_recommendation_messages_skips_non_new_recommendations(
 
 
 def test_format_recommendation_block_surfaces_missing_authoritative_rationale_transparently():
+    policy = make_test_paper_recommendation_policy()
     block = service._format_recommendation_block(
         1,
         {
@@ -206,6 +213,7 @@ def test_format_recommendation_block_surfaces_missing_authoritative_rationale_tr
                 "paper_representation": {},
             },
         },
+        policy=policy,
     )
 
     assert "No authoritative relevance explanation was available" in block
@@ -214,6 +222,7 @@ def test_format_recommendation_block_surfaces_missing_authoritative_rationale_tr
 def test_list_paper_recommendation_delivery_subject_ids_finds_researcher_users(
     monkeypatch,
 ):
+    patch_paper_recommendation_policy(monkeypatch, service)
     subject_doc = {
         "concept_id": "#V#michael_witbrock",
         "relationships": {

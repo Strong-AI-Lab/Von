@@ -15,21 +15,17 @@ from .concept_similarity_service import build_text_embedding
 from .concept_search_service import search_concepts
 from .concept_service import get_concept_by_concept_id_exact
 from .paper_recommendation_constants import (
-    DEFAULT_CANDIDATE_RECALL_LIMIT,
-    DEFAULT_LLM_CANDIDATE_LIMIT,
-    DEFAULT_MAX_RESULTS,
     GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
-    MAX_CANDIDATE_RECALL_LIMIT,
-    MAX_MAX_RESULTS,
-    MIN_RECOMMENDATION_SCORE,
-    PAPER_RECOMMENDATION_POLICY_VERSION,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_RATIONALE_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_TYPE_ID,
-    SUMMARY_EXCERPT_CHARS,
+)
+from .paper_recommendation_policy_authority_service import (
+    PaperRecommendationPolicy,
+    resolve_paper_recommendation_policy,
 )
 from .paper_recommendation_vontology_service import (
     list_subject_concept_ids_with_paper_matching_profiles,
@@ -56,44 +52,9 @@ from .workflow_prompt_authority_service import (
 
 logger = logging.getLogger(__name__)
 
-_PAPER_TEXT_PREDICATES: dict[str, tuple[str, ...]] = {
-    "summary": ("hasDescription", "hasContent"),
-    "publication_date": ("#V#has_publication_date",),
-    "topic_labels": ("#V#has_topic_labels",),
-}
 _SUBJECT_PROMPT_MAX_CHARS = 12000
-_STRUCTURAL_REL_KEYS = {
-    "is_a_type_of",
-    "has_subtype",
-    "is_an_instance_of",
-    "has_instance",
-    "linked_to",
-}
-_VISIBILITY_REL_KEYS = {
-    "#V#specific_to_user",
-    "#V#specific_to_organisation",
-}
 _LEGACY_PROFILE_JSON_PREDICATE_ID = "#V#has_paper_recommendation_profile_json"
-_AFFECTING_SUBJECT_RELATIONSHIP_PREDICATES = {
-    "#V#has_research_interest",
-    "#V#member_of_organisation",
-    "#V#has_project",
-    "#V#working_on_project",
-}
-_AFFECTING_PAPER_TEXT_PREDICATES = {
-    "hasName",
-    "hasDescription",
-    "hasContent",
-    "#V#has_topic_labels",
-    "#V#has_publication_date",
-}
-_EMBEDDING_ONLY_ACTIVE_LIMIT = 3
 _EMBEDDING_BACKEND_FAILURE_BACKOFF_SECONDS = 300.0
-_PAPER_CONTEXT_EXCERPT_CHARS = 4000
-_PLACEHOLDER_RATIONALE_SUMMARY = (
-    "Selected by semantic embedding similarity between the "
-    "subject context and the paper representation."
-)
 _embedding_backend_backoff_until = 0.0
 _embedding_backend_backoff_reason: str | None = None
 
@@ -255,18 +216,22 @@ def _first_text_with_predicate(
 def _relationship_rows(
     concept_doc: Mapping[str, Any],
     *,
-    per_predicate_limit: int = 6,
+    policy: PaperRecommendationPolicy,
+    per_predicate_limit: int | None = None,
     lookup_cache: _LookupCache | None = None,
 ) -> list[dict[str, str]]:
     relationships = concept_doc.get("relationships")
     if not isinstance(relationships, Mapping):
         return []
+    limit = int(per_predicate_limit or policy.relationship_per_predicate_limit)
+    structural_rel_keys = set(policy.matching_string_tuple("relationship_exclusion_predicates"))
+    visibility_rel_keys = set(policy.matching_string_tuple("visibility_exclusion_predicates"))
     rows: list[dict[str, str]] = []
     for predicate, raw_targets in relationships.items():
         predicate_id = _safe_str(predicate)
-        if not predicate_id or predicate_id in _STRUCTURAL_REL_KEYS:
+        if not predicate_id or predicate_id in structural_rel_keys:
             continue
-        if predicate_id in _VISIBILITY_REL_KEYS:
+        if predicate_id in visibility_rel_keys:
             continue
         targets = raw_targets
         if isinstance(targets, str):
@@ -288,7 +253,7 @@ def _relationship_rows(
                 }
             )
             added += 1
-            if added >= per_predicate_limit:
+            if added >= limit:
                 break
     return rows
 
@@ -296,6 +261,7 @@ def _relationship_rows(
 def _build_subject_bundle(
     subject_concept_id: str,
     *,
+    policy: PaperRecommendationPolicy,
     lookup_cache: _LookupCache | None = None,
 ) -> dict[str, Any]:
     profile_payload = load_subject_paper_matching_profile(subject_concept_id)
@@ -308,7 +274,7 @@ def _build_subject_bundle(
 
     subject_doc = dict(profile_payload.get("subject_doc") or {})
     subject_name = _safe_str(subject_doc.get("name")) or subject_concept_id
-    related_rows = _relationship_rows(subject_doc, lookup_cache=lookup_cache)
+    related_rows = _relationship_rows(subject_doc, policy=policy, lookup_cache=lookup_cache)
     profile = dict(profile_payload.get("profile") or {})
     legacy_payload = profile_payload.get("legacy_profile_payload") or {}
     derived_context = {}
@@ -320,8 +286,8 @@ def _build_subject_bundle(
     )
 
     fact_lines: list[str] = [
-        f"Subject concept: {subject_name}",
-        f"Concept ID: {subject_concept_id}",
+        f"{policy.context_label('subject_context_labels', 'subject_concept', 'Subject concept')}: {subject_name}",
+        f"{policy.context_label('subject_context_labels', 'concept_id', 'Concept ID')}: {subject_concept_id}",
     ]
     base_text = build_concept_searchable_text(subject_doc)
     if base_text:
@@ -340,7 +306,12 @@ def _build_subject_bundle(
             if isinstance(item, Mapping)
         ]
         if interest_names:
-            fact_lines.append("Research interests: " + ", ".join(interest_names))
+            label = policy.context_label(
+                "subject_context_labels",
+                "research_interests",
+                "Research interests",
+            )
+            fact_lines.append(label + ": " + ", ".join(interest_names))
     if organisation_ids:
         organisation_names: list[str] = []
         for organisation_id in organisation_ids[:8]:
@@ -352,20 +323,31 @@ def _build_subject_bundle(
                 _safe_str(organisation_doc.get("name")) or organisation_id
             )
         if organisation_names:
-            fact_lines.append("Organisations: " + ", ".join(organisation_names))
+            label = policy.context_label(
+                "subject_context_labels",
+                "organisations",
+                "Organisations",
+            )
+            fact_lines.append(label + ": " + ", ".join(organisation_names))
     if profile:
         profile_lines: list[str] = []
         for field, value in profile.items():
             if field in {"schema_version", "subject_concept_id", "updated_at"}:
                 continue
+            label = policy.profile_field_label(field)
             if isinstance(value, list) and value:
                 profile_lines.append(
-                    f"{field}: {', '.join(_normalise_string_list(value))}"
+                    f"{label}: {', '.join(_normalise_string_list(value))}"
                 )
             elif isinstance(value, str) and value.strip():
-                profile_lines.append(f"{field}: {value.strip()}")
+                profile_lines.append(f"{label}: {value.strip()}")
         if profile_lines:
-            fact_lines.append("Profile overlay:\n" + "\n".join(profile_lines))
+            label = policy.context_label(
+                "subject_context_labels",
+                "profile_overlay",
+                "Profile overlay",
+            )
+            fact_lines.append(label + ":\n" + "\n".join(profile_lines))
 
     return {
         "success": True,
@@ -385,6 +367,7 @@ def _build_subject_bundle(
 def _build_paper_bundle(
     paper_concept_id: str,
     *,
+    policy: PaperRecommendationPolicy,
     lookup_cache: _LookupCache | None = None,
 ) -> dict[str, Any]:
     paper_id = _safe_str(paper_concept_id)
@@ -404,7 +387,7 @@ def _build_paper_bundle(
     paper_title = _safe_str(paper_doc.get("name")) or paper_id
     summary, summary_source_predicate = _first_text_with_predicate(
         paper_id,
-        _PAPER_TEXT_PREDICATES["summary"],
+        policy.paper_text_predicates("summary"),
         lookup_cache=lookup_cache,
     )
     summary = summary or ""
@@ -418,26 +401,28 @@ def _build_paper_bundle(
     )
     publication_date = _first_text(
         paper_id,
-        _PAPER_TEXT_PREDICATES["publication_date"],
+        policy.paper_text_predicates("publication_date"),
         lookup_cache=lookup_cache,
     )
     topic_label_text = _first_text(
         paper_id,
-        _PAPER_TEXT_PREDICATES["topic_labels"],
+        policy.paper_text_predicates("topic_labels"),
         lookup_cache=lookup_cache,
     )
     topic_labels = _normalise_string_list(topic_label_text)
-    relationship_rows = _relationship_rows(paper_doc, lookup_cache=lookup_cache)
+    relationship_rows = _relationship_rows(paper_doc, policy=policy, lookup_cache=lookup_cache)
+    author_relation_predicates = set(policy.matching_string_tuple("author_relation_predicates"))
+    topic_relation_predicates = set(policy.matching_string_tuple("topic_relation_predicates"))
     author_names = [
         row["target_name"]
         for row in relationship_rows
-        if row.get("predicate") == "#V#authored_by"
+        if row.get("predicate") in author_relation_predicates
     ]
     if not topic_labels:
         topic_labels = [
             row["target_name"]
             for row in relationship_rows
-            if row.get("predicate") == "#V#about"
+            if row.get("predicate") in topic_relation_predicates
         ]
     base_text = build_concept_searchable_text(paper_doc)
     paper_context_text = content_text or summary or base_text
@@ -447,32 +432,44 @@ def _build_paper_bundle(
         else summary_source_predicate or "concept_searchable_text"
     )
     context_lines = [
-        f"Paper title: {paper_title}",
-        f"Paper concept ID: {paper_id}",
+        f"{policy.context_label('paper_context_labels', 'paper_title', 'Paper title')}: {paper_title}",
+        f"{policy.context_label('paper_context_labels', 'paper_concept_id', 'Paper concept ID')}: {paper_id}",
     ]
     if base_text:
         context_lines.append(base_text)
     if summary and summary not in base_text:
-        context_lines.append("Abstract or summary: " + summary)
+        label = policy.context_label(
+            "paper_context_labels",
+            "summary",
+            "Abstract or summary",
+        )
+        context_lines.append(label + ": " + summary)
     if author_names:
-        context_lines.append("Authors: " + ", ".join(author_names))
+        label = policy.context_label("paper_context_labels", "authors", "Authors")
+        context_lines.append(label + ": " + ", ".join(author_names))
     if topic_labels:
-        context_lines.append("Topics: " + ", ".join(topic_labels))
+        label = policy.context_label("paper_context_labels", "topics", "Topics")
+        context_lines.append(label + ": " + ", ".join(topic_labels))
     if publication_date:
-        context_lines.append("Publication date: " + publication_date)
+        label = policy.context_label(
+            "paper_context_labels",
+            "publication_date",
+            "Publication date",
+        )
+        context_lines.append(label + ": " + publication_date)
 
     bundle = {
         "paper_concept_id": paper_id,
         "paper_title": paper_title,
         "paper_summary": summary,
-        "summary_excerpt": _excerpt_text(summary, limit=SUMMARY_EXCERPT_CHARS),
+        "summary_excerpt": _excerpt_text(summary, limit=policy.summary_excerpt_chars),
         "summary_source_predicate": summary_source_predicate,
         "author_names": author_names,
         "topic_labels": topic_labels,
         "publication_date": publication_date,
         "paper_context_excerpt": _excerpt_text(
             paper_context_text,
-            limit=_PAPER_CONTEXT_EXCERPT_CHARS,
+            limit=policy.paper_context_excerpt_chars,
         ),
         "paper_context_source": paper_context_source,
         "representation_complete": True,
@@ -612,13 +609,18 @@ def _score_candidate_rows_with_embedding_function(
     *,
     subject_text: str,
     candidate_ids: Sequence[str],
+    policy: PaperRecommendationPolicy,
     embed_text,
     lookup_cache: _LookupCache | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     subject_embedding = list(embed_text(subject_text))
     rows: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
-        paper_bundle = _build_paper_bundle(candidate_id, lookup_cache=lookup_cache)
+        paper_bundle = _build_paper_bundle(
+            candidate_id,
+            policy=policy,
+            lookup_cache=lookup_cache,
+        )
         if not paper_bundle.get("representation_complete"):
             rows.append(
                 {
@@ -653,6 +655,7 @@ def _score_candidates_with_embeddings(
     *,
     subject_bundle: Mapping[str, Any],
     candidate_ids: Sequence[str],
+    policy: PaperRecommendationPolicy,
     lookup_cache: _LookupCache | None = None,
     embedding_backend_ready: bool | None = None,
     embedding_backend_error: str | None = None,
@@ -665,6 +668,7 @@ def _score_candidates_with_embeddings(
         rows, dimensions = _score_candidate_rows_with_embedding_function(
             subject_text=subject_text,
             candidate_ids=candidate_ids,
+            policy=policy,
             embed_text=lambda text: build_text_embedding(text).tolist(),
             lookup_cache=lookup_cache,
         )
@@ -680,6 +684,7 @@ def _score_candidates_with_embeddings(
         rows, dimensions = _score_candidate_rows_with_embedding_function(
             subject_text=subject_text,
             candidate_ids=candidate_ids,
+            policy=policy,
             embed_text=lambda text: client.get_embedding(text),
             lookup_cache=lookup_cache,
         )
@@ -698,6 +703,7 @@ def _score_candidates_with_embeddings(
         rows, dimensions = _score_candidate_rows_with_embedding_function(
             subject_text=subject_text,
             candidate_ids=candidate_ids,
+            policy=policy,
             embed_text=lambda text: build_text_embedding(text).tolist(),
             lookup_cache=lookup_cache,
         )
@@ -777,11 +783,11 @@ def _normalise_evidence_list(value: Any) -> list[Any]:
     return rows
 
 
-def _is_placeholder_rationale(text: Any) -> bool:
+def _is_placeholder_rationale(text: Any, *, policy: PaperRecommendationPolicy) -> bool:
     cleaned = _safe_str(text)
     if not cleaned:
         return False
-    return cleaned == _PLACEHOLDER_RATIONALE_SUMMARY
+    return cleaned == policy.placeholder_rationale_summary
 
 
 def _llm_rerank_candidates(
@@ -1012,6 +1018,7 @@ def _llm_generate_authoritative_rationale(
 def _embedding_only_rank(
     candidate_rows: Sequence[Mapping[str, Any]],
     *,
+    policy: PaperRecommendationPolicy,
     max_results: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -1024,7 +1031,7 @@ def _embedding_only_rank(
                 "score": score,
                 "fallback_rank": index,
                 "selected_by_fallback_shortlist": (
-                    score > 0.0 and index <= _EMBEDDING_ONLY_ACTIVE_LIMIT
+                    score > 0.0 and index <= policy.embedding_only_active_limit
                 ),
                 "rationale_summary": "",
                 "rationale": "",
@@ -1043,6 +1050,7 @@ def _apply_authoritative_rationale_generation(
     *,
     subject_bundle: Mapping[str, Any],
     ranked_rows: Sequence[Mapping[str, Any]],
+    policy: PaperRecommendationPolicy,
     max_results: int,
     decision_mode: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1053,9 +1061,9 @@ def _apply_authoritative_rationale_generation(
         paper_bundle = dict(row.get("paper_bundle") or {})
         existing_summary = _safe_str(resolved.get("rationale_summary"))
         existing_rationale = _safe_str(resolved.get("rationale"))
-        if _is_placeholder_rationale(existing_summary):
+        if _is_placeholder_rationale(existing_summary, policy=policy):
             existing_summary = ""
-        if _is_placeholder_rationale(existing_rationale):
+        if _is_placeholder_rationale(existing_rationale, policy=policy):
             existing_rationale = ""
         resolved["rationale_summary"] = existing_summary
         resolved["rationale"] = existing_rationale
@@ -1178,10 +1186,10 @@ def materialise_paper_recommendations_for_subject(
     *,
     subject_concept_id: str,
     candidate_paper_concept_ids: Sequence[str] | None = None,
-    max_results: int = DEFAULT_MAX_RESULTS,
-    candidate_limit: int = DEFAULT_CANDIDATE_RECALL_LIMIT,
+    max_results: int | None = None,
+    candidate_limit: int | None = None,
     include_all_candidates: bool = False,
-    min_score: float = MIN_RECOMMENDATION_SCORE,
+    min_score: float | None = None,
     trigger_source: str | None = None,
 ) -> dict[str, Any]:
     """Semantic candidate recall + reranking + Vontology materialisation."""
@@ -1195,19 +1203,29 @@ def materialise_paper_recommendations_for_subject(
             "message": "A target subject concept is required.",
         }
 
+    policy = resolve_paper_recommendation_policy()
     safe_max_results = _normalise_int(
         max_results,
-        default=DEFAULT_MAX_RESULTS,
+        default=policy.default_max_results,
         minimum=1,
-        maximum=MAX_MAX_RESULTS,
+        maximum=policy.max_max_results,
     )
     safe_candidate_limit = _normalise_int(
         candidate_limit,
-        default=DEFAULT_CANDIDATE_RECALL_LIMIT,
+        default=policy.default_candidate_recall_limit,
         minimum=1,
-        maximum=MAX_CANDIDATE_RECALL_LIMIT,
+        maximum=policy.max_candidate_recall_limit,
     )
-    subject_bundle = _build_subject_bundle(subject_id, lookup_cache=lookup_cache)
+    safe_min_score = (
+        float(min_score)
+        if min_score is not None
+        else float(policy.min_recommendation_score)
+    )
+    subject_bundle = _build_subject_bundle(
+        subject_id,
+        policy=policy,
+        lookup_cache=lookup_cache,
+    )
     if not subject_bundle.get("success"):
         return {
             "success": False,
@@ -1263,13 +1281,14 @@ def materialise_paper_recommendations_for_subject(
     scored_candidates, embedding_diagnostics = _score_candidates_with_embeddings(
         subject_bundle=subject_bundle,
         candidate_ids=candidate_ids,
+        policy=policy,
         lookup_cache=lookup_cache,
         embedding_backend_ready=embedding_backend_ready,
         embedding_backend_error=embedding_backend_error,
     )
     llm_candidate_rows = [
         row for row in scored_candidates if row.get("status") == "scored"
-    ][: min(DEFAULT_LLM_CANDIDATE_LIMIT, safe_max_results * 3)]
+    ][: min(policy.default_llm_candidate_limit, safe_max_results * 3)]
 
     llm_rows, llm_diagnostics = _llm_rerank_candidates(
         subject_bundle=subject_bundle,
@@ -1280,6 +1299,7 @@ def materialise_paper_recommendations_for_subject(
     if llm_rows is None:
         llm_rows = _embedding_only_rank(
             llm_candidate_rows,
+            policy=policy,
             max_results=safe_max_results,
         )
     merged_rows = _merge_rankings(
@@ -1289,6 +1309,7 @@ def materialise_paper_recommendations_for_subject(
     merged_rows, rationale_diagnostics = _apply_authoritative_rationale_generation(
         subject_bundle=subject_bundle,
         ranked_rows=merged_rows,
+        policy=policy,
         max_results=safe_max_results,
         decision_mode=decision_mode,
     )
@@ -1321,12 +1342,12 @@ def materialise_paper_recommendations_for_subject(
         active, selection_rule = _should_mark_recommendation_active(
             row=row,
             decision_mode=decision_mode,
-            min_score=float(min_score),
+            min_score=safe_min_score,
         )
         row["selection_rule"] = selection_rule
         evaluation_payload = {
             "schema_version": "paper_recommendation_assertion.v1",
-            "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+            "policy_version": policy.policy_version,
             "decision_mode": decision_mode,
             "selection_rule": selection_rule,
             "active": active,
@@ -1381,7 +1402,7 @@ def materialise_paper_recommendations_for_subject(
                 "provenance": {
                     "decision_mode": decision_mode,
                     "assertion_concept_id": persistence.get("assertion_concept_id"),
-                    "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+                    "policy_version": policy.policy_version,
                     "selection_rule": selection_rule,
                     "semantic_recall_score": semantic_score_map.get(paper_concept_id),
                     "embedding_score": float(row.get("embedding_score") or 0.0),
@@ -1411,7 +1432,7 @@ def materialise_paper_recommendations_for_subject(
             evaluation_payload={
                 **dict(existing_evaluation),
                 "active": False,
-                "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+                "policy_version": policy.policy_version,
                 "decision_mode": decision_mode,
                 "trigger_source": _safe_str(trigger_source) or None,
             },
@@ -1457,7 +1478,7 @@ def materialise_paper_recommendations_for_subject(
         "user_concept_id": subject_id,
         "subject_concept_id": subject_id,
         "profile_concept_id": subject_bundle.get("profile_concept_id"),
-        "recommendation_policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+        "recommendation_policy_version": policy.policy_version,
         "generated_at": None,
         "results": results,
         "ranked_count": len(persisted_rows),
@@ -1482,12 +1503,15 @@ def materialise_paper_recommendations_for_subject(
             "embedding": embedding_diagnostics,
             "reranker": llm_diagnostics,
             "rationale_generation": rationale_diagnostics,
+            "policy": dict(policy.diagnostics),
         },
     }
 
 
 def _impacted_subjects_from_text_mutation(
     event_payload: Mapping[str, Any],
+    *,
+    policy: PaperRecommendationPolicy,
 ) -> tuple[list[str], list[str]]:
     subject_concept_id = _safe_str(event_payload.get("subject_concept_id"))
     predicate = _safe_str(event_payload.get("predicate"))
@@ -1498,19 +1522,27 @@ def _impacted_subjects_from_text_mutation(
     if predicate == _LEGACY_PROFILE_JSON_PREDICATE_ID:
         return resolve_subject_ids_for_legacy_profile_concept(subject_concept_id), []
     concept_doc = _get_concept(subject_concept_id)
-    if _is_scholarly_article(concept_doc) and predicate in _AFFECTING_PAPER_TEXT_PREDICATES:
+    affecting_text_predicates = set(
+        policy.matching_string_tuple("affecting_paper_text_predicates")
+    )
+    if _is_scholarly_article(concept_doc) and predicate in affecting_text_predicates:
         return _default_refresh_subject_ids(limit=50), [subject_concept_id]
     return [], []
 
 
 def _impacted_subjects_from_relationship_mutation(
     event_payload: Mapping[str, Any],
+    *,
+    policy: PaperRecommendationPolicy,
 ) -> tuple[list[str], list[str]]:
     source_id = _safe_str(event_payload.get("source_id"))
     predicate = _safe_str(event_payload.get("predicate"))
     if not source_id or not predicate:
         return [], []
-    if predicate in _AFFECTING_SUBJECT_RELATIONSHIP_PREDICATES:
+    affecting_subject_predicates = set(
+        policy.matching_string_tuple("affecting_subject_relationship_predicates")
+    )
+    if predicate in affecting_subject_predicates:
         return [source_id], []
     source_doc = _get_concept(source_id)
     if _is_scholarly_article(source_doc):
@@ -1541,14 +1573,15 @@ def materialise_paper_recommendations_from_event(
     event_payload: Mapping[str, Any] | None = None,
     target_subject_concept_ids: Sequence[str] | None = None,
     candidate_paper_concept_ids: Sequence[str] | None = None,
-    candidate_limit: int = DEFAULT_CANDIDATE_RECALL_LIMIT,
-    max_results: int = DEFAULT_MAX_RESULTS,
+    candidate_limit: int | None = None,
+    max_results: int | None = None,
     trigger_source: str | None = None,
     discover_subjects_if_missing: bool = False,
 ) -> dict[str, Any]:
     """Resolve affected subjects/candidate papers from an event and refresh them."""
 
     payload = dict(event_payload or {})
+    policy = resolve_paper_recommendation_policy()
     resolved_subject_ids = _normalise_subject_ids(target_subject_concept_ids)
     resolved_candidate_ids = _normalise_candidate_ids(candidate_paper_concept_ids)
     event_type = _safe_str(payload.get("event_type"))
@@ -1557,7 +1590,10 @@ def materialise_paper_recommendations_from_event(
         EVENT_TYPE_TEXT_RELATION_UPSERTED,
         EVENT_TYPE_TEXT_RELATION_UPDATED,
     }:
-        event_subjects, event_candidates = _impacted_subjects_from_text_mutation(payload)
+        event_subjects, event_candidates = _impacted_subjects_from_text_mutation(
+            payload,
+            policy=policy,
+        )
         resolved_subject_ids = event_subjects
         if not resolved_candidate_ids:
             resolved_candidate_ids = event_candidates
@@ -1566,7 +1602,8 @@ def materialise_paper_recommendations_from_event(
         EVENT_TYPE_RELATIONSHIP_REMOVED,
     }:
         event_subjects, event_candidates = _impacted_subjects_from_relationship_mutation(
-            payload
+            payload,
+            policy=policy,
         )
         resolved_subject_ids = event_subjects
         if not resolved_candidate_ids:
@@ -1594,7 +1631,7 @@ def materialise_paper_recommendations_from_event(
             candidate_limit=candidate_limit,
             max_results=max_results,
             include_all_candidates=False,
-            trigger_source=trigger_source or event_type or "event_refresh",
+            trigger_source=trigger_source or event_type or policy.delivery_trigger_source_default,
         )
         reports.append(report)
 
@@ -1606,6 +1643,7 @@ def materialise_paper_recommendations_from_event(
         "refreshed_paper_count": len(resolved_candidate_ids),
         "subject_concept_ids": resolved_subject_ids,
         "candidate_paper_concept_ids": resolved_candidate_ids,
+        "policy": dict(policy.diagnostics),
         "reports": reports,
     }
 

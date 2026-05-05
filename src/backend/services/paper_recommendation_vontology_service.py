@@ -28,6 +28,12 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_FEEDBACK_SUBJECT_PREDICATE_ID,
     PAPER_RECOMMENDATION_FEEDBACK_TYPE_ID,
 )
+from .paper_recommendation_policy_authority_service import (
+    PaperRecommendationPolicy,
+    normalise_paper_matching_profile_overlay,
+    normalise_paper_recommendation_feedback_label,
+    resolve_paper_recommendation_policy,
+)
 from .relationship_write_service import add_relationship
 from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_vontology_materialisation_helpers import (
@@ -40,45 +46,6 @@ _PREDICATE_PARENT_IDS: tuple[str, ...] = ("#V#predicate", "#V#binary_predicate")
 _LEGACY_PROFILE_LINK_PREDICATE_ID = "#V#has_paper_recommendation_profile"
 _LEGACY_PROFILE_JSON_PREDICATE_ID = "#V#has_paper_recommendation_profile_json"
 _DEFAULT_LANG = "en-NZ"
-_PROFILE_FIELDS: tuple[str, ...] = (
-    "project_description",
-    "stated_interest_terms",
-    "negative_interest_terms",
-    "preferred_authors",
-    "preferred_venues",
-    "notes",
-)
-_FEEDBACK_SCORE_BY_LABEL: dict[str, float] = {
-    "not_useful": -1.0,
-    "partly_useful": 0.0,
-    "useful": 1.0,
-}
-_FEEDBACK_LABEL_ALIASES: dict[str, str] = {
-    "bad": "not_useful",
-    "negative": "not_useful",
-    "no": "not_useful",
-    "not helpful": "not_useful",
-    "not useful": "not_useful",
-    "not_useful": "not_useful",
-    "unhelpful": "not_useful",
-    "useless": "not_useful",
-    "-1": "not_useful",
-    "0": "partly_useful",
-    "mixed": "partly_useful",
-    "neutral": "partly_useful",
-    "partial": "partly_useful",
-    "partly": "partly_useful",
-    "partly useful": "partly_useful",
-    "partly_useful": "partly_useful",
-    "somewhat": "partly_useful",
-    "good": "useful",
-    "helpful": "useful",
-    "positive": "useful",
-    "useful": "useful",
-    "very useful": "useful",
-    "yes": "useful",
-    "1": "useful",
-}
 
 
 def _safe_str(value: Any) -> str:
@@ -110,27 +77,12 @@ def _normalise_string_list(value: Any) -> list[str]:
     return values
 
 
-def _normalise_feedback_label(value: Any) -> tuple[str | None, float | None]:
-    if value is None:
-        return None, None
-    if isinstance(value, bool):
-        label = "useful" if value else "not_useful"
-        return label, _FEEDBACK_SCORE_BY_LABEL[label]
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if float(value) > 0:
-            label = "useful"
-        elif float(value) < 0:
-            label = "not_useful"
-        else:
-            label = "partly_useful"
-        return label, _FEEDBACK_SCORE_BY_LABEL[label]
-    cleaned = _safe_str(value).replace("_", " ").replace("-", " ").casefold()
-    if not cleaned:
-        return None, None
-    alias = _FEEDBACK_LABEL_ALIASES.get(cleaned)
-    if alias is None:
-        return None, None
-    return alias, _FEEDBACK_SCORE_BY_LABEL[alias]
+def _normalise_feedback_label(
+    value: Any,
+    *,
+    policy: PaperRecommendationPolicy,
+) -> tuple[str | None, float | None]:
+    return normalise_paper_recommendation_feedback_label(value, policy=policy)
 
 
 def _feedback_display_name(*, paper_title: str, subject_label: str) -> str:
@@ -146,27 +98,10 @@ def _normalise_profile_overlay(
     *,
     subject_concept_id: str,
 ) -> dict[str, Any]:
-    profile = {
-        "schema_version": "paper_matching_profile.v1",
-        "subject_concept_id": subject_concept_id,
-        "project_description": "",
-        "stated_interest_terms": [],
-        "negative_interest_terms": [],
-        "preferred_authors": [],
-        "preferred_venues": [],
-        "notes": "",
-        "updated_at": None,
-    }
-    if not isinstance(value, Mapping):
-        return profile
-    for field in _PROFILE_FIELDS:
-        raw = value.get(field)
-        if isinstance(profile[field], list):
-            profile[field] = _normalise_string_list(raw)
-        else:
-            profile[field] = _safe_str(raw)
-    profile["updated_at"] = _safe_str(value.get("updated_at")) or None
-    return profile
+    return normalise_paper_matching_profile_overlay(
+        value,
+        subject_concept_id=subject_concept_id,
+    )
 
 
 def _ensure_type_concept(*, concept_id: str, name: str, description: str) -> None:
@@ -890,20 +825,25 @@ def record_paper_recommendation_feedback(
     explicit_paper_id = _safe_str(paper_concept_id) or None
     explicit_profile_id = _safe_str(profile_concept_id) or None
 
+    recommendation_policy = resolve_paper_recommendation_policy()
     recommendation_label, recommendation_score = _normalise_feedback_label(
-        recommendation_usefulness
+        recommendation_usefulness,
+        policy=recommendation_policy,
     )
     if recommendation_usefulness is not None and recommendation_label is None:
         raise ValueError(
-            "recommendation_usefulness must be one of: useful, partly_useful, not_useful"
+            "recommendation_usefulness must be one of: "
+            f"{recommendation_policy.feedback_label_summary()}"
         )
 
     explanation_label, explanation_score = _normalise_feedback_label(
-        explanation_usefulness
+        explanation_usefulness,
+        policy=recommendation_policy,
     )
     if explanation_usefulness is not None and explanation_label is None:
         raise ValueError(
-            "explanation_usefulness must be one of: useful, partly_useful, not_useful"
+            "explanation_usefulness must be one of: "
+            f"{recommendation_policy.feedback_label_summary()}"
         )
 
     free_text_feedback = _safe_str(feedback_text) or None

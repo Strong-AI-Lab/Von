@@ -6,11 +6,15 @@ from types import SimpleNamespace
 import pytest
 
 import src.backend.services.paper_recommendation_vontology_service as service
+from tests.backend.paper_recommendation_policy_test_helpers import (
+    patch_paper_recommendation_policy,
+)
 
 
 def test_record_paper_recommendation_feedback_persists_structured_feedback(
     monkeypatch,
 ):
+    patch_paper_recommendation_policy(monkeypatch, service)
     concepts = {
         "#V#lu_yunli": {"concept_id": "#V#lu_yunli", "name": "Lu Yunli"},
         "#V#paper_causal_science": {
@@ -150,6 +154,7 @@ def test_record_paper_recommendation_feedback_persists_structured_feedback(
 def test_record_paper_recommendation_feedback_requires_materialised_assertion(
     monkeypatch,
 ):
+    patch_paper_recommendation_policy(monkeypatch, service)
     monkeypatch.setattr(
         service,
         "ensure_paper_recommendation_primitives",
