@@ -47,6 +47,12 @@ represented authority before filing Jira work.
   is missing or partial should be checked against existing migration tasks
   before filing. The remaining defect is often fail-open fallback, not absence
   of a service.
+- Standalone publisher scripts are drift candidates when they embed full
+  production workflow families: prompt text, discovery exemplars, routing
+  metadata, transition/control definitions, required-effect contracts, or
+  response templates. Treat one-shot migration/export helpers separately, but
+  file when the script is the recoverable workflow source or is advertised as a
+  future workflow-family template.
 
 ## 2026-04-30 Examples
 
@@ -65,3 +71,5 @@ represented authority before filing Jira work.
   `JVNAUTOSCI-2262`.
 - Task-status event trigger status filtering before represented event bindings:
   `JVNAUTOSCI-2264`.
+- Python-authored KR materialisation workflow publisher:
+  `JVNAUTOSCI-2271`.
