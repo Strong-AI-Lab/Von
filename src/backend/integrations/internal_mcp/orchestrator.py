@@ -176,6 +176,10 @@ from src.backend.services.settings_service import (
     INTERNAL_MCP_TOOL_BATCH_CAP_MIN,
     get_model_llm_timeout,
 )
+from src.backend.workflows.model_execution_budget_policy import (
+    ModelExecutionBudgetPolicy,
+    resolve_model_execution_budget_policy,
+)
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
@@ -283,6 +287,19 @@ def _default_conversation_turn_llm_timeout_override_sec() -> float | None:
     )
 
 
+def _provider_from_llm_client(llm_client: Any) -> str | None:
+    class_name = type(llm_client).__name__.lower()
+    if "ollama" in class_name:
+        return "ollama"
+    if "openai" in class_name:
+        return "openai"
+    if "gemini" in class_name:
+        return "gemini"
+    if "anthropic" in class_name or "claude" in class_name:
+        return "anthropic"
+    return None
+
+
 def _conversation_turn_llm_timeout_override_sec_from_data(
     data: Mapping[str, Any] | None,
 ) -> float | None:
@@ -296,32 +313,43 @@ def _conversation_turn_llm_timeout_override_sec_from_data(
 def _resolve_model_llm_timeout_override_sec(
     llm_client: Any,
     model: str | None,
+    model_budget_policy: ModelExecutionBudgetPolicy | None = None,
 ) -> float | None:
-    """Look up the per-model timeout from settings; fall back to the env-var default.
+    """Look up the per-model timeout from settings, env, or Vontology policy.
 
     The provider is inferred from the LLM client's class name so we avoid
     importing the concrete client classes here.
     """
     if isinstance(model, str) and model.strip():
         try:
-            class_name = type(llm_client).__name__.lower()
-            if "ollama" in class_name:
-                provider = "ollama"
-            elif "openai" in class_name:
-                provider = "openai"
-            elif "gemini" in class_name:
-                provider = "gemini"
-            elif "anthropic" in class_name or "claude" in class_name:
-                provider = "anthropic"
-            else:
-                provider = None
+            provider = _provider_from_llm_client(llm_client)
             if provider:
                 saved = get_model_llm_timeout(provider, model.strip())
                 if saved is not None:
                     return saved
         except Exception:
             pass
+
+    if os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC"):
+        return _default_conversation_turn_llm_timeout_override_sec()
+
+    if (
+        model_budget_policy is not None
+        and model_budget_policy.conversation_turn_llm_timeout_sec is not None
+    ):
+        return model_budget_policy.conversation_turn_llm_timeout_sec
+
     return _default_conversation_turn_llm_timeout_override_sec()
+
+
+def _resolve_model_execution_budget_policy(
+    *, llm_client: Any, model: str | None
+) -> ModelExecutionBudgetPolicy | None:
+    provider = _provider_from_llm_client(llm_client)
+    try:
+        return resolve_model_execution_budget_policy(provider=provider, model=model)
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -3406,6 +3434,9 @@ class InternalMCPChatOrchestrator:
         # Completion-gate repeat loop guardrails (JVNAUTOSCI-1288).
         # These bounds apply to the "repeat until complete" turn loop when
         # required effects remain unresolved after a pass.
+        self._completion_gate_loop_max_attempts_env_configured = bool(
+            os.getenv("VON_COMPLETION_GATE_LOOP_MAX_ATTEMPTS_PER_TURN")
+        )
         self._completion_gate_loop_max_attempts = self._coerce_int(
             None,
             env_var="VON_COMPLETION_GATE_LOOP_MAX_ATTEMPTS_PER_TURN",
@@ -3413,12 +3444,18 @@ class InternalMCPChatOrchestrator:
             min_value=0,
             max_value=20,
         )
+        self._completion_gate_loop_max_elapsed_ms_env_configured = bool(
+            os.getenv("VON_COMPLETION_GATE_LOOP_MAX_ELAPSED_MS")
+        )
         self._completion_gate_loop_max_elapsed_ms = self._coerce_int(
             None,
             env_var="VON_COMPLETION_GATE_LOOP_MAX_ELAPSED_MS",
             default=60_000,
             min_value=1_000,
             max_value=600_000,
+        )
+        self._completion_gate_loop_no_progress_limit_env_configured = bool(
+            os.getenv("VON_COMPLETION_GATE_LOOP_NO_PROGRESS_LIMIT")
         )
         self._completion_gate_loop_no_progress_limit = self._coerce_int(
             None,
@@ -34183,15 +34220,59 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             step_callback=_step_callback,
         )
-        conversation_turn_llm_timeout_override_sec = (
-            _resolve_model_llm_timeout_override_sec(llm_client=llm_client, model=model)
+        model_budget_policy = _resolve_model_execution_budget_policy(
+            llm_client=llm_client,
+            model=model,
         )
+        conversation_turn_llm_timeout_override_sec = (
+            _resolve_model_llm_timeout_override_sec(
+                llm_client=llm_client,
+                model=model,
+                model_budget_policy=model_budget_policy,
+            )
+        )
+        completion_gate_loop_max_attempts = int(
+            self._completion_gate_loop_max_attempts
+        )
+        completion_gate_loop_max_elapsed_ms = int(
+            self._completion_gate_loop_max_elapsed_ms
+        )
+        completion_gate_loop_no_progress_limit = int(
+            self._completion_gate_loop_no_progress_limit
+        )
+        if model_budget_policy is not None:
+            if (
+                model_budget_policy.completion_gate_loop_max_attempts is not None
+                and not self._completion_gate_loop_max_attempts_env_configured
+            ):
+                completion_gate_loop_max_attempts = int(
+                    model_budget_policy.completion_gate_loop_max_attempts
+                )
+            if (
+                model_budget_policy.completion_gate_loop_max_elapsed_ms is not None
+                and not self._completion_gate_loop_max_elapsed_ms_env_configured
+            ):
+                completion_gate_loop_max_elapsed_ms = int(
+                    model_budget_policy.completion_gate_loop_max_elapsed_ms
+                )
+            if (
+                model_budget_policy.completion_gate_loop_no_progress_limit is not None
+                and not self._completion_gate_loop_no_progress_limit_env_configured
+            ):
+                completion_gate_loop_no_progress_limit = int(
+                    model_budget_policy.completion_gate_loop_no_progress_limit
+                )
 
         workflow_inputs = {
             "prompt": prompt,
             "user_prompt": prompt,
             "prompt_for_requirements": prompt,
             "requested_model": model,
+            "model_execution_budget_policy": (
+                model_budget_policy.as_telemetry()
+                if model_budget_policy is not None
+                else None
+            ),
             "augmented_context": list(augmented_context),
             "conversation_context": list(context or []),
             "workflow_discovery_result": (
@@ -34258,16 +34339,16 @@ class InternalMCPChatOrchestrator:
             "completion_gate_loop_stop_reason": None,
             "completion_gate_loop_attempts": 0,
             "completion_gate_loop_max_attempts": int(
-                self._completion_gate_loop_max_attempts
+                completion_gate_loop_max_attempts
             ),
             "completion_gate_loop_started_monotonic": float(time.monotonic()),
             "completion_gate_loop_elapsed_ms": 0,
             "completion_gate_loop_max_elapsed_ms": int(
-                self._completion_gate_loop_max_elapsed_ms
+                completion_gate_loop_max_elapsed_ms
             ),
             "completion_gate_loop_no_progress_streak": 0,
             "completion_gate_loop_no_progress_limit": int(
-                self._completion_gate_loop_no_progress_limit
+                completion_gate_loop_no_progress_limit
             ),
             "completion_gate_loop_stall_events": 0,
             "completion_gate_loop_stall_elapsed_ms": 0,
