@@ -107,3 +107,26 @@
   `JVNAUTOSCI-1913` and `JVNAUTOSCI-1605`, and added a visible user-impact
   comment.
 - No production code was changed.
+
+## 2026-05-06T03:08:27.1929297+12:00
+
+- Read required repo guidance and repo-local drift-review memories; the global
+  automation memory file was absent at start.
+- `pdm run python scripts\check_workflow_purity.py --verbose` produced no
+  visible output in this automation shell, and the checkout `.venv` Python was
+  inaccessible. The same purity gate passed with direct `python
+  scripts\check_workflow_purity.py --verbose`; all counters were zero.
+- Reviewed Python changes since the previous run, especially workflow model
+  selection, model execution budget policy, paper recommendation policy
+  materialisation, and the KR materialisation workflow publisher.
+- Created `JVNAUTOSCI-2271` for
+  `scripts/publish_kr_materialisation_workflows.py`: it embeds production
+  workflow prompts, discovery/routing metadata, required-effect contracts,
+  control flow, and response templates in Python before publishing them into
+  Vontology. Linked it to `JVNAUTOSCI-1913` and `JVNAUTOSCI-2268`, and added a
+  visible Jira user-impact comment.
+- Treated the model budget/policy-resolution changes as represented metadata
+  support, not new drift tasks. Treated the current paper recommendation
+  residual fallback as covered by existing recommender authority tasks unless
+  fresh live evidence shows a current fail-open user impact.
+- No production code was changed.
