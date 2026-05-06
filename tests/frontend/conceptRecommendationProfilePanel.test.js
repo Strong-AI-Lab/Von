@@ -84,6 +84,7 @@ describe('concept recommendation profile panel', () => {
         expect(document.getElementById('recommendationObservedInterests_test').textContent).toContain(
             'Knowledge Graph',
         );
+        expect(document.getElementById('recommendationProfilePanel_test').style.display).toBe('');
 
         document.getElementById('recommendationInterestTermsInput_test').value =
             'knowledge graphs, causal reasoning';
@@ -138,9 +139,49 @@ describe('concept recommendation profile panel', () => {
         });
 
         expect(document.getElementById('saveRecommendationProfileButton_test').disabled).toBe(true);
+        expect(document.getElementById('recommendationProfilePanel_test').style.display).toBe('');
         expect(document.getElementById('recommendationProfilePermissionHint_test').textContent).toContain(
             'Read-only here',
         );
+    });
+
+    test('keeps the recommendation profile panel hidden while applicability is unresolved', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        let resolveProfile;
+        api.getJsonDetailed.mockReturnValue(
+            new Promise((resolve) => {
+                resolveProfile = resolve;
+            }),
+        );
+
+        const {
+            ensureRecommendationProfilePanelForConceptTab,
+        } = require('../../src/frontend/web/von_interface/static/js/components/paperRecommendationProfilePanel.js');
+
+        const pending = ensureRecommendationProfilePanelForConceptTab({
+            conceptId: '#V#strong_ai_lab',
+            suffix: 'test',
+        });
+
+        const panel = document.getElementById('recommendationProfilePanel_test');
+        expect(panel.style.display).toBe('none');
+
+        resolveProfile({
+            data: {
+                success: true,
+                profile: {},
+                derived_context: {},
+                profile_applicability: {
+                    is_applicable: true,
+                    profile_type_id: '#V#paper_recommendation_profile',
+                    form_type_id: '#V#paper_recommendation_profile_form',
+                },
+                permissions: { can_edit: true },
+            },
+        });
+        await pending;
+
+        expect(panel.style.display).toBe('');
     });
 
     test('hides the recommendation profile panel when the backend marks the concept ineligible', async () => {
@@ -174,5 +215,25 @@ describe('concept recommendation profile panel', () => {
         expect(panel.dataset.profileTypeId).toBe('#V#paper_recommendation_profile');
         expect(panel.dataset.formTypeId).toBe('#V#paper_recommendation_profile_form');
         expect(document.getElementById('saveRecommendationProfileButton_test').disabled).toBe(true);
+    });
+
+    test('keeps the recommendation profile panel hidden when profile loading fails', async () => {
+        const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        api.getJsonDetailed.mockRejectedValue(new Error('network unavailable'));
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const {
+            ensureRecommendationProfilePanelForConceptTab,
+        } = require('../../src/frontend/web/von_interface/static/js/components/paperRecommendationProfilePanel.js');
+
+        await ensureRecommendationProfilePanelForConceptTab({
+            conceptId: '#V#strong_ai_lab',
+            suffix: 'test',
+        });
+
+        const panel = document.getElementById('recommendationProfilePanel_test');
+        expect(panel.style.display).toBe('none');
+        expect(document.getElementById('saveRecommendationProfileButton_test').disabled).toBe(true);
+        warnSpy.mockRestore();
     });
 });

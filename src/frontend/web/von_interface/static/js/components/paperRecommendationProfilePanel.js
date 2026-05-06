@@ -38,6 +38,7 @@ function ensurePanelElement(stepContainer, suffix) {
   panel = document.createElement('section');
   panel.id = `recommendationProfilePanel_${suffix}`;
   panel.className = 'speech-settings-section concept-recommendation-panel';
+  panel.style.display = 'none';
   panel.innerHTML = `
     <h3 class="speech-settings-title">Paper Recommendation Profile</h3>
     <p class="settings-note concept-recommendation-intro">
@@ -128,6 +129,7 @@ export async function ensureRecommendationProfilePanelForConceptTab({
   const elements = getPanelElements(suffix);
   if (!elements.panel) return;
   elements.panel.dataset.subjectConceptId = conceptId;
+  elements.panel.style.display = 'none';
 
   const editableElements = [
     elements.projectDescriptionInput,
@@ -238,7 +240,7 @@ export async function ensureRecommendationProfilePanelForConceptTab({
     }
   } catch (error) {
     console.warn('[paperRecommendationProfilePanel] Failed to load profile', error);
-    elements.panel.style.display = '';
+    elements.panel.style.display = 'none';
     if (elements.observedInterestsElement) {
       elements.observedInterestsElement.textContent = 'Recommendation profile is unavailable for this concept.';
     }
