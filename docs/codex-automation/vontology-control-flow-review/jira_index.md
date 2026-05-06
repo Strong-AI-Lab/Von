@@ -67,6 +67,17 @@ Use this before creating new drift-review tasks.
   response templates before publishing them into Vontology. Linked to
   `JVNAUTOSCI-1913` and `JVNAUTOSCI-2268`.
 
+## 2026-05-07 Drift Tasks
+
+- `JVNAUTOSCI-2275` - selected-workflow recovery handoff policy in
+  `selected_workflow_handoff_service.py`: Python still chooses handoff/fallback
+  mode and reason codes after `JVNAUTOSCI-2259` extracted the logic from the
+  orchestrator. Linked to `JVNAUTOSCI-1913` and `JVNAUTOSCI-2259`.
+- `JVNAUTOSCI-1985` - updated with current evidence from
+  `required_tool_obligation_service.py` that required-tool operation classes
+  still use Python prefix semantics; do not duplicate unless a separate
+  non-tool-metadata authority surface appears.
+
 Parent new architectural drift tasks under `JVNAUTOSCI-1116` unless a more
 specific active epic clearly owns the area. Link code-side policy drift to
 `JVNAUTOSCI-1913`.
