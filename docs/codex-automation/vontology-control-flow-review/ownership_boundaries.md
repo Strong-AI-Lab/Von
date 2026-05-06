@@ -37,6 +37,11 @@ predicates, and KB assertions should own durable:
   metadata, transition/control definitions, required-effect contracts, and
   response templates, even when a Python script later publishes them into
   Vontology.
+- selected-workflow recovery and handoff policy, including whether a failed
+  selected workflow retries, repairs launch inputs, falls through to generic
+  tool-calling, asks for follow-up, or fails closed.
+- required-tool operation/evidence/write semantics that affect completion-gate
+  blockers or recovery choice.
 
 ## Python Support
 
@@ -59,6 +64,9 @@ Python can remain the surface for:
 - generic knowledge-acquisition profile loading, validation, source telemetry,
   confidence arithmetic, and canonical relation mutation support when the
   policy values come from represented profile artefacts;
+- generic required-tool ledger construction, invocation counting, read-back
+  evidence preservation, and telemetry when operation classes and policy values
+  come from represented tool/workflow metadata;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles are publication/migration artefacts, not normal runtime authority
