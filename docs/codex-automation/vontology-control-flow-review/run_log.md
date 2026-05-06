@@ -130,3 +130,28 @@
   residual fallback as covered by existing recommender authority tasks unless
   fresh live evidence shows a current fail-open user impact.
 - No production code was changed.
+
+## 2026-05-07T02:07:29.1065026+12:00
+
+- Read required repo guidance, workflow manual, operational authority-alignment
+  guidance, and repo-local drift-review memories; the global automation memory
+  file was absent at start.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero, while reporting
+  `repo_seed_authority_drift_path_count=1`.
+- Reviewed Python changes since the previous automation run, especially
+  selected-workflow handoff extraction, richer recovery evidence, required-tool
+  obligation accounting, and the `JVNAUTOSCI-2272` Gmail/arXiv workflow repair
+  script.
+- Created `JVNAUTOSCI-2275` for Python-owned selected-workflow recovery handoff
+  policy in `selected_workflow_handoff_service.py`: the service still chooses
+  fallback-to-tool-pipeline mode, handoff reason codes, and quota recovery
+  wording after `JVNAUTOSCI-2259` extracted the logic from the orchestrator.
+  Linked it to `JVNAUTOSCI-1913` and `JVNAUTOSCI-2259`.
+- Updated `JVNAUTOSCI-1985` with current evidence that
+  `required_tool_obligation_service.py` still classifies required-tool
+  operation/evidence/write semantics using Python name-prefix rules.
+- Inspected the `JVNAUTOSCI-2272` repair script and
+  `_build_recovery_retry_launch_inputs`; treated them as covered/watch items
+  rather than new tasks this run.
+- No production code was changed.
