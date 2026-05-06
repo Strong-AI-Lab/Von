@@ -102,6 +102,21 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   live evidence that the current fallback sends or materialises recommendations
   contrary to represented prompt/workflow policy.
 
+## Inspected, Not Filed On 2026-05-07
+
+- `scripts/repair_jvnautosci_2272_zhan_gmail_arxiv_ingestion_workflow.py`:
+  one-shot Vontology-authoring repair for a specific Gmail/arXiv workflow
+  family. It contains domain workflow descriptions, retry policies, launch
+  contracts, and Gmail follow-up hint rewriting, but it is not startup/runtime
+  authority. File only if this pattern becomes a recurring workflow-family
+  publisher, template, or request-path authority.
+- `_build_recovery_retry_launch_inputs` in
+  `src/backend/workflows/durable/turn_execution_actions.py`: still a watch item
+  for arXiv/file-copy launch-input projection, but current evidence is already
+  covered by the multi-target/recovery and arXiv launch-input task family
+  (`JVNAUTOSCI-1873`, `JVNAUTOSCI-1874`, `JVNAUTOSCI-2251`). File only with a
+  fresh, narrower live failure not covered there.
+
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
 user-visible copy, or KB/profile semantics.
