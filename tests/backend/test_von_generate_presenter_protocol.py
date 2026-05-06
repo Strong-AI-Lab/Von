@@ -3,6 +3,8 @@ from __future__ import annotations
 from flask import Flask
 from typing import Protocol
 
+from src.backend.services.prompt_template_service import _render_template
+
 
 class _LLMProtocol(Protocol):
     def generate(self, prompt, context, model) -> str:  # pragma: no cover
@@ -397,6 +399,59 @@ def test_generate_buttonify_noops_when_vontology_prompt_unavailable(monkeypatch)
 
     # Prompt unavailable must suppress the extra buttonify model pass.
     assert len(llm.calls) == 1
+
+
+def test_generate_buttonify_route_fallback_honours_prompt_contract_variables(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+
+    llm = _StubLLMSequence(
+        [
+            'Please reply with one of: "Proceed", "Hold".',
+            '["Proceed", "Hold"]',
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    def _strict_buttonify_prompt(self, _concept_ids, *, variables=None, **_kwargs):
+        rendered_text = _render_template(
+            (
+                "Return ONLY a JSON array with up to 4 quick-reply strings.\n\n"
+                "User message:\n{user_message}\n\n"
+                "Assistant response:\n{assistant_response}"
+            ),
+            dict(variables or {}),
+        )
+        return type(
+            "RenderedPromptStub",
+            (),
+            {
+                "prompt_id": "#V#buttonify_prompt_v1",
+                "text": rendered_text,
+                "truncated": False,
+            },
+        )()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.render_prompt",
+        _strict_buttonify_prompt,
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "llm"
+    assert buttonify.get("options") == ["Proceed", "Hold"]
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "success"
+    assert buttonify_event["source_path"] == "llm"
+    assert len(llm.calls) == 2
 
 
 def test_generate_buttonify_non_json_llm_output_noops(monkeypatch):

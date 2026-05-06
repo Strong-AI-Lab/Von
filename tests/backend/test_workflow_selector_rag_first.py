@@ -9,11 +9,14 @@ Tests cover:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 
 import src.backend.services.workflow_selection_policy_service as policy_module
+from src.backend.services.prompt_template_service import _render_template
 from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
@@ -223,8 +226,14 @@ class TestRagFirstPrompt:
             "Run the meeting invitation test"
         )
         assert prompt.prompt_provenance["render_variables"][
+            "selector_routing_context"
+        ] == "No active workflow continuation context."
+        assert prompt.prompt_provenance["render_variables"][
             "continuation_routing_context"
         ] == "No active workflow continuation context."
+        assert prompt.prompt_provenance["render_variables"][
+            "routing_policy_fragments"
+        ] == "No learned routing policy guidance is active."
         assert prompt.prompt_text is not None
         assert "Canonical valid output examples" in prompt.prompt_text
         assert "Invalid outputs. Never do any of these" in prompt.prompt_text
@@ -264,8 +273,106 @@ class TestRagFirstPrompt:
         assert "workflow continuation context" in prompt.prompt_text.lower()
         assert "#V#missing_tool_call_workflow" in prompt.prompt_text
         assert prompt.prompt_provenance["render_variables"][
+            "selector_routing_context"
+        ].startswith("ACTIVE WORKFLOW CONTINUATION CONTEXT")
+        assert prompt.prompt_provenance["render_variables"][
             "continuation_routing_context"
         ].startswith("ACTIVE WORKFLOW CONTINUATION CONTEXT")
+
+    def test_prompt_supplies_live_like_selector_contract_variables(self):
+        class _StrictPromptService:
+            def render_prompt(self, concept_ids, *, variables=None, fallback=None, max_chars=None):
+                _ = (concept_ids, fallback, max_chars)
+                template = (
+                    "Selector routing context:\n{selector_routing_context}\n\n"
+                    "Routing policy guidance:\n{routing_policy_fragments}\n\n"
+                    "Continuation context:\n{continuation_routing_context}\n\n"
+                    "User request:\n{turn_text}\n\n"
+                    "Candidate workflows:\n{candidate_list}\n"
+                )
+                rendered = _render_template(template, dict(variables or {}))
+                return SimpleNamespace(
+                    prompt_id="#V#chat_turn_classifier_prompt",
+                    text=rendered,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+
+        selector = WorkflowSelector(
+            registry=_build_registry(),
+            prompt_service=cast(Any, _StrictPromptService()),
+        )
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Refresh my Jira todo list",
+            continuation_routing_context_text=(
+                "ACTIVE WORKFLOW CONTINUATION CONTEXT\n"
+                "Active workflow episode: wfep_refresh"
+            ),
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#todo_refresh_workflow",
+                    "name": "Todo refresh workflow",
+                    "description": "Refresh the todo list from Jira.",
+                },
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "name": "Chat assistant workflow",
+                    "description": "Plain conversational response.",
+                },
+            ],
+        )
+
+        assert prompt.prompt_failure_reason is None
+        assert prompt.prompt_text is not None
+        assert "Selector routing context:" in prompt.prompt_text
+        assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in prompt.prompt_text
+        assert "Routing policy guidance:" in prompt.prompt_text
+        assert "No learned routing policy guidance is active." in prompt.prompt_text
+
+    def test_prompt_formats_routing_policy_fragments_from_existing_policy_guidance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        selector = _build_selector()
+        monkeypatch.setattr(
+            "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+            lambda **_kwargs: {
+                "policy_active": True,
+                "guidance_mode": "prompt_guidance",
+                "recommended_workflow_id": "#V#todo_refresh_workflow",
+                "confidence_score": 0.91,
+                "reasoning": "Learned policy prefers the todo refresh workflow for Jira refresh turns.",
+                "candidate_scores": [
+                    {
+                        "workflow_id": "#V#todo_refresh_workflow",
+                        "rank": 1,
+                        "score": 1.42,
+                        "attempts": 7,
+                        "reasoning": "reward prior 0.84; evidence 7; exploration 0.10; token affinity jira, todo",
+                    }
+                ],
+                "ranked_candidate_ids": ["#V#todo_refresh_workflow"],
+            },
+        )
+
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Refresh my Jira todo list",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#todo_refresh_workflow",
+                    "name": "Todo refresh workflow",
+                    "description": "Refresh the todo list from Jira.",
+                }
+            ],
+        )
+
+        policy_fragments = prompt.prompt_provenance["render_variables"][
+            "routing_policy_fragments"
+        ]
+        assert "Learned routing policy guidance:" in policy_fragments
+        assert "Recommended workflow: #V#todo_refresh_workflow" in policy_fragments
+        assert "Policy confidence: 0.91" in policy_fragments
+        assert "Top policy candidates:" in policy_fragments
+        assert "#V#todo_refresh_workflow: rank 1; score 1.42; evidence 7;" in policy_fragments
 
     def test_prompt_carries_candidate_evidence_signals(self):
         selector = _build_selector()

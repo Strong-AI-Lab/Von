@@ -38,6 +38,8 @@ SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON = "selector_prompt_missing_turn_text"
 SELECTOR_FAIL_CLOSED_SOURCE = "selector_fail_closed"
 SELECTOR_PROMPT_MAX_CHARS = 24000
 SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS = 900
+SELECTOR_POLICY_REASONING_MAX_CHARS = 280
+SELECTOR_POLICY_FRAGMENT_MAX_CANDIDATES = 3
 
 
 @dataclass(frozen=True)
@@ -546,6 +548,80 @@ class WorkflowSelector:
             recommendation["hard_direct_guidance_removed"] = True
         return recommendation
 
+    @staticmethod
+    def _format_policy_fragment_number(value: Any) -> str | None:
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _truncate_policy_reasoning(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) <= SELECTOR_POLICY_REASONING_MAX_CHARS:
+            return text
+        return (
+            text[:SELECTOR_POLICY_REASONING_MAX_CHARS].rstrip()
+            + f"... [truncated {len(text) - SELECTOR_POLICY_REASONING_MAX_CHARS} chars]"
+        )
+
+    @classmethod
+    def _build_routing_policy_fragments(cls, policy_recommendation: Mapping[str, Any]) -> str:
+        if not bool(policy_recommendation.get("policy_active")):
+            return "No learned routing policy guidance is active."
+
+        lines = ["Learned routing policy guidance:"]
+        recommended_workflow_id = str(
+            policy_recommendation.get("recommended_workflow_id") or ""
+        ).strip()
+        if recommended_workflow_id:
+            lines.append(f"- Recommended workflow: {recommended_workflow_id}")
+
+        confidence = cls._format_policy_fragment_number(
+            policy_recommendation.get("confidence_score")
+        )
+        if confidence is not None:
+            lines.append(f"- Policy confidence: {confidence}")
+
+        reasoning = cls._truncate_policy_reasoning(
+            policy_recommendation.get("reasoning")
+        )
+        if reasoning:
+            lines.append(f"- Policy reasoning: {reasoning}")
+
+        candidate_scores = policy_recommendation.get("candidate_scores")
+        if isinstance(candidate_scores, Sequence):
+            score_lines: list[str] = []
+            for item in candidate_scores[:SELECTOR_POLICY_FRAGMENT_MAX_CANDIDATES]:
+                if not isinstance(item, Mapping):
+                    continue
+                workflow_id = str(item.get("workflow_id") or "").strip()
+                if not workflow_id:
+                    continue
+                fragments: list[str] = []
+                rank = item.get("rank")
+                if isinstance(rank, int):
+                    fragments.append(f"rank {rank}")
+                score = cls._format_policy_fragment_number(item.get("score"))
+                if score is not None:
+                    fragments.append(f"score {score}")
+                attempts = item.get("attempts")
+                if isinstance(attempts, (int, float)):
+                    fragments.append(f"evidence {int(attempts)}")
+                candidate_reasoning = cls._truncate_policy_reasoning(item.get("reasoning"))
+                if candidate_reasoning:
+                    fragments.append(candidate_reasoning)
+                if fragments:
+                    score_lines.append(f"- {workflow_id}: {'; '.join(fragments)}")
+                else:
+                    score_lines.append(f"- {workflow_id}")
+
+            if score_lines:
+                lines.append("Top policy candidates:")
+                lines.extend(score_lines)
+
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # High-level API
     # ------------------------------------------------------------------
@@ -752,6 +828,15 @@ class WorkflowSelector:
             and continuation_routing_context_text.strip()
             else "No active workflow continuation context."
         )
+        render_variables = {
+            "turn_text": turn_text,
+            "candidate_list": candidate_list,
+            "continuation_routing_context": continuation_context_text,
+            "selector_routing_context": continuation_context_text,
+            "routing_policy_fragments": self._build_routing_policy_fragments(
+                policy_recommendation
+            ),
+        }
         immutable_candidate_entries = tuple(
             {
                 str(key): value
@@ -764,22 +849,14 @@ class WorkflowSelector:
             "prompt_mode": "rag_first_candidate_selector",
             "requested_prompt_ids": list(requested_prompt_ids),
             "resolved_prompt_id": None,
-            "render_variables": {
-                "turn_text": turn_text,
-                "candidate_list": candidate_list,
-                "continuation_routing_context": continuation_context_text,
-            },
+            "render_variables": dict(render_variables),
             "truncated": False,
         }
 
         try:
             prompt = self._prompt_service.render_prompt(
                 requested_prompt_ids,
-                variables={
-                    "turn_text": turn_text,
-                    "candidate_list": candidate_list,
-                    "continuation_routing_context": continuation_context_text,
-                },
+                variables=render_variables,
                 fallback=None,
                 max_chars=SELECTOR_PROMPT_MAX_CHARS,
             )
