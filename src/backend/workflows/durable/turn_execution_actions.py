@@ -619,7 +619,9 @@ def _build_turn_execution_execute_tool_batch_handler(
             if error_text:
                 record["error"] = error_text
             if result_payload is not None:
-                record["result_preview"] = _bounded_snapshot(result_payload)
+                record["result_preview"] = _bounded_snapshot(
+                    result_payload, max_depth=5
+                )
             execution_records.append(record)
 
         outputs = build_turn_recovery_tool_batch_outputs(

@@ -892,6 +892,128 @@ def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[st
     return lines
 
 
+_SNAPSHOT_SECRET_KEY_PARTS: tuple[str, ...] = (
+    "authorization",
+    "api_key",
+    "apikey",
+    "cookie",
+    "credential",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "token",
+)
+_SNAPSHOT_SALIENCE_KEY_FIELDS: tuple[str, ...] = (
+    "name",
+    "key",
+    "field",
+    "field_name",
+    "header",
+    "label",
+    "type",
+)
+_SNAPSHOT_SALIENT_FIELD_NAMES: set[str] = {
+    "author",
+    "bcc",
+    "cc",
+    "date",
+    "from",
+    "label",
+    "labels",
+    "message-id",
+    "message_id",
+    "recipient",
+    "reply-to",
+    "sender",
+    "snippet",
+    "status",
+    "subject",
+    "summary",
+    "title",
+    "to",
+}
+
+
+def _snapshot_key_is_sensitive(key: str | None) -> bool:
+    lowered = str(key or "").strip().lower()
+    return bool(lowered) and any(
+        part in lowered for part in _SNAPSHOT_SECRET_KEY_PARTS
+    )
+
+
+def _snapshot_scalar_value(value: Any, *, max_string_length: int) -> Any | None:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return (
+            value[:max_string_length] + "..."
+            if len(value) > max_string_length
+            else value
+        )
+    return None
+
+
+def _bounded_scalar_mapping(
+    value: Mapping[str, Any],
+    *,
+    max_items: int,
+    max_string_length: int,
+) -> dict[str, Any]:
+    bounded: dict[str, Any] = {}
+    scalar_seen = 0
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if scalar_seen >= max_items:
+            break
+        if _snapshot_key_is_sensitive(key):
+            bounded[key] = "[redacted]"
+            scalar_seen += 1
+            continue
+        scalar = _snapshot_scalar_value(item, max_string_length=max_string_length)
+        if scalar is None:
+            continue
+        bounded[key] = scalar
+        scalar_seen += 1
+
+    if bounded:
+        omitted = max(0, len(value) - len(bounded))
+        if omitted:
+            bounded["_omitted_non_scalar_or_excess_items"] = omitted
+        return bounded
+    return {"_truncated": "mapping"}
+
+
+def _mapping_salience_name(value: Mapping[str, Any]) -> str | None:
+    for key in _SNAPSHOT_SALIENCE_KEY_FIELDS:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().lower()
+    return None
+
+
+def _is_salient_scalar_mapping(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    name = _mapping_salience_name(value)
+    if name and name in _SNAPSHOT_SALIENT_FIELD_NAMES:
+        return True
+    return any(
+        key in value
+        for key in (
+            "sender",
+            "from",
+            "subject",
+            "date",
+            "summary",
+            "title",
+            "snippet",
+            "status",
+        )
+    )
+
+
 def _bounded_snapshot(
     value: Any,
     *,
@@ -902,7 +1024,11 @@ def _bounded_snapshot(
 ) -> Any:
     if _depth >= max_depth:
         if isinstance(value, Mapping):
-            return {"_truncated": "mapping"}
+            return _bounded_scalar_mapping(
+                value,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            )
         if isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
         ):
@@ -933,6 +1059,10 @@ def _bounded_snapshot(
             if count >= max_items:
                 bounded["_truncated_items"] = max(0, len(value) - max_items)
                 break
+            if _snapshot_key_is_sensitive(key):
+                bounded[key] = "[redacted]"
+                count += 1
+                continue
             bounded[key] = _bounded_snapshot(
                 item,
                 max_depth=max_depth,
@@ -949,6 +1079,17 @@ def _bounded_snapshot(
             if not isinstance(value, list)
             else value[:max_items]
         )
+        if len(value) > max_items:
+            retained_ids = {id(item) for item in items}
+            salient_extras: list[Any] = []
+            for item in value[max_items:]:
+                if id(item) in retained_ids or not _is_salient_scalar_mapping(item):
+                    continue
+                salient_extras.append(item)
+                retained_ids.add(id(item))
+                if len(salient_extras) >= max_items:
+                    break
+            items.extend(salient_extras)
         bounded_items = [
             _bounded_snapshot(
                 item,
@@ -960,7 +1101,9 @@ def _bounded_snapshot(
             for item in items
         ]
         if len(value) > max_items:
-            bounded_items.append(f"... (+{len(value) - max_items} more)")
+            omitted_count = max(0, len(value) - len(items))
+            if omitted_count:
+                bounded_items.append(f"... (+{omitted_count} more)")
         return bounded_items
 
     text = repr(value)
@@ -2020,7 +2163,9 @@ def build_turn_recovery_tool_batch_outputs(
 
     clean_selected_workflow_id = _safe_str(selected_workflow_id)
     bounded_tool_calls = _bounded_snapshot(list(requested_tool_calls), max_items=4)
-    bounded_invocations = _bounded_snapshot(list(invocation_records), max_items=4)
+    bounded_invocations = _bounded_snapshot(
+        list(invocation_records), max_depth=5, max_items=8
+    )
     successful_count = sum(
         1
         for record in invocation_records
