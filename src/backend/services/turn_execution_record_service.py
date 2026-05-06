@@ -1677,6 +1677,19 @@ def _build_custom_workflow_execution_summary(
     if not workflow_id:
         workflow_id = _safe_str(dispatch_workflow_id) or _safe_str(selected_workflow_id)
 
+    workflow_instance_evidence = _extract_workflow_instance_evidence(trace_payload)
+    if trace_result_snapshot:
+        _merge_workflow_instance_evidence(
+            workflow_instance_evidence,
+            _extract_workflow_instance_evidence(trace_result_snapshot),
+        )
+    if summary_source:
+        _merge_workflow_instance_evidence(
+            workflow_instance_evidence,
+            _extract_workflow_instance_evidence(summary_source),
+        )
+    workflow_instance_payload = workflow_instance_evidence.get("workflow_instance")
+
     return {
         "observed": observed,
         "schema_version": _safe_str(summary_source.get("schema_version"))
@@ -1695,6 +1708,28 @@ def _build_custom_workflow_execution_summary(
         "error": trace_error or None,
         "completion_report_source": trace_completion_report_source or None,
         "result_snapshot": trace_result_snapshot,
+        "workflow_instance": (
+            dict(workflow_instance_payload)
+            if isinstance(workflow_instance_payload, Mapping)
+            else None
+        ),
+        "workflow_instance_id": _safe_str(
+            workflow_instance_evidence.get("workflow_instance_id")
+        )
+        or _safe_str(workflow_instance_evidence.get("instance_id")),
+        "workflow_instance_status": _safe_str(
+            workflow_instance_evidence.get("status")
+        ),
+        "workflow_instance_retry_count": (
+            _safe_non_negative_int(workflow_instance_evidence.get("retry_count"))
+            if workflow_instance_evidence.get("retry_count") is not None
+            else None
+        ),
+        "workflow_instance_max_retries": (
+            _safe_non_negative_int(workflow_instance_evidence.get("max_retries"))
+            if workflow_instance_evidence.get("max_retries") is not None
+            else None
+        ),
         "completion_gate_safe_to_claim_completion": (
             summary_source.get("completion_gate_safe_to_claim_completion")
             if isinstance(
@@ -1906,6 +1941,120 @@ def _custom_workflow_workflow_execute_equivalent_status(
     return None
 
 
+def _merge_workflow_instance_evidence(
+    target: dict[str, Any],
+    source: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(source, Mapping):
+        return
+    for key in (
+        "workflow_instance_id",
+        "instance_id",
+        "workflow_id",
+        "status",
+        "retry_count",
+        "max_retries",
+    ):
+        if target.get(key) not in (None, ""):
+            continue
+        value = source.get(key)
+        if value not in (None, ""):
+            target[key] = value
+    if not isinstance(target.get("workflow_instance"), Mapping):
+        workflow_instance = source.get("workflow_instance")
+        if isinstance(workflow_instance, Mapping):
+            target["workflow_instance"] = dict(workflow_instance)
+
+
+def _extract_workflow_instance_evidence(
+    payload: Mapping[str, Any] | None,
+    *,
+    depth: int = 0,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping) or depth > 3:
+        return {}
+
+    evidence: dict[str, Any] = {}
+    for key in (
+        "workflow_instance",
+        "selected_workflow_instance",
+        "durable_workflow_instance",
+    ):
+        workflow_instance = payload.get(key)
+        if isinstance(workflow_instance, Mapping):
+            evidence["workflow_instance"] = dict(workflow_instance)
+            _merge_workflow_instance_evidence(evidence, workflow_instance)
+            break
+
+    for source_key, target_key in (
+        ("workflow_instance_id", "workflow_instance_id"),
+        ("selected_workflow_instance_id", "workflow_instance_id"),
+        ("instance_id", "instance_id"),
+        ("workflow_id", "workflow_id"),
+        ("status", "status"),
+        ("terminal_status", "status"),
+        ("retry_count", "retry_count"),
+        ("max_retries", "max_retries"),
+    ):
+        if evidence.get(target_key) not in (None, ""):
+            continue
+        value = payload.get(source_key)
+        if value not in (None, ""):
+            evidence[target_key] = value
+
+    for nested_key in (
+        "result_snapshot",
+        "child_result_snapshot",
+        "workflow_execution_summary",
+        "workflow_execution",
+        "completion_report",
+    ):
+        nested = payload.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        nested_evidence = _extract_workflow_instance_evidence(
+            nested,
+            depth=depth + 1,
+        )
+        _merge_workflow_instance_evidence(evidence, nested_evidence)
+
+    return evidence
+
+
+def _custom_workflow_instance_evidence_observed(
+    custom_workflow_summary: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(custom_workflow_summary, Mapping):
+        return False
+    if isinstance(custom_workflow_summary.get("workflow_instance"), Mapping):
+        return True
+    return any(
+        _safe_str(custom_workflow_summary.get(key))
+        for key in ("workflow_instance_id", "instance_id")
+    )
+
+
+def _custom_workflow_workflow_get_instance_equivalent_status(
+    execution_summary: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(execution_summary, Mapping):
+        return None
+    if (_safe_str(execution_summary.get("selected_execution_mode")) or "").lower() != (
+        "custom_workflow"
+    ):
+        return None
+
+    custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    custom_workflow_summary: Mapping[str, Any] = (
+        custom_workflow_execution
+        if isinstance(custom_workflow_execution, Mapping)
+        else {}
+    )
+    if _custom_workflow_instance_evidence_observed(custom_workflow_summary):
+        return "satisfied"
+    return None
+
+
 def _append_tool_name_once(values: list[str], tool_name: str) -> None:
     lowered = tool_name.lower()
     if all(existing.lower() != lowered for existing in values):
@@ -1931,6 +2080,13 @@ def _augment_tool_outcomes_with_execution_surfaces(
     elif workflow_execute_status == "failed":
         _append_tool_name_once(augmented_failed_tools, "workflow_execute")
         _append_tool_name_once(observed_equivalent_tools, "workflow_execute")
+
+    workflow_get_instance_status = (
+        _custom_workflow_workflow_get_instance_equivalent_status(execution_summary)
+    )
+    if workflow_get_instance_status == "satisfied":
+        _append_tool_name_once(augmented_successful_tools, "workflow_get_instance")
+        _append_tool_name_once(observed_equivalent_tools, "workflow_get_instance")
 
     return augmented_successful_tools, augmented_failed_tools, observed_equivalent_tools
 
@@ -3163,6 +3319,40 @@ def build_workflow_routing_diagnostics(
                     ),
                     "final_state": _safe_str(
                         custom_workflow_execution_payload.get("final_state")
+                    ),
+                    "workflow_instance_id": _safe_str(
+                        custom_workflow_execution_payload.get(
+                            "workflow_instance_id"
+                        )
+                    ),
+                    "workflow_instance_status": _safe_str(
+                        custom_workflow_execution_payload.get(
+                            "workflow_instance_status"
+                        )
+                    ),
+                    "workflow_instance_retry_count": (
+                        _safe_non_negative_int(
+                            custom_workflow_execution_payload.get(
+                                "workflow_instance_retry_count"
+                            )
+                        )
+                        if custom_workflow_execution_payload.get(
+                            "workflow_instance_retry_count"
+                        )
+                        is not None
+                        else None
+                    ),
+                    "workflow_instance_max_retries": (
+                        _safe_non_negative_int(
+                            custom_workflow_execution_payload.get(
+                                "workflow_instance_max_retries"
+                            )
+                        )
+                        if custom_workflow_execution_payload.get(
+                            "workflow_instance_max_retries"
+                        )
+                        is not None
+                        else None
                     ),
                     "completion_gate_safe_to_claim_completion": (
                         custom_workflow_execution_payload.get(
@@ -7201,12 +7391,6 @@ def build_turn_execution_record(
     tool_call_validation_failure_context = (
         _extract_tool_call_validation_failure_context(aux_llm_calls)
     )
-    required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
-        required_tools_by_source=required_tool_sources,
-        invocations=serialised_invocations,
-        tool_call_validation_failure_context=tool_call_validation_failure_context,
-        existing_ledger=existing_required_tool_obligation_ledger,
-    )
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
         turn_execution_diagnostics=(
@@ -7227,17 +7411,35 @@ def build_turn_execution_record(
         failed_tools=failed_tools,
         execution_summary=execution_summary,
     )
+    actual_successful_tool_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in successful_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    actual_failed_tool_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in failed_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    execution_surface_successful_equivalent_tools = [
+        tool_name
+        for tool_name in execution_surface_successful_tools
+        if _tool_requirement_key(tool_name) not in actual_successful_tool_lookup
+    ]
+    execution_surface_failed_equivalent_tools = [
+        tool_name
+        for tool_name in execution_surface_failed_tools
+        if _tool_requirement_key(tool_name) not in actual_failed_tool_lookup
+    ]
     if execution_surface_observed_tools:
         execution_summary = dict(execution_summary)
         successful_surface_lookup = {
             _tool_requirement_key(tool_name)
-            for tool_name in execution_surface_successful_tools
-            if tool_name not in successful_tools
+            for tool_name in execution_surface_successful_equivalent_tools
         }
         failed_surface_lookup = {
             _tool_requirement_key(tool_name)
-            for tool_name in execution_surface_failed_tools
-            if tool_name not in failed_tools
+            for tool_name in execution_surface_failed_equivalent_tools
         }
         execution_summary["execution_surface_observed_tool_names"] = list(
             execution_surface_observed_tools
@@ -7252,6 +7454,16 @@ def build_turn_execution_record(
             for tool_name in execution_surface_observed_tools
             if _tool_requirement_key(tool_name) in failed_surface_lookup
         ]
+    required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
+        required_tools_by_source=required_tool_sources,
+        invocations=serialised_invocations,
+        observed_equivalent_successful_tools=(
+            execution_surface_successful_equivalent_tools
+        ),
+        observed_equivalent_failed_tools=execution_surface_failed_equivalent_tools,
+        tool_call_validation_failure_context=tool_call_validation_failure_context,
+        existing_ledger=existing_required_tool_obligation_ledger,
+    )
     effective_successful_write_tools = _dedupe_string_sequence(
         [
             *successful_write_tools,

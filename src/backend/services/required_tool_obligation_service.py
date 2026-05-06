@@ -380,6 +380,8 @@ def build_required_tool_obligation_ledger(
     required_tools: Sequence[Any] | None = None,
     required_tools_by_source: Mapping[str, Any] | None = None,
     invocations: Sequence[Mapping[str, Any]] | None = None,
+    observed_equivalent_successful_tools: Sequence[Any] | None = None,
+    observed_equivalent_failed_tools: Sequence[Any] | None = None,
     planned_tool_calls: Sequence[Mapping[str, Any]] | None = None,
     tool_call_validation_failure_context: Mapping[str, Any] | None = None,
     tool_call_validation_errors: Sequence[Mapping[str, Any]] | None = None,
@@ -487,6 +489,35 @@ def build_required_tool_obligation_ledger(
         if status == "ok":
             successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
 
+    observed_equivalent_invocation_count = 0
+    for tool_name in normalise_required_tool_names(
+        observed_equivalent_successful_tools
+    ):
+        lowered = tool_name.lower()
+        observed_equivalent_invocation_count += 1
+        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
+        planned_counts[lowered] = max(
+            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        )
+        successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
+        last_status_by_tool[lowered] = "ok"
+        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+
+    for tool_name in normalise_required_tool_names(observed_equivalent_failed_tools):
+        lowered = tool_name.lower()
+        observed_equivalent_invocation_count += 1
+        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
+        planned_counts[lowered] = max(
+            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        )
+        last_status_by_tool[lowered] = "error"
+        last_invocation_by_tool[lowered] = {
+            "tool": tool_name,
+            "status": "error",
+            "error": "Equivalent execution surface reported failure.",
+        }
+        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+
     obligations: list[dict[str, Any]] = []
     for tool_name, sources in sources_by_tool.items():
         cleaned_tool = _safe_str(tool_name)
@@ -587,7 +618,7 @@ def build_required_tool_obligation_ledger(
             max_tool_invocations = raw_existing_cap
     observed_invocation_count = len(
         [item for item in invocations or () if isinstance(item, Mapping)]
-    )
+    ) + observed_equivalent_invocation_count
     exhausted_budget = (
         isinstance(max_tool_invocations, int)
         and max_tool_invocations >= 0

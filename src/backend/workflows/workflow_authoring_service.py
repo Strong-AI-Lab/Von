@@ -589,6 +589,7 @@ def serialise_workflow_definition_to_authoring_spec(
                 "writes_context_keys",
                 "tool_output_context_mappings",
                 "mutation_authority",
+                "transition_condition_specs",
             }
         }
         if remaining_metadata:

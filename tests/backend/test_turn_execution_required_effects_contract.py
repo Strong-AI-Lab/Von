@@ -1605,6 +1605,76 @@ def test_prompt_required_workflow_execute_is_satisfied_by_custom_workflow_succes
     )
 
 
+def test_selected_workflow_instance_evidence_satisfies_workflow_instance_readback() -> (
+    None
+):
+    workflow_id = "#V#example_custom_workflow"
+    workflow_summary = {
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": workflow_id,
+        "completed": True,
+        "effective_completed": True,
+        "terminal_status": "completed",
+        "final_state": "#V#workflow_step_example_custom_workflow_completed",
+        "step_result_envelope_count": 2,
+        "action_started_count": 2,
+        "action_completed_count": 2,
+        "action_success_count": 2,
+        "action_failure_count": 0,
+        "action_unknown_count": 0,
+        "terminal_success_evaluation": {"success": True, "failure_codes": []},
+    }
+
+    record = _build_record(
+        prompt_text="Execute the selected workflow and inspect its durable instance.",
+        response_text="The selected workflow completed and its instance was inspected.",
+        workflow_routing={
+            "workflow_id": workflow_id,
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        required_prompt_tools=["workflow_execute", "workflow_get_instance"],
+        selected_workflow_trace={
+            "selected_workflow_id": workflow_id,
+            "selected_execution_mode": "custom_workflow",
+            "child_workflow_completed": True,
+            "child_workflow_final_state": (
+                "#V#workflow_step_example_custom_workflow_completed"
+            ),
+            "child_result_snapshot": {
+                "workflow_instance": {
+                    "instance_id": "wf-instance-123",
+                    "workflow_id": workflow_id,
+                    "status": "completed",
+                    "retry_count": 1,
+                    "max_retries": 3,
+                }
+            },
+            "workflow_execution_summary": workflow_summary,
+        },
+        tool_invocations=[],
+    )
+
+    summary = record["execution"]["summary"]
+    assert summary["execution_surface_successful_tool_names"] == [
+        "workflow_execute",
+        "workflow_get_instance",
+    ]
+    assert summary["missing_prompt_tools"] == []
+    assert summary["required_effects_missing_required_tools"] == []
+    assert summary["required_tool_obligations"]["unsatisfied_required_tools"] == []
+    assert summary["custom_workflow_execution"]["workflow_instance_id"] == (
+        "wf-instance-123"
+    )
+    assert summary["custom_workflow_execution"]["workflow_instance_retry_count"] == 1
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("safe_to_claim_completion") is True
+    assert "workflow_get_instance" not in (
+        summary.get("required_effects_missing_required_tools") or []
+    )
+
+
 def test_prompt_required_workflow_execute_fails_closed_on_custom_workflow_failure() -> (
     None
 ):

@@ -2986,6 +2986,108 @@ def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypat
     assert selector_entry["prompt_failure_reason"] == "selector_prompt_unavailable"
 
 
+def test_selector_prompt_unavailable_recovers_single_discovered_execution_workflow(
+    monkeypatch,
+):
+    """Fail-closed selector recovery should not drift to chat when one execution candidate is already grounded."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Ingest unseen Gmail arXiv digests for Zhan and label completed mail.",
+    )
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        data={"response_text": "Grounded Gmail arXiv ingestion completed."},
+    )
+
+    original_render_prompt = orchestrator._prompt_templates.render_prompt
+
+    def _render_without_selector_prompt(
+        prompt_ids: Any,
+        *,
+        fallback: Any = None,
+        variables: Any = None,
+        max_chars: Any = None,
+    ) -> Any:
+        requested_prompt_ids = {
+            str(item).strip()
+            for item in (prompt_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        }
+        if requested_prompt_ids.intersection(orchestrator._TURN_SELECTOR_PROMPTS):
+            return None
+        return original_render_prompt(
+            prompt_ids,
+            fallback=fallback,
+            variables=variables,
+            max_chars=max_chars,
+        )
+
+    monkeypatch.setattr(
+        orchestrator._prompt_templates,
+        "render_prompt",
+        _render_without_selector_prompt,
+    )
+
+    candidate = {
+        "concept_id": selected_workflow_id,
+        "name": "Zhan Gmail arXiv Ingestion Workflow",
+        "description": "Process unseen Zhan Gmail arXiv messages and label completed work.",
+        "match_source": "capability_index",
+        "confidence_score": 0.98,
+        "relevance_score": 0.98,
+        "routing_eligible": True,
+        "is_executable": True,
+        "is_policy_safe": True,
+        "turn_launchable": True,
+        "executability_reason": "executable_now",
+        "candidate_source": "workflow_discovery",
+        "routing_profile": {"role": "execution"},
+    }
+    llm = _CapturingLLM(["Unexpected fallback response."])
+    result = orchestrator.run(
+        prompt="Process Zhan's unseen Gmail arXiv digests.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [candidate],
+            "candidates": [candidate],
+            "match_count": 1,
+        },
+        conversation_session_id="session-selector-prompt-unavailable-recovery",
+        turn_id="turn-selector-prompt-unavailable-recovery",
+    )
+
+    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "selector_prompt_unavailable"
+    assert result.workflow_routing.source == "selector_fail_closed"
+    assert result.response_text == "Grounded Gmail arXiv ingestion completed."
+
+    selector_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == selected_workflow_id
+    assert selector_entry["selection_source"] == "selector_fail_closed"
+    assert selector_entry["prompt_failure_reason"] == "selector_prompt_unavailable"
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "single_specialised_candidate_recovery_from_selector_prompt_unavailable"
+    )
+    assert selector_entry["selection_metadata"]["recovered_candidate_workflow_id"] == (
+        selected_workflow_id
+    )
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-922 Phase 1.3: Discovered workflows in selector prompt.
 # ---------------------------------------------------------------------------

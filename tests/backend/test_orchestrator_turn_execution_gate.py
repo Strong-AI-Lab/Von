@@ -1251,6 +1251,100 @@ def test_turn_completion_gate_does_not_repeat_terminal_execution_failure() -> No
     )
 
 
+def test_turn_completion_gate_reports_distinct_budget_diagnostics() -> None:
+    orchestrator = _build_orchestrator()
+    request = WorkflowActionRequest(
+        action_id="turn_execution.completion_gate",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=object(),
+            gateway=cast(Any, _DummyGateway()),
+            model="test-model",
+            user_namespace="#V#test_user",
+            max_tool_invocations=7,
+        ),
+        data={
+            "final_response": "Execution needs another pass.",
+            "invocations": [{"tool": "search_concepts", "status": "ok"}],
+            "conversation_turn_llm_timeout_override_sec": 12.5,
+            "missing_tool_call_retry_attempts": 1,
+            "missing_tool_call_retry_budget": 3,
+            "missing_tool_call_retry_stop_reason": "retry_budget_available",
+            "selected_workflow_trace": {
+                "child_result_snapshot": {
+                    "workflow_instance": {
+                        "instance_id": "wf-budget-1",
+                        "workflow_id": "#V#budget_workflow",
+                        "status": "running",
+                        "retry_count": 2,
+                        "max_retries": 5,
+                    }
+                }
+            },
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "partial",
+                    "decision_reason": "More verification is needed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "repeat_eligible": True,
+                    "blocking_effect_ids": ["effect_verify_1"],
+                    "blocking_failure_codes": ["postcondition_inconclusive"],
+                    "evidence_payload": {
+                        "unresolved_preconditions": [
+                            {
+                                "effect_id": "effect_verify_1",
+                                "effect_type": "grounded_evidence",
+                                "status": "not_executed",
+                                "status_reason": "Verification is incomplete.",
+                                "failure_codes": ["postcondition_inconclusive"],
+                            }
+                        ]
+                    },
+                }
+            },
+            "completion_gate_loop_attempts": 1,
+            "completion_gate_loop_max_attempts": 4,
+            "completion_gate_loop_started_monotonic": time.monotonic() - 0.25,
+            "completion_gate_loop_max_elapsed_ms": 20_000,
+            "completion_gate_loop_no_progress_streak": 1,
+            "completion_gate_loop_no_progress_limit": 2,
+            "completion_gate_loop_stall_elapsed_ms": 250,
+            "completion_gate_loop_stall_max_elapsed_ms": 5_000,
+            "completion_gate_loop_last_invocation_count": 1,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+
+    diagnostics = result.outputs["execution_budget_diagnostics"]
+    assert diagnostics["model_llm_timeout"] == {
+        "timeout_sec": 12.5,
+        "source": "conversation_turn_llm_timeout_override_sec",
+        "configured": True,
+    }
+    assert diagnostics["completion_gate_loop"]["attempts"] == 2
+    assert diagnostics["completion_gate_loop"]["max_attempts"] == 4
+    assert diagnostics["completion_gate_loop"]["no_progress_streak"] == 0
+    assert diagnostics["durable_workflow_retry"]["instance_id"] == "wf-budget-1"
+    assert diagnostics["durable_workflow_retry"]["retry_count"] == 2
+    assert diagnostics["durable_workflow_retry"]["max_retries"] == 5
+    assert diagnostics["missing_tool_call_retry"]["attempts"] == 1
+    assert diagnostics["missing_tool_call_retry"]["budget"] == 3
+    assert diagnostics["internal_mcp_tool_invocations"] == {
+        "observed_invocation_count": 1,
+        "max_tool_invocations": 7,
+        "remaining": 6,
+        "settings_key": "internal_mcp_max_tool_invocations",
+        "budget_exhausted": False,
+    }
+    assert (
+        result.outputs["completion_gate_evidence_payload"]["budget_diagnostics"]
+        == diagnostics
+    )
+
+
 def test_execution_signal_blocker_returns_none_when_invocation_succeeded() -> None:
     """When at least one invocation succeeded the blocker must not fire."""
     result = _derive_execution_signal_completion_blocker(

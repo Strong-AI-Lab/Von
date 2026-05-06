@@ -53,6 +53,172 @@ def _coerce_non_negative_int(
     return coerced
 
 
+def _coerce_optional_non_negative_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        coerced = int(value)
+    except Exception:
+        return None
+    return coerced if coerced >= 0 else None
+
+
+def _coerce_optional_positive_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        coerced = float(value)
+    except Exception:
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _merge_workflow_retry_budget_evidence(
+    target: dict[str, Any],
+    source: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(source, Mapping):
+        return
+    for key in ("instance_id", "workflow_id", "status", "retry_count", "max_retries"):
+        if target.get(key) not in (None, ""):
+            continue
+        value = source.get(key)
+        if value not in (None, ""):
+            target[key] = value
+
+
+def _extract_workflow_retry_budget_evidence(
+    payload: Mapping[str, Any] | None,
+    *,
+    depth: int = 0,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping) or depth > 3:
+        return {}
+    evidence: dict[str, Any] = {}
+    workflow_instance = payload.get("workflow_instance")
+    if isinstance(workflow_instance, Mapping):
+        _merge_workflow_retry_budget_evidence(evidence, workflow_instance)
+    _merge_workflow_retry_budget_evidence(evidence, payload)
+    for nested_key in (
+        "selected_workflow_trace",
+        "child_result_snapshot",
+        "result_snapshot",
+        "workflow_execution_summary",
+        "workflow_execution",
+        "completion_report",
+        "completion_gate_evidence_payload",
+    ):
+        nested = payload.get(nested_key)
+        if isinstance(nested, Mapping):
+            _merge_workflow_retry_budget_evidence(
+                evidence,
+                _extract_workflow_retry_budget_evidence(nested, depth=depth + 1),
+            )
+    return evidence
+
+
+def _build_turn_execution_budget_diagnostics(
+    *,
+    data: Mapping[str, Any],
+    environment: Any,
+    invocation_count: int,
+    completion_gate_loop_attempts: int,
+    completion_gate_loop_max_attempts: int,
+    completion_gate_loop_elapsed_ms: int,
+    completion_gate_loop_max_elapsed_ms: int,
+    completion_gate_loop_no_progress_streak: int,
+    completion_gate_loop_no_progress_limit: int,
+    completion_gate_loop_stall_elapsed_ms: int,
+    completion_gate_loop_stall_max_elapsed_ms: int,
+    completion_gate_repeat_stop_reason: str | None,
+) -> dict[str, Any]:
+    model_budget_policy = data.get("model_execution_budget_policy")
+    model_timeout_sec = _coerce_optional_positive_float(
+        data.get("conversation_turn_llm_timeout_override_sec")
+    )
+    model_timeout_source = "conversation_turn_llm_timeout_override_sec"
+    if model_timeout_sec is None and isinstance(model_budget_policy, Mapping):
+        model_timeout_sec = _coerce_optional_positive_float(
+            model_budget_policy.get("conversation_turn_llm_timeout_sec")
+        )
+        model_timeout_source = "model_execution_budget_policy"
+
+    missing_tool_retry_attempts = _coerce_non_negative_int(
+        data.get("missing_tool_call_retry_attempts"),
+        default=0,
+        max_value=20,
+    )
+    missing_tool_retry_budget = _coerce_non_negative_int(
+        data.get("missing_tool_call_retry_budget"),
+        default=0,
+        max_value=20,
+    )
+    max_tool_invocations = _coerce_optional_non_negative_int(
+        getattr(environment, "max_tool_invocations", None)
+    )
+    if max_tool_invocations is None:
+        max_tool_invocations = _coerce_optional_non_negative_int(
+            data.get("max_tool_invocations")
+        )
+    retry_evidence = _extract_workflow_retry_budget_evidence(data)
+    retry_count = _coerce_optional_non_negative_int(retry_evidence.get("retry_count"))
+    max_retries = _coerce_optional_non_negative_int(retry_evidence.get("max_retries"))
+
+    return {
+        "schema_version": "turn_execution_budget_diagnostics.v1",
+        "model_llm_timeout": {
+            "timeout_sec": model_timeout_sec,
+            "source": model_timeout_source if model_timeout_sec is not None else None,
+            "configured": model_timeout_sec is not None,
+        },
+        "completion_gate_loop": {
+            "attempts": completion_gate_loop_attempts,
+            "max_attempts": completion_gate_loop_max_attempts,
+            "elapsed_ms": completion_gate_loop_elapsed_ms,
+            "max_elapsed_ms": completion_gate_loop_max_elapsed_ms,
+            "no_progress_streak": completion_gate_loop_no_progress_streak,
+            "no_progress_limit": completion_gate_loop_no_progress_limit,
+            "stall_elapsed_ms": completion_gate_loop_stall_elapsed_ms,
+            "stall_max_elapsed_ms": completion_gate_loop_stall_max_elapsed_ms,
+            "stop_reason": completion_gate_repeat_stop_reason,
+        },
+        "durable_workflow_retry": {
+            "instance_id": _safe_str(retry_evidence.get("instance_id")),
+            "workflow_id": _safe_str(retry_evidence.get("workflow_id")),
+            "status": _safe_str(retry_evidence.get("status")),
+            "retry_count": retry_count,
+            "max_retries": max_retries,
+            "retry_budget_exhausted": (
+                retry_count is not None
+                and max_retries is not None
+                and retry_count >= max_retries
+            ),
+        },
+        "missing_tool_call_retry": {
+            "attempts": missing_tool_retry_attempts,
+            "budget": missing_tool_retry_budget,
+            "remaining": max(0, missing_tool_retry_budget - missing_tool_retry_attempts),
+            "suppressed": bool(data.get("missing_tool_call_retry_suppressed")),
+            "stop_reason": _safe_str(data.get("missing_tool_call_retry_stop_reason")),
+            "recovery_outcome": _safe_str(data.get("missing_tool_call_recovery_outcome")),
+        },
+        "internal_mcp_tool_invocations": {
+            "observed_invocation_count": max(0, int(invocation_count)),
+            "max_tool_invocations": max_tool_invocations,
+            "remaining": (
+                max(0, max_tool_invocations - max(0, int(invocation_count)))
+                if max_tool_invocations is not None
+                else None
+            ),
+            "settings_key": "internal_mcp_max_tool_invocations",
+            "budget_exhausted": (
+                max_tool_invocations is not None
+                and max(0, int(invocation_count)) >= max_tool_invocations
+            ),
+        },
+    }
+
+
 def _is_evidence_effect_type(effect_type: str | None) -> bool:
     if not isinstance(effect_type, str):
         return False
@@ -2695,6 +2861,20 @@ def run_turn_execution_completion_gate(
     recovery_repeat_eligible = bool(
         repeat_eligible and not terminal_non_repeatable and repeat_stop_reason is None
     )
+    budget_diagnostics = _build_turn_execution_budget_diagnostics(
+        data=data,
+        environment=request.environment,
+        invocation_count=invocation_count,
+        completion_gate_loop_attempts=loop_attempts,
+        completion_gate_loop_max_attempts=loop_max_attempts,
+        completion_gate_loop_elapsed_ms=loop_elapsed_ms,
+        completion_gate_loop_max_elapsed_ms=loop_max_elapsed_ms,
+        completion_gate_loop_no_progress_streak=loop_no_progress_streak,
+        completion_gate_loop_no_progress_limit=loop_no_progress_limit,
+        completion_gate_loop_stall_elapsed_ms=loop_stall_elapsed_ms,
+        completion_gate_loop_stall_max_elapsed_ms=loop_stall_max_elapsed_ms,
+        completion_gate_repeat_stop_reason=repeat_stop_reason,
+    )
 
     completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
     completion_gate_evidence_payload.update(
@@ -2721,6 +2901,7 @@ def run_turn_execution_completion_gate(
             "loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
             "escalation_signal": escalation_signal,
             "escalation_reason": escalation_reason,
+            "budget_diagnostics": budget_diagnostics,
         }
     )
 
@@ -2953,6 +3134,7 @@ def run_turn_execution_completion_gate(
                         "escalation_signal": escalation_signal,
                         "escalation_reason": escalation_reason,
                         "loop_retry_reason": loop_retry_reason,
+                        "budget_diagnostics": budget_diagnostics,
                         "workflow_introspection_autotrigger": introspection_autotrigger,
                         "episode_evaluation_autotrigger": introspection_autotrigger,
                     },
@@ -3000,6 +3182,8 @@ def run_turn_execution_completion_gate(
             ),
             "completion_gate_loop_last_invocation_count": invocation_count,
             "completion_gate_loop_last_blocking_signature": blocking_signature,
+            "completion_gate_budget_diagnostics": budget_diagnostics,
+            "execution_budget_diagnostics": budget_diagnostics,
             "completion_gate_escalation_signal": escalation_signal,
             "completion_gate_escalation_reason": escalation_reason,
             "workflow_introspection_autotrigger": introspection_autotrigger,

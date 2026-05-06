@@ -269,6 +269,7 @@ class WorkflowSelector:
             self._eligible_specialised_candidate_summaries(
                 candidate_workflow_ids=candidate_workflow_ids,
                 candidate_entries=candidate_entries,
+                require_explicit_candidate_flags=True,
             )
         )
         if len(eligible_specialised_candidates) != 1:
@@ -280,6 +281,7 @@ class WorkflowSelector:
         *,
         candidate_workflow_ids: Sequence[str],
         candidate_entries: Sequence[Mapping[str, Any]] | None,
+        require_explicit_candidate_flags: bool = False,
     ) -> dict[str, dict[str, str]]:
         """Return non-default candidates that are already eligible for routing."""
 
@@ -304,6 +306,12 @@ class WorkflowSelector:
             if matched_workflow_id.lower() == self._default_workflow_id.lower():
                 continue
             if self._is_selector_default_candidate(entry):
+                continue
+            if require_explicit_candidate_flags and not (
+                entry.get("routing_eligible") is True
+                and entry.get("is_executable") is True
+                and entry.get("is_policy_safe") is True
+            ):
                 continue
             if entry.get("routing_eligible") is False:
                 continue
@@ -1071,6 +1079,44 @@ class WorkflowSelector:
         ):
             selection_metadata["prompt_failure_detail"] = (
                 selection_prompt.prompt_failure_detail
+            )
+        recovered_candidate = self._resolve_single_specialised_candidate_recovery(
+            candidate_workflow_ids=selection_prompt.discovered_workflow_ids,
+            candidate_entries=selection_prompt.candidate_entries,
+        )
+        if recovered_candidate is not None:
+            workflow_id = recovered_candidate["workflow_id"]
+            selection_metadata.update(
+                {
+                    "selection_resolution": (
+                        "single_specialised_candidate_recovery_from_selector_prompt_unavailable"
+                    ),
+                    "selector_contract_recovery_applied": True,
+                    "recovered_from_workflow_id": self._default_workflow_id,
+                    "recovered_candidate_workflow_id": workflow_id,
+                    "recovered_candidate_name": recovered_candidate["name"],
+                    "eligible_specialised_candidate_ids": [workflow_id],
+                    "selected_workflow_id": workflow_id,
+                }
+            )
+            if recovered_candidate.get("candidate_source"):
+                selection_metadata["recovered_candidate_source"] = (
+                    recovered_candidate["candidate_source"]
+                )
+            return WorkflowSelection(
+                workflow_id=workflow_id,
+                verdict=failure_reason,
+                prompt_id=selection_prompt.prompt_id,
+                prompt_used=selection_prompt.prompt_text,
+                raw_response="",
+                discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+                confidence_score=0.0,
+                reasoning=(
+                    f"{failure_reason}; the only eligible specialised candidate "
+                    "already present in the selector candidate set was selected."
+                ),
+                selection_source=SELECTOR_FAIL_CLOSED_SOURCE,
+                selection_metadata=selection_metadata,
             )
         return WorkflowSelection(
             workflow_id=self._default_workflow_id,
