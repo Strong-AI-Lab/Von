@@ -53,6 +53,15 @@ represented authority before filing Jira work.
   response templates. Treat one-shot migration/export helpers separately, but
   file when the script is the recoverable workflow source or is advertised as a
   future workflow-family template.
+- Extracting workflow/recovery control out of a monolith into a dedicated
+  Python service is not enough. If the new service still decides execution-mode
+  fallback, retry/handoff reason, or user-facing recovery wording, file a
+  represented-authority follow-up rather than treating the extraction as done.
+- Required-tool ledgers are support surfaces, but operation classes and
+  evidence/write semantics should come from represented tool metadata or
+  workflow contracts. Prefix classifiers such as `search_`, `create_`, `get_`,
+  and `workflow_` are a strong signal to update the tool-metadata authority
+  track.
 
 ## 2026-04-30 Examples
 
@@ -73,3 +82,5 @@ represented authority before filing Jira work.
   `JVNAUTOSCI-2264`.
 - Python-authored KR materialisation workflow publisher:
   `JVNAUTOSCI-2271`.
+- Selected-workflow recovery handoff policy:
+  `JVNAUTOSCI-2275`.
