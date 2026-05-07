@@ -19,29 +19,25 @@ predicates, and KB assertions should own durable:
   postconditions;
 - concept-summary renderer profiles, including field choice, section grouping,
   labels, panel ordering, empty states, and concept-family type exclusions;
-- semantic file-copy typing and routing rules, including type candidates,
-  route-hint taxonomy, thresholds or prompt-classifier policy, and downstream
-  workflow applicability;
-- minimal-imposition runtime profile policy, including decision rules,
-  write-tool risk classes, and scenario/tool overrides;
+- semantic file-copy typing and routing rules;
+- minimal-imposition runtime profile policy, write-tool risk classes, and
+  scenario/tool overrides;
 - knowledge-acquisition profile policy, including predicate priorities,
   confidence thresholds, source adjustments, auto-apply rules, and question
-  limits for relation-completion workflows;
-- event-binding and workflow-trigger policy, including which organisational
-  process states or event payload values should cause a workflow to launch;
+  limits;
+- event-binding and workflow-trigger policy;
 - recommendation matching, feedback semantics, and delivery wording;
 - domain-specific workflow launch policy;
 - workflow-description semantics such as domain labels, capability wording,
-  maturity/cost, and success-likelihood claims.
+  maturity/cost, and success-likelihood claims;
 - production workflow-family prompt text, discovery exemplars, routing
   metadata, transition/control definitions, required-effect contracts, and
-  response templates, even when a Python script later publishes them into
-  Vontology.
-- selected-workflow recovery and handoff policy, including whether a failed
-  selected workflow retries, repairs launch inputs, falls through to generic
-  tool-calling, asks for follow-up, or fails closed.
+  response templates;
+- selected-workflow recovery and handoff policy;
 - required-tool operation/evidence/write semantics that affect completion-gate
-  blockers or recovery choice.
+  blockers or recovery choice;
+- integration-specific tool metadata semantics, such as whether a Gmail read
+  tool is search evidence or verification evidence.
 
 ## Python Support
 
@@ -57,21 +53,18 @@ Python can remain the surface for:
   specs without hard-coded domain action ids or predicate defaults;
 - generic concept-summary rendering executors that apply represented panel
   specs and fetch requested Vontology fields;
-- generic file evidence extraction and typing-result persistence when the
-  semantic typing/routing policy comes from represented artefacts;
+- generic file evidence extraction and typing-result persistence when semantic
+  typing/routing policy comes from represented artefacts;
 - generic event emission, event payload normalisation, persisted binding lookup,
   workflow instance submission, idempotency, and telemetry;
 - generic knowledge-acquisition profile loading, validation, source telemetry,
-  confidence arithmetic, and canonical relation mutation support when the
-  policy values come from represented profile artefacts;
+  confidence arithmetic, and canonical relation mutation support;
 - generic required-tool ledger construction, invocation counting, read-back
   evidence preservation, and telemetry when operation classes and policy values
   come from represented tool/workflow metadata;
+- generic tool metadata loading, validation, normalisation, merge telemetry, and
+  fail-closed diagnostics when represented metadata is absent;
 - generic HTTP/request plumbing that passes represented decisions through.
 
-Seed bundles are publication/migration artefacts, not normal runtime authority
-after Vontology authority exists.
-
-Workflow publisher scripts are acceptable only as bounded migration, export, or
-verification tooling. They should not become the durable workflow source or the
-template for future workflow-family authoring.
+Seed bundles and workflow publisher scripts are migration/publication tooling,
+not normal runtime authority after Vontology authority exists.
