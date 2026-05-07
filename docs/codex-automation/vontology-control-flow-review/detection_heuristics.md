@@ -17,70 +17,40 @@ represented authority before filing Jira work.
 - Prompt text appended to Vontology-rendered prompts in Python.
 - Python-generated Vontology descriptions containing domain labels, capability
   wording, cost, maturity, or success-likelihood claims.
-- After prompt-backed interpretation migrations, inspect the downstream
-  materialisation contract separately: Python candidate schemas,
-  field-to-predicate mappings, note text, and success criteria can remain
-  hidden policy even when extraction/inference is prompt-owned.
-- In generic workflow-authoring surfaces, domain action ids such as
+- Prompt-backed interpretation migrations need a downstream materialisation
+  read: Python candidate schemas, field-to-predicate mappings, note text, and
+  success criteria can remain hidden policy.
+- Generic workflow-authoring surfaces with domain action ids such as
   `workflow_authoring.resolve_<domain>`, hard-coded type/predicate defaults,
-  domain profile fields, and tests asserting those action ids are strong
-  represented-authority drift signals.
-- User-visible renderer services that query Vontology metadata but then branch
-  on renderer IDs or domain concept families to choose section labels, field
-  ordering, expanded panels, or type exclusions are information-policy drift.
-- File-copy typing/routing services need a split read: MIME/extension evidence
-  extraction can be support logic, but semantic categories such as scholarly
-  paper, CV, business card, meeting transcript, or email message are represented
-  workflow/profile policy when they influence routing or persisted KB facts.
-- Vontology profile services that fall back at runtime to canonical Python
-  default decision policies, tool-risk classes, or profile blueprints are
-  authority seams even when they also materialise those defaults into KB.
-- Predicate-specific profile tables such as `*_PRIORITY_POLICY`,
-  `*_AUTO_APPLY_POLICY`, source-adjustment maps, or confidence thresholds are
-  strong drift signals when normal workflow execution can load, merge, or
-  repair them from Python.
+  domain profile fields, or tests asserting those action ids.
+- Renderer services that query Vontology metadata but branch on renderer IDs or
+  domain concept families for labels, field ordering, expanded panels, or type
+  exclusions.
+- File-copy typing/routing services: MIME/extension evidence extraction can be
+  support, but semantic categories that influence routing or KB facts are
+  represented workflow/profile policy.
+- Vontology-backed metadata/profile services that merge Python defaults when
+  authority is missing or partial. The defect is often fail-open fallback, not
+  absence of a service.
 - Event-emission helpers that filter process events by hard-coded or env-var
-  status/type allow-lists before persisted event bindings or VWL conditions run
-  are workflow-control drift. Python should emit structured events and let
-  represented binding/workflow policy decide relevance.
-- Vontology-backed metadata services that merge Python defaults when authority
-  is missing or partial should be checked against existing migration tasks
-  before filing. The remaining defect is often fail-open fallback, not absence
-  of a service.
-- Standalone publisher scripts are drift candidates when they embed full
-  production workflow families: prompt text, discovery exemplars, routing
-  metadata, transition/control definitions, required-effect contracts, or
-  response templates. Treat one-shot migration/export helpers separately, but
-  file when the script is the recoverable workflow source or is advertised as a
-  future workflow-family template.
+  status/type allow-lists before persisted bindings or VWL conditions run.
+- Publisher scripts that embed production workflow prompt text, discovery
+  exemplars, routing metadata, transition/control definitions, required-effect
+  contracts, or response templates.
 - Extracting workflow/recovery control out of a monolith into a dedicated
-  Python service is not enough. If the new service still decides execution-mode
-  fallback, retry/handoff reason, or user-facing recovery wording, file a
-  represented-authority follow-up rather than treating the extraction as done.
+  Python service is not enough if the new service still decides fallback mode,
+  retry/handoff reason, or user-facing recovery wording.
 - Required-tool ledgers are support surfaces, but operation classes and
   evidence/write semantics should come from represented tool metadata or
   workflow contracts. Prefix classifiers such as `search_`, `create_`, `get_`,
   and `workflow_` are a strong signal to update the tool-metadata authority
   track.
+- Tests that monkeypatch Vontology metadata loading to `{}` and then assert
+  integration-specific evidence, write, operation, or completion-gate semantics
+  are strong evidence of hidden Python fallback authority.
 
-## 2026-04-30 Examples
+## Recent Examples
 
-- Representation profile blueprints: `JVNAUTOSCI-2193`.
-- Paper recommendation policy: `JVNAUTOSCI-2194`.
-- Onboarding launch/process policy: `JVNAUTOSCI-2195`.
-- Deterministic workflow-description authoring: `JVNAUTOSCI-2196`.
-- Buttonify prompt suffix: `JVNAUTOSCI-2197`.
-- File-copy entity materialisation contract bindings: `JVNAUTOSCI-2216`.
-- PhD-student workflow-authoring action contracts and handlers:
-  `JVNAUTOSCI-2219`.
-- Concept-summary renderer panel policy: `JVNAUTOSCI-2234`.
-- File-copy semantic typing and route hints: `JVNAUTOSCI-2235`.
-- Represented-artefact repo-seed/startup authority: `JVNAUTOSCI-2260`.
-- Knowledge-acquisition profile predicate priorities and thresholds:
-  `JVNAUTOSCI-2262`.
-- Task-status event trigger status filtering before represented event bindings:
-  `JVNAUTOSCI-2264`.
-- Python-authored KR materialisation workflow publisher:
-  `JVNAUTOSCI-2271`.
-- Selected-workflow recovery handoff policy:
-  `JVNAUTOSCI-2275`.
+- `JVNAUTOSCI-2271` - Python-authored KR materialisation workflow publisher.
+- `JVNAUTOSCI-2275` - selected-workflow recovery handoff policy.
+- `JVNAUTOSCI-2284` - Gmail read-tool evidence-role defaults.
