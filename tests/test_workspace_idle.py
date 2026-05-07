@@ -538,6 +538,47 @@ def test_workspace_idle_main_records_recent_activity_telemetry(
     assert record["assessment"]["recent_repo_activity"][0]["path"] == ".git\\index"
 
 
+def test_workspace_idle_main_show_no_reason_reports_recent_activity_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    activity = RepoActivityAssessment(
+        kind="git_metadata",
+        path=".git\\index",
+        reason="recent Git metadata activity",
+        age_seconds=12.0,
+    )
+    monkeypatch.setattr(
+        workspace_idle,
+        "detect_recent_repo_activity",
+        lambda *args, **kwargs: (activity,),
+    )
+    monkeypatch.setattr(
+        workspace_idle,
+        "iter_fast_local_processes",
+        lambda: pytest.fail("processes should not be scanned after repo activity"),
+    )
+    monkeypatch.setattr(workspace_idle, "current_lineage_pids", lambda: set())
+
+    code = check_workspace_idle.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--no-fail",
+            "--show-no-reason",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines() == [
+        "NO",
+        "Reason: recent repo activity: kind=git_metadata, age=12.0s: .git\\index (recent Git metadata activity)",
+    ]
+    assert captured.err == ""
+
+
 def test_workspace_idle_telemetry_write_failure_dumps_to_stderr(
     tmp_path: Path,
     monkeypatch,
@@ -770,4 +811,39 @@ def test_powershell_wrapper_no_fail_missing_entrypoint_is_exact_no(
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == ["NO"]
+    assert completed.stderr == ""
+
+
+@pytest.mark.skipif(not POWERSHELL_EXE, reason="PowerShell is required")
+def test_powershell_wrapper_show_no_reason_surfaces_failure_summary(
+    tmp_path: Path,
+) -> None:
+    assert POWERSHELL_EXE is not None
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copyfile(
+        REPO_ROOT / "scripts" / "check_workspace_idle.ps1",
+        scripts_dir / "check_workspace_idle.ps1",
+    )
+
+    completed = subprocess.run(
+        [
+            POWERSHELL_EXE,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(scripts_dir / "check_workspace_idle.ps1"),
+            "--no-fail",
+            "--show-no-reason",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines()[0] == "NO"
+    assert completed.stdout.splitlines()[1].startswith("Reason: Python entry point not found at ")
     assert completed.stderr == ""

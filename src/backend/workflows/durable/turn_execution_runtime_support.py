@@ -337,9 +337,8 @@ def _entry_matches_selected_workflow(
 
 
 def _trace_identifier_fields(entry: Mapping[str, Any]) -> dict[str, str]:
-    execution_id = _safe_str(entry.get("execution_id")) or _safe_str(
-        entry.get("execution_trace_id")
-    )
+    execution_trace_id = _safe_str(entry.get("execution_trace_id"))
+    execution_id = _safe_str(entry.get("execution_id")) or execution_trace_id
     instance_id = (
         _safe_str(entry.get("instance_id"))
         or _safe_str(entry.get("workflow_instance_id"))
@@ -348,6 +347,8 @@ def _trace_identifier_fields(entry: Mapping[str, Any]) -> dict[str, str]:
     fields: dict[str, str] = {}
     if execution_id:
         fields["execution_id"] = execution_id
+    if execution_trace_id:
+        fields["execution_trace_id"] = execution_trace_id
     if instance_id:
         fields["instance_id"] = instance_id
         fields["workflow_instance_id"] = instance_id
@@ -586,6 +587,69 @@ def _tool_invocation_completed_successfully(invocation: Mapping[str, Any]) -> bo
         if payload.get("success") is False:
             return False
     return True
+
+
+def _tool_invocation_name(invocation: Mapping[str, Any]) -> str | None:
+    raw_tool = invocation.get("tool")
+    if isinstance(raw_tool, str) and raw_tool.strip():
+        return raw_tool.strip()
+    raw_method = invocation.get("method")
+    if isinstance(raw_method, str) and raw_method.strip():
+        return raw_method.strip()
+    return None
+
+
+def _tool_invocation_payload(invocation: Mapping[str, Any]) -> Any:
+    for key in ("effective_payload", "result", "payload"):
+        value = invocation.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _tool_invocation_status(invocation: Mapping[str, Any]) -> str:
+    raw_status = invocation.get("status")
+    if isinstance(raw_status, str) and raw_status.strip():
+        lowered = raw_status.strip().lower()
+        if lowered in {"error", "failed", "failure"}:
+            return "error"
+        if lowered == "blocked":
+            return "blocked"
+    error_text = _safe_str(invocation.get("error"))
+    if error_text:
+        return "error"
+    if _tool_invocation_completed_successfully(invocation):
+        return "ok"
+    return "error"
+
+
+def _reconstruct_tool_messages_from_invocations(
+    invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, str]]:
+    reconstructed: list[dict[str, str]] = []
+    for invocation in invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _tool_invocation_name(invocation)
+        if not tool_name:
+            continue
+        payload: dict[str, Any] = {
+            "tool": tool_name,
+            "status": _tool_invocation_status(invocation),
+        }
+        duration_ms = invocation.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+            payload["duration_ms"] = duration_ms
+        result_payload = _tool_invocation_payload(invocation)
+        if payload["status"] == "ok" and result_payload is not None:
+            payload["payload"] = _bounded_snapshot(result_payload)
+        error_text = _safe_str(invocation.get("error"))
+        if error_text:
+            payload["error"] = error_text
+        reconstructed.append(
+            {"role": "tool", "content": json.dumps(payload, default=str)}
+        )
+    return reconstructed
 
 
 def _missing_required_tools_from_invocations(
@@ -1975,6 +2039,12 @@ def build_turn_execution_selected_workflow_outputs(
     child_tool_messages = child_outputs_map.get("tool_messages")
     if isinstance(child_tool_messages, list):
         outputs["tool_messages"] = list(child_tool_messages)
+    elif child_invocation_maps:
+        reconstructed_tool_messages = _reconstruct_tool_messages_from_invocations(
+            child_invocation_maps
+        )
+        if reconstructed_tool_messages:
+            outputs["tool_messages"] = reconstructed_tool_messages
     child_aux_llm_calls = child_outputs_map.get("aux_llm_calls")
     if _is_mapping_sequence(parent_aux_llm_calls) or _is_mapping_sequence(
         child_aux_llm_calls

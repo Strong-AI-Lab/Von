@@ -7,6 +7,7 @@ $PythonScript = Join-Path $ScriptDir "check_workspace_idle.py"
 $PythonCandidateFailures = New-Object System.Collections.Generic.List[string]
 $NoFailRequested = $ForwardedArgs -contains "--no-fail"
 $JsonOutputRequested = $ForwardedArgs -contains "--json"
+$ShowNoReasonRequested = $ForwardedArgs -contains "--show-no-reason"
 
 function Complete-WorkspaceIdleFailure {
     param(
@@ -16,6 +17,12 @@ function Complete-WorkspaceIdleFailure {
     )
 
     Write-Output "NO"
+    if ($ShowNoReasonRequested) {
+        Write-Output "Reason: $Summary"
+        foreach ($detail in $Details) {
+            Write-Output "Detail: $detail"
+        }
+    }
     if (-not $NoFailRequested) {
         [Console]::Error.WriteLine("workspace idle check failed: $Summary")
         foreach ($detail in $Details) {
@@ -100,6 +107,13 @@ function Invoke-WorkspaceIdlePython {
         if ($JsonOutputRequested) {
             [Console]::Out.Write($stdout)
             if ($stderr) {
+                [Console]::Error.Write($stderr)
+            }
+            exit 0
+        }
+        if ($ShowNoReasonRequested -and $trimmedStdout.StartsWith("NO")) {
+            [Console]::Out.Write($stdout)
+            if ($stderr -and -not $NoFailRequested) {
                 [Console]::Error.Write($stderr)
             }
             exit 0

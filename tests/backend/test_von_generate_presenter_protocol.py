@@ -860,6 +860,77 @@ def test_generate_backfills_screen_when_only_spoken_tag_present(monkeypatch):
     assert llm.calls[1]["prompt"] == "Generate <screen> display content"
 
 
+def test_presenter_mode_reconstructs_tool_messages_from_invocations_when_missing(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    aux_llm_calls = (
+        {
+            "type": "turn_completion_gate",
+            "decision": "escalation_required",
+            "decision_reason": (
+                "The Gmail retrieval ran, but the final answer still needs follow-up."
+            ),
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "blocking_effect_ids": ["effect_email_resolution_1"],
+        },
+    )
+    tool_invocations = (
+        {
+            "tool": "gmail_get_message",
+            "status": "ok",
+            "duration_ms": 18,
+            "effective_payload": {
+                "message_id": "msg-123",
+                "subject": "FW: NeurIPS 2026 has received a new review",
+                "labels": ["INBOX", "IMPORTANT"],
+            },
+            "result_summary": "Message: FW: NeurIPS 2026 has received a new revi",
+        },
+    )
+    orchestrator_result = OrchestratorResult(
+        response_text=(
+            "Execution status: follow_up_required\n"
+            "Unresolved preconditions: missing presenter channels"
+        ),
+        extra_messages=[],
+        tool_invocations=tool_invocations,
+        aux_llm_calls=aux_llm_calls,
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Show me the latest email", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert "I ran tools for this request" in screen_text
+    assert "Tool activity diagnostics:" in screen_text
+    assert "gmail_get_message" in screen_text
+
+    llm_debug = body["llm_debug"]
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "fallback_success"
+    assert screen_backfill_event["source_path"] == "follow_up_summary"
+    assert screen_backfill_event["input_summary"]["tool_message_count"] == 1
+
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "success"
+    assert spoken_backfill_event["source_path"] == "llm_synthesis"
+
+
 def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
     llm = _StubLLMSequence(
         [

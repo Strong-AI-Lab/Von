@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from unittest.mock import MagicMock, patch
 
 from src.backend.services.blob_store import BlobRef
 from src.backend.services.debug_payload_store import compact_debug_payload_for_storage
@@ -376,6 +377,68 @@ def test_get_chat_history_debug_entry_hydrates_blob_refs(monkeypatch):
     )
 
     assert debug == original_debug
+
+
+def test_add_message_to_history_offloads_large_content_and_get_chat_history_hydrates(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    store = _FakeBlobStore()
+    mock_coll = MagicMock()
+
+    monkeypatch.setenv("VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+
+    docs: list[dict[str, Any]] = []
+
+    def _capture_update_one(*args, **kwargs):
+        payload = args[1]["$push"]["history"]
+        docs[:] = [
+            {
+                "_id": "history-1",
+                "user_id": "#V#u",
+                "session_id": "s1",
+                "history": [payload],
+            }
+        ]
+        return MagicMock()
+
+    mock_coll.update_one.side_effect = _capture_update_one
+
+    def _get_collection(*args, **kwargs):
+        if kwargs.get("read_only"):
+            return _FakeCollection(docs)
+        return mock_coll
+
+    with (
+        patch(
+            "src.backend.services.chat_history_service.get_chat_history_collection_service",
+            side_effect=_get_collection,
+        ),
+        patch(
+            "src.backend.services.chat_history_service.get_session_context",
+            return_value={"namespace": "#V#u"},
+        ),
+        patch("src.backend.services.chat_history_service.get_rag_service", None),
+    ):
+        large_content = "x" * 5000
+        chat_history_service.add_message_to_history(
+            user_id="#V#u",
+            session_id="s1",
+            message={"role": "assistant", "content": large_content},
+        )
+
+        stored_entry = docs[0]["history"][0]
+        assert isinstance(stored_entry["content"], dict)
+        assert stored_entry["content"]["schema_version"] == "debug_payload_blob_ref.v1"
+
+        history = chat_history_service.get_chat_history(user_id="#V#u", session_id="s1")
+
+    assert history[0]["content"] == large_content
 
 
 def test_get_chat_history_segments_reports_truncation(monkeypatch):

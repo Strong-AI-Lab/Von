@@ -1175,12 +1175,29 @@ def get_chat_history(
         _record_chat_history_read_success()
 
         if doc:
-            return doc.get("history", [])
+            return _hydrate_chat_history_entries(doc.get("history", []))
         return []
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history", e)
         logger.error(f"Error retrieving chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
+
+
+def _hydrate_chat_history_entries(history: Any) -> List[Dict[str, Any]]:
+    if not isinstance(history, list):
+        return []
+
+    hydrated_entries: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        hydrated = hydrate_debug_payload_blob_refs(entry, fail_soft=True)
+        payload = hydrated.payload
+        if isinstance(payload, dict):
+            hydrated_entries.append(payload)
+        else:
+            hydrated_entries.append(dict(entry))
+    return hydrated_entries
 
 
 def get_chat_history_segments(
@@ -1264,7 +1281,7 @@ def get_chat_history_segments(
             _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
 
-        history = doc.get("history") or []
+        history = _hydrate_chat_history_entries(doc.get("history") or [])
         if not isinstance(history, list) or not history:
             _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
@@ -1742,6 +1759,24 @@ def add_message_to_history(
             )
             message_with_timestamp["llm_debug_data"] = compacted_debug.payload
 
+        compacted_message = compact_debug_payload_for_storage(
+            message_with_timestamp,
+            root_kind="chat_history.message",
+            namespace=ns.strip() if isinstance(ns, str) and ns.strip() else None,
+            request_id=(
+                str(llm_debug_payload.get("request_id")).strip()
+                if isinstance(llm_debug_payload, dict)
+                and llm_debug_payload.get("request_id")
+                else None
+            ),
+            fail_soft=True,
+        )
+        stored_message = (
+            compacted_message.payload
+            if isinstance(compacted_message.payload, dict)
+            else message_with_timestamp
+        )
+
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
         # NOTE: namespace is intentionally NOT in $set - it should only be set
         # on document creation via $setOnInsert. Otherwise, when a shared
@@ -1768,7 +1803,7 @@ def add_message_to_history(
         chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id},
             {
-                "$push": {"history": message_with_timestamp},
+                "$push": {"history": stored_message},
                 "$set": set_fields,
                 "$setOnInsert": set_on_insert,
             },
@@ -3421,6 +3456,181 @@ def backfill_chat_history_for_user(
     except PyMongoError as e:
         logger.error(f"Error during chat history backfill: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Backfill failed: {e}") from e
+
+
+def backfill_chat_history_blob_payloads(
+    *,
+    user_concept_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    session_ids: Optional[List[str]] = None,
+    max_sessions: int = 25,
+    max_entries: int = 2000,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Backfill oversized inline chat-history payloads into the configured blob store.
+
+    Safety properties:
+    - Reuses the existing chat_history.message compaction contract.
+    - Never degrades inline payloads to error markers during migration; if blob
+      upload fails, the original entry is left untouched and the error is reported.
+    - Dry-run reports the candidate rewrites without mutating Mongo.
+    - Reruns are safe because existing blob refs are preserved.
+    """
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    safe_max_sessions = 25
+    if isinstance(max_sessions, int) and max_sessions > 0:
+        safe_max_sessions = min(max_sessions, 5000)
+
+    safe_max_entries = 2000
+    if isinstance(max_entries, int) and max_entries > 0:
+        safe_max_entries = min(max_entries, 500000)
+
+    query: Dict[str, Any] = {}
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        query["user_id"] = user_concept_id.strip()
+    if isinstance(namespace, str) and namespace.strip():
+        query["namespace"] = namespace.strip()
+    if session_ids:
+        cleaned_session_ids = [
+            str(session_id).strip()
+            for session_id in session_ids
+            if isinstance(session_id, str) and session_id.strip()
+        ]
+        if cleaned_session_ids:
+            query["session_id"] = {"$in": cleaned_session_ids}
+
+    sessions_examined = 0
+    sessions_updated = 0
+    entries_examined = 0
+    candidate_entries = 0
+    entries_updated = 0
+    bytes_before = 0
+    bytes_after = 0
+    limit_reached = False
+    errors: List[Dict[str, Any]] = []
+
+    try:
+        cursor = chat_history_coll.find(query)
+
+        for doc in cursor:
+            if sessions_examined >= safe_max_sessions or limit_reached:
+                break
+            sessions_examined += 1
+
+            history = doc.get("history") or []
+            if not isinstance(history, list) or not history:
+                continue
+
+            updated_history: Optional[List[Any]] = None
+            session_candidate_entries = 0
+
+            for index, entry in enumerate(history):
+                if entries_examined >= safe_max_entries:
+                    limit_reached = True
+                    break
+                if not isinstance(entry, dict):
+                    continue
+
+                entries_examined += 1
+
+                debug_payload = entry.get("llm_debug_data")
+                request_id_value = (
+                    str(debug_payload.get("request_id")).strip()
+                    if isinstance(debug_payload, dict)
+                    and debug_payload.get("request_id")
+                    else None
+                )
+                entry_namespace = doc.get("namespace")
+                compacted = None
+                try:
+                    compacted = compact_debug_payload_for_storage(
+                        entry,
+                        root_kind="chat_history.message",
+                        namespace=(
+                            entry_namespace.strip()
+                            if isinstance(entry_namespace, str)
+                            and entry_namespace.strip()
+                            else None
+                        ),
+                        request_id=request_id_value,
+                        fail_soft=False,
+                    )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "type": "entry_offload_failed",
+                            "session_id": doc.get("session_id"),
+                            "history_index": index,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+
+                compacted_entry = (
+                    compacted.payload if isinstance(compacted.payload, dict) else entry
+                )
+                if compacted_entry == entry:
+                    continue
+
+                candidate_entries += 1
+                session_candidate_entries += 1
+                bytes_before += compacted.original_size_bytes
+                bytes_after += compacted.stored_size_bytes
+
+                if updated_history is None:
+                    updated_history = list(history)
+                updated_history[index] = compacted_entry
+
+            if session_candidate_entries == 0:
+                continue
+
+            if dry_run:
+                sessions_updated += 1
+                entries_updated += session_candidate_entries
+                continue
+
+            try:
+                chat_history_coll.update_one(
+                    {"_id": doc.get("_id")},
+                    {"$set": {"history": updated_history}},
+                )
+                sessions_updated += 1
+                entries_updated += session_candidate_entries
+            except Exception as exc:
+                errors.append(
+                    {
+                        "type": "session_update_failed",
+                        "session_id": doc.get("session_id"),
+                        "error": str(exc),
+                    }
+                )
+
+        return {
+            "status": "ok",
+            "dry_run": bool(dry_run),
+            "query": query,
+            "sessions_examined": sessions_examined,
+            "sessions_updated": sessions_updated,
+            "entries_examined": entries_examined,
+            "candidate_entries": candidate_entries,
+            "entries_updated": entries_updated,
+            "bytes_before": bytes_before,
+            "bytes_after": bytes_after,
+            "bytes_saved_estimate": max(0, bytes_before - bytes_after),
+            "limit_reached": limit_reached,
+            "errors": errors,
+        }
+    except PyMongoError as e:
+        logger.error(
+            f"Error during chat history blob payload backfill: {e}", exc_info=True
+        )
+        raise ChatHistoryServiceError(
+            f"Chat history blob payload backfill failed: {e}"
+        ) from e
 
 
 def reindex_chat_history_for_user_namespace(

@@ -423,6 +423,63 @@ def test_selected_workflow_outputs_emit_pre_trace_failure_without_trace_ref() ->
     )
 
 
+def test_selected_workflow_outputs_preserve_execution_trace_id_from_aux_trace() -> None:
+    parent_aux = [
+        {
+            "type": "workflow_execution_trace",
+            "workflow_id": "#V#example_child_workflow",
+            "execution_trace_id": "exec-trace-selected",
+            "instance_id": "wf-instance-selected",
+        }
+    ]
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#example_child_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={},
+        parent_aux_llm_calls=parent_aux,
+    )
+
+    trace = outputs["selected_workflow_trace"]
+    assert trace["execution_id"] == "exec-trace-selected"
+    assert trace["execution_trace_id"] == "exec-trace-selected"
+    assert outputs["completion_report"]["execution_id"] == "exec-trace-selected"
+
+
+def test_selected_workflow_outputs_reconstruct_tool_messages_from_invocations() -> None:
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#tool_calling_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Fetched the latest message.",
+            "invocations": [
+                {
+                    "tool": "gmail_get_message",
+                    "status": "ok",
+                    "duration_ms": 18,
+                    "effective_payload": {
+                        "message_id": "msg-123",
+                        "subject": "FW: NeurIPS 2026 has received a new review",
+                        "labels": ["INBOX", "IMPORTANT"],
+                    },
+                }
+            ],
+        },
+    )
+
+    tool_messages = outputs["tool_messages"]
+    assert tool_messages == [
+        {
+            "role": "tool",
+            "content": '{"tool": "gmail_get_message", "status": "ok", "duration_ms": 18, "payload": {"message_id": "msg-123", "subject": "FW: NeurIPS 2026 has received a new review", "labels": ["INBOX", "IMPORTANT"]}}',
+        }
+    ]
+
+
 def test_selected_workflow_outputs_derives_missing_tools_from_turn_contract() -> None:
     outputs = build_turn_execution_selected_workflow_outputs(
         selected_workflow_id="#V#tool_calling_workflow",

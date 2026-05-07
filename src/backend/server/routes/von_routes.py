@@ -4701,6 +4701,77 @@ def _serialise_tool_invocations_for_llm_debug(
     return serialised
 
 
+def _reconstruct_tool_messages_from_invocations(
+    tool_invocations: Any,
+    *,
+    orchestrator: Any = None,
+) -> list[dict[str, str]]:
+    """Best-effort presenter fallback when ``extra_messages`` are missing.
+
+    The authoritative route path is still ``OrchestratorResult.extra_messages``.
+    When that list is unexpectedly empty but executed invocations are present,
+    rebuild tool-style messages so presenter backfill can remain grounded in the
+    actual tool outcomes rather than synthesising a false no-tool narrative.
+    """
+
+    if not isinstance(tool_invocations, list):
+        return []
+
+    formatter = getattr(orchestrator, "_format_tool_result", None)
+    reconstructed: list[dict[str, str]] = []
+    for raw_invocation in tool_invocations:
+        if not isinstance(raw_invocation, Mapping):
+            continue
+
+        tool_name = raw_invocation.get("tool") or raw_invocation.get("method")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+
+        raw_status = raw_invocation.get("status")
+        error_text = raw_invocation.get("error")
+        status = (
+            "error"
+            if isinstance(raw_status, str) and raw_status.strip().lower() == "error"
+            else "ok"
+        )
+        payload = raw_invocation.get("effective_payload")
+        if payload is None:
+            payload = raw_invocation.get("result")
+        duration_ms = raw_invocation.get("duration_ms")
+        if not isinstance(duration_ms, (int, float)):
+            duration_ms = None
+
+        if callable(formatter):
+            try:
+                content = formatter(
+                    tool_name.strip(),
+                    payload,
+                    duration_ms,
+                    status,
+                    error_text if isinstance(error_text, str) else None,
+                )
+            except Exception:
+                content = None
+            if isinstance(content, str) and content.strip():
+                reconstructed.append({"role": "tool", "content": content})
+                continue
+
+        fallback_payload: dict[str, Any] = {
+            "tool": tool_name.strip(),
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+        if status == "ok":
+            fallback_payload["payload"] = payload
+        if isinstance(error_text, str) and error_text.strip():
+            fallback_payload["error"] = error_text.strip()
+        reconstructed.append(
+            {"role": "tool", "content": json.dumps(fallback_payload, default=str)}
+        )
+
+    return reconstructed
+
+
 def _truncate_debug_payload(raw: str | None, max_chars: int = 4000) -> str | None:
     """Limit rejected tool payloads before surfacing them in LLM debug info."""
     if raw is None:
@@ -9657,6 +9728,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     dict(msg) for msg in orchestrator_result.extra_messages
                 ]
                 tool_invocations = list(orchestrator_result.tool_invocations)
+                if not tool_messages and tool_invocations:
+                    tool_messages = _reconstruct_tool_messages_from_invocations(
+                        tool_invocations,
+                        orchestrator=orchestrator,
+                    )
                 orchestrator_auxiliary_llm_calls = list(
                     getattr(orchestrator_result, "aux_llm_calls", [])
                 )

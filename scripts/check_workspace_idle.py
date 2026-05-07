@@ -41,6 +41,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With text output, include blocker details after the YES/NO line.",
     )
     parser.add_argument(
+        "--show-no-reason",
+        action="store_true",
+        help=(
+            "With text output, include a concise reason line when the answer "
+            "is NO."
+        ),
+    )
+    parser.add_argument(
         "--include-services",
         action="store_true",
         help=(
@@ -261,12 +269,59 @@ def _trim(value: str, max_chars: int) -> str:
     return value[: max(0, max_chars - 3)] + "..."
 
 
-def _print_assessment(assessment, *, json_output: bool, verbose: bool, max_command_chars: int) -> None:
+def _summarise_no_reason(assessment, *, max_command_chars: int) -> str | None:
+    if assessment.answer != "NO":
+        return None
+
+    if assessment.recent_repo_activity:
+        activity = assessment.recent_repo_activity[0]
+        status = f", status={activity.status}" if activity.status else ""
+        age = (
+            f", age={activity.age_seconds:.1f}s"
+            if activity.age_seconds is not None
+            else ""
+        )
+        return (
+            f"recent repo activity: kind={activity.kind}{status}{age}: "
+            f"{activity.path} ({activity.reason})"
+        )
+
+    if assessment.blockers:
+        blocker = assessment.blockers[0]
+        age = (
+            f", age={blocker.age_seconds:.1f}s"
+            if blocker.age_seconds is not None
+            else ""
+        )
+        return (
+            f"process blocker: pid={blocker.pid}, name={blocker.name}, "
+            f"reason={blocker.reason}{age}: "
+            f"{_trim(blocker.command, max_command_chars)}"
+        )
+
+    return "workspace is not idle"
+
+
+def _print_assessment(
+    assessment,
+    *,
+    json_output: bool,
+    verbose: bool,
+    show_no_reason: bool,
+    max_command_chars: int,
+) -> None:
     if json_output:
         print(json.dumps(assessment.to_json_dict(), indent=2, sort_keys=True))
         return
 
     print(assessment.answer)
+    if show_no_reason:
+        reason_summary = _summarise_no_reason(
+            assessment,
+            max_command_chars=max_command_chars,
+        )
+        if reason_summary:
+            print(f"Reason: {reason_summary}")
     if not verbose:
         return
 
@@ -348,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
                 assessment,
                 json_output=bool(args.json),
                 verbose=bool(args.verbose),
+                show_no_reason=bool(args.show_no_reason),
                 max_command_chars=int(args.max_command_chars),
             )
             exit_code = 0 if args.no_fail else 1
@@ -381,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                 assessment,
                 json_output=bool(args.json),
                 verbose=bool(args.verbose),
+                show_no_reason=bool(args.show_no_reason),
                 max_command_chars=int(args.max_command_chars),
             )
             exit_code = 0 if args.no_fail else 1
@@ -405,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
                         assessment,
                         json_output=bool(args.json),
                         verbose=bool(args.verbose),
+                        show_no_reason=bool(args.show_no_reason),
                         max_command_chars=int(args.max_command_chars),
                     )
                     exit_code = 0 if args.no_fail or assessment.idle else 1
@@ -450,6 +508,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print("NO")
+            if args.show_no_reason:
+                print(f"Reason: workspace idle check failed: {exc}")
             if not args.no_fail:
                 print(f"workspace idle check failed: {exc}", file=sys.stderr)
         exit_code = 0 if args.no_fail else 2
@@ -466,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         assessment,
         json_output=bool(args.json),
         verbose=bool(args.verbose),
+        show_no_reason=bool(args.show_no_reason),
         max_command_chars=int(args.max_command_chars),
     )
 
