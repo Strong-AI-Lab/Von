@@ -59,6 +59,26 @@ def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
         service.invalidate_cache()
 
 
+def test_gmail_read_tools_are_prompt_required_evidence(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        list_metadata = service.get_tool_metadata("gmail_list_messages")
+        message_metadata = service.get_tool_metadata("gmail_get_message")
+
+        assert list_metadata.operation_category == "read"
+        assert list_metadata.evidence_role == "search"
+        assert service.is_tool_prompt_required_evidence("gmail_list_messages") is True
+
+        assert message_metadata.operation_category == "read"
+        assert message_metadata.evidence_role == "verification"
+        assert service.is_tool_prompt_required_evidence("gmail_get_message") is True
+    finally:
+        service.invalidate_cache()
+
+
 def test_jira_get_transitions_metadata_is_discoverable(monkeypatch):
     from src.backend.services import tool_metadata_service as service
 

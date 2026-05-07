@@ -453,6 +453,43 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
     assert captured["prefer_default_model"] is True
 
 
+def test_execute_llm_step_honours_explicit_prefer_default_model_flag(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["prefer_default_model"] = kwargs.get("prefer_default_model")
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "prefer_default_model": True,
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["prefer_default_model"] is True
+
+
 def test_execute_llm_step_tool_mode_marks_user_model_preference(
     monkeypatch,
 ) -> None:

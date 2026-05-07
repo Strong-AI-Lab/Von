@@ -571,6 +571,24 @@ def test_generate_buttonify_telemetry_reports_skipped_when_disabled(monkeypatch)
     assert buttonify_event["options_emitted_count"] == 0
 
 
+def test_generate_buttonify_can_be_skipped_by_request(monkeypatch):
+    llm = _StubLLM("No options here.")
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "skip_buttonify": True},
+    )
+
+    assert resp.status_code == 200
+    llm_debug = resp.get_json()["llm_debug"]
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "skipped"
+    assert buttonify_event["suppression_reason"] == "buttonify_skipped_by_request"
+    assert buttonify_event["options_emitted_count"] == 0
+
+
 def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
     from src.backend.workflows import CHAT_BUTTONIFY_WORKFLOW_ID
@@ -635,6 +653,7 @@ def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
     assert stub_orchestrator.workflow_calls
     first_call = stub_orchestrator.workflow_calls[0]
     assert first_call["args"][0] == CHAT_BUTTONIFY_WORKFLOW_ID
+    assert first_call["kwargs"]["data"]["prefer_default_model"] is True
     assert len(llm.calls) == 0
 
 

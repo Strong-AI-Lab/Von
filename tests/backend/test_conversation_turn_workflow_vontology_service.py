@@ -270,19 +270,13 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     required_effects_contract = tool_calling_definition.metadata.get(
         "required_effects_contract"
     )
-    assert isinstance(required_effects_contract, dict)
-    assert required_effects_contract.get("contract_id") == (
-        "conversation_diagnostics_required_evidence"
-    )
-    required_effects = required_effects_contract.get("required_effects")
-    assert isinstance(required_effects, list)
-    assert required_effects[0]["effect_id"] == "conversation_locator"
+    assert required_effects_contract is None
     contract_rows = get_texts_for_concept(
         TOOL_CALLING_WORKFLOW_ID,
         predicate="#V#hasWorkflowRequiredEffectsContractJson",
         limit=5,
     )
-    assert any((row or {}).get("text") for row in contract_rows)
+    assert not any((row or {}).get("text") for row in contract_rows)
 
     turn_definition = load_workflow_definition_from_vontology(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID

@@ -451,6 +451,9 @@ def _resolve_user_context_ids(
 
 
 def _prefer_default_model_for_request(request: WorkflowActionRequest) -> bool:
+    explicit_preference = request.data.get("prefer_default_model")
+    if isinstance(explicit_preference, bool):
+        return explicit_preference
     requested_model = _context_string(request.data.get("requested_model"))
     requested_client_type = _context_string(request.data.get("requested_client_type"))
     return bool(requested_model or requested_client_type)

@@ -7983,6 +7983,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     data = request.get_json()
     prompt_text = data.get("prompt", "")
 
+    raw_skip_buttonify = data.get("skip_buttonify")
+    if isinstance(raw_skip_buttonify, str):
+        skip_buttonify = raw_skip_buttonify.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    else:
+        skip_buttonify = bool(raw_skip_buttonify)
+
     client_request_id = data.get("client_request_id")
     if (
         isinstance(client_request_id, str)
@@ -10987,7 +10998,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
         buttonify_workflow_contract: dict[str, Any] | None = None
-        buttonify_enabled = get_buttonify_model_enabled()
+        buttonify_enabled = get_buttonify_model_enabled() and not skip_buttonify
         buttonify_allowed = (
             not current_app.testing
             and not os.getenv("PYTEST_CURRENT_TEST")
@@ -11013,7 +11024,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_workflow_used = False
         buttonify_filtering_boundary: dict[str, Any] | None = None
 
-        if not buttonify_enabled:
+        if skip_buttonify:
+            buttonify_suppression_reason = "buttonify_skipped_by_request"
+        elif not buttonify_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
         elif not buttonify_allowed:
             buttonify_suppression_reason = "buttonify_not_allowed"
@@ -11052,6 +11065,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "buttonify_enabled": buttonify_enabled,
                             "buttonify_allowed": buttonify_allowed,
                             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
+                            "prefer_default_model": True,
                             "default_model": model_name,
                             "policy_state": policy_state,
                             "registry_snapshot": registry_snapshot,

@@ -472,11 +472,15 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "{count} messages",
+        "operation_category": "read",
+        "evidence_role": "search",
     },
     "gmail_get_message": {
         "salience": "medium",
         "category": "gmail",
         "display_template": "Message: {subject}",
+        "operation_category": "read",
+        "evidence_role": "verification",
     },
     "gmail_send_message": {
         "salience": "medium",
