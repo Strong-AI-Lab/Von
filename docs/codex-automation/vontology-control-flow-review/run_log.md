@@ -45,3 +45,26 @@
   support, and annotation extraction prompt loading as watch/non-issues rather
   than new tasks this run.
 - No production code was changed.
+
+## 2026-05-09T02:09:15.5073269+12:00
+
+- Read required repo guidance, repo-local drift-review memories, and attempted
+  the global automation memory path; `$CODEX_HOME` was unset in this shell, so
+  the memory file was written under `C:\Users\mwit860\.codex\automations`.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero and `repo_seed_authority_drift_path_count=1`.
+- Reviewed code changes since `2026-05-07T14:00:30Z`: Gmail evidence-contract
+  materialisation (`JVNAUTOSCI-2287`, `JVNAUTOSCI-2288`), Gmail fallback
+  metadata (`JVNAUTOSCI-2284` still open), LLM-duration stats, chat-history blob
+  offload, buttonify action removal, and workspace-idle reporting.
+- Treated LLM-duration stats and chat-history blob offload as support-only
+  telemetry/storage work. Treated the Gmail evidence-contract materialisation
+  services as covered by `JVNAUTOSCI-2284`/`JVNAUTOSCI-2286` unless they become
+  runtime fallback authority.
+- Created `JVNAUTOSCI-2291` for talk/presentation representation profile and
+  verification policy in Python: `talk_representation_service.py` owns profile
+  names, required type sets, predicate/type primitive creation, field-to-predicate
+  materialisation, and verification criteria; `talk_representation_workflow.py`
+  delegates durable actions to that service. Linked it to `JVNAUTOSCI-1913`,
+  `JVNAUTOSCI-2173`, and `JVNAUTOSCI-2216`, and added a user-impact comment.
+- No production code was changed.
