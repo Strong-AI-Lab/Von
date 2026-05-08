@@ -274,6 +274,10 @@ function Test-WritableDirectory {
 }
 
 function Resolve-AutomationVenvBase {
+    if ($script:ResolvedAutomationVenvBase) {
+        return $script:ResolvedAutomationVenvBase
+    }
+
     $candidates = New-Object System.Collections.Generic.List[string]
 
     if ($AutomationVenvRoot) {
@@ -309,11 +313,30 @@ function Resolve-AutomationVenvBase {
         }
 
         if (Test-WritableDirectory -Directory $fullPath) {
-            return $fullPath
+            $script:ResolvedAutomationVenvBase = $fullPath
+            return $script:ResolvedAutomationVenvBase
         }
     }
 
     throw "No writable automation virtualenv root was found. Checked explicit root, CODEX_HOME, user .codex, and temp fallback."
+}
+
+function Initialize-PdmRuntimeEnvironment {
+    $runtimeRoot = Join-Path (Resolve-AutomationVenvBase) "pdm-runtime"
+    $cacheDir = Join-Path $runtimeRoot "cache"
+    $logDir = Join-Path $runtimeRoot "logs"
+    $configDir = Join-Path $runtimeRoot "config"
+    $globalConfigPath = Join-Path $configDir "config.toml"
+
+    foreach ($directory in @($runtimeRoot, $cacheDir, $logDir, $configDir)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    $env:PDM_CACHE_DIR = $cacheDir
+    $env:PDM_LOG_DIR = $logDir
+    $env:PDM_CONFIG_FILE = $globalConfigPath
+
+    Write-Ok "Using writable PDM runtime directories under $runtimeRoot"
 }
 
 function Resolve-AutomationVenvDir {
@@ -646,6 +669,7 @@ if ($currentPdmPython -ne $resolvedVenvPython) {
 $env:VIRTUAL_ENV = $venvDir
 $env:Path = "$venvScriptsDir;$env:Path"
 $env:PDM_CHECK_UPDATE = "false"
+Initialize-PdmRuntimeEnvironment
 if ($venvIsAutomationFallback) {
     $env:VON_CODEX_AUTOMATION_USING_FALLBACK_VENV = "1"
 }
