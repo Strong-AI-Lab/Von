@@ -325,9 +325,8 @@ def _resolve_model_llm_timeout_override_sec(
                 if saved is not None:
                     return saved
         except Exception:
-            self._logger.debug(
-                "Vontology tool evidence projection failed for %s; using existing payload shaper",
-                tool_name,
+            logging.getLogger(__name__).debug(
+                "Model LLM timeout lookup failed; using default timeout policy",
                 exc_info=True,
             )
 
@@ -10621,6 +10620,13 @@ class InternalMCPChatOrchestrator:
         else:
             aux_calls = ()
 
+        raw_llm_calls = data.get("llm_calls")
+        llm_call_records: Sequence[Mapping[str, Any]]
+        if isinstance(raw_llm_calls, list):
+            llm_call_records = cast(Sequence[Mapping[str, Any]], raw_llm_calls)
+        else:
+            llm_call_records = ()
+
         workflow_discovery = data.get("workflow_discovery_result")
         workflow_discovery_payload = (
             dict(workflow_discovery)
@@ -10648,6 +10654,7 @@ class InternalMCPChatOrchestrator:
             tool_invocations=tool_invocations,
             turn_execution_diagnostics=data.get("turn_execution_diagnostics"),
             aux_llm_calls=aux_calls,
+            llm_calls=llm_call_records,
             selected_workflow_trace=data.get("selected_workflow_trace"),
             turn_expected_outcome_contract=(
                 data.get("turn_expected_outcome_contract_state")

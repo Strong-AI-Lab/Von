@@ -1,3 +1,5 @@
+import json
+
 from src.backend.services.turn_execution_record_service import (
     TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
     build_turn_execution_correctness_summary,
@@ -12,7 +14,6 @@ from src.backend.services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
 )
 
-
 _KR_REQUIRED_TOOLS = [
     "search_concepts",
     "create_concepts",
@@ -21,6 +22,133 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry() -> (
+    None
+):
+    projected_tool_payload = {
+        "tool": "gmail_list_messages",
+        "status": "ok",
+        "call_id": "tool-call-1",
+        "payload": {
+            "messages": [
+                {"id": "msg-1", "subject": "Lab scheduling"},
+                {"id": "msg-2", "subject": "Ontology review"},
+            ],
+            "_tool_evidence_projection": {
+                "tool_concept_id": "#V#gmail_list_messages_tool",
+                "evidence_view_concept_ids": [
+                    "#V#gmail_message_final_answer_evidence_view"
+                ],
+                "preserved_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_message_subject_field",
+                        "output_key": "subject",
+                        "location": "payload.messages[]",
+                        "item_count": 2,
+                    }
+                ],
+                "missing_required_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_message_sender_field",
+                        "output_key": "sender",
+                        "reason": "missing_from_payload",
+                    }
+                ],
+                "omitted_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_message_snippet_field",
+                        "output_key": "snippet",
+                        "reason": "not_selected_for_view",
+                    }
+                ],
+                "redacted_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_message_body_field",
+                        "output_key": "body",
+                        "reason": "too_large_for_context",
+                    }
+                ],
+            },
+        },
+    }
+    aux_llm_calls = [
+        {
+            "type": "workflow_model_policy_stage",
+            "stage": "summariser",
+            "workflow_stage_id": "screen_backfill",
+            "selected": {"provider": "openai", "model_resolved": "gpt-test"},
+            "request": {
+                "prompt": "Provide the final answer.",
+                "context_messages": [
+                    {"role": "system", "content": "system rules"},
+                    {
+                        "role": "tool",
+                        "content": json.dumps(projected_tool_payload),
+                    },
+                ],
+                "context_summary": {"message_count": 2},
+                "context_lineage": {"added_message_count": 1},
+                "tool_names": ["gmail_list_messages"],
+                "tool_count": 1,
+            },
+        }
+    ]
+    llm_calls = [
+        {
+            "type": "llm.generate",
+            "stage": "summariser",
+            "workflow_stage_id": "screen_backfill",
+            "provider": "openai",
+            "model": "gpt-test",
+            "duration_ms": 123,
+            "exchange_blob_ref": {
+                "collection": "llm_exchange_blobs",
+                "blob_id": "blob-123",
+                "sha256": "abc123",
+            },
+        }
+    ]
+
+    record = build_turn_execution_record(
+        request_id="req-final-synthesis",
+        session_id="session-final-synthesis",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Which messages did you find?",
+        response_text="I found two relevant messages.",
+        interaction_timestamp_utc="2026-04-20T01:00:00Z",
+        workflow_routing={"verdict": "tool_calling", "source": "orchestrator"},
+        tool_invocations=[],
+        aux_llm_calls=aux_llm_calls,
+        llm_calls=llm_calls,
+    )
+
+    synthesis = record["final_answer_synthesis"]
+    assert synthesis["schema_version"] == "final_answer_synthesis_telemetry.v1"
+    assert synthesis["exchange_blob_ref"]["blob_id"] == "blob-123"
+    assert synthesis["request"]["prompt"]["text"] == "Provide the final answer."
+    assert synthesis["context_lineage"] == {"added_message_count": 1}
+
+    projection = synthesis["tool_evidence_projection"]
+    assert projection["projection_count"] == 1
+    assert projection["tools"] == ["gmail_list_messages"]
+    assert projection["source_tool_invocation_ids"] == ["tool-call-1"]
+    assert projection["preserved_field_concept_ids"] == [
+        "#V#gmail_message_subject_field"
+    ]
+    assert projection["missing_required_field_concept_ids"] == [
+        "#V#gmail_message_sender_field"
+    ]
+    assert projection["omitted_field_concept_ids"] == ["#V#gmail_message_snippet_field"]
+    assert projection["redacted_field_concept_ids"] == ["#V#gmail_message_body_field"]
+    assert record["execution"]["summary"]["final_answer_synthesis_observed"] is True
+    assert (
+        record["execution"]["summary"]["final_answer_synthesis_projection_count"] == 1
+    )
+    assert record["final_response"]["synthesis_observed"] is True
 
 
 def test_worker_unavailable_failure_code_only_applies_to_tool_routes() -> None:

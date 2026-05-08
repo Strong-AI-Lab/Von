@@ -61,6 +61,10 @@ logger = logging.getLogger(__name__)
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
 TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
+FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION = "final_answer_synthesis_telemetry.v1"
+TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
+    "tool_evidence_projection_reachability.v1"
+)
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
 _TURN_EXECUTION_INDEXES_READY = False
@@ -1717,9 +1721,7 @@ def _build_custom_workflow_execution_summary(
             workflow_instance_evidence.get("workflow_instance_id")
         )
         or _safe_str(workflow_instance_evidence.get("instance_id")),
-        "workflow_instance_status": _safe_str(
-            workflow_instance_evidence.get("status")
-        ),
+        "workflow_instance_status": _safe_str(workflow_instance_evidence.get("status")),
         "workflow_instance_retry_count": (
             _safe_non_negative_int(workflow_instance_evidence.get("retry_count"))
             if workflow_instance_evidence.get("retry_count") is not None
@@ -2317,6 +2319,344 @@ def _normalise_llm_request(value: Any) -> dict[str, Any] | None:
         ),
     }
     return {key: item for key, item in payload.items() if item is not None}
+
+
+def _normalise_llm_call_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    exchange_blob_ref = value.get("exchange_blob_ref")
+    candidate = value.get("candidate")
+    payload: dict[str, Any] = {
+        "call_type": _safe_str(value.get("type")) or _safe_str(value.get("call_type")),
+        "stage": _safe_str(value.get("stage")),
+        "workflow_stage_id": _safe_str(value.get("workflow_stage_id")),
+        "model": _safe_str(value.get("model")) or _safe_str(value.get("model_name")),
+        "provider": _safe_str(value.get("provider")),
+        "duration_ms": _safe_non_negative_int(value.get("duration_ms")),
+        "note": _safe_str(value.get("note")),
+        "exchange_blob_ref": (
+            {
+                str(key): item
+                for key, item in exchange_blob_ref.items()
+                if isinstance(key, str)
+            }
+            if isinstance(exchange_blob_ref, Mapping)
+            else None
+        ),
+        "candidate": (
+            {str(key): item for key, item in candidate.items() if isinstance(key, str)}
+            if isinstance(candidate, Mapping)
+            else None
+        ),
+    }
+    usage = value.get("usage")
+    if isinstance(usage, Mapping):
+        payload["usage"] = {
+            str(key): item for key, item in usage.items() if isinstance(key, str)
+        }
+    return {key: item for key, item in payload.items() if item not in (None, [], {})}
+
+
+def _normalise_projection_field_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        entry: dict[str, Any] = {
+            "field_concept_id": _safe_str(item.get("field_concept_id")),
+            "output_key": _safe_str(item.get("output_key")),
+            "location": _safe_str(item.get("location")),
+            "reason": _safe_str(item.get("reason")),
+        }
+        if "item_count" in item:
+            entry["item_count"] = _safe_non_negative_int(item.get("item_count"))
+        entry = {
+            key: nested for key, nested in entry.items() if nested not in (None, [], {})
+        }
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def _projection_field_ids(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    field_concept_ids: list[Any] = []
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            field_concept_ids.append(entry.get("field_concept_id"))
+    return _dedupe_string_sequence(field_concept_ids)
+
+
+def _extract_projection_from_context_text(
+    text: str,
+    *,
+    context_message_index: int,
+) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    payload = parsed.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    projection = payload.get("_tool_evidence_projection")
+    if not isinstance(projection, Mapping):
+        return None
+
+    preserved_fields = _normalise_projection_field_entries(
+        projection.get("preserved_fields")
+    )
+    missing_required_fields = _normalise_projection_field_entries(
+        projection.get("missing_required_fields")
+    )
+    omitted_fields = _normalise_projection_field_entries(
+        projection.get("omitted_fields")
+    )
+    redacted_fields = _normalise_projection_field_entries(
+        projection.get("redacted_fields")
+    )
+    entry: dict[str, Any] = {
+        "context_message_index": context_message_index,
+        "tool": _safe_str(parsed.get("tool")),
+        "source_tool_invocation_id": _safe_str(parsed.get("call_id"))
+        or _safe_str(parsed.get("tool_call_id"))
+        or _safe_str(payload.get("call_id")),
+        "tool_concept_id": _safe_str(projection.get("tool_concept_id")),
+        "evidence_view_concept_ids": _dedupe_string_sequence(
+            projection.get("evidence_view_concept_ids") or []
+        ),
+        "preserved_fields": preserved_fields,
+        "missing_required_fields": missing_required_fields,
+        "omitted_fields": omitted_fields,
+        "redacted_fields": redacted_fields,
+    }
+    return {key: item for key, item in entry.items() if item not in (None, [], {})}
+
+
+def _extract_tool_evidence_projection_reachability(
+    request: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(request, Mapping):
+        return None
+    raw_messages = request.get("context_messages")
+    if not isinstance(raw_messages, Sequence) or isinstance(raw_messages, (str, bytes)):
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for index, message in enumerate(raw_messages):
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        text = None
+        if isinstance(content, Mapping):
+            text = _safe_str(content.get("text"))
+        elif isinstance(content, str):
+            text = content
+        if not text:
+            continue
+        projection_entry = _extract_projection_from_context_text(
+            text,
+            context_message_index=index,
+        )
+        if projection_entry is not None:
+            source_tool_call_id = _safe_str(message.get("tool_call_id"))
+            if source_tool_call_id and not projection_entry.get(
+                "source_tool_invocation_id"
+            ):
+                projection_entry["source_tool_invocation_id"] = source_tool_call_id
+            entries.append(projection_entry)
+
+    if not entries:
+        return None
+
+    preserved_field_ids: list[str] = []
+    missing_required_field_ids: list[str] = []
+    omitted_field_ids: list[str] = []
+    redacted_field_ids: list[str] = []
+    for entry in entries:
+        preserved_field_ids.extend(
+            _projection_field_ids(entry.get("preserved_fields") or [])
+        )
+        missing_required_field_ids.extend(
+            _projection_field_ids(entry.get("missing_required_fields") or [])
+        )
+        omitted_field_ids.extend(
+            _projection_field_ids(entry.get("omitted_fields") or [])
+        )
+        redacted_field_ids.extend(
+            _projection_field_ids(entry.get("redacted_fields") or [])
+        )
+
+    tool_names: list[Any] = []
+    tool_concept_ids: list[Any] = []
+    source_tool_invocation_ids: list[Any] = []
+    for entry in entries:
+        tool_names.append(entry.get("tool"))
+        tool_concept_ids.append(entry.get("tool_concept_id"))
+        source_tool_invocation_ids.append(entry.get("source_tool_invocation_id"))
+
+    return {
+        "schema_version": TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION,
+        "projection_count": len(entries),
+        "tools": _dedupe_string_sequence(tool_names),
+        "tool_concept_ids": _dedupe_string_sequence(tool_concept_ids),
+        "source_tool_invocation_ids": _dedupe_string_sequence(
+            source_tool_invocation_ids
+        ),
+        "preserved_field_concept_ids": _dedupe_string_sequence(preserved_field_ids),
+        "missing_required_field_concept_ids": _dedupe_string_sequence(
+            missing_required_field_ids
+        ),
+        "omitted_field_concept_ids": _dedupe_string_sequence(omitted_field_ids),
+        "redacted_field_concept_ids": _dedupe_string_sequence(redacted_field_ids),
+        "entries": entries,
+    }
+
+
+def _select_latest_summariser_request_entry(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    entries = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_model_policy_stage",
+    )
+    for entry in reversed(entries):
+        stage = (_safe_str(entry.get("stage")) or "").lower()
+        if stage == "summariser":
+            return entry
+    return None
+
+
+def _select_latest_summariser_llm_call(
+    llm_calls: Sequence[Mapping[str, Any]] | None,
+    *,
+    workflow_stage_id: str | None,
+) -> dict[str, Any] | None:
+    fallback: Mapping[str, Any] | None = None
+    for entry in reversed(llm_calls or ()):
+        if not isinstance(entry, Mapping):
+            continue
+        stage = (_safe_str(entry.get("stage")) or "").lower()
+        call_type = (
+            _safe_str(entry.get("type")) or _safe_str(entry.get("call_type")) or ""
+        )
+        if stage != "summariser" or not call_type.startswith("llm.generate"):
+            continue
+        entry_workflow_stage_id = _safe_str(entry.get("workflow_stage_id"))
+        if workflow_stage_id and entry_workflow_stage_id == workflow_stage_id:
+            return _normalise_llm_call_entry(entry)
+        if fallback is None:
+            fallback = entry
+    return _normalise_llm_call_entry(fallback) if fallback is not None else None
+
+
+def _build_final_answer_synthesis_telemetry(
+    *,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    request_entry = _select_latest_summariser_request_entry(aux_llm_calls)
+    request = (
+        _normalise_llm_request(request_entry.get("request"))
+        if isinstance(request_entry, Mapping)
+        else None
+    )
+    stage = (
+        _safe_str(request_entry.get("stage"))
+        if isinstance(request_entry, Mapping)
+        else None
+    ) or "summariser"
+    workflow_stage_id = (
+        _safe_str(request_entry.get("workflow_stage_id"))
+        if isinstance(request_entry, Mapping)
+        else None
+    )
+    llm_call = _select_latest_summariser_llm_call(
+        llm_calls,
+        workflow_stage_id=workflow_stage_id,
+    )
+    if request_entry is None and llm_call is None:
+        return None
+
+    tool_projection_reachability = _extract_tool_evidence_projection_reachability(
+        request
+    )
+    selected = (
+        request_entry.get("selected") if isinstance(request_entry, Mapping) else None
+    )
+    exchange_blob_ref = (
+        llm_call.get("exchange_blob_ref") if isinstance(llm_call, Mapping) else None
+    )
+    context_lineage = (
+        request.get("context_lineage") if isinstance(request, Mapping) else None
+    )
+    exchange_blob_ref_payload = (
+        {
+            str(key): item
+            for key, item in exchange_blob_ref.items()
+            if isinstance(key, str)
+        }
+        if isinstance(exchange_blob_ref, Mapping)
+        else None
+    )
+    context_lineage_payload = (
+        {
+            str(key): item
+            for key, item in context_lineage.items()
+            if isinstance(key, str)
+        }
+        if isinstance(context_lineage, Mapping)
+        else None
+    )
+    payload: dict[str, Any] = {
+        "schema_version": FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION,
+        "stage": stage,
+        "workflow_stage_id": workflow_stage_id,
+        "model": (
+            _safe_str(llm_call.get("model")) if isinstance(llm_call, Mapping) else None
+        )
+        or (
+            _safe_str(selected.get("model_resolved"))
+            if isinstance(selected, Mapping)
+            else None
+        ),
+        "provider": (
+            _safe_str(llm_call.get("provider"))
+            if isinstance(llm_call, Mapping)
+            else None
+        )
+        or (
+            _safe_str(selected.get("provider"))
+            if isinstance(selected, Mapping)
+            else None
+        ),
+        "llm_call": llm_call,
+        "exchange_blob_ref": exchange_blob_ref_payload,
+        "request": request,
+        "context_lineage": context_lineage_payload,
+        "tool_evidence_projection": tool_projection_reachability,
+        "fallback_used": (
+            bool(request_entry.get("fallback_used"))
+            if isinstance(request_entry, Mapping)
+            and isinstance(request_entry.get("fallback_used"), bool)
+            else None
+        ),
+        "fallback_attempt_count": (
+            _safe_non_negative_int(request_entry.get("fallback_attempt_count"))
+            if isinstance(request_entry, Mapping)
+            else None
+        ),
+        "failure_count": (
+            _safe_non_negative_int(request_entry.get("failure_count"))
+            if isinstance(request_entry, Mapping)
+            else None
+        ),
+    }
+    return {key: item for key, item in payload.items() if item not in (None, [], {})}
 
 
 def _normalise_model_policy_attempts(values: Any) -> list[dict[str, Any]]:
@@ -3321,9 +3661,7 @@ def build_workflow_routing_diagnostics(
                         custom_workflow_execution_payload.get("final_state")
                     ),
                     "workflow_instance_id": _safe_str(
-                        custom_workflow_execution_payload.get(
-                            "workflow_instance_id"
-                        )
+                        custom_workflow_execution_payload.get("workflow_instance_id")
                     ),
                     "workflow_instance_status": _safe_str(
                         custom_workflow_execution_payload.get(
@@ -4749,16 +5087,12 @@ def _apply_tool_call_validation_failures_to_required_effects(
 ) -> list[dict[str, Any]]:
     if not isinstance(validation_failure_context, Mapping):
         return [
-            dict(effect)
-            for effect in required_effects
-            if isinstance(effect, Mapping)
+            dict(effect) for effect in required_effects if isinstance(effect, Mapping)
         ]
     failures_by_tool_raw = validation_failure_context.get("failures_by_tool")
     if not isinstance(failures_by_tool_raw, Mapping) or not failures_by_tool_raw:
         return [
-            dict(effect)
-            for effect in required_effects
-            if isinstance(effect, Mapping)
+            dict(effect) for effect in required_effects if isinstance(effect, Mapping)
         ]
 
     failures_by_tool: dict[str, Mapping[str, Any]] = {
@@ -7244,6 +7578,7 @@ def build_turn_execution_record(
     search_evidence: Sequence[Mapping[str, Any]] | None = None,
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+    llm_calls: Sequence[Mapping[str, Any]] | None = None,
     selected_workflow_trace: Mapping[str, Any] | None = None,
     turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     critic_verdict: Mapping[str, Any] | None = None,
@@ -7258,6 +7593,10 @@ def build_turn_execution_record(
         namespace=namespace,
     )
     workflow_discovery_normalised = _extract_workflow_discovery(workflow_discovery)
+    final_answer_synthesis = _build_final_answer_synthesis_telemetry(
+        aux_llm_calls=aux_llm_calls,
+        llm_calls=llm_calls,
+    )
     selected_workflow_id = None
     selector_verdict = None
     selector_source = "default"
@@ -7888,6 +8227,18 @@ def build_turn_execution_record(
     execution_summary_with_contract["required_evidence_answer_consistency_source"] = (
         prompt_required_evidence_answer_consistency_source
     )
+    execution_summary_with_contract["final_answer_synthesis_observed"] = bool(
+        final_answer_synthesis
+    )
+    if isinstance(final_answer_synthesis, Mapping):
+        tool_projection = final_answer_synthesis.get("tool_evidence_projection")
+        if isinstance(tool_projection, Mapping):
+            execution_summary_with_contract[
+                "final_answer_synthesis_projection_count"
+            ] = _safe_non_negative_int(tool_projection.get("projection_count"))
+            execution_summary_with_contract[
+                "final_answer_synthesis_projection_tools"
+            ] = _dedupe_string_sequence(tool_projection.get("tools") or [])
     if effective_required_prompt_tools:
         execution_summary_with_contract["required_prompt_tools"] = list(
             effective_required_prompt_tools
@@ -7985,10 +8336,12 @@ def build_turn_execution_record(
         "completion_gate": completion_gate,
         "completion_gate_verdict": completion_gate_verdict,
         "completion_report": completion_report,
+        "final_answer_synthesis": final_answer_synthesis,
         "final_response": {
             "response_sha256": _hash_text(response_text),
             "completion_claim_detected": bool(completion_claim["detected"]),
             "completion_claim_validated": bool(completion_claim["validated"]),
+            "synthesis_observed": bool(final_answer_synthesis),
         },
     }
     return ensure_turn_execution_record_execution_correctness(record_payload)
