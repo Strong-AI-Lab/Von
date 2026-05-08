@@ -2670,6 +2670,59 @@ describe('thinking activity history normalisation', () => {
         expect(debugHtml).toContain('LLM provider');
     });
 
+    test('renders LLM timing baselines only when enough observations exist', () => {
+        const baseRequest = {
+            thinkingCardMode: 'expert',
+            clientRequestId: 'req-timing',
+            latestProgress: {
+                status: 'completed',
+                phase: 'completed',
+                stage: 'completed'
+            },
+            timingBreakdown: {
+                llm_calls_by_stage_model: [
+                    {
+                        stage: 'selector_decision',
+                        model: 'gpt-baseline',
+                        provider: 'openai',
+                        call_count: 1,
+                        duration_ms: 420,
+                        historical_observation_count: 5,
+                        historical_mean_duration_ms: 250,
+                        historical_stddev_duration_ms: 40,
+                        duration_deviation_classification: 'slower_than_usual'
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(baseRequest);
+        expect(html).toContain('LLM timing');
+        expect(html).toContain('gpt-baseline');
+        expect(html).toContain('usual');
+        expect(html).toContain('slower than usual');
+
+        const sparseHtml = __testOnly_renderThinkingCardBodyHTML({
+            ...baseRequest,
+            timingBreakdown: {
+                llm_calls_by_stage_model: [
+                    {
+                        stage: 'selector_decision',
+                        model: 'gpt-baseline',
+                        provider: 'openai',
+                        call_count: 1,
+                        duration_ms: 420,
+                        historical_observation_count: 2,
+                        historical_mean_duration_ms: 250
+                    }
+                ]
+            }
+        });
+        expect(sparseHtml).toContain('LLM timing');
+        expect(sparseHtml).toContain('gpt-baseline');
+        expect(sparseHtml).not.toContain('usual');
+    });
+
     test('builds a canonical progress view model from explicit turn state', () => {
         const viewModel = __testOnly_buildThinkingCardProgressViewModel({
             latestProgress: {
@@ -3692,6 +3745,59 @@ describe('thinking card meta telemetry', () => {
         });
 
         expect(document.getElementById('thinkingCardMeta').textContent).toContain('1/8 tools');
+    });
+
+    test('shows model timing baseline when enough observations exist', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000,
+            timingBreakdown: {
+                llm_calls_by_stage_model: [
+                    {
+                        stage: 'selector_decision',
+                        model: 'gpt-baseline',
+                        duration_ms: 420,
+                        historical_observation_count: 5,
+                        historical_mean_duration_ms: 250,
+                        historical_stddev_duration_ms: 40,
+                        duration_deviation_classification: 'slower_than_usual'
+                    }
+                ]
+            }
+        };
+        __testOnly_updateThinkingCardMeta(request, {
+            stage: 'selector_decision',
+            last_activity_at_utc: '2026-03-06T22:39:48.399497Z'
+        });
+
+        const text = document.getElementById('thinkingCardMeta').textContent;
+        expect(text).toContain('gpt-baseline');
+        expect(text).toContain('avg');
+        expect(text).toContain('slower than usual');
+    });
+
+    test('suppresses model timing baseline when observations are sparse', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000,
+            timingBreakdown: {
+                llm_calls_by_stage_model: [
+                    {
+                        stage: 'selector_decision',
+                        model: 'gpt-baseline',
+                        duration_ms: 420,
+                        historical_observation_count: 2,
+                        historical_mean_duration_ms: 250
+                    }
+                ]
+            }
+        };
+        __testOnly_updateThinkingCardMeta(request, {
+            stage: 'selector_decision',
+            last_activity_at_utc: '2026-03-06T22:39:48.399497Z'
+        });
+
+        const text = document.getElementById('thinkingCardMeta').textContent;
+        expect(text).not.toContain('gpt-baseline');
+        expect(text).not.toContain('avg');
     });
 });
 

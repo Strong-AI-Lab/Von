@@ -58,9 +58,7 @@ def _build_tool_call_descriptor(
     payload = {
         "tool_name": tool_name,
         "arguments": {
-            key: value
-            for key, value in arguments.items()
-            if value is not None
+            key: value for key, value in arguments.items() if value is not None
         },
     }
     if isinstance(purpose, str) and purpose.strip():
@@ -106,7 +104,9 @@ def _query_chat_history_document(
     return _safe_mapping(doc)
 
 
-def _extract_prompt_text_from_debug(llm_debug_data: Mapping[str, Any] | None) -> str | None:
+def _extract_prompt_text_from_debug(
+    llm_debug_data: Mapping[str, Any] | None,
+) -> str | None:
     if not isinstance(llm_debug_data, Mapping):
         return None
 
@@ -521,7 +521,14 @@ def _derive_tool_counts(tool_history: Sequence[Mapping[str, Any]]) -> dict[str, 
         if status in {"completed", "complete", "success", "succeeded"}:
             success += 1
             ended += 1
-        elif status in {"failed", "failure", "error", "blocked", "cancelled", "canceled"}:
+        elif status in {
+            "failed",
+            "failure",
+            "error",
+            "blocked",
+            "cancelled",
+            "canceled",
+        }:
             failure += 1
             ended += 1
     pending = max(0, total - ended)
@@ -547,16 +554,40 @@ def _normalise_llm_call_rows(llm_calls: Any) -> list[dict[str, Any]]:
             duration_ms: int | None = None
             if isinstance(duration_raw, (int, float)):
                 duration_ms = int(max(0.0, float(duration_raw)))
-            rows.append(
-                {
-                    "stage": _safe_str(entry.get("stage"))
-                    or _safe_str(entry.get("phase"))
-                    or "unscoped",
-                    "model": _safe_str(entry.get("model")) or "unknown",
-                    "provider": _safe_str(entry.get("provider")),
-                    "duration_ms": duration_ms or 0,
-                }
-            )
+            row = {
+                "stage": _safe_str(entry.get("workflow_stage_id"))
+                or _safe_str(entry.get("stage"))
+                or _safe_str(entry.get("phase"))
+                or "unscoped",
+                "model": _safe_str(entry.get("model"))
+                or _safe_str(entry.get("model_name"))
+                or "unknown",
+                "provider": _safe_str(entry.get("provider")),
+                "duration_ms": duration_ms or 0,
+            }
+            count_raw = entry.get("historical_observation_count")
+            if isinstance(count_raw, (int, float)) and not isinstance(count_raw, bool):
+                row["historical_observation_count"] = int(max(0.0, float(count_raw)))
+                for key in (
+                    "historical_mean_duration_ms",
+                    "historical_stddev_duration_ms",
+                    "historical_min_duration_ms",
+                    "historical_max_duration_ms",
+                    "duration_deviation_from_mean_ms",
+                    "duration_deviation_ratio",
+                    "duration_deviation_stddevs",
+                ):
+                    value = entry.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        row[key] = float(value)
+                for key in (
+                    "historical_last_observed_at_utc",
+                    "duration_deviation_classification",
+                ):
+                    value = _safe_str(entry.get(key))
+                    if value:
+                        row[key] = value
+            rows.append(row)
     return rows
 
 
@@ -564,11 +595,15 @@ def _build_minimal_timing_breakdown(
     *,
     llm_debug: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    llm_rows = _normalise_llm_call_rows(llm_debug.get("llm_calls") if isinstance(llm_debug, Mapping) else None)
+    llm_rows = _normalise_llm_call_rows(
+        llm_debug.get("llm_calls") if isinstance(llm_debug, Mapping) else None
+    )
     if not llm_rows and isinstance(llm_debug, Mapping):
         interaction = llm_debug.get("llm_interaction")
         if isinstance(interaction, Mapping):
-            duration_raw = interaction.get("duration_ms") or interaction.get("server_elapsed_ms")
+            duration_raw = interaction.get("duration_ms") or interaction.get(
+                "server_elapsed_ms"
+            )
             if isinstance(duration_raw, (int, float)):
                 llm_rows.append(
                     {
@@ -581,6 +616,31 @@ def _build_minimal_timing_breakdown(
 
     aggregated: dict[tuple[str, str], dict[str, Any]] = {}
     total_ms = 0
+
+    def _merge_duration_baseline(
+        bucket: dict[str, Any], row: Mapping[str, Any]
+    ) -> None:
+        count = row.get("historical_observation_count")
+        if not isinstance(count, int) or count <= 0:
+            return
+        existing_count = bucket.get("historical_observation_count")
+        if isinstance(existing_count, int) and existing_count >= count:
+            return
+        for key in (
+            "historical_observation_count",
+            "historical_mean_duration_ms",
+            "historical_stddev_duration_ms",
+            "historical_min_duration_ms",
+            "historical_max_duration_ms",
+            "historical_last_observed_at_utc",
+            "duration_deviation_from_mean_ms",
+            "duration_deviation_ratio",
+            "duration_deviation_stddevs",
+            "duration_deviation_classification",
+        ):
+            if key in row:
+                bucket[key] = row.get(key)
+
     for row in llm_rows:
         stage = str(row["stage"])
         model = str(row["model"])
@@ -595,6 +655,7 @@ def _build_minimal_timing_breakdown(
                 "duration_ms": 0,
             }
             aggregated[key] = bucket
+        _merge_duration_baseline(bucket, row)
         bucket["call_count"] = int(bucket["call_count"]) + 1
         bucket["duration_ms"] = int(bucket["duration_ms"]) + int(row["duration_ms"])
         if bucket.get("provider") is None and row.get("provider") is not None:
@@ -605,7 +666,9 @@ def _build_minimal_timing_breakdown(
     if isinstance(llm_debug, Mapping):
         interaction = llm_debug.get("llm_interaction")
         if isinstance(interaction, Mapping):
-            elapsed_raw = interaction.get("server_elapsed_ms") or interaction.get("duration_ms")
+            elapsed_raw = interaction.get("server_elapsed_ms") or interaction.get(
+                "duration_ms"
+            )
             if isinstance(elapsed_raw, (int, float)):
                 elapsed_ms = int(max(0.0, float(elapsed_raw)))
 
@@ -646,7 +709,9 @@ def _build_fallback_turn_execution_diagnostics(
         if isinstance(turn_record, Mapping)
         else None
     )
-    workflow_stage_model_snapshot = execution.get("workflow_stage_model") if execution else None
+    workflow_stage_model_snapshot = (
+        execution.get("workflow_stage_model") if execution else None
+    )
     workflow_stage_model = (
         deepcopy(workflow_stage_model_snapshot)
         if isinstance(workflow_stage_model_snapshot, Mapping)
@@ -661,7 +726,9 @@ def _build_fallback_turn_execution_diagnostics(
     if workflow_selection:
         selected_workflow_id = _safe_str(workflow_selection.get("selected_workflow_id"))
 
-    workflow_stage_path_snapshot = execution.get("workflow_stage_path") if execution else None
+    workflow_stage_path_snapshot = (
+        execution.get("workflow_stage_path") if execution else None
+    )
     workflow_stage_path = (
         deepcopy(workflow_stage_path_snapshot)
         if isinstance(workflow_stage_path_snapshot, Mapping)
@@ -701,7 +768,9 @@ def _build_fallback_turn_execution_diagnostics(
     ):
         workflow_discovery = deepcopy(workflow_selection.get("workflow_discovery"))
 
-    prompt_text = history_context_mapping.get("prompt_text") if history_context_mapping else None
+    prompt_text = (
+        history_context_mapping.get("prompt_text") if history_context_mapping else None
+    )
     prompt_preview = (
         str(prompt_text)[:_PROMPT_PREVIEW_LIMIT]
         if isinstance(prompt_text, str)
@@ -723,7 +792,9 @@ def _build_fallback_turn_execution_diagnostics(
     if isinstance(llm_debug_mapping, Mapping):
         code_version = _safe_str(llm_debug_mapping.get("code_version"))
         if isinstance(llm_debug_mapping.get("code_version_details"), Mapping):
-            code_version_details = deepcopy(llm_debug_mapping.get("code_version_details"))
+            code_version_details = deepcopy(
+                llm_debug_mapping.get("code_version_details")
+            )
 
     return {
         "schema_version": TURN_EXECUTION_DIAGNOSTICS_SCHEMA_VERSION,
@@ -743,14 +814,18 @@ def _build_fallback_turn_execution_diagnostics(
         "phase_history": [],
         "tool_history": tool_history,
         "workflow_discovery": workflow_discovery,
-        "workflow_selection": deepcopy(workflow_selection)
-        if isinstance(workflow_selection, Mapping)
-        else None,
+        "workflow_selection": (
+            deepcopy(workflow_selection)
+            if isinstance(workflow_selection, Mapping)
+            else None
+        ),
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "workflow_stage_model": workflow_stage_model,
         "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": [],
-        "timing_breakdown": _build_minimal_timing_breakdown(llm_debug=llm_debug_mapping),
+        "timing_breakdown": _build_minimal_timing_breakdown(
+            llm_debug=llm_debug_mapping
+        ),
         "reconstruction": {
             "source": (
                 "chat_history.llm_debug_data"
@@ -801,17 +876,25 @@ def _normalise_embedded_diagnostics_payload(
     payload["generated_at_utc"] = generated_at_utc or _now_utc_iso()
 
     if not _safe_str(payload.get("prompt_preview")):
-        prompt_text = history_context_mapping.get("prompt_text") if history_context_mapping else None
+        prompt_text = (
+            history_context_mapping.get("prompt_text")
+            if history_context_mapping
+            else None
+        )
         if isinstance(prompt_text, str):
             payload["prompt_preview"] = prompt_text[:_PROMPT_PREVIEW_LIMIT]
 
-    if not _safe_str(payload.get("code_version")) and isinstance(llm_debug_mapping, Mapping):
+    if not _safe_str(payload.get("code_version")) and isinstance(
+        llm_debug_mapping, Mapping
+    ):
         code_version = _safe_str(llm_debug_mapping.get("code_version"))
         if code_version:
             payload["code_version"] = code_version
-    if not isinstance(payload.get("code_version_details"), Mapping) and isinstance(
-        llm_debug_mapping, Mapping
-    ) and isinstance(llm_debug_mapping.get("code_version_details"), Mapping):
+    if (
+        not isinstance(payload.get("code_version_details"), Mapping)
+        and isinstance(llm_debug_mapping, Mapping)
+        and isinstance(llm_debug_mapping.get("code_version_details"), Mapping)
+    ):
         payload["code_version_details"] = deepcopy(
             llm_debug_mapping.get("code_version_details")
         )
@@ -852,14 +935,20 @@ def _normalise_embedded_diagnostics_payload(
             payload["workflow_routing_diagnostics"] = deepcopy(routing)
 
     if not isinstance(payload.get("workflow_stage_model"), Mapping):
-        workflow_stage_model_snapshot = execution.get("workflow_stage_model") if execution else None
+        workflow_stage_model_snapshot = (
+            execution.get("workflow_stage_model") if execution else None
+        )
         if isinstance(workflow_stage_model_snapshot, Mapping):
             payload["workflow_stage_model"] = deepcopy(workflow_stage_model_snapshot)
         else:
-            payload["workflow_stage_model"] = build_conversation_turn_stage_model_snapshot()
+            payload["workflow_stage_model"] = (
+                build_conversation_turn_stage_model_snapshot()
+            )
 
     if not isinstance(payload.get("workflow_stage_path"), Mapping):
-        workflow_stage_path_snapshot = execution.get("workflow_stage_path") if execution else None
+        workflow_stage_path_snapshot = (
+            execution.get("workflow_stage_path") if execution else None
+        )
         if isinstance(workflow_stage_path_snapshot, Mapping):
             payload["workflow_stage_path"] = deepcopy(workflow_stage_path_snapshot)
         else:
@@ -917,7 +1006,8 @@ def get_turn_execution_diagnostics_payload(
     )
     turn_record = _load_turn_execution_record(
         request_id=request_id_value,
-        namespace=_safe_str(namespace) or (
+        namespace=_safe_str(namespace)
+        or (
             _safe_str(history_context.get("namespace"))
             if isinstance(history_context, Mapping)
             else None
@@ -942,7 +1032,9 @@ def get_turn_execution_diagnostics_payload(
             history_context=history_context,
             turn_record=turn_record,
         )
-        payload["diagnostics_source"] = "chat_history.llm_debug_data.turn_execution_diagnostics"
+        payload["diagnostics_source"] = (
+            "chat_history.llm_debug_data.turn_execution_diagnostics"
+        )
     elif isinstance(history_context, Mapping) or isinstance(turn_record, Mapping):
         payload = _build_fallback_turn_execution_diagnostics(
             request_id=request_id_value,

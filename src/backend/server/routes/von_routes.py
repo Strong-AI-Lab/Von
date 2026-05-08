@@ -338,9 +338,7 @@ def create_chat_prompt_queue_route():
         else chat_prompt_queue_service.STATUS_QUEUED
     )
     source = (
-        "active"
-        if status == chat_prompt_queue_service.STATUS_IN_PROGRESS
-        else "queued"
+        "active" if status == chat_prompt_queue_service.STATUS_IN_PROGRESS else "queued"
     )
     try:
         record = chat_prompt_queue_service.create_queue_record(
@@ -1836,6 +1834,34 @@ def _normalise_llm_stage_calls(
             source_entries.append(event)
 
     normalised: list[dict[str, Any]] = []
+
+    def _duration_baseline(entry: Mapping[str, Any]) -> dict[str, Any]:
+        baseline: dict[str, Any] = {}
+        count = _progress_number(entry.get("historical_observation_count"))
+        if count is None:
+            return baseline
+        baseline["historical_observation_count"] = int(max(0.0, count))
+        for source_key in (
+            "historical_mean_duration_ms",
+            "historical_stddev_duration_ms",
+            "historical_min_duration_ms",
+            "historical_max_duration_ms",
+            "duration_deviation_from_mean_ms",
+            "duration_deviation_ratio",
+            "duration_deviation_stddevs",
+        ):
+            value = _progress_number(entry.get(source_key))
+            if value is not None:
+                baseline[source_key] = value
+        for source_key in (
+            "historical_last_observed_at_utc",
+            "duration_deviation_classification",
+        ):
+            value = _progress_str(entry.get(source_key))
+            if value:
+                baseline[source_key] = value
+        return baseline
+
     for entry in source_entries:
         if not isinstance(entry, dict):
             continue
@@ -1844,19 +1870,24 @@ def _normalise_llm_stage_calls(
             continue
         duration_ms = int(max(0.0, float(duration_raw)))
         stage = (
-            _progress_str(entry.get("stage"))
+            _progress_str(entry.get("workflow_stage_id"))
+            or _progress_str(entry.get("stage"))
             or _progress_str(entry.get("phase"))
             or "unscoped"
         )
-        model = _progress_str(entry.get("model")) or "unknown"
-        normalised.append(
-            {
-                "stage": stage,
-                "model": model,
-                "provider": _progress_str(entry.get("provider")),
-                "duration_ms": duration_ms,
-            }
+        model = (
+            _progress_str(entry.get("model"))
+            or _progress_str(entry.get("model_name"))
+            or "unknown"
         )
+        row = {
+            "stage": stage,
+            "model": model,
+            "provider": _progress_str(entry.get("provider")),
+            "duration_ms": duration_ms,
+        }
+        row.update(_duration_baseline(entry))
+        normalised.append(row)
     return normalised
 
 
@@ -1925,6 +1956,30 @@ def _build_timing_breakdown(
     llm_by_stage_model: dict[tuple[str, str], dict[str, Any]] = {}
     llm_total_ms = 0
 
+    def _merge_duration_baseline(
+        bucket: dict[str, Any], entry: Mapping[str, Any]
+    ) -> None:
+        count = entry.get("historical_observation_count")
+        if not isinstance(count, int) or count <= 0:
+            return
+        existing_count = bucket.get("historical_observation_count")
+        if isinstance(existing_count, int) and existing_count >= count:
+            return
+        for key in (
+            "historical_observation_count",
+            "historical_mean_duration_ms",
+            "historical_stddev_duration_ms",
+            "historical_min_duration_ms",
+            "historical_max_duration_ms",
+            "historical_last_observed_at_utc",
+            "duration_deviation_from_mean_ms",
+            "duration_deviation_ratio",
+            "duration_deviation_stddevs",
+            "duration_deviation_classification",
+        ):
+            if key in entry:
+                bucket[key] = entry.get(key)
+
     for entry in llm_stage_calls:
         stage = cast(str, entry["stage"])
         model = cast(str, entry["model"])
@@ -1946,6 +2001,7 @@ def _build_timing_breakdown(
                 "duration_ms": 0,
             }
             llm_by_stage_model[key] = bucket
+        _merge_duration_baseline(bucket, entry)
         bucket["call_count"] = int(bucket["call_count"]) + 1
         bucket["duration_ms"] = int(bucket["duration_ms"]) + duration_ms
         if bucket.get("provider") is None and provider is not None:
@@ -12806,7 +12862,9 @@ def history_sessions():
             agent_visibility=agent_visibility,
             keep_newest_agent_created=keep_newest_agent_created,
         )
-        sessions = session_result.get("sessions") if isinstance(session_result, dict) else []
+        sessions = (
+            session_result.get("sessions") if isinstance(session_result, dict) else []
+        )
         if not isinstance(sessions, list):
             sessions = []
 

@@ -2446,6 +2446,19 @@ function syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnos
         updated = true;
     }
 
+    if (diagnostics.timing_breakdown && typeof diagnostics.timing_breakdown === 'object') {
+        request.timingBreakdown = {
+            ...diagnostics.timing_breakdown,
+            stages: Array.isArray(diagnostics.timing_breakdown.stages)
+                ? diagnostics.timing_breakdown.stages.map((entry) => ({ ...entry }))
+                : [],
+            llm_calls_by_stage_model: Array.isArray(diagnostics.timing_breakdown.llm_calls_by_stage_model)
+                ? diagnostics.timing_breakdown.llm_calls_by_stage_model.map((entry) => ({ ...entry }))
+                : []
+        };
+        updated = true;
+    }
+
     return updated;
 }
 
@@ -2681,6 +2694,17 @@ function createThinkingCardHistorySnapshot(request) {
     const stageDiagnostics = Array.isArray(request.stageDiagnostics)
         ? request.stageDiagnostics.map((entry) => ({ ...entry }))
         : [];
+    const timingBreakdown = (request.timingBreakdown && typeof request.timingBreakdown === 'object')
+        ? {
+            ...request.timingBreakdown,
+            stages: Array.isArray(request.timingBreakdown.stages)
+                ? request.timingBreakdown.stages.map((entry) => ({ ...entry }))
+                : [],
+            llm_calls_by_stage_model: Array.isArray(request.timingBreakdown.llm_calls_by_stage_model)
+                ? request.timingBreakdown.llm_calls_by_stage_model.map((entry) => ({ ...entry }))
+                : []
+        }
+        : null;
 
     const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
     const completedDisplayState = reduceThinkingCardDisplayState(
@@ -2701,6 +2725,7 @@ function createThinkingCardHistorySnapshot(request) {
         workflowRoutingDiagnostics,
         workflowStagePath,
         stageDiagnostics,
+        timingBreakdown,
         latestProgress,
         thinkingCardMode: getThinkingCardMode(request),
         expandedThinkingDiagnosticKeys: request.expandedThinkingDiagnosticKeys instanceof Set
@@ -4223,6 +4248,42 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
 /**
  * Update the thinking card meta element (elapsed time + liveness metadata).
  */
+function getThinkingTimingRows(request) {
+    const timing = (request?.timingBreakdown && typeof request.timingBreakdown === 'object')
+        ? request.timingBreakdown
+        : null;
+    return Array.isArray(timing?.llm_calls_by_stage_model)
+        ? timing.llm_calls_by_stage_model.filter((entry) => entry && typeof entry === 'object')
+        : [];
+}
+
+function hasSufficientThinkingTimingBaseline(row) {
+    return Number.isFinite(row?.historical_observation_count)
+        && Number(row.historical_observation_count) >= 3
+        && Number.isFinite(row?.historical_mean_duration_ms);
+}
+
+function formatThinkingTimingBaselineMeta(request) {
+    const rows = getThinkingTimingRows(request)
+        .filter(hasSufficientThinkingTimingBaseline)
+        .sort((a, b) => Number(b.duration_ms || 0) - Number(a.duration_ms || 0));
+    if (rows.length === 0) {
+        return '';
+    }
+    const row = rows[0];
+    const model = normaliseThinkingActivityString(row.model) || 'model';
+    const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    const mean = formatThinkingDiagnosticDuration(row.historical_mean_duration_ms);
+    if (!duration || !mean) {
+        return '';
+    }
+    const classification = normaliseThinkingActivityString(row.duration_deviation_classification);
+    const label = classification && classification !== 'within_usual_range'
+        ? `${formatThinkingActivityFallbackLabel(classification).toLowerCase()}: `
+        : '';
+    return `${label}${model} ${duration} avg ${mean}`;
+}
+
 function updateThinkingCardMeta(request, progress, cardRoot = null) {
     const metaEl = getThinkingCardMetaEl(cardRoot);
     if (!metaEl) return;
@@ -4272,6 +4333,11 @@ function updateThinkingCardMeta(request, progress, cardRoot = null) {
     const etaText = formatThinkingEtaText(effectiveProgress);
     if (etaText) {
         bits.push(etaText);
+    }
+
+    const timingBaselineText = formatThinkingTimingBaselineMeta(request);
+    if (timingBaselineText) {
+        bits.push(timingBaselineText);
     }
 
     const lastActivityText = formatLastActivityText(effectiveProgress);
@@ -7408,6 +7474,72 @@ function renderThinkingWorkflowStageHistoryHTML(request, mode = THINKING_CARD_MO
     }, 'thinking-card-tool thinking-card-activity')).join('');
 }
 
+function formatThinkingLlmTimingLine(row) {
+    if (!row || typeof row !== 'object') {
+        return '';
+    }
+    const stage = normaliseThinkingActivityString(row.stage);
+    const model = normaliseThinkingActivityString(row.model) || 'unknown model';
+    const provider = normaliseThinkingActivityString(row.provider);
+    const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    const calls = Number.isFinite(row.call_count)
+        ? formatThinkingCountLabel(Number(row.call_count), 'call')
+        : '';
+    const bits = [
+        stage ? formatThinkingActivityFallbackLabel(stage) : '',
+        provider ? `${provider}/${model}` : model,
+        calls,
+        duration
+    ].filter(Boolean);
+
+    if (hasSufficientThinkingTimingBaseline(row)) {
+        const mean = formatThinkingDiagnosticDuration(row.historical_mean_duration_ms);
+        const stddev = Number.isFinite(row.historical_stddev_duration_ms)
+            ? formatThinkingDiagnosticDuration(row.historical_stddev_duration_ms)
+            : '';
+        const count = Number(row.historical_observation_count);
+        const classification = normaliseThinkingActivityString(row.duration_deviation_classification);
+        const baseline = [
+            mean ? `usual ${mean}` : '',
+            stddev ? `+/- ${stddev}` : '',
+            Number.isFinite(count) ? `n=${count}` : '',
+            classification && classification !== 'within_usual_range'
+                ? formatThinkingActivityFallbackLabel(classification).toLowerCase()
+                : ''
+        ].filter(Boolean).join(' ');
+        if (baseline) {
+            bits.push(baseline);
+        }
+    }
+
+    return bits.join(' · ');
+}
+
+function renderThinkingTimingBreakdownHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
+    const renderMode = normaliseThinkingCardMode(mode);
+    if (renderMode === THINKING_CARD_MODE_DEFAULT) {
+        return '';
+    }
+    const rows = getThinkingTimingRows(request);
+    if (rows.length === 0) {
+        return '';
+    }
+    const timingLines = rows
+        .map(formatThinkingLlmTimingLine)
+        .filter(Boolean);
+    if (timingLines.length === 0) {
+        return '';
+    }
+    return renderThinkingDiagnosticRowHTML({
+        label: 'LLM timing',
+        detail: timingLines[0],
+        diagnosticKey: buildThinkingDiagnosticKey('timing', 'llm'),
+        diagnosticHtml: renderMode === THINKING_CARD_MODE_DEBUG
+            ? buildThinkingDiagnosticListHTML('LLM calls by stage/model', timingLines)
+            : ''
+    }, 'thinking-card-tool thinking-card-activity');
+}
+
 /**
  * Render workflow discovery results as HTML for the thinking card.
  * JVNAUTOSCI-1076: Shows relevant workflows found during conversation turn.
@@ -7455,13 +7587,14 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     }
 
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
+    const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (workflowStageHtml) {
-        return synopsisHtml + workflowStageHtml + renderToolHistoryHTML(request, mode);
+        return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode);
     }
 
     const activityHistoryHtml = renderThinkingActivityHistoryHTML(request, mode);
     if (activityHistoryHtml) {
-        return synopsisHtml + activityHistoryHtml;
+        return synopsisHtml + activityHistoryHtml + timingHtml;
     }
 
     const toolHistoryHtml = renderToolHistoryHTML(request, mode);
@@ -7470,7 +7603,7 @@ function renderThinkingCardBodyHTML(request, options = {}) {
         : '';
     const fallbackProgressHtml = renderThinkingLatestProgressSummaryHTML(request);
 
-    return synopsisHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml;
+    return synopsisHtml + timingHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml;
 }
 
 function renderThinkingLatestProgressSummaryHTML(request) {
@@ -24913,6 +25046,7 @@ function buildThinkingDiagnosticsPayload(request) {
                 : latestProgress
         ),
         workflow_stage_path: request.workflowStagePath || null,
+        timing_breakdown: request.timingBreakdown || null,
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request),
         mcp_access: locatorPayload?.mcp_access || null
     };

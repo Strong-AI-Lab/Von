@@ -538,7 +538,9 @@ def test_progress_endpoint_prefers_live_alternate_scope_before_persisted_miss(
     assert body.get("progress_source") == "alternate_scope_fallback"
 
 
-def test_progress_endpoint_prefers_freshest_alternate_scope_payload(monkeypatch) -> None:
+def test_progress_endpoint_prefers_freshest_alternate_scope_payload(
+    monkeypatch,
+) -> None:
     app = Flask(__name__)
     app.secret_key = "test-secret"
     app.register_blueprint(von_routes.von_bp, url_prefix="/von")
@@ -626,9 +628,7 @@ def test_register_tool_progress_scope_aliases_copies_current_state_to_all_reques
         "anon:session:legacy_cookie_scope",
     ]
 
-    user_scope_state = von_routes._get_tool_progress(
-        "user:#V#test_user", request_id
-    )
+    user_scope_state = von_routes._get_tool_progress("user:#V#test_user", request_id)
     assert user_scope_state is not None
     assert user_scope_state.get("stage") == "context_build"
 
@@ -754,7 +754,9 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
 
     state = von_routes._get_tool_progress("scope-d", "req-d")
     assert state is not None
-    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+    serialised = von_routes._serialise_tool_progress_state(
+        state, now_epoch=clock["now"]
+    )
 
     assert serialised["request_id"] == "req-d"
     assert isinstance(serialised["sequence_no"], int)
@@ -820,7 +822,9 @@ def test_live_stage_diagnostics_surface_prepared_llm_request_before_aux_persiste
 
     state = von_routes._get_tool_progress("scope-live-llm", "req-live-llm")
     assert state is not None
-    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+    serialised = von_routes._serialise_tool_progress_state(
+        state, now_epoch=clock["now"]
+    )
 
     stage_diagnostics = serialised.get("stage_diagnostics")
     assert isinstance(stage_diagnostics, list)
@@ -863,8 +867,7 @@ def test_live_stage_diagnostics_surface_prepared_llm_request_before_aux_persiste
         (
             entry
             for entry in diagnostic_events
-            if isinstance(entry, dict)
-            and entry.get("status") == "llm_request_prepared"
+            if isinstance(entry, dict) and entry.get("status") == "llm_request_prepared"
         ),
         None,
     )
@@ -893,7 +896,9 @@ def test_progress_goal_label_and_candidate_count_are_serialised(monkeypatch) -> 
     state = von_routes._get_tool_progress("scope-goal", "req-goal")
     assert state is not None
 
-    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+    serialised = von_routes._serialise_tool_progress_state(
+        state, now_epoch=clock["now"]
+    )
     assert (
         serialised["goal_label"]
         == "Fully represent the paper #V#uploaded_file_copy_123"
@@ -904,7 +909,9 @@ def test_progress_goal_label_and_candidate_count_are_serialised(monkeypatch) -> 
     assert events[-1].get("goal_label") == serialised["goal_label"]
     assert events[-1].get("workflow_candidate_count") == 1
 
-    progress_events = von_routes._normalise_progress_events_from_diagnostic_events(events)
+    progress_events = von_routes._normalise_progress_events_from_diagnostic_events(
+        events
+    )
     assert progress_events[-1].get("goal_label") == serialised["goal_label"]
 
     summary = von_routes._build_tool_progress_compact_summary(serialised)
@@ -969,7 +976,9 @@ def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -
     ]
 
 
-def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state() -> None:
+def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state() -> (
+    None
+):
     payload = von_routes._normalise_workflow_discovery_progress_payload(
         None,
         query="find a workflow for this task",
@@ -1081,7 +1090,9 @@ def test_progress_clears_stale_success_on_error(monkeypatch) -> None:
     assert events[-1].get("success") is None
 
 
-def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch) -> None:
+def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(
+    monkeypatch,
+) -> None:
     clock = _set_clock(monkeypatch, start=5000.0)
 
     von_routes._set_tool_progress(
@@ -1170,11 +1181,15 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
 
     workflow_stage_model = diagnostics.get("workflow_stage_model")
     assert isinstance(workflow_stage_model, dict)
-    assert workflow_stage_model.get("schema_version") == "conversation_turn_stage_model.v1"
+    assert (
+        workflow_stage_model.get("schema_version") == "conversation_turn_stage_model.v1"
+    )
 
     workflow_stage_path = diagnostics.get("workflow_stage_path")
     assert isinstance(workflow_stage_path, dict)
-    assert workflow_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    assert (
+        workflow_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    )
     path = workflow_stage_path.get("path")
     assert isinstance(path, list)
     assert len(path) == 2
@@ -1212,6 +1227,41 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     assert first_llm.get("stage") == "tool_execute"
     assert first_llm.get("model") == "test-model"
     assert first_llm.get("duration_ms") == 125
+
+
+def test_turn_execution_timing_uses_model_name_and_duration_baseline(
+    monkeypatch,
+) -> None:
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-duration-baseline",
+        prompt_text="Run a workflow step",
+        llm_calls=[
+            {
+                "type": "llm.generate",
+                "stage": "selector_decision",
+                "workflow_stage_id": "#V#selector_step",
+                "model_name": "gpt-baseline",
+                "duration_ms": 420.4,
+                "provider": "openai",
+                "historical_observation_count": 5,
+                "historical_mean_duration_ms": 250.0,
+                "historical_stddev_duration_ms": 40.0,
+                "duration_deviation_classification": "slower_than_usual",
+            }
+        ],
+    )
+
+    timing = diagnostics.get("timing_breakdown")
+    assert isinstance(timing, dict)
+    llm_rows = timing.get("llm_calls_by_stage_model")
+    assert isinstance(llm_rows, list)
+    assert len(llm_rows) == 1
+    row = llm_rows[0]
+    assert row.get("stage") == "#V#selector_step"
+    assert row.get("model") == "gpt-baseline"
+    assert row.get("historical_observation_count") == 5
+    assert row.get("historical_mean_duration_ms") == 250.0
+    assert row.get("duration_deviation_classification") == "slower_than_usual"
 
 
 def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> None:
@@ -1494,6 +1544,7 @@ def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat
         "response_finalising",
     ]
 
+
 def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
     monkeypatch,
 ) -> None:
@@ -1624,7 +1675,9 @@ def test_response_finalising_eta_estimate_is_bounded() -> None:
 
 
 def test_default_stage_label_includes_response_finalising() -> None:
-    assert von_routes._default_stage_label("response_finalising") == "Finalising response"
+    assert (
+        von_routes._default_stage_label("response_finalising") == "Finalising response"
+    )
 
 
 def test_non_terminal_progress_update_clears_stale_error_code(monkeypatch) -> None:
@@ -1924,7 +1977,9 @@ def test_progress_summary_prefers_lifecycle_counts_over_null_history_rows() -> N
     assert isinstance(stage_diagnostics, list)
 
 
-def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_and_dispatch() -> None:
+def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_and_dispatch() -> (
+    None
+):
     snapshot = von_routes._serialise_tool_progress_state(
         {
             "request_id": "req-routing-diag",
@@ -1996,7 +2051,9 @@ def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_an
     )
 
 
-def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads() -> None:
+def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads() -> (
+    None
+):
     snapshot = von_routes._serialise_tool_progress_state(
         {
             "request_id": "req-stage-utility",
@@ -2147,9 +2204,7 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
             "requires_follow_up": True,
             "safe_to_claim_completion": False,
             "blocking_effect_ids": ["effect_tool_execution_1"],
-            "blocking_failure_codes": [
-                "tool_execution_required_but_not_observed"
-            ],
+            "blocking_failure_codes": ["tool_execution_required_but_not_observed"],
         },
     )
 
@@ -2184,9 +2239,9 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
     assert by_stage["workflow_dispatch_prepare"]["selected_workflow_id"] == (
         "#V#tool_calling_workflow"
     )
-    assert by_stage["workflow_dispatch_prepare"]["pre_dispatch"]["slowest_step_label"] == (
-        "Load workflow contract"
-    )
+    assert by_stage["workflow_dispatch_prepare"]["pre_dispatch"][
+        "slowest_step_label"
+    ] == ("Load workflow contract")
     assert by_stage["workflow_dispatch_prepare"]["latest_subtask"] == (
         "Resolve workflow inputs"
     )
@@ -2227,7 +2282,10 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
             "presenter_format": "narration_fallback_v1",
         },
     }
-    assert by_stage["postcondition_critic"]["critic_verdict"]["unresolved_check_count"] == 2
+    assert (
+        by_stage["postcondition_critic"]["critic_verdict"]["unresolved_check_count"]
+        == 2
+    )
     assert by_stage["completion_gate"]["completion_gate"]["blocking_effect_ids"] == [
         "effect_tool_execution_1"
     ]
@@ -2412,7 +2470,8 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
         (
             entry
             for entry in stage_diagnostics
-            if isinstance(entry, dict) and entry.get("stage_id") == "selector_preparation"
+            if isinstance(entry, dict)
+            and entry.get("stage_id") == "selector_preparation"
         ),
         None,
     )
@@ -2433,9 +2492,12 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     assert selector_decision is not None
     assert selector_decision.get("llm_exchange_record_count") == 1
     assert selector_decision.get("llm_exchange_entry_types") == ["workflow_selector"]
-    assert selector_decision.get("latest_llm_exchange", {}).get(
-        "response_preview", {}
-    ).get("text") == selected_workflow_id
+    assert (
+        selector_decision.get("latest_llm_exchange", {})
+        .get("response_preview", {})
+        .get("text")
+        == selected_workflow_id
+    )
 
     workflow_dispatch = next(
         (
@@ -2477,21 +2539,30 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     assert routing_diagnostics.get("dispatch", {}).get("selected_execution_mode") == (
         "custom_workflow"
     )
-    assert routing_diagnostics.get("dispatch", {}).get(
-        "dispatch_terminal_failure_reason"
-    ) == "workflow_launch_input_resolution_failed"
-    assert routing_diagnostics.get("dispatch", {}).get(
-        "dispatch_terminal_failing_state_id"
-    ) == "prepare_spec"
-    assert routing_diagnostics.get("dispatch", {}).get(
-        "dispatch_terminal_failing_action_id"
-    ) == "tool.prepare_spec"
+    assert (
+        routing_diagnostics.get("dispatch", {}).get("dispatch_terminal_failure_reason")
+        == "workflow_launch_input_resolution_failed"
+    )
+    assert (
+        routing_diagnostics.get("dispatch", {}).get(
+            "dispatch_terminal_failing_state_id"
+        )
+        == "prepare_spec"
+    )
+    assert (
+        routing_diagnostics.get("dispatch", {}).get(
+            "dispatch_terminal_failing_action_id"
+        )
+        == "tool.prepare_spec"
+    )
     assert routing_diagnostics.get("dispatch", {}).get(
         "dispatch_terminal_unresolved_required_inputs"
     ) == ["invitation_text"]
 
 
-def test_serialised_tool_progress_state_includes_live_workflow_routing_diagnostics() -> None:
+def test_serialised_tool_progress_state_includes_live_workflow_routing_diagnostics() -> (
+    None
+):
     serialised = von_routes._serialise_tool_progress_state(
         {
             "request_id": "req-live-routing-diag",

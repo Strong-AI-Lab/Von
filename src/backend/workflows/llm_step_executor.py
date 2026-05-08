@@ -24,6 +24,9 @@ from ..services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
     classify_required_tool_operation,
 )
+from ..services.workflow_llm_duration_stats_service import (
+    record_workflow_llm_step_duration_observation,
+)
 from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .conversation_turn_llm_timeout import (
@@ -160,9 +163,7 @@ def _tool_call_validation_failure_context_from_data(
             or []
         ),
         "repair_outcome": _context_string(data.get("tool_call_repair_outcome")),
-        "repair_stop_reason": _context_string(
-            data.get("tool_call_repair_stop_reason")
-        ),
+        "repair_stop_reason": _context_string(data.get("tool_call_repair_stop_reason")),
         "repair_decision": (
             dict(repair_decision) if isinstance(repair_decision, Mapping) else None
         ),
@@ -1025,7 +1026,7 @@ def _append_llm_call(
     candidate: Mapping[str, Any] | None = None,
     duration_ms: float | None = None,
     note: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     llm_calls = bucket.get("llm_calls")
     if not isinstance(llm_calls, list):
         llm_calls = []
@@ -1044,6 +1045,43 @@ def _append_llm_call(
     if note:
         entry["note"] = note
     llm_calls.append(entry)
+    return entry
+
+
+def _request_id_from_data(data: Mapping[str, Any]) -> str | None:
+    for key in ("request_id", "client_request_id", "turn_request_id"):
+        value = _context_string(data.get(key))
+        if value:
+            return value
+    return None
+
+
+def _record_workflow_llm_duration_for_entry(
+    request: WorkflowActionRequest,
+    entry: MutableMapping[str, Any],
+    *,
+    stage: str | None,
+    model_name: str | None,
+    provider: str | None = None,
+    duration_ms: float | None,
+    workflow_stage_id: str | None = None,
+) -> None:
+    try:
+        baseline = record_workflow_llm_step_duration_observation(
+            workflow_id=request.workflow_id,
+            workflow_state_id=request.workflow_state_id,
+            workflow_stage_id=workflow_stage_id or stage,
+            stage=stage,
+            provider=provider,
+            model_name=model_name,
+            duration_ms=duration_ms,
+            request_id=_request_id_from_data(request.data),
+        )
+    except Exception as exc:
+        entry["duration_stats_error"] = exc.__class__.__name__
+        return
+    if isinstance(baseline, Mapping) and baseline:
+        entry.update(dict(baseline))
 
 
 def _tool_mode(llm_policy: Mapping[str, Any]) -> str:
@@ -1125,7 +1163,9 @@ def _select_model_context_for_prompt_variant(
     *,
     request: WorkflowActionRequest,
     stage: str,
-) -> tuple[str | None, Mapping[str, Any] | None, Mapping[str, Any] | None, dict[str, Any]]:
+) -> tuple[
+    str | None, Mapping[str, Any] | None, Mapping[str, Any] | None, dict[str, Any]
+]:
     diagnostics: dict[str, Any] = {
         "source": "environment_default",
         "stage": stage,
@@ -1138,9 +1178,13 @@ def _select_model_context_for_prompt_variant(
         return selected_model, selected_candidate, registry_snapshot, diagnostics
 
     try:
-        orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
-            _build_gateway_runtime(request)
-        )
+        (
+            orchestrator,
+            policy_state,
+            registry_snapshot,
+            user_concept_id,
+            org_concept_id,
+        ) = _build_gateway_runtime(request)
         selector = getattr(orchestrator, "_select_model_for_stage", None)
         if callable(selector):
             selector_model = selector(
@@ -1231,9 +1275,7 @@ def _build_result(
     if max_tool_invocations is not None:
         llm_step_envelope["max_tool_invocations"] = int(max_tool_invocations)
     if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
-        llm_step_envelope["prompt_variant_selection"] = dict(
-            prompt_variant_selection
-        )
+        llm_step_envelope["prompt_variant_selection"] = dict(prompt_variant_selection)
 
     outputs = {
         "final_response": response_text,
@@ -1315,9 +1357,7 @@ def _build_timeout_failure_result(
         llm_step_envelope["base_prompt_id"] = prompt_variant_selection.get(
             "base_prompt_concept_id"
         )
-        llm_step_envelope["prompt_variant_selection"] = dict(
-            prompt_variant_selection
-        )
+        llm_step_envelope["prompt_variant_selection"] = dict(prompt_variant_selection)
     return WorkflowActionResult(
         status="failed",
         outputs={
@@ -1361,13 +1401,21 @@ def _run_direct_llm_step(
         model=model_name,
     )
     duration_ms = (time.perf_counter() - start) * 1000.0
-    _append_llm_call(
+    llm_call_entry = _append_llm_call(
         request.data,
         call_type="llm.generate",
         stage=stage,
         model_name=model_name,
         duration_ms=duration_ms,
         note="generic_llm_step_direct",
+    )
+    _record_workflow_llm_duration_for_entry(
+        request,
+        llm_call_entry,
+        stage=stage,
+        model_name=model_name,
+        duration_ms=duration_ms,
+        workflow_stage_id=request.workflow_state_id,
     )
 
     response_text = response if isinstance(response, str) else str(response)
@@ -1454,6 +1502,15 @@ def _run_gateway_llm_step_no_tools(
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
         llm_calls.append(entry)
+        _record_workflow_llm_duration_for_entry(
+            request,
+            entry,
+            stage=stage,
+            model_name=model_name,
+            provider=provider,
+            duration_ms=duration_ms,
+            workflow_stage_id=workflow_stage_id,
+        )
 
     try:
         response_text, selected_model, selected_candidate = (
@@ -1807,6 +1864,15 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
         llm_calls.append(entry)
+        _record_workflow_llm_duration_for_entry(
+            request,
+            entry,
+            stage=stage,
+            model_name=model_name,
+            provider=provider,
+            duration_ms=duration_ms,
+            workflow_stage_id=workflow_stage_id,
+        )
 
     def _build_simple_error_result(
         kind: str,

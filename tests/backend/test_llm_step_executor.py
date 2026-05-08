@@ -125,6 +125,51 @@ def test_execute_llm_step_recovers_embedded_json_value_output() -> None:
     assert result.outputs["validated_json_parse_mode"] == "embedded_json"
 
 
+def test_execute_llm_step_records_duration_baseline_for_direct_workflow_step(
+    monkeypatch,
+) -> None:
+    recorded_calls: list[dict[str, object]] = []
+
+    def fake_record_duration(**kwargs):
+        recorded_calls.append(dict(kwargs))
+        return {
+            "historical_observation_count": 3,
+            "historical_mean_duration_ms": 250.0,
+            "historical_stddev_duration_ms": 50.0,
+            "duration_deviation_classification": "within_usual_range",
+        }
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor."
+        "record_workflow_llm_step_duration_observation",
+        fake_record_duration,
+    )
+    llm_client = MagicMock()
+    llm_client.generate.return_value = "Plain response"
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm_client, model="gpt-test"),
+        data={"request_id": "req-duration-baseline"},
+        prompt_contract={"prompt_text": "Answer plainly."},
+        workflow_id="#V#workflow",
+        workflow_state_id="#V#step",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert recorded_calls
+    assert recorded_calls[0]["workflow_id"] == "#V#workflow"
+    assert recorded_calls[0]["workflow_state_id"] == "#V#step"
+    assert recorded_calls[0]["workflow_stage_id"] == "#V#step"
+    assert recorded_calls[0]["model_name"] == "gpt-test"
+    assert recorded_calls[0]["request_id"] == "req-duration-baseline"
+    llm_entry = result.outputs["llm_calls"][0]
+    assert llm_entry["historical_observation_count"] == 3
+    assert llm_entry["historical_mean_duration_ms"] == 250.0
+
+
 def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() -> None:
     request = WorkflowActionRequest(
         action_id="llm.action",
@@ -282,7 +327,9 @@ def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     assert "json_parse_failed" in str(envelope["validation"]["reason"] or "")
 
 
-def test_execute_llm_step_falls_back_to_defaults_when_json_unparseable_and_defaults_exist() -> None:
+def test_execute_llm_step_falls_back_to_defaults_when_json_unparseable_and_defaults_exist() -> (
+    None
+):
     """When the model returns unparseable prose but all required fields have defaults,
     the step should succeed using those defaults rather than failing the turn."""
     llm_client = MagicMock()
@@ -312,7 +359,9 @@ def test_execute_llm_step_falls_back_to_defaults_when_json_unparseable_and_defau
 
     assert result.status == "success"
     validated = result.outputs["validated_json"]
-    assert validated["expected_outcome_summary"] == "Answer the user's request accurately."
+    assert (
+        validated["expected_outcome_summary"] == "Answer the user's request accurately."
+    )
     assert validated["grounding_requirement"] == "Use available context."
     assert validated["required_tools"] == []
     envelope = result.outputs["llm_step_envelope"]
@@ -384,7 +433,9 @@ def test_execute_llm_step_uses_model_family_prompt_variant(monkeypatch) -> None:
 
     assert result.status == "success"
     llm_client.generate.assert_called_once()
-    assert llm_client.generate.call_args.args[0] == "Ollama tool prompt for workflow tools"
+    assert (
+        llm_client.generate.call_args.args[0] == "Ollama tool prompt for workflow tools"
+    )
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["base_prompt_id"] == "#V#tool_prompt"
     assert envelope["selected_prompt_id"] == "#V#ollama_tool_prompt"
