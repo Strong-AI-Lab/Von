@@ -53,6 +53,13 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   `model_execution_budget_policy.py`, and model-selection workflow support:
   current evidence is Vontology-authored model/prompt metadata support. File if
   capability semantics, prompt wording, or model-choice policy become Python.
+- `tool_evidence_contract_vontology_service.py` and
+  `gmail_tool_evidence_contract_vontology_service.py`: current evidence is
+  graph-KR materialisation support under `JVNAUTOSCI-2287`/`JVNAUTOSCI-2288`,
+  with remaining runtime fallback authority already tracked by `JVNAUTOSCI-2284`
+  and broader projection work by `JVNAUTOSCI-2286`. File only if these services
+  become startup/runtime authority that repopulates missing Gmail semantics
+  instead of a deletable materialisation helper.
 - `concept_predicate_metadata_service.py`: update `JVNAUTOSCI-1957` unless a
   separate predicate-policy surface appears.
 - `workflow_event_integration_service.py` autotrigger/depth guards: file only
