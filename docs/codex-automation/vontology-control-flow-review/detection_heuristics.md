@@ -48,9 +48,15 @@ represented authority before filing Jira work.
 - Tests that monkeypatch Vontology metadata loading to `{}` and then assert
   integration-specific evidence, write, operation, or completion-gate semantics
   are strong evidence of hidden Python fallback authority.
+- Domain-specific durable action services that normalise named profiles and map
+  those profiles to required ontology types, field-to-predicate writes, or
+  verification criteria are strong drift candidates even when the surrounding
+  workflow graph is Vontology-backed.
 
 ## Recent Examples
 
 - `JVNAUTOSCI-2271` - Python-authored KR materialisation workflow publisher.
 - `JVNAUTOSCI-2275` - selected-workflow recovery handoff policy.
 - `JVNAUTOSCI-2284` - Gmail read-tool evidence-role defaults.
+- `JVNAUTOSCI-2291` - talk/presentation representation profile and verification
+  policy in Python.
