@@ -1629,6 +1629,10 @@ def render_selected_workflow_user_response(
     orchestrator_result_map = (
         dict(orchestrator_result) if isinstance(orchestrator_result, Mapping) else {}
     )
+    subworkflow_result = child_outputs_map.get("result")
+    subworkflow_result_map = (
+        dict(subworkflow_result) if isinstance(subworkflow_result, Mapping) else {}
+    )
     completion_report = child_outputs_map.get("completion_report")
     completion_report_map = (
         dict(completion_report) if isinstance(completion_report, Mapping) else {}
@@ -1646,6 +1650,7 @@ def render_selected_workflow_user_response(
         completion_report_map,
         child_snapshot,
         orchestrator_result_map,
+        subworkflow_result_map,
         child_outputs_map,
     ):
         if isinstance(payload, Mapping):
@@ -1687,6 +1692,9 @@ def render_selected_workflow_user_response(
         (orchestrator_result_map, "response_text"),
         (orchestrator_result_map, "final_response"),
         (orchestrator_result_map, "summary"),
+        (subworkflow_result_map, "response_text"),
+        (subworkflow_result_map, "final_response"),
+        (subworkflow_result_map, "summary"),
         (child_snapshot, "response_text"),
         (child_snapshot, "final_response"),
         (completion_report_map, "response_text"),

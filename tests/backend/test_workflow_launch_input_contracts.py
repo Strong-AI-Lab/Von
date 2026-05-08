@@ -55,6 +55,55 @@ def test_resolve_workflow_launch_inputs_extracts_declared_values() -> None:
     assert resolution.diagnostics.get("status") == "resolved"
 
 
+def test_resolve_workflow_launch_inputs_can_read_selector_workflow_inputs() -> None:
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id="#V#general_mail_review_workflow",
+        contract={
+            "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+            "required_inputs": ["prompt"],
+            "input_mappings": [
+                {
+                    "target_context_key": "prompt",
+                    "source_expression": "inputs.prompt",
+                    "extractor": "identity",
+                    "required": True,
+                },
+                {
+                    "target_context_key": "mail_review_profile_id",
+                    "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.mail_profile_id",
+                    "extractor": "identity",
+                    "required": False,
+                },
+                {
+                    "target_context_key": "mail_review_output_fields",
+                    "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.output_fields",
+                    "extractor": "identity",
+                    "required": False,
+                },
+            ],
+        },
+        inputs={
+            "prompt": "Show my latest mail in a table.",
+            "selected_workflow_trace": {
+                "selector_selection_metadata": {
+                    "workflow_inputs": {
+                        "mail_profile_id": "vonwitbrock-gmail",
+                        "output_fields": ["sender", "date", "subject", "labels"],
+                    }
+                }
+            },
+        },
+    )
+
+    assert dict(resolution.resolved_inputs) == {
+        "prompt": "Show my latest mail in a table.",
+        "mail_review_profile_id": "vonwitbrock-gmail",
+        "mail_review_output_fields": ["sender", "date", "subject", "labels"],
+    }
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.diagnostics.get("status") == "resolved"
+
+
 def test_resolve_workflow_launch_inputs_fails_closed_for_missing_required_value() -> None:
     resolution = resolve_workflow_launch_inputs(
         workflow_id="#V#meeting_invitation_testing_workflow",

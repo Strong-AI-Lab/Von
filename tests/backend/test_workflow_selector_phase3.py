@@ -83,6 +83,26 @@ class TestStructuredResponseParsing:
         assert result["confidence"] == pytest.approx(0.95)
         assert result["reasoning"] == "The request requires tool access."
 
+    def test_parse_workflow_inputs_from_structured_response(self):
+        result = WorkflowSelector._parse_structured_selection(
+            raw_response=json.dumps({
+                "workflow_id": "#V#general_mail_review_workflow",
+                "confidence": 0.94,
+                "reasoning": "The request asks for a bounded mail review.",
+                "workflow_inputs": {
+                    "mail_profile_id": "vonwitbrock-gmail",
+                    "message_limit": 15,
+                    "output_shape": "table",
+                },
+            }),
+        )
+
+        assert result["workflow_inputs"] == {
+            "mail_profile_id": "vonwitbrock-gmail",
+            "message_limit": 15,
+            "output_shape": "table",
+        }
+
     def test_parse_confidence_clamped_to_range(self):
         result = WorkflowSelector._parse_structured_selection(
             raw_response=json.dumps({
@@ -183,6 +203,32 @@ class TestSelectionConfidenceReasoning:
         assert result.verdict == "rag_selected"
         assert result.confidence_score == pytest.approx(0.92)
         assert result.reasoning == "Request needs external data."
+
+    def test_structured_json_preserves_workflow_inputs_in_selection_metadata(self):
+        selector = _build_selector()
+        mail_workflow_id = "#V#general_mail_review_workflow"
+        result = selector.resolve_selection(
+            raw_response=json.dumps({
+                "workflow_id": mail_workflow_id,
+                "confidence": 0.93,
+                "reasoning": "The request asks for ordinary mail review.",
+                "workflow_inputs": {
+                    "mail_profile_id": "vonwitbrock-gmail",
+                    "message_limit": 15,
+                    "output_shape": "table",
+                },
+            }),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[_CHAT_WORKFLOW, mail_workflow_id],
+        )
+
+        assert result.workflow_id == mail_workflow_id
+        assert result.selection_metadata.get("workflow_inputs") == {
+            "mail_profile_id": "vonwitbrock-gmail",
+            "message_limit": 15,
+            "output_shape": "table",
+        }
 
     def test_structured_json_reasoning_overrides_conflicting_workflow_id(self):
         selector = _build_selector()

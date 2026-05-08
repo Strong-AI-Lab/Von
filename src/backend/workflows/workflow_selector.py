@@ -100,6 +100,7 @@ class WorkflowSelector:
     )
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
+    _JSON_WORKFLOW_INPUT_KEYS = ("workflow_inputs", "inputs", "launch_inputs")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
     _WORKFLOW_CONCEPT_ID_PATTERN = re.compile(r"#v#[a-z0-9_]+", flags=re.IGNORECASE)
     _REASONING_SELECTION_CUES = (
@@ -1004,6 +1005,9 @@ class WorkflowSelector:
                 "structured_selection_detected", False
             ),
         }
+        workflow_inputs = structured.get("workflow_inputs")
+        if isinstance(workflow_inputs, Mapping):
+            selection_metadata["workflow_inputs"] = dict(workflow_inputs)
         requested_candidate_workflow_id = self._resolve_requested_candidate_workflow_id(
             raw_response=raw_response,
             raw_candidate_label=label,
@@ -1263,9 +1267,21 @@ class WorkflowSelector:
                 reasoning = raw_reason.strip()
                 break
 
+        workflow_inputs: dict[str, Any] = {}
+        for key in cls._JSON_WORKFLOW_INPUT_KEYS:
+            raw_inputs = parsed.get(key)
+            if isinstance(raw_inputs, Mapping):
+                workflow_inputs = {
+                    str(input_key): input_value
+                    for input_key, input_value in raw_inputs.items()
+                    if isinstance(input_key, str) and input_key.strip()
+                }
+                break
+
         return {
             "confidence": confidence,
             "reasoning": reasoning,
+            "workflow_inputs": workflow_inputs,
             "structured_selection_detected": True,
             "raw_response_format": "json_object",
         }

@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "9",
+  "seed_version": "10",
   "workflows": [
     {
       "publication_spec": {
@@ -1480,6 +1480,174 @@
         }
       ],
       "workflow_id": "#V#tool_calling_workflow"
+    },
+    {
+      "workflow_id": "#V#general_mail_review_workflow",
+      "display_name": "General Mail Review Workflow",
+      "description": "Review, list, read, compare, table, or summarise ordinary mailbox messages through mail tools without treating the request as paper ingestion or represented-knowledge authoring.",
+      "content": "Execution workflow for broad mail review tasks: list recent messages, read selected messages, inspect labels, sender, date, subject, snippets and body evidence, and answer with the requested list, table, summary, comparison, triage, or bounded follow-up. This workflow is for mail as mail. It may surface conditional follow-on affordances when message evidence suggests arXiv ingestion, scholarly paper representation, meeting extraction, task creation, Jira follow-up, or Vontology writes, but it must not perform those follow-ons unless the user explicitly asks for that authoring or ingestion objective.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Original user request for mail review."
+          },
+          {
+            "target_context_key": "mail_review_profile_id",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.mail_profile_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Mail profile or account named by the request or context."
+          },
+          {
+            "target_context_key": "mail_review_limit",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.message_limit",
+            "extractor": "identity",
+            "required": false,
+            "description": "Bounded message count requested for the review."
+          },
+          {
+            "target_context_key": "mail_review_query",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.query",
+            "extractor": "identity",
+            "required": false,
+            "description": "Grounded mail-search query or scope phrase carried from selector decision."
+          },
+          {
+            "target_context_key": "mail_review_label_filter",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.label_filter",
+            "extractor": "identity",
+            "required": false,
+            "description": "Mailbox label or category filter explicitly supplied by the request."
+          },
+          {
+            "target_context_key": "mail_review_output_shape",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.output_shape",
+            "extractor": "identity",
+            "required": false,
+            "description": "Requested output shape such as table, list, digest, summary, or comparison."
+          },
+          {
+            "target_context_key": "mail_review_output_fields",
+            "source_expression": "inputs.selected_workflow_trace.selector_selection_metadata.workflow_inputs.output_fields",
+            "extractor": "identity",
+            "required": false,
+            "description": "Requested fields for each message row or item."
+          }
+        ]
+      },
+      "publication_spec": {
+        "initial_state": "delegate_to_tool_pipeline",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#tool_calling_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "completed",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "delegate_to_tool_pipeline",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "completed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":false,\"prefer_existing_capability\":true,\"ordinary_mail_review\":true,\"excludes_authoring_or_ingestion_without_explicit_intent\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"mail review\",\"gmail review\",\"list recent messages\",\"read mailbox messages\",\"email table\",\"message labels\",\"summarise emails\",\"compare emails\",\"mail digest\",\"mail triage\"],\"examples\":[\"Show me the fifteen most recent messages in my Gmail profile and put sender, date, subject, labels, and gist in a table.\",\"Review recent mail from this profile and summarise what needs attention.\",\"List unread messages with labels and short descriptions.\",\"Read the latest messages matching this mailbox query and compare them.\"],\"routing_notes\":[\"Choose this for ordinary mailbox listing, reading, summarising, tabulating, comparing, or triage tasks even when message content later mentions scholarly papers.\",\"Do not choose arXiv or scholarly-paper ingestion workflows unless the user explicitly asks to ingest, represent, or persist papers or arXiv metadata.\",\"If reviewed mail reveals possible arXiv, paper, meeting, task, Jira, or Vontology follow-on work, answer the mail review first and offer the follow-on as optional unless the user already asked for it.\"],\"launch_input_keys\":[\"mail_profile_id\",\"message_limit\",\"query\",\"label_filter\",\"output_shape\",\"output_fields\"]}",
+          "lang": "en-NZ"
+        }
+      ]
     },
     {
       "publication_spec": {

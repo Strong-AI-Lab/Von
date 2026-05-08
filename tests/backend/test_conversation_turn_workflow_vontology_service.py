@@ -37,6 +37,7 @@ NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_repor
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_postcondition_critic"
+GENERAL_MAIL_REVIEW_WORKFLOW_ID = "#V#general_mail_review_workflow"
 
 
 @pytest.fixture
@@ -169,6 +170,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "Do not assume the current request is standalone" in selector_text
     assert "Canonical valid output examples" in selector_text
     assert "Invalid outputs. Never do any of these" in selector_text
+    assert "optional `workflow_inputs`" in selector_text
+    assert "selected-workflow launch parameters" in selector_text
     assert "authenticated self-relative entity-information question" in selector_text
     assert "#V#entity_information_retrieval_workflow" in selector_text
     assert '"workflow_id":"#V#tool_calling_workflow"' in selector_text
@@ -240,7 +243,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 6
+    assert counts.get("workflows_published") == 7
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -277,6 +280,57 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         limit=5,
     )
     assert not any((row or {}).get("text") for row in contract_rows)
+
+    mail_review_definition = load_workflow_definition_from_vontology(
+        GENERAL_MAIL_REVIEW_WORKFLOW_ID
+    )
+    assert mail_review_definition is not None
+    mail_review_delegate_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="delegate_to_tool_pipeline",
+    )
+    mail_review_delegate_action = mail_review_definition.states[
+        mail_review_delegate_step_id
+    ].actions[0]
+    assert mail_review_delegate_action.action_id == "workflow_invoke_subworkflow"
+    assert mail_review_delegate_action.subworkflow_id == TOOL_CALLING_WORKFLOW_ID
+    launch_contract = mail_review_definition.metadata.get("launch_input_contract")
+    assert isinstance(launch_contract, dict)
+    assert launch_contract.get("required_inputs") == ["prompt"]
+    mail_mapping_targets = {
+        mapping.get("target_context_key")
+        for mapping in launch_contract.get("input_mappings", [])
+        if isinstance(mapping, dict)
+    }
+    assert {
+        "prompt",
+        "mail_review_profile_id",
+        "mail_review_limit",
+        "mail_review_query",
+        "mail_review_label_filter",
+        "mail_review_output_shape",
+        "mail_review_output_fields",
+    }.issubset(mail_mapping_targets)
+    mail_exemplar_rows = get_texts_for_concept(
+        GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        predicate="#V#hasWorkflowDiscoveryExemplarsJson",
+        limit=5,
+    )
+    raw_mail_exemplar_text: object = next(
+        (
+            (row or {}).get("text")
+            for row in mail_exemplar_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    mail_exemplar_text = (
+        raw_mail_exemplar_text if isinstance(raw_mail_exemplar_text, str) else ""
+    )
+    assert "gmail review" in mail_exemplar_text
+    assert "ordinary mailbox listing" in mail_exemplar_text
+    assert "Do not choose arXiv" in mail_exemplar_text
+    assert "mail_profile_id" in mail_exemplar_text
 
     turn_definition = load_workflow_definition_from_vontology(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID

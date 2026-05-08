@@ -958,3 +958,20 @@ def test_selected_workflow_renderer_preserves_grounded_success_response() -> Non
         "You are Michael Witbrock. Grounded papers: Learning to Tell Two "
         "Spirals Apart."
     )
+
+
+def test_selected_workflow_renderer_preserves_subworkflow_result_response() -> None:
+    response = render_selected_workflow_user_response(
+        selected_workflow_id="#V#general_mail_review_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "result": {
+                "response_text": "Here is the requested mail review table.",
+            }
+        },
+        child_result_snapshot=None,
+    )
+
+    assert response == "Here is the requested mail review table."

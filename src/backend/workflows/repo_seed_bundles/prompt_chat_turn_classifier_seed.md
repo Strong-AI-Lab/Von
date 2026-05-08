@@ -12,7 +12,7 @@ You will receive:
 Use the full turn context messages as authoritative context for resolving references, continuity, and user-relative language. Do not assume the current request is standalone when the surrounding context already disambiguates references such as "me", "myself", "my name", "our workflow", or "that turn".
 Use the current user request as the immediate routing objective unless explicit workflow continuation context shows that this turn is mainly a continuation, repair, verification, or follow-up about an earlier step.
 
-Return JSON only with fields `workflow_id`, `confidence`, and `reasoning`.
+Return JSON only with fields `workflow_id`, `confidence`, `reasoning`, and optional `workflow_inputs`.
 Return exactly one JSON object. Do not wrap it in Markdown fences. Do not include any surrounding prose.
 
 Rules:
@@ -23,6 +23,7 @@ Rules:
 - Do not treat broader prompts such as "tell me about myself", "what do you know about me", "summarise my profile", or "what are my papers/interests/roles/relationships" as narrow identity checks. Those requests invite a grounded concept profile or predicate/relation retrieval when a suitable workflow is eligible and launchable.
 - For authenticated self-relative turns, distinguish identity or organisation reflection that is already explicit in context from requests for additional represented facts. Use retrieval workflows for papers, affiliations, students, collaborators, predicate-filtered relationships, richer concept profiles, or other represented facts that would improve the answer beyond the already-present context.
 - `workflow_id` must be exactly one of the candidate workflow IDs listed below.
+- Use `workflow_inputs` only for selected-workflow launch parameters that are explicitly grounded in the current request or turn context. Do not invent missing values. Prefer generic keys advertised by the selected workflow's launch contract; omit the field when no launch parameter needs to be carried across the decision boundary.
 - Do not ask the user a clarification question from this selector stage.
 - Do not answer the user directly from this selector stage.
 - If the request is ambiguous, still choose the best candidate from the provided list and explain the ambiguity in `reasoning`.
@@ -56,6 +57,8 @@ These examples show the required JSON shape and reasoning style only. In the rea
   `{"workflow_id":"#V#chat_assistant_workflow","confidence":0.87,"reasoning":"The authenticated context already contains the narrow identity requested, and no grounded lookup is needed for this direct-response turn."}`
 - Specialised discovered workflow:
   `{"workflow_id":"#V#concept_search_instance_retrieval_workflow","confidence":0.96,"reasoning":"The request asks for represented information about a specific concept, so the specialised retrieval workflow is the best eligible candidate."}`
+- Specialised workflow with grounded launch inputs:
+  `{"workflow_id":"#V#specialised_review_workflow","confidence":0.94,"reasoning":"The candidate is the most specific eligible workflow for the requested review, and the request explicitly supplies the review scope and output shape.","workflow_inputs":{"scope":"latest items","output_shape":"table"}}`
 - Event representation workflow:
   `{"workflow_id":"#V#event_representation_workflow","confidence":0.95,"reasoning":"The request asks to create or persist event-level represented facts, including temporal or participant evidence, so the event representation workflow is the most specific route."}`
 - Self-relative entity-information workflow:
