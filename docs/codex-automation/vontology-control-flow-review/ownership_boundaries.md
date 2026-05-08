@@ -38,6 +38,9 @@ predicates, and KB assertions should own durable:
   blockers or recovery choice;
 - integration-specific tool metadata semantics, such as whether a Gmail read
   tool is search evidence or verification evidence.
+- talk/presentation representation profiles, including required type sets,
+  field-to-predicate bindings, speaker role semantics, and verification
+  postconditions.
 
 ## Python Support
 
@@ -64,6 +67,9 @@ Python can remain the surface for:
   come from represented tool/workflow metadata;
 - generic tool metadata loading, validation, normalisation, merge telemetry, and
   fail-closed diagnostics when represented metadata is absent;
+- generic representation-profile executors that load represented talk/presentation
+  field bindings and verification contracts, apply them through canonical
+  Vontology services, and read back postconditions;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
