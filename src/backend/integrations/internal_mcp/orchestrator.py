@@ -325,7 +325,11 @@ def _resolve_model_llm_timeout_override_sec(
                 if saved is not None:
                     return saved
         except Exception:
-            pass
+            self._logger.debug(
+                "Vontology tool evidence projection failed for %s; using existing payload shaper",
+                tool_name,
+                exc_info=True,
+            )
 
     if os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC"):
         return _default_conversation_turn_llm_timeout_override_sec()
@@ -21605,6 +21609,16 @@ class InternalMCPChatOrchestrator:
     def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
         if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
             return payload
+        try:
+            from src.backend.services.tool_evidence_projection_service import (
+                project_tool_payload_for_llm,
+            )
+
+            projected_payload = project_tool_payload_for_llm(tool_name, payload)
+            if projected_payload is not None:
+                return projected_payload
+        except Exception:
+            pass
         tool_lower = tool_name.strip().lower()
         if tool_lower == "search_knowledge_base":
             return self._shape_search_knowledge_base_payload_for_llm(payload)
