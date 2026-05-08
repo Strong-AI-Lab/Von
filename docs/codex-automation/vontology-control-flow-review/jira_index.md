@@ -49,3 +49,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   `tool_metadata_service.py`; active `JVNAUTOSCI-2282` branch adds
   `operation_category`/`evidence_role` fallback for `gmail_list_messages` and
   `gmail_get_message`.
+- `JVNAUTOSCI-2291` - talk/presentation representation profile names, required
+  type sets, field-to-predicate materialisation, and verification criteria in
+  Python rather than represented Vontology profiles/contracts.
