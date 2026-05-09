@@ -28070,8 +28070,23 @@ function buildWorkflowDefinitionLocatorPayload({ workflowId, workflowName }) {
 
 function buildWorkflowMonitorLocatorPayload() {
     const namespaceContext = buildConversationTelemetryNamespaceContext();
-    const statusQuery = buildWorkflowStatusQuery({ includeStatusFilter: true });
-    const activeStatuses = statusQuery.get('status') || null;
+    const instanceScopeArgs = {
+        namespace: namespaceContext.namespace || null,
+        user_id: namespaceContext.namespace ? null : (namespaceContext.user_id || null),
+        org_id: namespaceContext.namespace ? null : (namespaceContext.org_id || null),
+        limit: 200
+    };
+    const activeInstanceAccess = Array.from(WORKFLOW_STATUS_ACTIVE).reduce((access, status) => ({
+        ...access,
+        [`workflow_list_${status}_instances`]: buildMcpToolAccess(
+            'workflow_list_instances',
+            {
+                ...instanceScopeArgs,
+                status
+            },
+            `Fetch ${status} workflow instances shown in the active monitor view.`
+        )
+    }), {});
 
     return {
         schema_version: WORKFLOW_MONITOR_LOCATOR_SCHEMA_VERSION,
@@ -28088,19 +28103,9 @@ function buildWorkflowMonitorLocatorPayload() {
                 {
                     limit: 200
                 },
-                'Fetch the workflow definitions and parity inventory used by the monitor.'
+                'Fetch the workflow definitions, parity inventory, and capability_matrix used by the monitor.'
             ),
-            workflow_list_instances: buildMcpToolAccess(
-                'workflow_list_instances',
-                {
-                    namespace: namespaceContext.namespace || null,
-                    user_id: namespaceContext.namespace ? null : (namespaceContext.user_id || null),
-                    org_id: namespaceContext.namespace ? null : (namespaceContext.org_id || null),
-                    status: activeStatuses,
-                    limit: 200
-                },
-                'Fetch the workflow instances shown in the active monitor view.'
-            )
+            ...activeInstanceAccess
         }
     };
 }
@@ -28940,6 +28945,9 @@ export function __testOnly_resetWorkflowDefinitionsState() {
 }
 export function __testOnly_buildWorkflowMonitorExportPayload() {
     return buildWorkflowMonitorExportPayload();
+}
+export function __testOnly_buildWorkflowMonitorLocatorPayload() {
+    return buildWorkflowMonitorLocatorPayload();
 }
 export async function __testOnly_loadChatHistory(options = {}) {
     return loadChatHistory(options);

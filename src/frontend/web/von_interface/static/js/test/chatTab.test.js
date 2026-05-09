@@ -4,6 +4,7 @@ import {
     __testOnly_buildThinkingDiagnosticsPayload,
     __testOnly_buildDiagnosticsExportRequestPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
+    __testOnly_buildWorkflowMonitorLocatorPayload,
     __testOnly_loadChatHistory,
     __testOnly_refreshChatSessionTabs,
     __testOnly_refreshAvailableWorkflowDefinitions,
@@ -488,6 +489,30 @@ describe('workflow monitor concept links', () => {
         expect(payload.monitor_state.mode).toBe('available_workflows');
         expect(payload.monitor_state.show_designs).toBe(false);
         expect(payload.definitions_snapshot.rendered_workflow_ids).toContain('#V#salient_predicate_governance_workflow');
+    });
+
+    test('exports workflow monitor MCP access with executable status-scoped instance calls', () => {
+        const { getSessionScopedNamespace } = require('../utils/sessionScopedStorage.js');
+        getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock@university_of_auckland_strong_ai_lab');
+
+        const payload = __testOnly_buildWorkflowMonitorLocatorPayload();
+
+        expect(payload.mcp_access.workflow_list_definitions).toEqual(expect.objectContaining({
+            tool_name: 'workflow_list_definitions',
+            arguments: { limit: 200 },
+            purpose: expect.stringContaining('capability_matrix')
+        }));
+        expect(payload.mcp_access.workflow_list_pending_instances).toEqual(expect.objectContaining({
+            tool_name: 'workflow_list_instances',
+            arguments: expect.objectContaining({
+                namespace: '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+                status: 'pending',
+                limit: 200
+            })
+        }));
+        expect(payload.mcp_access.workflow_list_running_instances.arguments.status).toBe('running');
+        expect(payload.mcp_access.workflow_list_paused_instances.arguments.status).toBe('paused');
+        expect(payload.mcp_access.workflow_list_instances).toBeUndefined();
     });
 
     test('hides design artefacts by default in available workflows list', () => {
