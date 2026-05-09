@@ -68,3 +68,26 @@
   delegates durable actions to that service. Linked it to `JVNAUTOSCI-1913`,
   `JVNAUTOSCI-2173`, and `JVNAUTOSCI-2216`, and added a user-impact comment.
 - No production code was changed.
+
+## 2026-05-10T02:08:11.3452112+12:00
+
+- Read required repo guidance, repo-local drift-review memories, and the global
+  automation memory path, which was empty/absent at run start.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero and `repo_seed_authority_drift_path_count=1`.
+- Reviewed code changes since `2026-05-08T14:02:09Z`, especially the general
+  mail review workflow, mail-profile resolver/materialisation support, Vontology
+  tool-evidence projection, final-answer synthesis telemetry, and split selector
+  routing tests.
+- Created `JVNAUTOSCI-2296` for mail-profile resource authority in Python:
+  `mail_profile_resource_vontology_service.py` defines mail/Gmail profile
+  resource vocabulary, authorised/default/runtime-alias predicates, concrete
+  alias concept IDs, and user/default-profile relationships from Python specs.
+  Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-2295`, and `JVNAUTOSCI-2286`, and
+  added a visible user-impact comment.
+- Treated `tool_evidence_projection_service.py` as generic represented-contract
+  runtime support, the represented `#V#general_mail_review_workflow` resolver
+  step as the correct workflow-side authority, and the meeting-invitation
+  experiment template as covered by `JVNAUTOSCI-1579` absent fresh runtime
+  production-authority evidence.
+- No production code was changed.

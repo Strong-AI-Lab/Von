@@ -41,6 +41,9 @@ predicates, and KB assertions should own durable:
 - talk/presentation representation profiles, including required type sets,
   field-to-predicate bindings, speaker role semantics, and verification
   postconditions.
+- mail/profile resource authority, including resource/profile vocabulary,
+  authorised/default profile predicates, runtime-alias facts, and user-to-profile
+  relationships that workflows use before calling mail tools.
 
 ## Python Support
 
@@ -70,6 +73,9 @@ Python can remain the surface for:
 - generic representation-profile executors that load represented talk/presentation
   field bindings and verification contracts, apply them through canonical
   Vontology services, and read back postconditions;
+- generic resource-profile materialisers that validate represented profile specs,
+  safely expose non-secret runtime aliases, and fail closed when the represented
+  resource/profile authority is absent;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
