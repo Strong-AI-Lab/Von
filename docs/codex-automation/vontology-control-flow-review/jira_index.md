@@ -52,3 +52,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2291` - talk/presentation representation profile names, required
   type sets, field-to-predicate materialisation, and verification criteria in
   Python rather than represented Vontology profiles/contracts.
+- `JVNAUTOSCI-2296` - mail-profile resource vocabulary, Gmail profile alias
+  concepts, authorised/default profile predicates, and user-profile facts in
+  Python rather than represented Vontology/profile authority.

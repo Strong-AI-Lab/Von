@@ -60,6 +60,10 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   and broader projection work by `JVNAUTOSCI-2286`. File only if these services
   become startup/runtime authority that repopulates missing Gmail semantics
   instead of a deletable materialisation helper.
+- `tool_evidence_projection_service.py`: generic runtime projection executor
+  that reads represented tool/evidence-view/field contracts. File only if the
+  priority ordering, field selection, or redaction semantics become
+  integration-specific Python policy rather than represented metadata.
 - `concept_predicate_metadata_service.py`: update `JVNAUTOSCI-1957` unless a
   separate predicate-policy surface appears.
 - `workflow_event_integration_service.py` autotrigger/depth guards: file only
@@ -71,6 +75,13 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   Vontology, especially `#V#hasWorkflowTypedSubworkflowRouteMapJson`.
 - `annotation_extraction_service.py`: annotation prompt instructions are loaded
   through Vontology relations and protected by workflow-purity checks.
+- `experiment_run_service.py` meeting-invitation scenario template: already
+  covered by `JVNAUTOSCI-1579` unless fresh runtime evidence shows the
+  remaining Python template is still production workflow or prompt authority
+  rather than test/experiment scaffolding.
+- `#V#general_mail_review_workflow` resolver step: the workflow-side profile
+  resolution is represented; the newly filed concern is the Python mail-profile
+  resource vocabulary/materialiser tracked by `JVNAUTOSCI-2296`.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

@@ -52,6 +52,10 @@ represented authority before filing Jira work.
   those profiles to required ontology types, field-to-predicate writes, or
   verification criteria are strong drift candidates even when the surrounding
   workflow graph is Vontology-backed.
+- Runtime services that create integration-specific resource/profile vocabulary,
+  predicates, user-authorisation/default relationships, or concept IDs from
+  configured aliases are strong drift candidates. A represented workflow
+  consuming those facts does not make Python the correct source of the facts.
 
 ## Recent Examples
 
@@ -60,3 +64,5 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2284` - Gmail read-tool evidence-role defaults.
 - `JVNAUTOSCI-2291` - talk/presentation representation profile and verification
   policy in Python.
+- `JVNAUTOSCI-2296` - mail-profile resource vocabulary, predicates, alias
+  concepts, and user/default-profile facts authored by Python materialisation.
