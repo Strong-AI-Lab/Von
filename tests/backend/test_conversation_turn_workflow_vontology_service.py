@@ -285,6 +285,55 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         GENERAL_MAIL_REVIEW_WORKFLOW_ID
     )
     assert mail_review_definition is not None
+    mail_review_resolver_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="resolve_mail_profile",
+    )
+    mail_review_resolver_action = mail_review_definition.states[
+        mail_review_resolver_step_id
+    ].actions[0]
+    assert mail_review_resolver_action.action_id == "mail_review.resolve_profile"
+    assert mail_review_resolver_action.execution_mode == "llm"
+    assert mail_review_resolver_action.llm_policy is not None
+    assert "find_relations_with_argument" in mail_review_resolver_action.llm_policy.get(
+        "required_tools", []
+    )
+    assert "#V#has_authorised_mail_profile" in mail_review_resolver_action.llm_policy[
+        "response_contract_text"
+    ]
+    assert "environment defaults" in mail_review_resolver_action.llm_policy[
+        "response_contract_text"
+    ]
+    assert "runtime_profile_alias" in mail_review_resolver_action.llm_policy[
+        "response_contract_text"
+    ]
+    resolver_branch_targets = {
+        transition.to_state
+        for transition in mail_review_definition.states[
+            mail_review_resolver_step_id
+        ].transitions
+    }
+    assert {
+        authority_service._step_concept_id(
+            workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+            state_id="delegate_to_tool_pipeline",
+        ),
+        authority_service._step_concept_id(
+            workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+            state_id="profile_choice_needed",
+        ),
+    }.issubset(resolver_branch_targets)
+    assert "gmail_profile" in mail_review_definition.states[
+        mail_review_resolver_step_id
+    ].metadata.get("writes_context_keys", [])
+    profile_choice_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="profile_choice_needed",
+    )
+    profile_choice_action = mail_review_definition.states[
+        profile_choice_step_id
+    ].actions[0]
+    assert profile_choice_action.action_id == "workflow_control.context_template"
     mail_review_delegate_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="delegate_to_tool_pipeline",
