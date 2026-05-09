@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "11",
+  "seed_version": "12",
   "workflows": [
     {
       "publication_spec": {
@@ -1597,6 +1597,7 @@
             "invoked_workflow_id": null,
             "llm_policy": {
               "policy_stage": "mail_profile_resolution",
+              "prompt_text": "You are resolving the represented mail profile for a mail-review workflow step. Use only grounded Vontology tool evidence and the supplied workflow context. Do not call Gmail tools in this step. Return the requested JSON decision after inspecting the user's represented mail-profile resource facts.",
               "tool_mode": "allowed",
               "allowed_tools": [
                 "fetch_concept",

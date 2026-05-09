@@ -295,6 +295,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_resolver_action.action_id == "mail_review.resolve_profile"
     assert mail_review_resolver_action.execution_mode == "llm"
     assert mail_review_resolver_action.llm_policy is not None
+    assert mail_review_resolver_action.llm_policy.get("prompt_text")
     assert "find_relations_with_argument" in mail_review_resolver_action.llm_policy.get(
         "required_tools", []
     )
