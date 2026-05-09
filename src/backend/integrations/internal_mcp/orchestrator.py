@@ -31368,6 +31368,116 @@ class InternalMCPChatOrchestrator:
         return lines
 
     @staticmethod
+    def _tool_evidence_projection_field_labels(entries: Any) -> list[str]:
+        if not isinstance(entries, list):
+            return []
+        labels: list[str] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            raw_label = entry.get("output_key") or entry.get("field_concept_id")
+            if not isinstance(raw_label, str) or not raw_label.strip():
+                continue
+            label = raw_label.strip().removeprefix("#V#")
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+        return labels
+
+    @classmethod
+    def _tool_evidence_projection_payload_fragments(
+        cls,
+        projected_payload: Mapping[str, Any],
+        *,
+        max_fields: int = 8,
+        max_value_chars: int = 180,
+    ) -> list[str]:
+        fragments: list[str] = []
+        for key, value in projected_payload.items():
+            if not isinstance(key, str) or key.startswith("_"):
+                continue
+            if key.endswith("_omitted_count"):
+                continue
+            if isinstance(value, str):
+                value_text = value.strip()
+            else:
+                try:
+                    value_text = json.dumps(value, default=str, ensure_ascii=False)
+                except Exception:
+                    value_text = str(value)
+            value_text = value_text.strip()
+            if not value_text:
+                continue
+            if len(value_text) > max_value_chars:
+                value_text = value_text[:max_value_chars].rstrip() + "..."
+            fragments.append(f"{key}={value_text}")
+            if len(fragments) >= max_fields:
+                break
+        return fragments
+
+    @classmethod
+    def _build_tool_evidence_projection_follow_up_lines(
+        cls,
+        *,
+        tool_name: str,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        try:
+            from src.backend.services.tool_evidence_projection_service import (
+                project_tool_payload_for_llm,
+            )
+
+            projected_payload = project_tool_payload_for_llm(tool_name, payload)
+        except Exception:
+            return []
+        if not isinstance(projected_payload, Mapping):
+            return []
+        telemetry = projected_payload.get("_tool_evidence_projection")
+        if not isinstance(telemetry, Mapping):
+            return []
+
+        preserved = cls._tool_evidence_projection_field_labels(
+            telemetry.get("preserved_fields")
+        )
+        missing_required = cls._tool_evidence_projection_field_labels(
+            telemetry.get("missing_required_fields")
+        )
+        redacted = cls._tool_evidence_projection_field_labels(
+            telemetry.get("redacted_fields")
+        )
+        if not (preserved or missing_required or redacted):
+            return []
+
+        lines: list[str] = []
+        if preserved:
+            fields = ", ".join(preserved[:12])
+            if len(preserved) > 12:
+                fields += f", +{len(preserved) - 12} more"
+            lines.append(
+                f"- {tool_name} exposed represented tool-evidence fields: {fields}."
+            )
+        evidence_fragments = cls._tool_evidence_projection_payload_fragments(
+            projected_payload
+        )
+        if evidence_fragments:
+            lines.append(f"  Projected evidence: {'; '.join(evidence_fragments)}.")
+        if missing_required:
+            lines.append(
+                f"- {tool_name} missing represented required evidence fields: "
+                + ", ".join(missing_required[:12])
+                + "."
+            )
+        if redacted:
+            lines.append(
+                f"- {tool_name} redacted represented sensitive fields: "
+                + ", ".join(redacted[:12])
+                + "."
+            )
+        return lines
+
+    @staticmethod
     def _tool_follow_up_result_noun(tool_name: str) -> str:
         return {
             "jira_search": "issue",
@@ -31430,6 +31540,25 @@ class InternalMCPChatOrchestrator:
             tool_name = str(
                 invocation.get("tool") or invocation.get("method") or ""
             ).strip()
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            projection_lines = cls._build_tool_evidence_projection_follow_up_lines(
+                tool_name=tool_name,
+                payload=payload,
+            )
+            if projection_lines:
+                tool_blocks.append(
+                    ((0, -10, invocation_index), projection_lines, True)
+                )
+                continue
+
             if tool_name not in {
                 "jira_search",
                 "search_knowledge_base",
@@ -31441,14 +31570,6 @@ class InternalMCPChatOrchestrator:
                 "find_relations_with_argument",
                 "get_predicate_incidence",
             }:
-                continue
-            if not cls._tool_invocation_completed_successfully(invocation):
-                continue
-
-            payload = invocation.get("effective_payload")
-            if not isinstance(payload, Mapping):
-                payload = invocation.get("payload")
-            if not isinstance(payload, Mapping):
                 continue
             count = cls._extract_tool_result_count_for_follow_up(tool_name, payload)
             if count is None:

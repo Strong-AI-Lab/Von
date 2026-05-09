@@ -315,3 +315,68 @@ def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(
     assert "#V#gmail_messages_collection_field" in preserved_ids
     assert "#V#gmail_message_id_field" in preserved_ids
     assert "#V#gmail_thread_id_field" in preserved_ids
+
+
+def test_follow_up_stage_uses_represented_projection_for_unlisted_tool(
+    _reset_mock_db: Any,
+) -> None:
+    _materialise_mock_projection_contract()
+
+    messages = InternalMCPChatOrchestrator._build_tool_follow_up_stage_messages(
+        data={
+            "invocations": [
+                {
+                    "tool": "example_projection_tool",
+                    "effective_payload": {
+                        "headline": "Represented projection works",
+                        "secret_blob": {"raw": "do not expose"},
+                    },
+                }
+            ]
+        }
+    )
+
+    assert messages
+    content = messages[0]["content"]
+    assert "example_projection_tool exposed represented tool-evidence fields" in content
+    assert "title" in content
+    assert "Represented projection works" in content
+    assert "secret_blob" in content
+    assert "do not expose" not in content
+
+
+def test_follow_up_stage_surfaces_gmail_detail_evidence_from_contract(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_gmail_tool_evidence_contract()
+
+    messages = InternalMCPChatOrchestrator._build_tool_follow_up_stage_messages(
+        data={
+            "invocations": [
+                {
+                    "tool": "gmail_get_message",
+                    "effective_payload": {
+                        "message_id": "msg-1",
+                        "sender": "sender@example.org",
+                        "subject": "A useful message",
+                        "date": "Fri, 8 May 2026 12:00:00 +0000",
+                        "snippet": "The short useful description.",
+                        "labelIds": ["INBOX", "IMPORTANT"],
+                        "payload": {"headers": [], "parts": [{"body": "large"}]},
+                    },
+                }
+            ]
+        }
+    )
+
+    assert messages
+    content = messages[0]["content"]
+    assert "gmail_get_message exposed represented tool-evidence fields" in content
+    assert "sender" in content
+    assert "subject" in content
+    assert "date" in content
+    assert "snippet" in content
+    assert "labelIds" in content
+    assert "A useful message" in content
+    assert "payload" in content
+    assert "headers" not in content
