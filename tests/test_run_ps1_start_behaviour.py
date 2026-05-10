@@ -245,6 +245,40 @@ $result = [ordered]@{{
     assert any("preserving other Von server" in line for line in payload["agent_logs"])
 
 
+def test_run_ps1_project_python_prefers_verified_pdm_python(
+    tmp_path: Path,
+) -> None:
+    fake_root = tmp_path / "repo"
+    fake_root.mkdir()
+    fake_pdm_python = tmp_path / "fake_pdm_python.cmd"
+    fake_pdm_python.write_text(
+        "\r\n".join(
+            [
+                "@echo off",
+                "exit /b 0",
+            ]
+        )
+        + "\r\n",
+        encoding="utf-8",
+    )
+    (fake_root / ".pdm-python").write_text(str(fake_pdm_python), encoding="utf-8")
+
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:Root = {ps_quote(str(fake_root))}
+$resolved = Get-ProjectPythonExecutable
+$result = [ordered]@{{
+    resolved = [string]$resolved
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload["resolved"] == str(fake_pdm_python)
+
+
 def test_run_ps1_agent_test_skips_shared_startup_background_services() -> None:
     script = f"""
 $ErrorActionPreference = 'Stop'

@@ -607,9 +607,28 @@ function Get-ProcessCommandLine {
 }
 
 function Get-ProjectPythonExecutable {
-    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
-    if (Test-Path $venvPython) {
-        return $venvPython
+    $candidatePaths = @()
+    $pdmPythonPath = Join-Path $Root '.pdm-python'
+    if (Test-Path $pdmPythonPath) {
+        $recordedPython = (Get-Content $pdmPythonPath -Raw -ErrorAction SilentlyContinue).Trim()
+        if ($recordedPython) {
+            $candidatePaths += $recordedPython
+        }
+    }
+
+    $candidatePaths += (Join-Path $Root '.venv\Scripts\python.exe')
+
+    foreach ($candidatePath in $candidatePaths) {
+        if (-not (Test-Path $candidatePath)) {
+            continue
+        }
+        try {
+            & $candidatePath -c "import sys" 1>$null 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return $candidatePath
+            }
+        }
+        catch { }
     }
     return 'python'
 }
@@ -2316,13 +2335,13 @@ function Start-VonServer {
     Invoke-VonServerStartProcessCleanup
 
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+    $projectPython = Get-ProjectPythonExecutable
 
     $serverExe = $null
     $serverArgs = @()
     $launchMode = 'direct-python'
-    if (Test-Path $venvPython) {
-        $serverExe = $venvPython
+    if ($projectPython -and $projectPython -ne 'python') {
+        $serverExe = $projectPython
         $serverArgs = @('-u', 'src/workflows/von/main.py', '--port', "$Port")
     }
     else {
