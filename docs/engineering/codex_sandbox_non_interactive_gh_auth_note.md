@@ -1,5 +1,16 @@
 # Codex Sandbox Non-Interactive GitHub Auth Note
 
+Current recurring Jira automation should use the repo-local REST API publish
+preflight instead of `git push --dry-run`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\test_codex_automation_publish_preflight.ps1
+```
+
+That script loads `VON_CODEX_AUTOMATION_TOKEN` into process-local `GH_TOKEN`,
+avoids `gh auth status`, and validates create/read/delete access on the
+temporary GitHub ref `refs/heads/codex/api-preflight-token-test`.
+
 This note preserves the exact guidance given during the `JVNAUTOSCI-2210`
 setup discussion, because Jira comment rendering can rewrite nested Markdown
 code fences.

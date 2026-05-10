@@ -530,6 +530,24 @@ See:
 
 - `docs/engineering/github_internal_mcp_runbook.md`
 
+#### Codex automation publish preflight
+
+Recurring Codex automations that must publish from the sandbox should use the
+PowerShell-native REST API preflight script instead of hand-writing `gh api`
+request bodies inline:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\test_codex_automation_publish_preflight.ps1
+```
+
+The script loads only `VON_CODEX_AUTOMATION_TOKEN` from repo-root `.env` into
+`GH_TOKEN` for its process, avoids `gh auth status`, verifies `gh api user`,
+`gh repo view`, and `main` ref access, then creates, reads, deletes, and
+rechecks `refs/heads/codex/api-preflight-token-test`. It uses a temporary JSON
+file for `gh api --input`, because Bash-style `<<<` redirection is invalid in
+PowerShell and older Windows PowerShell `Set-Content -Encoding UTF8` can emit a
+BOM that GitHub rejects as malformed JSON.
+
 ### 6.6a Non-sandbox Git/GitHub publication handoff: JVNAUTOSCI-2208
 
 This note preserves the exact operational pattern that allowed
