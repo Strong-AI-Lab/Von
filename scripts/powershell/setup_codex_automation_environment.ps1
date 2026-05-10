@@ -289,10 +289,10 @@ function Resolve-AutomationVenvBase {
     if ($env:CODEX_HOME) {
         [void]$candidates.Add((Join-Path $env:CODEX_HOME "automations\python-envs"))
     }
+    [void]$candidates.Add((Join-Path ([System.IO.Path]::GetTempPath()) "codex-automation-python-envs"))
     if ($env:USERPROFILE) {
         [void]$candidates.Add((Join-Path $env:USERPROFILE ".codex\automations\python-envs"))
     }
-    [void]$candidates.Add((Join-Path ([System.IO.Path]::GetTempPath()) "codex-automation-python-envs"))
 
     $seen = New-Object System.Collections.Generic.HashSet[string]
     foreach ($candidate in $candidates) {
