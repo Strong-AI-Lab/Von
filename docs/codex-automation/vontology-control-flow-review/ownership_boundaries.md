@@ -44,6 +44,9 @@ predicates, and KB assertions should own durable:
 - mail/profile resource authority, including resource/profile vocabulary,
   authorised/default profile predicates, runtime-alias facts, and user-to-profile
   relationships that workflows use before calling mail tools.
+- maintenance/introspection workflow graphs and policy, including diagnosis
+  causes, repair selection, prompt guardrail wording, Jira remediation wording,
+  transition/control definitions, and tool-family/domain semantics.
 
 ## Python Support
 
@@ -76,6 +79,9 @@ Python can remain the surface for:
 - generic resource-profile materialisers that validate represented profile specs,
   safely expose non-secret runtime aliases, and fail closed when the represented
   resource/profile authority is absent;
+- generic maintenance/introspection support actions that gather evidence,
+  invoke bounded MCP tools, apply explicitly represented text-relation or Jira
+  operations, validate outputs, and emit telemetry;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
