@@ -1892,6 +1892,74 @@ def test_required_evidence_permission_denied_is_preserved_distinctly(
     assert "PERMISSION_DENIED" in (completion_gate.get("decision_reason") or "")
 
 
+def test_workflow_lookup_failure_blocks_completion_claim() -> None:
+    record = _build_record(
+        prompt_text="What gmail profiles can you see?",
+        response_text=(
+            "I couldn't complete that request because the authoritative "
+            "conversation-turn workflow definition was not available."
+        ),
+        workflow_routing={
+            "workflow_id": "#V#conversation_turn_execution_workflow",
+            "verdict": "custom_workflow",
+            "source": "selector",
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_instance_submission",
+                "path": "orchestrator.execute_workflow",
+                "status": "submitted",
+                "reason_code": "durable_instance_created",
+                "workflow_id": "#V#conversation_turn_execution_workflow",
+                "workflow_instance_id": "348019b8-2563-4fba-b634-3adf93654235",
+                "submission": {
+                    "success": True,
+                    "workflow_id": "#V#conversation_turn_execution_workflow",
+                    "status": "submitted",
+                    "instance_id": "348019b8-2563-4fba-b634-3adf93654235",
+                    "verification": {
+                        "runnable_verification_success": True,
+                        "preflight_passed": True,
+                        "postflight_passed": True,
+                    },
+                },
+            },
+            {
+                "type": "workflow_use_episode",
+                "workflow_id": "#V#conversation_turn_execution_workflow",
+                "workflow_instance_id": "348019b8-2563-4fba-b634-3adf93654235",
+                "completed": False,
+                "terminal_stage": "workflow_lookup",
+                "final_state": None,
+                "termination_reason": {
+                    "code": "workflow_not_registered",
+                    "detail": "workflow_definition_not_found",
+                },
+            },
+        ],
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {
+                    "tools_started": 0,
+                    "tools_completed": 0,
+                },
+                "diagnostic_events": [],
+            }
+        },
+        tool_invocations=[],
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "workflow_access_failure" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+    execution_correctness = record.get("execution_correctness") or {}
+    assert execution_correctness.get("overall_outcome") != "successful_completion"
+
+
 def test_incidental_read_tool_failure_outside_required_evidence_contract_does_not_block(
     monkeypatch,
 ) -> None:

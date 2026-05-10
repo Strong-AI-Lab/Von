@@ -282,41 +282,19 @@ def _build_runnable_feature_signature() -> dict[str, Any]:
 def _resolve_registered_workflow_runtime(
     workflow_id: str,
 ) -> tuple[Any, WorkflowDefinition | None, str, tuple[str, ...]]:
-    from .registry_factory import (
-        get_shared_workflow_registry_read_only,
-        register_workflow_from_vontology,
-    )
+    from .registry_factory import resolve_workflow_definition_from_authority
 
-    registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-    definition = registry.get(workflow_id)
-    if definition is None:
-        try:
-            registered, _error_code = register_workflow_from_vontology(
-                registry=registry,
-                workflow_id=workflow_id,
-            )
-            if registered:
-                definition = registry.get(workflow_id)
-        except Exception:
-            # Keep submission/verification fail-closed. Callers handle a missing
-            # definition explicitly after the shared lookup path completes.
-            definition = None
-    registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
-    registration_source = (
-        str(getattr(registration, "source", "") or "").strip()
-        if registration
-        else "unknown"
+    resolution = resolve_workflow_definition_from_authority(
+        workflow_id,
+        use_current_shared_registry=True,
+        register_authoritative_fallback=True,
     )
-    known_workflow_ids = tuple(
-        sorted(
-            {
-                str(item).strip()
-                for item in getattr(registry, "all_workflow_ids", lambda: [])()
-                if isinstance(item, str) and str(item).strip()
-            }
-        )
+    return (
+        resolution.registry,
+        resolution.definition,
+        resolution.registration_source,
+        resolution.known_workflow_ids,
     )
-    return registry, definition, registration_source, known_workflow_ids
 
 
 def _resolve_submission_launch_inputs(
@@ -838,14 +816,16 @@ def verify_workflow_runnable(
             if not candidate_id:
                 return None
             try:
-                registered_definition = registry.get(candidate_id)
-                if registered_definition is not None:
-                    return registered_definition
-            except Exception:
-                # Keep validation conservative when registry lookups fail.
-                pass
-            try:
-                return load_workflow_definition_from_vontology(candidate_id)
+                from .registry_factory import resolve_workflow_definition_from_authority
+
+                resolution = resolve_workflow_definition_from_authority(
+                    candidate_id,
+                    registry=registry,
+                    use_current_shared_registry=True,
+                    promote_to_registry=registry,
+                    register_authoritative_fallback=True,
+                )
+                return resolution.definition
             except Exception:
                 return None
 

@@ -364,33 +364,34 @@ def _get_durable_definition_loader():
 
     if _durable_workflow_registry is None:
         _durable_workflow_registry = _build_durable_workflow_registry()
-    registry = _durable_workflow_registry
 
     def loader(workflow_id: str):
-        if registry is None:
-            return None
-        # Primary lookup: existing in-memory registry.
-        definition = registry.get(workflow_id)
-        if definition is not None:
-            return definition
-
-        # Runtime bridge (JVNAUTOSCI-1106): lazily register newly authored
-        # Vontology workflows when a worker first encounters them, so UI/chat
-        # workflow authoring does not require a process restart.
+        global _durable_workflow_registry
         try:
             from ..workflows.durable.registry_factory import (
-                register_workflow_from_vontology,
+                resolve_workflow_definition_from_authority,
             )
 
-            registered, _error_code = register_workflow_from_vontology(
-                registry=registry,
-                workflow_id=workflow_id,
+            resolution = resolve_workflow_definition_from_authority(
+                workflow_id,
+                registry=_durable_workflow_registry,
+                use_current_shared_registry=True,
+                promote_to_registry=_durable_workflow_registry,
+                register_authoritative_fallback=True,
             )
-            if registered:
-                return registry.get(workflow_id)
+            if resolution.registry is not None:
+                _durable_workflow_registry = resolution.registry
+            if resolution.definition is not None:
+                return resolution.definition
+            if resolution.error_code:
+                logging.getLogger(__name__).warning(
+                    "[durable_workflows] Workflow definition resolution failed for %s: %s",
+                    workflow_id,
+                    resolution.error_code,
+                )
         except Exception as exc:
             logging.getLogger(__name__).warning(
-                "[durable_workflows] Runtime workflow registration failed for %s: %s",
+                "[durable_workflows] Runtime workflow resolution failed for %s: %s",
                 workflow_id,
                 exc,
             )

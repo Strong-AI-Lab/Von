@@ -4102,6 +4102,10 @@ def _summarise_tool_execution_context(
         aux_llm_calls,
         entry_type="workflow_instance_submission",
     )
+    workflow_use_episode_events = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_use_episode",
+    )
     selected_execution_mode = ""
     dispatch_workflow_id = ""
     contract_resolution_status = ""
@@ -4132,6 +4136,15 @@ def _summarise_tool_execution_context(
                     break
         if not latest_workflow_instance_submission:
             latest_workflow_instance_submission = workflow_instance_submission_events[0]
+    latest_workflow_use_episode: Mapping[str, Any] = {}
+    if workflow_use_episode_events:
+        if selected_workflow_id:
+            for _episode_evt in workflow_use_episode_events:
+                if _safe_str(_episode_evt.get("workflow_id")) == selected_workflow_id:
+                    latest_workflow_use_episode = _episode_evt
+                    break
+        if not latest_workflow_use_episode:
+            latest_workflow_use_episode = workflow_use_episode_events[0]
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
@@ -4255,6 +4268,46 @@ def _summarise_tool_execution_context(
             or _safe_str(submission_payload.get("error"))
             or dispatch_terminal_failure_detail
         )
+    if not dispatch_terminal_status and latest_workflow_use_episode:
+        episode_completed = latest_workflow_use_episode.get("completed")
+        termination_reason = latest_workflow_use_episode.get("termination_reason")
+        termination_reason = (
+            termination_reason if isinstance(termination_reason, Mapping) else {}
+        )
+        episode_terminal_stage = (
+            _safe_str(latest_workflow_use_episode.get("terminal_stage")) or ""
+        )
+        episode_failure_code = _safe_str(termination_reason.get("code")) or ""
+        episode_failure_detail = _safe_str(termination_reason.get("detail")) or ""
+        workflow_access_failure_codes = {
+            "workflow_not_registered",
+            "workflow_definition_not_found",
+            "workflow_lookup_failed",
+            "workflow_access_failure",
+        }
+        if episode_completed is False and (
+            episode_terminal_stage == "workflow_lookup"
+            or episode_failure_code in workflow_access_failure_codes
+            or episode_failure_detail in workflow_access_failure_codes
+        ):
+            dispatch_workflow_id = (
+                _safe_str(latest_workflow_use_episode.get("workflow_id"))
+                or dispatch_workflow_id
+            )
+            if not selected_execution_mode:
+                selected_execution_mode = "custom_workflow"
+            dispatch_terminal_status = "failed"
+            dispatch_terminal_completed = False
+            dispatch_terminal_final_state = (
+                _safe_str(latest_workflow_use_episode.get("final_state"))
+                or dispatch_terminal_final_state
+            )
+            dispatch_terminal_failure_reason = "workflow_access_failure"
+            dispatch_terminal_failure_detail = (
+                episode_failure_detail
+                or episode_failure_code
+                or dispatch_terminal_failure_detail
+            )
 
     invocation_count = len(serialised_invocations)
     observed_started_count = max(progress_tools_started, tool_call_start_event_count)

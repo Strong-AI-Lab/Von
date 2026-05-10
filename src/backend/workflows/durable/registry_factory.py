@@ -16,12 +16,14 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
 from .. import WorkflowRegistry
-from ..workflow_registry import LazyWorkflowRegistration
+from ..engine import WorkflowDefinition
+from ..workflow_registry import LazyWorkflowRegistration, WorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import (
     apply_namespace_to_mcp_payload,
@@ -78,6 +80,40 @@ _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#jira_task_incremental_import_workflow",
     "#V#multilingual_concept_enrichment_rumination_workflow",
 )
+
+
+@dataclass(frozen=True)
+class WorkflowDefinitionAuthorityResolution:
+    """Resolved runtime workflow definition plus authority diagnostics."""
+
+    workflow_id: str
+    registry: WorkflowRegistry | None
+    registration: WorkflowRegistration | None
+    definition: WorkflowDefinition | None
+    registration_source: str
+    known_workflow_ids: tuple[str, ...]
+    definition_identity: Dict[str, Any] | None = None
+    error_code: str | None = None
+    diagnostics: Dict[str, Any] | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.definition is not None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "workflow_id": self.workflow_id,
+            "success": self.success,
+            "registration_source": self.registration_source,
+            "known_workflow_count": len(self.known_workflow_ids),
+        }
+        if isinstance(self.definition_identity, dict):
+            payload["definition_identity"] = dict(self.definition_identity)
+        if isinstance(self.error_code, str) and self.error_code:
+            payload["error_code"] = self.error_code
+        if isinstance(self.diagnostics, dict):
+            payload["diagnostics"] = dict(self.diagnostics)
+        return payload
 
 
 def _utc_now_iso() -> str:
@@ -252,6 +288,210 @@ def register_workflow_from_vontology(
     if not registered:
         return False, "registration_conflict"
     return True, None
+
+
+def _known_workflow_ids_for_registry(registry: WorkflowRegistry | None) -> tuple[str, ...]:
+    if registry is None:
+        return ()
+    try:
+        return tuple(
+            sorted(
+                {
+                    str(item).strip()
+                    for item in getattr(registry, "all_workflow_ids", lambda: [])()
+                    if isinstance(item, str) and str(item).strip()
+                }
+            )
+        )
+    except Exception:
+        return ()
+
+
+def _registration_source_for(
+    registration: WorkflowRegistration | None,
+    *,
+    default: str = "unknown",
+) -> str:
+    if registration is None:
+        return default
+    source = str(getattr(registration, "source", "") or "").strip()
+    return source or default
+
+
+def _promote_workflow_definition_to_registry(
+    *,
+    target_registry: WorkflowRegistry | None,
+    definition: WorkflowDefinition | None,
+    registration_source: str,
+) -> WorkflowRegistration | None:
+    if target_registry is None or definition is None:
+        return None
+    try:
+        target_registry.register_or_replace(
+            WorkflowRegistration(
+                workflow_id=definition.workflow_id,
+                definition=definition,
+                purpose=definition.purpose,
+                source=registration_source or "vontology",
+            )
+        )
+        return target_registry.get_registration(definition.workflow_id)
+    except Exception:
+        logger.debug(
+            "workflow definition promotion failed for %s",
+            getattr(definition, "workflow_id", "<unknown>"),
+            exc_info=True,
+        )
+        return None
+
+
+def resolve_workflow_definition_from_authority(
+    workflow_id: str,
+    *,
+    registry: WorkflowRegistry | None = None,
+    use_current_shared_registry: bool = True,
+    promote_to_registry: WorkflowRegistry | None = None,
+    register_authoritative_fallback: bool = True,
+) -> WorkflowDefinitionAuthorityResolution:
+    """Resolve an executable workflow definition through one runtime authority path.
+
+    Submission, durable workers, and orchestrators must not each invent a
+    slightly different lookup path. This helper keeps the runtime side focused
+    on current registry resolution plus Vontology-backed registration, while
+    leaving workflow policy authored in Vontology/VWL.
+    """
+
+    workflow_id_text = (
+        str(workflow_id).strip()
+        if isinstance(workflow_id, str) and str(workflow_id).strip()
+        else ""
+    )
+    if not workflow_id_text:
+        return WorkflowDefinitionAuthorityResolution(
+            workflow_id="",
+            registry=None,
+            registration=None,
+            definition=None,
+            registration_source="unknown",
+            known_workflow_ids=(),
+            error_code="invalid_workflow_id",
+            diagnostics={
+                "schema_version": "workflow_definition_authority_resolution.v1",
+                "status": "failed",
+                "reason": "invalid_workflow_id",
+            },
+        )
+
+    active_registry = (
+        get_shared_workflow_registry_read_only(defer_parity_work=True)
+        if use_current_shared_registry or registry is None
+        else registry
+    )
+    diagnostics: Dict[str, Any] = {
+        "schema_version": "workflow_definition_authority_resolution.v1",
+        "workflow_id": workflow_id_text,
+        "used_current_shared_registry": bool(use_current_shared_registry),
+        "had_supplied_registry": registry is not None,
+        "promote_to_supplied_registry": promote_to_registry is not None,
+    }
+    registration: WorkflowRegistration | None = None
+    definition: WorkflowDefinition | None = None
+    error_code: str | None = None
+
+    try:
+        definition = active_registry.get(workflow_id_text)
+        registration = active_registry.get_registration(workflow_id_text)
+    except Exception as exc:
+        error_code = f"registry_lookup_failed:{type(exc).__name__}"
+        logger.debug(
+            "workflow definition registry lookup failed for %s",
+            workflow_id_text,
+            exc_info=True,
+        )
+
+    if definition is None and register_authoritative_fallback:
+        try:
+            registered, register_error = register_workflow_from_vontology(
+                registry=active_registry,
+                workflow_id=workflow_id_text,
+            )
+            diagnostics["vontology_registration_attempted"] = True
+            diagnostics["vontology_registration_success"] = bool(registered)
+            if register_error:
+                diagnostics["vontology_registration_error_code"] = register_error
+            if registered:
+                definition = active_registry.get(workflow_id_text)
+                registration = active_registry.get_registration(workflow_id_text)
+                error_code = None if definition is not None else "definition_not_loadable"
+            elif not error_code:
+                error_code = register_error or "definition_not_loadable"
+        except Exception as exc:
+            diagnostics["vontology_registration_attempted"] = True
+            diagnostics["vontology_registration_success"] = False
+            diagnostics["vontology_registration_exception_type"] = type(exc).__name__
+            error_code = f"vontology_registration_failed:{type(exc).__name__}"
+            logger.debug(
+                "workflow definition Vontology registration failed for %s",
+                workflow_id_text,
+                exc_info=True,
+            )
+
+    registration_source = _registration_source_for(
+        registration,
+        default="vontology" if definition is not None else "unknown",
+    )
+    promoted_registration = None
+    if (
+        definition is not None
+        and promote_to_registry is not None
+        and promote_to_registry is not active_registry
+    ):
+        promoted_registration = _promote_workflow_definition_to_registry(
+            target_registry=promote_to_registry,
+            definition=definition,
+            registration_source=registration_source,
+        )
+        diagnostics["promoted_to_supplied_registry"] = promoted_registration is not None
+
+    if promoted_registration is not None:
+        registration = promoted_registration
+
+    definition_identity = None
+    try:
+        from ..workflow_definition_identity_service import (
+            build_workflow_definition_identity,
+        )
+
+        definition_identity = build_workflow_definition_identity(
+            workflow_id=workflow_id_text,
+            source=registration_source or "unknown",
+            definition=definition,
+            authoritative_definition=(
+                definition if registration_source.lower() == "vontology" else None
+            ),
+        )
+    except Exception:
+        logger.debug(
+            "workflow definition identity build failed for %s",
+            workflow_id_text,
+            exc_info=True,
+        )
+
+    diagnostics["status"] = "resolved" if definition is not None else "failed"
+    if error_code:
+        diagnostics["error_code"] = error_code
+
+    return WorkflowDefinitionAuthorityResolution(
+        workflow_id=workflow_id_text,
+        registry=active_registry,
+        registration=registration,
+        definition=definition,
+        registration_source=registration_source,
+        known_workflow_ids=_known_workflow_ids_for_registry(active_registry),
+        definition_identity=definition_identity,
+        error_code=error_code,
+        diagnostics=diagnostics,
+    )
 
 
 def _get_or_build_durable_mcp_gateway():

@@ -13,12 +13,14 @@ from src.backend.workflows.durable.registry_factory import (
     build_durable_action_registry,
     invalidate_shared_durable_action_registry,
     invalidate_shared_workflow_registry_read_only,
+    resolve_workflow_definition_from_authority,
 )
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowStateSpec,
 )
+from src.backend.workflows.workflow_registry import WorkflowRegistry
 from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
@@ -115,6 +117,122 @@ def _make_verification(
         warnings=(),
         errors=(),
     )
+
+
+def test_authority_resolver_uses_current_shared_registry_after_stale_registry_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "#V#conversation_turn_execution_workflow"
+    definition = _make_definition(include_action=False)
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state=definition.initial_state,
+        states=definition.states,
+        termination_states=definition.termination_states,
+        metadata=definition.metadata,
+    )
+    stale_registry = WorkflowRegistry(definition_loader=lambda _workflow_id: None)
+
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [workflow_id])
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        lambda candidate_id: definition if candidate_id == workflow_id else None,
+    )
+
+    invalidate_shared_workflow_registry_read_only()
+    resolution = resolve_workflow_definition_from_authority(
+        workflow_id,
+        registry=stale_registry,
+        use_current_shared_registry=True,
+        promote_to_registry=stale_registry,
+    )
+
+    assert resolution.success is True
+    assert resolution.definition is definition
+    assert resolution.registration_source == "vontology"
+    assert resolution.registry is not stale_registry
+    assert stale_registry.get(workflow_id) is definition
+    assert (resolution.definition_identity or {}).get("source") == "vontology"
+
+
+def test_durable_definition_loader_resolves_after_shared_registry_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "#V#conversation_turn_execution_workflow"
+    definition = _make_definition(include_action=False)
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state=definition.initial_state,
+        states=definition.states,
+        termination_states=definition.termination_states,
+        metadata=definition.metadata,
+    )
+    stale_registry = WorkflowRegistry(definition_loader=lambda _workflow_id: None)
+
+    import src.backend.server.utils_flask as utils_flask
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [workflow_id])
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        lambda candidate_id: definition if candidate_id == workflow_id else None,
+    )
+    monkeypatch.setattr(utils_flask, "_durable_workflow_registry", stale_registry)
+
+    invalidate_shared_workflow_registry_read_only()
+    loader = utils_flask._get_durable_definition_loader()
+
+    assert loader(workflow_id) is definition
+    assert utils_flask._durable_workflow_registry is not stale_registry
+
+
+def test_orchestrator_definition_resolution_refreshes_stale_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "#V#conversation_turn_execution_workflow"
+    definition = _make_definition(include_action=False)
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state=definition.initial_state,
+        states=definition.states,
+        termination_states=definition.termination_states,
+        metadata=definition.metadata,
+    )
+    stale_registry = WorkflowRegistry(definition_loader=lambda _workflow_id: None)
+
+    import src.backend.workflows.durable.registry_factory as registry_factory
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
+
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [workflow_id])
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        lambda candidate_id: definition if candidate_id == workflow_id else None,
+    )
+
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._workflow_registry = stale_registry
+    orchestrator._action_registry = MagicMock()
+    orchestrator._workflow_executor = MagicMock()
+    invalidate_shared_workflow_registry_read_only()
+
+    registration, resolved_definition = (
+        InternalMCPChatOrchestrator._resolve_workflow_registration_and_definition(
+            orchestrator,
+            workflow_id,
+        )
+    )
+
+    assert resolved_definition is definition
+    assert registration is not None
+    assert registration.source == "vontology"
+    assert orchestrator._workflow_registry is not stale_registry
 
 
 def test_verify_workflow_runnable_rejects_initial_vacuous_step() -> None:

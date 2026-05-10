@@ -143,6 +143,7 @@ from ...workflows.workflow_selector import WorkflowSelectionPrompt, WorkflowSele
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
     get_shared_workflow_registry_read_only,
+    resolve_workflow_definition_from_authority,
 )
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
@@ -3531,10 +3532,10 @@ class InternalMCPChatOrchestrator:
         """Resolve a workflow definition from runtime registry or Vontology.
 
         Selector-time launchability checks and execution handoff both need the
-        authoritative workflow definition even when the current registry
-        snapshot does not already contain the workflow ID. Fall back to the
-        Vontology loader and promote the result into the local registry so the
-        remainder of the turn observes a consistent definition/source.
+        authoritative workflow definition even when a registry snapshot has
+        been invalidated or rebuilt. Delegate to the shared runtime resolver so
+        submission, durable workers, and orchestrator execution observe the
+        same Vontology-backed support path.
         """
 
         self._ensure_workflow_runtime_surfaces()
@@ -3546,44 +3547,18 @@ class InternalMCPChatOrchestrator:
         if not workflow_id_text:
             return None, None
 
-        registration = self._workflow_registry.get_registration(workflow_id_text)
-        definition = (
-            registration.definition
-            if registration is not None
-            else self._workflow_registry.get(workflow_id_text)
+        resolution = resolve_workflow_definition_from_authority(
+            workflow_id_text,
+            registry=self._workflow_registry,
+            use_current_shared_registry=True,
+            promote_to_registry=(
+                self._workflow_registry if register_authoritative_fallback else None
+            ),
+            register_authoritative_fallback=register_authoritative_fallback,
         )
-        if definition is not None:
-            return registration, definition
-
-        authoritative_definition = load_workflow_definition_from_vontology(
-            workflow_id_text
-        )
-        if authoritative_definition is None:
-            return registration, None
-
-        if register_authoritative_fallback:
-            try:
-                self._workflow_registry.register_or_replace(
-                    WorkflowRegistration(
-                        workflow_id=authoritative_definition.workflow_id,
-                        definition=authoritative_definition,
-                        purpose=authoritative_definition.purpose,
-                        source="vontology",
-                    )
-                )
-                registration = self._workflow_registry.get_registration(
-                    workflow_id_text
-                )
-                definition = (
-                    registration.definition if registration is not None else None
-                )
-            except Exception:
-                registration = None
-                definition = authoritative_definition
-        else:
-            definition = authoritative_definition
-
-        return registration, definition
+        if resolution.registry is not None:
+            self._workflow_registry = resolution.registry
+        return resolution.registration, resolution.definition
 
     def get_execution_caps(self) -> dict[str, int]:
         return {
@@ -28742,6 +28717,27 @@ class InternalMCPChatOrchestrator:
                 return snapshot
             return None
 
+        def _definition_identity_from_submission(
+            submission_payload: Mapping[str, Any] | None,
+        ) -> dict[str, Any] | None:
+            if not isinstance(submission_payload, Mapping):
+                return None
+            verification = submission_payload.get("verification")
+            if not isinstance(verification, Mapping):
+                return None
+            for phase_key in ("postflight", "preflight"):
+                phase_payload = verification.get(phase_key)
+                if not isinstance(phase_payload, Mapping):
+                    continue
+                identity = phase_payload.get("definition_identity")
+                if isinstance(identity, Mapping):
+                    return {
+                        str(key): value
+                        for key, value in identity.items()
+                        if isinstance(key, str)
+                    }
+            return None
+
         def _extract_workflow_ids(payload: Any, *, key: str) -> list[str]:
             if not isinstance(payload, Mapping):
                 return []
@@ -30051,6 +30047,11 @@ class InternalMCPChatOrchestrator:
                     )
                 durable_instance_id = submission.instance_id
                 durable_instance_created_new = submission.created_new
+                verified_identity = _definition_identity_from_submission(
+                    submission.to_dict()
+                )
+                if isinstance(verified_identity, dict):
+                    workflow_definition_identity = verified_identity
                 _record_durable_instance_submission_event(
                     status="submitted",
                     reason_code=(
