@@ -82,6 +82,14 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
 - `#V#general_mail_review_workflow` resolver step: the workflow-side profile
   resolution is represented; the newly filed concern is the Python mail-profile
   resource vocabulary/materialiser tracked by `JVNAUTOSCI-2296`.
+- `catalogue.py` Gmail profile concept-to-runtime-alias bridge: treat as
+  low-level integration plumbing while it only exposes represented aliases to
+  Gmail tools. Update `JVNAUTOSCI-2296` instead of filing a duplicate if the
+  bridge starts authoring mail-profile vocabulary/facts or silently falls back
+  to unrepresented profile policy.
+- Recent mail-review repo-seed prompt/control edits are covered by the existing
+  repo-seed/workflow-purity track (`JVNAUTOSCI-2080`, `JVNAUTOSCI-2260`) unless
+  they become a distinct runtime authority path not represented in Vontology.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
