@@ -217,6 +217,31 @@ class ActionRegistry:
             self._actions_by_concept_id[concept_id] = spec
         return True
 
+    def replace(self, spec: ActionSpec) -> None:
+        """Register *spec*, replacing any existing action with the same ID."""
+
+        if not isinstance(spec, ActionSpec):
+            raise TypeError("spec must be an ActionSpec")
+        existing = self._actions.get(spec.action_id)
+        if existing is not None:
+            existing_concept_id = str(existing.concept_id or "").strip()
+            if existing_concept_id:
+                current = self._actions_by_concept_id.get(existing_concept_id)
+                if current is existing:
+                    self._actions_by_concept_id.pop(existing_concept_id, None)
+
+        concept_id = str(spec.concept_id or "").strip()
+        if concept_id:
+            existing_by_concept = self._actions_by_concept_id.get(concept_id)
+            if (
+                existing_by_concept is not None
+                and existing_by_concept.action_id != spec.action_id
+            ):
+                self._actions.pop(existing_by_concept.action_id, None)
+        self._actions[spec.action_id] = spec
+        if concept_id:
+            self._actions_by_concept_id[concept_id] = spec
+
     def merge(self, other: "ActionRegistry", *, overwrite: bool = False) -> None:
         """Merge all actions from *other* into this registry.
 

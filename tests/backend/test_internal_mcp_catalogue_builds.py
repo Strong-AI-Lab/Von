@@ -314,6 +314,67 @@ def test_gmail_list_messages_input_schema_accepts_bypass_flag():
     assert "effective_query" in output_description
 
 
+def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp.schemas import (
+        normalise_payload_aliases,
+        validate_payload,
+    )
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("gmail_list_messages")
+    payload = {
+        "profile": "zhan-gmail",
+        "limit": 10,
+        "order_by": "newest",
+        "include_metadata": ["id", "from", "subject", "date"],
+    }
+
+    normalise_payload_aliases(method.input_schema, payload)
+    ok, errors = validate_payload(method.input_schema, payload)
+
+    assert ok, errors
+    assert payload["max_results"] == 10
+    assert "limit" not in payload
+
+
+def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeypatch):
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.services import concept_service
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [], "resultSizeEstimate": 0}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="zhan-gmail",
+        token_path="/tmp/fake-token.json",
+    )
+
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+    monkeypatch.setattr(
+        concept_service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "attributes": {"runtime_profile_alias": "zhan-gmail"},
+        },
+    )
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="#V#gmail_profile_zhan_gmail",
+        max_results=10,
+    )
+
+    assert payload["messages"] == []
+    assert captured_kwargs["profile_id"] == "zhan-gmail"
+    assert payload["profile"] == "zhan-gmail"
+
+
 def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,

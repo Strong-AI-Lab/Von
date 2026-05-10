@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -156,6 +158,36 @@ def test_authority_resolver_uses_current_shared_registry_after_stale_registry_sp
     assert resolution.registry is not stale_registry
     assert stale_registry.get(workflow_id) is definition
     assert (resolution.definition_identity or {}).get("source") == "vontology"
+
+
+def test_authority_resolver_normalises_unprefixed_actor_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    captured: dict[str, str | None] = {}
+
+    @contextmanager
+    def _capture_actor(user_id, org_id):
+        captured["user_id"] = user_id
+        captured["org_id"] = org_id
+        yield
+
+    monkeypatch.setattr(registry_factory, "override_current_actor", _capture_actor)
+
+    resolve_workflow_definition_from_authority(
+        "#V#missing_workflow",
+        registry=WorkflowRegistry(definition_loader=lambda _workflow_id: None),
+        use_current_shared_registry=False,
+        register_authoritative_fallback=False,
+        actor_user_id="michael_witbrock",
+        actor_org_id="university_of_auckland_strong_ai_lab",
+    )
+
+    assert captured == {
+        "user_id": "#V#michael_witbrock",
+        "org_id": "#V#university_of_auckland_strong_ai_lab",
+    }
 
 
 def test_durable_definition_loader_resolves_after_shared_registry_rebuild(

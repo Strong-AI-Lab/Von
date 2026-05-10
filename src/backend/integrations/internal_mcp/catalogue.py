@@ -20045,10 +20045,39 @@ def _gmail_list_profiles(**kwargs):  # noqa: ARG001 (namespace ignored)
     }
 
 
+def _resolve_gmail_profile_argument(profile: Any) -> str | None:
+    """Resolve represented profile resource concepts to runtime Gmail aliases."""
+
+    if not isinstance(profile, str):
+        return None
+    cleaned = profile.strip()
+    if not cleaned:
+        return None
+    if not cleaned.startswith("#V#"):
+        return cleaned
+
+    try:
+        from ...services import concept_service
+
+        concept_doc = concept_service.get_concept_by_concept_id(cleaned)
+    except Exception:
+        concept_doc = None
+    if isinstance(concept_doc, Mapping):
+        attributes = concept_doc.get("attributes")
+        if isinstance(attributes, Mapping):
+            alias = attributes.get("runtime_profile_alias")
+            if isinstance(alias, str) and alias.strip():
+                return alias.strip()
+
+    return cleaned
+
+
 def _gmail_list_messages(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     if not profile:
         return make_error_response(
             "missing_parameter",
@@ -20160,7 +20189,9 @@ def _gmail_list_messages(**kwargs):
 def _gmail_get_message(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     message_id = kwargs.get("message_id")
     if not profile or not message_id:
         return make_error_response(
@@ -27567,19 +27598,24 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "label_ids": list,
             "max_results": (int, type(None)),
             "maxResults": (int, type(None)),
+            "order_by": str,
+            "include_metadata": list,
             "bypass_profile_query_prefix": bool,
         },
         allow_unknown=False,
         description=(
             "List Gmail messages for a profile with optional query/labels "
             "(read-only). Set bypass_profile_query_prefix=true to ignore the "
-            "profile's configured query_prefix and label_filter for this call."
+            "profile's configured query_prefix and label_filter for this call. "
+            "The 'limit' alias maps to max_results; order_by and include_metadata "
+            "are accepted as read-only planning hints."
         ),
         aliases={
             "profile_id": "profile",
             "identity": "profile",
             "user_id": "profile",
             "q": "query",
+            "limit": "max_results",
         },
         batch_propagated_fields=("profile",),
     )

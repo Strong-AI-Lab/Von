@@ -436,3 +436,155 @@ def test_subworkflow_action_compacts_child_runtime_payload_before_propagating() 
     assert "workflow_step_result_envelopes" not in result_payload
     assert "last_workflow_step_result_envelope" not in result_payload
     assert "workflow_result_envelope" not in result_payload
+
+
+def test_subworkflow_action_can_be_rebound_after_registry_merge() -> None:
+    base_registry = ActionRegistry()
+    register_subworkflow_actions(
+        base_registry,
+        definition_loader=lambda workflow_id: (
+            _child_success_definition() if workflow_id == "#V#child_success" else None
+        ),
+    )
+
+    merged_registry = ActionRegistry()
+    merged_registry.merge(base_registry)
+    merged_registry.register(
+        ActionSpec(
+            action_id="child.emit",
+            handler=lambda _request: WorkflowActionResult(outputs={"answer": 42}),
+        )
+    )
+
+    stale_execution = merged_registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+    assert stale_execution.status == "failed"
+    assert "action_not_registered:child.emit" in (stale_execution.error or "")
+
+    register_subworkflow_actions(
+        merged_registry,
+        definition_loader=lambda workflow_id: (
+            _child_success_definition() if workflow_id == "#V#child_success" else None
+        ),
+        overwrite=True,
+    )
+    rebound_execution = merged_registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert rebound_execution.status == "success"
+    result_payload = rebound_execution.outputs.get("result")
+    assert isinstance(result_payload, dict)
+    assert result_payload["answer"] == 42
+
+
+def test_subworkflow_action_can_inherit_parent_context_explicitly() -> None:
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="child.emit",
+            handler=lambda request: WorkflowActionResult(
+                outputs={"answer": request.data.get("augmented_context")}
+            ),
+        )
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            _child_success_definition() if workflow_id == "#V#child_success" else None
+        ),
+    )
+
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "inherit_parent_context": True,
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={
+            "augmented_context": [{"role": "system", "content": "shared"}],
+            "__workflow_subworkflow_invocation_count": 3,
+        },
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "success"
+    result_payload = execution.outputs.get("result")
+    assert isinstance(result_payload, dict)
+    assert result_payload["answer"] == [{"role": "system", "content": "shared"}]
+    assert "__workflow_subworkflow_invocation_count" not in result_payload
+
+
+def test_subworkflow_action_uses_authority_resolver_with_actor_context(
+    monkeypatch,
+) -> None:
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="child.emit",
+            handler=lambda _request: WorkflowActionResult(outputs={"answer": 42}),
+        )
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda _workflow_id: None,
+    )
+    captured: dict[str, object] = {}
+
+    class _Resolution:
+        definition = _child_success_definition()
+
+    def _resolve_from_authority(workflow_id: str, **kwargs):
+        captured["workflow_id"] = workflow_id
+        captured.update(kwargs)
+        return _Resolution()
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory."
+        "resolve_workflow_definition_from_authority",
+        _resolve_from_authority,
+    )
+
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=(
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            ),
+        ),
+        trace=None,
+    )
+
+    assert execution.status == "success"
+    assert captured["workflow_id"] == "#V#child_success"
+    assert captured["use_current_shared_registry"] is True
+    assert captured["promote_to_registry"] is registry
+    assert captured["actor_user_id"] == "#V#michael_witbrock"
+    assert captured["actor_org_id"] == "#V#university_of_auckland_strong_ai_lab"

@@ -73,6 +73,7 @@ _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
     "__workflow_invocation_chain",
     "failure_mode",
     "__failure_mode",
+    "inherit_parent_context",
     "max_transitions",
 }
 _INVOCATION_CHAIN_KEY = "__workflow_invocation_chain"
@@ -193,11 +194,22 @@ def _resolve_failure_mode(inputs: Mapping[str, Any]) -> str:
 def _extract_child_inputs(
     *,
     inputs: Mapping[str, Any],
+    parent_context: Mapping[str, Any],
     invocation_chain: Sequence[str],
     parent_workflow_id: str,
     parent_state_id: str,
 ) -> Dict[str, Any]:
     child_inputs: Dict[str, Any] = {}
+    if bool(inputs.get("inherit_parent_context")):
+        for key, value in parent_context.items():
+            key_text = _normalise_text(key)
+            if (
+                not key_text
+                or key_text.startswith("__workflow")
+                or key_text in _INTERNAL_CHILD_RESULT_KEYS
+            ):
+                continue
+            child_inputs[key_text] = value
     for key, value in inputs.items():
         key_text = _normalise_text(key)
         if not key_text or key_text in _RESERVED_SUBWORKFLOW_INPUT_KEYS:
@@ -307,6 +319,30 @@ def _build_subworkflow_handler(
 
         definition = definition_loader(child_workflow_id)
         if definition is None:
+            try:
+                from ...services.namespace_service import (
+                    derive_actor_context_from_namespace,
+                )
+                from .registry_factory import resolve_workflow_definition_from_authority
+
+                namespace_user, namespace_org = derive_actor_context_from_namespace(
+                    request.environment.user_namespace
+                )
+                actor_user_id = request.environment.user_concept_id or namespace_user
+                actor_org_id = request.environment.org_concept_id or namespace_org
+                resolution = resolve_workflow_definition_from_authority(
+                    child_workflow_id,
+                    registry=None,
+                    use_current_shared_registry=True,
+                    promote_to_registry=registry,
+                    register_authoritative_fallback=True,
+                    actor_user_id=actor_user_id,
+                    actor_org_id=actor_org_id,
+                )
+                definition = resolution.definition
+            except Exception:
+                definition = None
+        if definition is None:
             return WorkflowActionResult(
                 status="failed",
                 error=f"subworkflow_definition_not_found:{child_workflow_id}",
@@ -315,6 +351,7 @@ def _build_subworkflow_handler(
         child_chain = [*invocation_chain, child_workflow_id]
         child_inputs = _extract_child_inputs(
             inputs=inputs,
+            parent_context=request.data,
             invocation_chain=child_chain,
             parent_workflow_id=parent_workflow_id,
             parent_state_id=parent_state_id,
@@ -425,6 +462,7 @@ def register_subworkflow_actions(
     registry: ActionRegistry,
     *,
     definition_loader: Callable[[str], WorkflowDefinition | None] | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Register the canonical subworkflow invocation action.
 
@@ -432,16 +470,18 @@ def register_subworkflow_actions(
     a known action ID instead of relying on fallback tool routing.
     """
     loader = definition_loader or load_workflow_definition_from_vontology
-    registry.register_if_absent(
-        ActionSpec(
-            action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-            handler=_build_subworkflow_handler(
-                registry=registry,
-                definition_loader=loader,
-            ),
-            description="Invoke a child workflow using explicit subworkflow contracts.",
-        )
+    spec = ActionSpec(
+        action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        handler=_build_subworkflow_handler(
+            registry=registry,
+            definition_loader=loader,
+        ),
+        description="Invoke a child workflow using explicit subworkflow contracts.",
     )
+    if overwrite:
+        registry.replace(spec)
+    else:
+        registry.register_if_absent(spec)
 
 
 __all__ = ["register_subworkflow_actions"]

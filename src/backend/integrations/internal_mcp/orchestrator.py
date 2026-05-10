@@ -145,6 +145,7 @@ from ...workflows.durable.registry_factory import (
     get_shared_workflow_registry_read_only,
     resolve_workflow_definition_from_authority,
 )
+from ...workflows.durable.subworkflow_actions import register_subworkflow_actions
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
     render_selected_workflow_user_response,
@@ -3966,6 +3967,14 @@ class InternalMCPChatOrchestrator:
             )
         )
         registry.merge(override_registry, overwrite=True)
+        # The shared durable registry's subworkflow handler closes over the
+        # shared registry. Rebind it here so selected-workflow child execution
+        # sees the orchestrator's tool-calling and turn-control action handlers.
+        register_subworkflow_actions(
+            registry,
+            definition_loader=load_workflow_definition_from_vontology,
+            overwrite=True,
+        )
 
         # JVNAUTOSCI-922 Phase 3.1: Fallback handler for Vontology-defined
         # MCP tool actions.  Any action_id not explicitly registered is

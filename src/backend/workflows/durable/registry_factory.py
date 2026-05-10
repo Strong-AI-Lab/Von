@@ -322,6 +322,15 @@ def _registration_source_for(
     return source or default
 
 
+def _normalise_actor_concept_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("#"):
+        return text
+    return f"#V#{text}"
+
+
 def _promote_workflow_definition_to_registry(
     *,
     target_registry: WorkflowRegistry | None,
@@ -388,6 +397,8 @@ def resolve_workflow_definition_from_authority(
             },
         )
 
+    actor_user_id = _normalise_actor_concept_id(actor_user_id)
+    actor_org_id = _normalise_actor_concept_id(actor_org_id)
     active_registry = (
         get_shared_workflow_registry_read_only(defer_parity_work=True)
         if use_current_shared_registry or registry is None

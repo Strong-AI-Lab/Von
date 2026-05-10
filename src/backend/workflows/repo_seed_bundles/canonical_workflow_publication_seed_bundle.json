@@ -1580,7 +1580,7 @@
                   ]
                 },
                 "reason": "represented_mail_profile_resolved",
-                "to_state": "delegate_to_tool_pipeline"
+                "to_state": "prepare_mail_review_tool_prompt"
               },
               {
                 "condition_spec": {
@@ -1624,7 +1624,7 @@
                   "limit": 40
                 }
               },
-              "response_contract_text": "Resolve the Gmail/mail profile from represented Vontology resource facts before any mail tool is called. Use the authenticated user concept from user_concept_id, user_id, or the user part of namespace. Inspect relationships from that user with predicates #V#has_authorised_mail_profile and #V#has_default_mail_profile, then fetch any candidate profile concepts you need. Select a profile only when it is represented for the user and either explicitly named by the request, marked as default, or the only authorised mail profile. Do not use environment defaults, tool defaults, or unrepresented profile strings. Return JSON only with keys mail_profile_resolution_status, mail_review_profile_id, mail_profile_resource_concept_id, mail_profile_candidates, and mail_profile_resolution_reason. Set mail_review_profile_id to the runtime_profile_alias attribute or alias concept value such as vonwitbrock-gmail, not the #V# concept id. If no represented profile is available or multiple profiles remain ambiguous, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id to null, include candidates if known, and do not call Gmail tools.",
+              "response_contract_text": "Resolve the Gmail/mail profile from represented Vontology resource facts before any mail tool is called. Use the authenticated user concept from user_concept_id, user_id, or the user part of namespace. Inspect relationships from that user with predicates #V#has_authorised_mail_profile and #V#has_default_mail_profile, then fetch any candidate profile concepts you need. Select a profile only when it is represented for the user and either explicitly named by the request, marked as default, or the only authorised mail profile. Do not use environment defaults, tool defaults, or unrepresented profile strings. Return JSON only with keys mail_profile_resolution_status, mail_review_profile_id, mail_profile_resource_concept_id, mail_profile_candidates, and mail_profile_resolution_reason. Set mail_review_profile_id to the runtime_profile_alias attribute or #V#has_runtime_profile_alias alias concept value such as vonwitbrock-gmail. mail_review_profile_id must be the runtime alias accepted by Gmail tools, must not start with #V#, and must not be a profile resource concept id such as #V#gmail_profile_zhan_gmail. If the selected represented profile concept lacks a runtime_profile_alias, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id to null, include candidates if known, and do not call Gmail tools. If no represented profile is available or multiple profiles remain ambiguous, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id to null, include candidates if known, and do not call Gmail tools.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -1716,8 +1716,6 @@
               "output_format": "json_value",
               "required_json_fields": [
                 "mail_profile_resolution_status",
-                "mail_review_profile_id",
-                "mail_profile_resource_concept_id",
                 "mail_profile_candidates",
                 "mail_profile_resolution_reason"
               ]
@@ -1791,11 +1789,108 @@
             ]
           },
           {
+            "action_id": "workflow_control.context_template",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "mail_review_tool_prompt_ready",
+                "to_state": "delegate_to_tool_pipeline"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "state_id": "prepare_mail_review_tool_prompt",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "mail_review_tool_prompt",
+                    "template": "Mail review request: {prompt}\n\nResolved Gmail profile: {gmail_profile}\n\nUse the resolved Gmail profile as the Gmail tool profile. First call gmail_list_messages with profile {gmail_profile}, max_results {mail_review_limit}, and bypass_profile_query_prefix true. Ground the answer only in Gmail tool results. If gmail_list_messages fails, report that concrete Gmail access error instead of searching Vontology or substituting concept evidence.",
+                    "variables": {
+                      "prompt": {
+                        "value_from_context": "prompt",
+                        "default": ""
+                      },
+                      "gmail_profile": {
+                        "value_from_context": "gmail_profile",
+                        "default": ""
+                      },
+                      "mail_review_limit": {
+                        "value_from_context": "mail_review_limit",
+                        "default": 10
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "mail_review_tool_prompt"
+            ]
+          },
+          {
             "action_concept_id": null,
             "action_id": "workflow_invoke_subworkflow",
             "concept_id": null,
             "conditional_transitions": [],
-            "context_input_mapping_specs": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt",
+                "context_key": "mail_review_tool_prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt_for_requirements",
+                "context_key": "mail_review_tool_prompt",
+                "required": true,
+                "tool_param": "prompt_for_requirements"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_gmail_profile_to_gmail_profile",
+                "context_key": "gmail_profile",
+                "required": true,
+                "tool_param": "gmail_profile"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_profile_id_to_mail_review_profile_id",
+                "context_key": "mail_review_profile_id",
+                "required": false,
+                "tool_param": "mail_review_profile_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_limit_to_mail_review_limit",
+                "context_key": "mail_review_limit",
+                "required": false,
+                "tool_param": "mail_review_limit"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_query_to_mail_review_query",
+                "context_key": "mail_review_query",
+                "required": false,
+                "tool_param": "mail_review_query"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_label_filter_to_mail_review_label_filter",
+                "context_key": "mail_review_label_filter",
+                "required": false,
+                "tool_param": "mail_review_label_filter"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_output_shape_to_mail_review_output_shape",
+                "context_key": "mail_review_output_shape",
+                "required": false,
+                "tool_param": "mail_review_output_shape"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_output_fields_to_mail_review_output_fields",
+                "context_key": "mail_review_output_fields",
+                "required": false,
+                "tool_param": "mail_review_output_fields"
+              }
+            ],
             "context_input_mappings": [],
             "effects": [],
             "execution_mode": "subworkflow",
@@ -1812,7 +1907,19 @@
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "delegate_to_tool_pipeline",
-            "static_input_bindings": [],
+            "static_input_bindings": [
+              [
+                "inherit_parent_context",
+                true
+              ],
+              [
+                "llm_allowed_tools",
+                [
+                  "gmail_list_messages",
+                  "gmail_get_message"
+                ]
+              ]
+            ],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,

@@ -308,6 +308,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "runtime_profile_alias" in mail_review_resolver_action.llm_policy[
         "response_contract_text"
     ]
+    assert "must not start with #V#" in mail_review_resolver_action.llm_policy[
+        "response_contract_text"
+    ]
     resolver_branch_targets = {
         transition.to_state
         for transition in mail_review_definition.states[
@@ -317,7 +320,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert {
         authority_service._step_concept_id(
             workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
-            state_id="delegate_to_tool_pipeline",
+            state_id="prepare_mail_review_tool_prompt",
         ),
         authority_service._step_concept_id(
             workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
@@ -327,6 +330,18 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "gmail_profile" in mail_review_definition.states[
         mail_review_resolver_step_id
     ].metadata.get("writes_context_keys", [])
+    resolver_validation_policy = mail_review_resolver_action.validation_policy
+    assert isinstance(resolver_validation_policy, dict)
+    resolver_required_fields = set(
+        resolver_validation_policy.get("required_json_fields") or []
+    )
+    assert {
+        "mail_profile_resolution_status",
+        "mail_profile_candidates",
+        "mail_profile_resolution_reason",
+    }.issubset(resolver_required_fields)
+    assert "mail_review_profile_id" not in resolver_required_fields
+    assert "mail_profile_resource_concept_id" not in resolver_required_fields
     profile_choice_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="profile_choice_needed",
@@ -335,6 +350,23 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         profile_choice_step_id
     ].actions[0]
     assert profile_choice_action.action_id == "workflow_control.context_template"
+    mail_review_prompt_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="prepare_mail_review_tool_prompt",
+    )
+    mail_review_prompt_action = mail_review_definition.states[
+        mail_review_prompt_step_id
+    ].actions[0]
+    assert mail_review_prompt_action.action_id == "workflow_control.context_template"
+    prompt_assignments = mail_review_prompt_action.inputs.get("assignments")
+    assert isinstance(prompt_assignments, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("key") == "mail_review_tool_prompt"
+        and "gmail_list_messages" in str(item.get("template") or "")
+        and "bypass_profile_query_prefix" in str(item.get("template") or "")
+        for item in prompt_assignments
+    )
     mail_review_delegate_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="delegate_to_tool_pipeline",
@@ -344,6 +376,31 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     ].actions[0]
     assert mail_review_delegate_action.action_id == "workflow_invoke_subworkflow"
     assert mail_review_delegate_action.subworkflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert mail_review_delegate_action.inputs["inherit_parent_context"] is True
+    assert mail_review_delegate_action.inputs["prompt"] == {
+        "$context_key": "mail_review_tool_prompt",
+        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt",
+        "$required": True,
+    }
+    assert mail_review_delegate_action.inputs["prompt_for_requirements"] == {
+        "$context_key": "mail_review_tool_prompt",
+        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt_for_requirements",
+        "$required": True,
+    }
+    assert mail_review_delegate_action.inputs["llm_allowed_tools"] == [
+        "gmail_list_messages",
+        "gmail_get_message",
+    ]
+    assert mail_review_delegate_action.inputs["gmail_profile"] == {
+        "$context_key": "gmail_profile",
+        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_gmail_profile_to_gmail_profile",
+        "$required": True,
+    }
+    assert mail_review_delegate_action.inputs["mail_review_profile_id"] == {
+        "$context_key": "mail_review_profile_id",
+        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_profile_id_to_mail_review_profile_id",
+        "$required": False,
+    }
     launch_contract = mail_review_definition.metadata.get("launch_input_contract")
     assert isinstance(launch_contract, dict)
     assert launch_contract.get("required_inputs") == ["prompt"]
