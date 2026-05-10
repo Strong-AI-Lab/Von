@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "12",
+  "seed_version": "13",
   "workflows": [
     {
       "publication_spec": {
@@ -1548,8 +1548,128 @@
         ]
       },
       "publication_spec": {
-        "initial_state": "resolve_mail_profile",
+        "initial_state": "capture_authenticated_mail_user",
         "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_template",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "authenticated_mail_user_captured",
+                "to_state": "lookup_represented_mail_profiles"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "capture_authenticated_mail_user",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "mail_review_authenticated_user_concept_id",
+                    "template": "{user_concept_id}",
+                    "variables": {
+                      "user_concept_id": {
+                        "value_from_request": "environment.user_concept_id",
+                        "default": ""
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "mail_review_authenticated_user_concept_id"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_mcp.invoke_tool",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "represented_mail_profile_relations_loaded",
+                "to_state": "resolve_mail_profile"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "lookup_represented_mail_profiles",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "find_relations_with_argument"
+              ],
+              [
+                "tool_arguments",
+                {
+                  "concept_id": {
+                    "$context_key": "mail_review_authenticated_user_concept_id"
+                  },
+                  "argument_index": "subject",
+                  "predicate_filter": [
+                    "#V#has_authorised_mail_profile",
+                    "#V#has_default_mail_profile"
+                  ],
+                  "relation_kind": "any",
+                  "include_concept_preview": true,
+                  "include_text_snippets": false,
+                  "limit": 20
+                }
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_mail_profile_relation_lookup_result_to_mail_profile_relation_lookup_result",
+                "tool_output_field": "result",
+                "context_key": "mail_profile_relation_lookup_result"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "mail_profile_relation_lookup_result"
+            ]
+          },
           {
             "action_concept_id": null,
             "action_id": "mail_review.resolve_profile",
@@ -1597,7 +1717,7 @@
             "invoked_workflow_id": null,
             "llm_policy": {
               "policy_stage": "mail_profile_resolution",
-              "prompt_text": "You are resolving the represented mail profile for a mail-review workflow step. Use only grounded Vontology tool evidence and the supplied workflow context. Do not call Gmail tools in this step. Return the requested JSON decision after inspecting the user's represented mail-profile resource facts.",
+              "prompt_text": "You are resolving the represented mail profile for a mail-review workflow step. Use only grounded Vontology relation evidence and the supplied workflow context. A deterministic workflow step has already queried the authenticated user's represented mail-profile facts. Do not call Gmail tools in this step. Return the requested JSON decision from the represented profile evidence.",
               "tool_mode": "allowed",
               "allowed_tools": [
                 "fetch_concept",
@@ -1605,9 +1725,7 @@
                 "find_relations_with_argument",
                 "search_concepts"
               ],
-              "required_tools": [
-                "find_relations_with_argument"
-              ],
+              "required_tools": [],
               "max_tool_invocations": 6,
               "tool_argument_defaults": {
                 "find_relations_with_argument": {
@@ -1624,7 +1742,7 @@
                   "limit": 40
                 }
               },
-              "response_contract_text": "Resolve the Gmail/mail profile from represented Vontology resource facts before any mail tool is called. Use the authenticated user concept from user_concept_id, user_id, or the user part of namespace. Inspect relationships from that user by calling find_relations_with_argument with concept_id set to the authenticated user concept, argument_index set to subject, and predicate_filter set to [\"#V#has_authorised_mail_profile\", \"#V#has_default_mail_profile\"]; do not use predicate_concept_id for this tool. Then fetch any candidate profile concepts you need. Select a profile only when it is represented for the user and either explicitly named by the request, marked as default, or the only authorised mail profile. Do not use environment defaults, tool defaults, or unrepresented profile strings. Return JSON only with keys mail_profile_resolution_status, mail_review_profile_id, mail_profile_resource_concept_id, mail_profile_candidates, and mail_profile_resolution_reason. Set mail_review_profile_id to the runtime_profile_alias attribute or #V#has_runtime_profile_alias alias concept value such as vonwitbrock-gmail. mail_review_profile_id must be the runtime alias accepted by Gmail tools, must not start with #V#, and must not be a profile resource concept id such as #V#gmail_profile_zhan_gmail. If the selected represented profile concept lacks a runtime_profile_alias, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id to null, include candidates if known, and do not call Gmail tools. If no represented profile is available or multiple profiles remain ambiguous, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id to null, include candidates if known, and do not call Gmail tools.",
+              "response_contract_text": "Resolve the Gmail/mail profile from represented Vontology resource facts before any mail tool is called. The workflow has already populated mail_profile_relation_lookup_result by invoking find_relations_with_argument with concept_id set to the authenticated user concept, argument_index set to subject, predicate_filter set to [\"#V#has_authorised_mail_profile\", \"#V#has_default_mail_profile\"], and no predicate_concept_id. Treat that context field as the primary authority for available represented mail profiles. You may fetch candidate profile concepts only when needed to read runtime_profile_alias or #V#has_runtime_profile_alias. Select a profile automatically when it is explicitly named by the request, marked by #V#has_default_mail_profile, or is the only authorised mail profile. If a #V#has_default_mail_profile relation exists, select that default represented profile even when other authorised profiles also exist; do not ask the user to choose in that case. Do not use environment defaults, tool defaults, or unrepresented profile strings. Return JSON only with keys mail_profile_resolution_status, mail_review_profile_id, mail_profile_resource_concept_id, mail_profile_candidates, and mail_profile_resolution_reason. Set mail_profile_resolution_status to resolved when a represented profile is selected. Set mail_profile_resource_concept_id to the represented Gmail profile resource concept ID such as #V#gmail_profile_vonwitbrock_gmail or #V#gmail_profile_zhan_gmail. The downstream Gmail tool profile is mapped from mail_profile_resource_concept_id so the tool can resolve the canonical runtime alias. Set mail_review_profile_id to the runtime_profile_alias attribute or #V#has_runtime_profile_alias alias concept value such as vonwitbrock-gmail when that exact alias is available. Never derive mail_review_profile_id by stripping #V#gmail_profile_ or by converting concept-id underscores; vonwitbrock_gmail is not a valid runtime alias. If the exact runtime alias is not available but the represented profile concept is available, still set mail_profile_resource_concept_id and mail_profile_resolution_status to resolved. If no represented profile concept is available, set mail_profile_resolution_status to needs_user_choice, set mail_review_profile_id and mail_profile_resource_concept_id to null, include candidates if known, and do not call Gmail tools. Only set mail_profile_resolution_status to needs_user_choice when no represented profile is available or multiple authorised profiles remain after applying explicit-name and default-profile evidence.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -1649,6 +1767,10 @@
                 {
                   "context_key": "org_concept_id",
                   "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "mail_profile_relation_lookup_result",
+                  "label": "Deterministic represented mail-profile relation lookup result"
                 },
                 {
                   "context_key": "mail_review_limit",
@@ -1686,7 +1808,7 @@
               },
               {
                 "concept_id": "#V#workflow_mapping_mail_profile_resolution_profile_id_to_gmail_profile",
-                "tool_output_field": "validated_json.mail_review_profile_id",
+                "tool_output_field": "validated_json.mail_profile_resource_concept_id",
                 "context_key": "gmail_profile"
               },
               {
@@ -1807,7 +1929,7 @@
                 [
                   {
                     "key": "mail_review_tool_prompt",
-                    "template": "Mail review request: {prompt}\n\nResolved Gmail profile: {gmail_profile}\n\nUse the resolved Gmail profile as the Gmail tool profile. First call gmail_list_messages with profile {gmail_profile}, max_results {mail_review_limit}, and bypass_profile_query_prefix true. Ground the answer only in Gmail tool results. If gmail_list_messages fails, report that concrete Gmail access error instead of searching Vontology or substituting concept evidence.",
+                    "template": "Mail review request: {prompt}\n\nResolved Gmail profile: {gmail_profile}\nResolved workflow message limit, if supplied by selector metadata: {mail_review_limit}\n\nUse the resolved Gmail profile as the Gmail tool profile. First call gmail_list_messages with profile {gmail_profile}, max_results equal to the explicit numeric message count in the mail review request, and bypass_profile_query_prefix true. If the request does not contain an explicit numeric count, use the resolved workflow message limit when it is numeric; otherwise use max_results 10. Then call gmail_get_message only for messages that are needed to answer the requested count, using the exact message_id value returned by gmail_list_messages. Do not invent message IDs, do not use row numbers or placeholder IDs, and do not substitute thread IDs unless the list response explicitly lacks message_id and exposes Gmail id as the message identifier. Ground the answer only in Gmail tool results. If gmail_list_messages fails, report that concrete Gmail access error instead of searching Vontology or substituting concept evidence.",
                     "variables": {
                       "prompt": {
                         "value_from_context": "prompt",
@@ -1819,7 +1941,7 @@
                       },
                       "mail_review_limit": {
                         "value_from_context": "mail_review_limit",
-                        "default": 10
+                        "default": "not supplied"
                       }
                     }
                   }

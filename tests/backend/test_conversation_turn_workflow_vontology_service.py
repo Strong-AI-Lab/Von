@@ -283,6 +283,54 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         GENERAL_MAIL_REVIEW_WORKFLOW_ID
     )
     assert mail_review_definition is not None
+    mail_review_capture_user_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="capture_authenticated_mail_user",
+    )
+    assert mail_review_definition.initial_state == mail_review_capture_user_step_id
+    mail_review_capture_user_action = mail_review_definition.states[
+        mail_review_capture_user_step_id
+    ].actions[0]
+    assert mail_review_capture_user_action.action_id == (
+        "workflow_control.context_template"
+    )
+    assert "mail_review_authenticated_user_concept_id" in mail_review_definition.states[
+        mail_review_capture_user_step_id
+    ].metadata.get("writes_context_keys", [])
+    mail_review_lookup_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="lookup_represented_mail_profiles",
+    )
+    mail_review_lookup_action = mail_review_definition.states[
+        mail_review_lookup_step_id
+    ].actions[0]
+    assert mail_review_lookup_action.action_id == "workflow_mcp.invoke_tool"
+    assert mail_review_lookup_action.execution_mode == "deterministic"
+    assert mail_review_lookup_action.inputs["tool_name"] == (
+        "find_relations_with_argument"
+    )
+    assert mail_review_lookup_action.inputs["tool_arguments"] == {
+        "concept_id": {"$context_key": "mail_review_authenticated_user_concept_id"},
+        "argument_index": "subject",
+        "predicate_filter": [
+            "#V#has_authorised_mail_profile",
+            "#V#has_default_mail_profile",
+        ],
+        "relation_kind": "any",
+        "include_concept_preview": True,
+        "include_text_snippets": False,
+        "limit": 20,
+    }
+    assert "mail_profile_relation_lookup_result" in mail_review_definition.states[
+        mail_review_lookup_step_id
+    ].metadata.get("writes_context_keys", [])
+    assert any(
+        mapping.get("tool_output_field") == "result"
+        and mapping.get("context_key") == "mail_profile_relation_lookup_result"
+        for mapping in mail_review_definition.states[
+            mail_review_lookup_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
     mail_review_resolver_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="resolve_mail_profile",
@@ -294,9 +342,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_resolver_action.execution_mode == "llm"
     assert mail_review_resolver_action.llm_policy is not None
     assert mail_review_resolver_action.llm_policy.get("prompt_text")
-    assert "find_relations_with_argument" in mail_review_resolver_action.llm_policy.get(
-        "required_tools", []
-    )
+    assert mail_review_resolver_action.llm_policy.get("required_tools") == []
     assert (
         "#V#has_authorised_mail_profile"
         in mail_review_resolver_action.llm_policy["response_contract_text"]
@@ -310,16 +356,29 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         in mail_review_resolver_action.llm_policy["response_contract_text"]
     )
     assert (
+        "mail_profile_relation_lookup_result"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "mail_profile_resource_concept_id"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
         "predicate_filter"
         in mail_review_resolver_action.llm_policy["response_contract_text"]
     )
     assert (
-        "do not use predicate_concept_id"
+        "no predicate_concept_id"
         in mail_review_resolver_action.llm_policy["response_contract_text"]
     )
     assert (
-        "must not start with #V#"
+        "vonwitbrock_gmail is not a valid runtime alias"
         in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert any(
+        field.get("context_key") == "mail_profile_relation_lookup_result"
+        for field in mail_review_resolver_action.llm_policy.get("context_fields", [])
+        if isinstance(field, dict)
     )
     resolver_branch_targets = {
         transition.to_state
@@ -340,6 +399,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "gmail_profile" in mail_review_definition.states[
         mail_review_resolver_step_id
     ].metadata.get("writes_context_keys", [])
+    assert any(
+        mapping.get("tool_output_field")
+        == "validated_json.mail_profile_resource_concept_id"
+        and mapping.get("context_key") == "gmail_profile"
+        for mapping in mail_review_definition.states[
+            mail_review_resolver_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
     resolver_validation_policy = mail_review_resolver_action.validation_policy
     assert isinstance(resolver_validation_policy, dict)
     resolver_required_fields = set(
@@ -374,6 +441,8 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         isinstance(item, dict)
         and item.get("key") == "mail_review_tool_prompt"
         and "gmail_list_messages" in str(item.get("template") or "")
+        and "explicit numeric message count" in str(item.get("template") or "")
+        and "exact message_id value" in str(item.get("template") or "")
         and "bypass_profile_query_prefix" in str(item.get("template") or "")
         for item in prompt_assignments
     )
