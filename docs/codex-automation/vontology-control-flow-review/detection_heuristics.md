@@ -56,6 +56,11 @@ represented authority before filing Jira work.
   predicates, user-authorisation/default relationships, or concept IDs from
   configured aliases are strong drift candidates. A represented workflow
   consuming those facts does not make Python the correct source of the facts.
+- Durable modules that build `WorkflowDefinition(...)` graphs, register them as
+  `source="built_in"`, and also own diagnosis, repair, or remediation wording
+  are strong drift candidates. Even "maintenance" workflows should be
+  Vontology-stored VWL; Python should expose only reusable actions and
+  telemetry.
 
 ## Recent Examples
 
@@ -66,3 +71,6 @@ represented authority before filing Jira work.
   policy in Python.
 - `JVNAUTOSCI-2296` - mail-profile resource vocabulary, predicates, alias
   concepts, and user/default-profile facts authored by Python materialisation.
+- `JVNAUTOSCI-2302` - workflow-introspection maintenance workflow graph,
+  diagnosis/repair policy, prompt patch text, and Jira remediation wording in
+  Python.
