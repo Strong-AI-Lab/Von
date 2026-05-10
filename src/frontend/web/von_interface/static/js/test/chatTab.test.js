@@ -5611,6 +5611,31 @@ describe('chat session composer state', () => {
         expect(promptInput.value).toBe('');
         expect(overlayContent.textContent).toBe('');
     });
+
+    test('does not call generate when local premium is disabled and no Ollama model is selected', async () => {
+        try {
+            localStorage.setItem('von:localModelPreference', JSON.stringify({
+                schemaVersion: 'localModelPreference.v1',
+                activeSource: 'ollama',
+                openaiModel: 'gpt-5.4-mini',
+                ollamaSelection: null,
+            }));
+            __testOnly_setActiveChatSession('session-local-model', 'Local model session');
+            const promptInput = document.getElementById('promptInput');
+            promptInput.value = 'Summarise today';
+            global.fetch = jest.fn();
+
+            await expect(sendMessage()).resolves.toBeUndefined();
+
+            expect(global.fetch).not.toHaveBeenCalled();
+            expect(promptInput.value).toBe('Summarise today');
+            expect(document.body.textContent).toContain(
+                'No usable model configured. Choose an Ollama model in Settings or enable premium model use.'
+            );
+        } finally {
+            localStorage.removeItem('von:localModelPreference');
+        }
+    });
 });
 
 describe('chat cartouche hydration retries', () => {

@@ -112,6 +112,43 @@ describe('local model preferences', () => {
         expect(resolveLocalRequestedLlm()).toBeNull();
     });
 
+    test('marks disabled premium with no Ollama selection as an unavailable local model state', async () => {
+        const {
+            applyLocalModelPreferenceOverlay,
+            getEffectiveLocalModelPreference,
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredOpenAiSelectedModel,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenAiSelectedModel('gpt-5.4-mini');
+        setLocalPremiumModelUseEnabled(false);
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        });
+        expect(getEffectiveLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+            requestedLlm: null,
+            modelUnavailable: true,
+            modelUnavailableReason: 'premium_disabled_no_ollama_model',
+        });
+        expect(resolveLocalRequestedLlm()).toBeNull();
+        expect(applyLocalModelPreferenceOverlay({
+            active_llm: { provider: 'openai', model: 'gpt-5.4-mini' },
+        })).toEqual({
+            active_llm: null,
+            local_model_unavailable_reason: 'premium_disabled_no_ollama_model',
+        });
+    });
+
     test('migrates legacy premium-openai state into the canonical local model preference', async () => {
         const {
             getStoredLocalModelPreference,
@@ -167,6 +204,8 @@ describe('local model preferences', () => {
                 host: 'http://localhost:11434',
                 requestModel: 'ollama:llama3.1:8b',
             },
+            modelUnavailable: false,
+            modelUnavailableReason: null,
         });
         expect(resolveLocalRequestedLlm()).toEqual({
             provider: 'ollama',

@@ -1,6 +1,6 @@
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
-import { resolveLocalRequestedLlm } from './utils/localModelPreferences.js';
+import { getEffectiveLocalModelPreference, resolveLocalRequestedLlm } from './utils/localModelPreferences.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
@@ -70,6 +70,22 @@ function buildChatFetchHeaders(extraHeaders = {}) {
         headers['X-User-Concept-ID'] = userConceptId;
     }
     return headers;
+}
+
+const LOCAL_MODEL_UNAVAILABLE_CHAT_MESSAGE = 'No usable model configured. Choose an Ollama model in Settings or enable premium model use.';
+
+function getUnavailableLocalModelPreferenceForChat() {
+    const preference = getEffectiveLocalModelPreference();
+    return preference?.modelUnavailable === true ? preference : null;
+}
+
+function notifyUnavailableLocalModelForChat() {
+    showToast(LOCAL_MODEL_UNAVAILABLE_CHAT_MESSAGE, 'error');
+    try {
+        openSettingsTabAndFocus('von:focus-model-settings');
+    } catch (_) {
+        // Best-effort navigation only; the fail-closed guard is the important part.
+    }
 }
 
 // Store LLM debug data for each turn
@@ -25933,6 +25949,15 @@ async function drainQueuedChatPromptIfIdle() {
         return;
     }
 
+    if (getUnavailableLocalModelPreferenceForChat()) {
+        nextEntry.syncError = LOCAL_MODEL_UNAVAILABLE_CHAT_MESSAGE;
+        renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
+        notifyUnavailableLocalModelForChat();
+        return;
+    }
+
     if (nextEntry.queueId) {
         try {
             nextEntry = await persistQueuedPromptUpdateNow(nextEntry);
@@ -26020,6 +26045,13 @@ async function handleSendPrompt(options = {}) {
     if (!promptText) {
         if (!fromQueue) {
             alert('Please enter a prompt.');
+        }
+        return;
+    }
+
+    if (getUnavailableLocalModelPreferenceForChat()) {
+        if (!fromQueue) {
+            notifyUnavailableLocalModelForChat();
         }
         return;
     }
@@ -29129,7 +29161,4 @@ export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
-
-
-
 

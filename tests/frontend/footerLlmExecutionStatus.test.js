@@ -90,6 +90,37 @@ describe('footer latest LLM execution status', () => {
         delete window.__VON_RESTORE_TITLES;
     });
 
+    test('shows no configured model when premium is disabled and no Ollama model is selected', async () => {
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        }));
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+
+        const modelSegment = await waitForModelSegment((seg) => (
+            seg.classList.contains('fatal')
+            && seg.querySelector('.concept-footer-button')?.textContent?.trim() === 'No model configured'
+        ));
+        expect(modelSegment).toBeTruthy();
+        expect(modelSegment.classList.contains('llm-status-badge')).toBe(true);
+        expect(modelSegment.classList.contains('fatal')).toBe(true);
+
+        const modelButton = modelSegment.querySelector('.concept-footer-button');
+        expect(modelButton.getAttribute('aria-label')).toBe('Open language model settings');
+        expect(modelButton.title).toContain('Configured status: No model configured');
+        expect(modelButton.title).toContain('No usable model configured: premium model use is disabled and no Ollama model is selected.');
+
+        const llmInfoCalls = global.fetch.mock.calls.filter(([url]) => {
+            const rawUrl = typeof url === 'string' ? url : (url?.url || String(url));
+            return new URL(rawUrl, 'http://localhost').pathname === '/api/settings/llm/info';
+        });
+        expect(llmInfoCalls).toHaveLength(0);
+    });
+
     test('turns footer red and shows actual fallback model plus reason', async () => {
         const { setModelInfoFooterText } = require(domUtilsPath);
 

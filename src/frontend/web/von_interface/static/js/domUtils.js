@@ -907,7 +907,11 @@ export async function setModelInfoFooterText() {
   // and status checks. This ensures the footer immediately reflects the user's
   // local choice (e.g. Ollama when premium is disabled) rather than the DB value.
   const localModelPref = getEffectiveLocalModelPreference();
-  const effectiveLlm = localModelPref.requestedLlm
+  const localModelUnavailable = localModelPref.modelUnavailable === true;
+  const localModelUnavailableReason = localModelPref.modelUnavailableReason || '';
+  const effectiveLlm = localModelUnavailable
+    ? null
+    : localModelPref.requestedLlm
     ? { provider: localModelPref.requestedLlm.provider, model: localModelPref.requestedLlm.model }
     : activeLlm;
 
@@ -917,19 +921,21 @@ export async function setModelInfoFooterText() {
   // Fetch LLM connection info early for merging into Model segment
   // Pass user context for proper per-user resolution
   let llmInfo = null;
-  try {
-    const llmParams = new URLSearchParams();
-    if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
-    if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
-    // Pass the effective provider so the status check reflects the user's local model
-    // preference rather than always checking the DB-stored (e.g. OpenAI) provider.
-    if (effectiveLlm?.provider) llmParams.set('effective_provider', effectiveLlm.provider);
-    const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
-    llmInfo = await fetchJsonWithTimeout(llmUrl, {
-      cache: 'no-store',
-      timeoutMs: 6000,
-    });
-  } catch (_) { }
+  if (!localModelUnavailable) {
+    try {
+      const llmParams = new URLSearchParams();
+      if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
+      if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
+      // Pass the effective provider so the status check reflects the user's local model
+      // preference rather than always checking the DB-stored (e.g. OpenAI) provider.
+      if (effectiveLlm?.provider) llmParams.set('effective_provider', effectiveLlm.provider);
+      const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
+      llmInfo = await fetchJsonWithTimeout(llmUrl, {
+        cache: 'no-store',
+        timeoutMs: 6000,
+      });
+    } catch (_) { }
+  }
   if (!llmInfo) {
     readinessIssues.add('llm');
   }
@@ -943,7 +949,10 @@ export async function setModelInfoFooterText() {
   let llmClass = '';
   let configuredStatusLabel = 'Unknown';
 
-  if (status === 'missing_key') {
+  if (localModelUnavailable) {
+    llmClass = 'fatal';
+    configuredStatusLabel = 'No model configured';
+  } else if (status === 'missing_key') {
     llmClass = 'missing-key';
     configuredStatusLabel = 'Missing Key';
   } else if (status === 'error') {
@@ -1071,7 +1080,7 @@ export async function setModelInfoFooterText() {
     const unexpectedModelMismatch = (
       actualDiffersFromRequested || actualDiffersFromConfiguredProvider
     ) && !explicitStageModelOverride;
-    const executionOverlayActive = !!executionTelemetry && (
+    const executionOverlayActive = !localModelUnavailable && !!executionTelemetry && (
       !!executionTelemetry.fallbackUsed
       || actualDiffersFromRequested
       || actualDiffersFromConfiguredProvider
@@ -1085,6 +1094,10 @@ export async function setModelInfoFooterText() {
       : (executionTelemetry?.fallbackUsed ? 'Fallback Active' : (failureReason ? 'Execution Error' : 'Last Execution'));
     const titleParts = ['Open language model settings'];
     titleParts.push(`Configured status: ${configuredStatusLabel}`);
+    if (localModelUnavailable) {
+      titleParts.push('No usable model configured: premium model use is disabled and no Ollama model is selected.');
+      if (localModelUnavailableReason) titleParts.push(`Unavailable reason: ${localModelUnavailableReason}`);
+    }
     if (configuredProvider) titleParts.push(`Configured provider: ${configuredProvider}`);
     if (configuredModel) titleParts.push(`Configured model: ${configuredModel}`);
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
@@ -1124,7 +1137,9 @@ export async function setModelInfoFooterText() {
         titleParts.push(`Warnings: ${executionTelemetry.warnings.join(' | ')}`);
       }
     }
-    const displayModelText = executionOverlayActive
+    const displayModelText = localModelUnavailable
+      ? 'No model configured'
+      : executionOverlayActive
       ? (actualModel || requestedModel || configuredModel || 'Not Set')
       : (configuredModel || 'Not Set');
     const modelSettingsSegment = makeActionButton(

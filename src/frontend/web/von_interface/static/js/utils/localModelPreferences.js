@@ -3,6 +3,7 @@ const LS_OPENAI_SELECTED_MODEL = 'von:openaiSelectedModel';
 const LS_OLLAMA_SELECTION = 'von:ollamaSelection';
 const LS_PREMIUM_MODEL_USE_ENABLED = 'von:premiumModelUseEnabled';
 const LOCAL_MODEL_PREFERENCE_SCHEMA = 'localModelPreference.v1';
+const LOCAL_MODEL_UNAVAILABLE_REASON_NO_OLLAMA_MODEL = 'premium_disabled_no_ollama_model';
 
 function readStoredJson(key) {
   try {
@@ -193,6 +194,8 @@ function buildEffectiveLocalModelPreference(preference) {
       openaiModel: null,
       ollamaSelection: null,
       requestedLlm: null,
+      modelUnavailable: false,
+      modelUnavailableReason: null,
     };
   }
 
@@ -203,9 +206,15 @@ function buildEffectiveLocalModelPreference(preference) {
     requestedLlm = buildOllamaRequestedLlm(canonical.ollamaSelection);
   }
 
+  const modelUnavailableReason = canonical.activeSource === 'ollama' && !requestedLlm
+    ? LOCAL_MODEL_UNAVAILABLE_REASON_NO_OLLAMA_MODEL
+    : null;
+
   return {
     ...canonical,
     requestedLlm,
+    modelUnavailable: !!modelUnavailableReason,
+    modelUnavailableReason,
   };
 }
 
@@ -304,8 +313,18 @@ export function resolveLocalRequestedLlm() {
 }
 
 export function applyLocalModelPreferenceOverlay(settings) {
-  const localOverride = resolveLocalRequestedLlm();
-  if (!settings || !localOverride) return settings;
+  const localPreference = getEffectiveLocalModelPreference();
+  if (!settings) return settings;
+  if (localPreference.modelUnavailable) {
+    return {
+      ...settings,
+      active_llm: null,
+      local_model_unavailable_reason: localPreference.modelUnavailableReason,
+    };
+  }
+
+  const localOverride = localPreference.requestedLlm;
+  if (!localOverride) return settings;
 
   return {
     ...settings,
