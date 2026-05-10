@@ -99,11 +99,24 @@ def _get_concept_by_concept_id(**kwargs):
         enrich_concept_with_text_relations,
         get_concept_by_concept_id,
     )
+    from ...security.access_control import describe_concept_access
     from ...services.relationship_write_service import detect_vacuous_typing
 
     concept_id = kwargs.get("concept_id")
     if not concept_id:
         raise ValueError("concept_id is required")
+
+    access = describe_concept_access(concept_id)
+    if access.get("exists") is True and access.get("accessible") is False:
+        return make_error_response(
+            "access_denied",
+            f"Concept is not accessible: {concept_id}",
+            details=access,
+            suggestions=[
+                "Use search_concepts under the current namespace to find accessible concepts",
+                "Choose an accessible concept before attempting reads or writes",
+            ],
+        )
 
     concept = get_concept_by_concept_id(concept_id=concept_id)
 
@@ -1592,7 +1605,7 @@ def _upsert_singleton_text_relation(**kwargs):
 
 def _concept_exists(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
-    from ...security.access_control import can_access_concept
+    from ...security.access_control import describe_concept_access
     from ...vontology.code_concepts_registry import is_code_concept_id
 
     concept_id = kwargs.get("concept_id")
@@ -1619,14 +1632,20 @@ def _concept_exists(**kwargs):
                     "Check Mongo DNS/direct-host fallback configuration if this persists",
                 ],
             )
-        doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
-        exists = bool(doc) or is_code_concept_id(concept_id)
-        accessible = can_access_concept(concept_id)
+        access = describe_concept_access(concept_id)
+        access_exists = access.get("exists")
+        if isinstance(access_exists, bool):
+            exists = access_exists or is_code_concept_id(concept_id)
+        else:
+            doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
+            exists = bool(doc) or is_code_concept_id(concept_id)
+        accessible = bool(access.get("accessible"))
         return {
             "success": True,
             "concept_id": concept_id,
             "exists": exists,
             "accessible": accessible,
+            "access": access,
         }
     except Exception as exc:
         return make_error_response(
@@ -6790,6 +6809,9 @@ def _concept_fetch_input_schema() -> Schema:
     return Schema(
         required={"concept_id": str},
         optional={
+            "namespace": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
             "include_relations_arg1": (bool,),
             "include_relations_any_arg": (bool,),
             "include_text_relations_arg1": (bool, str),
@@ -7149,7 +7171,11 @@ def _upsert_singleton_text_relation_output_schema() -> Schema:
 def _concept_exists_input_schema() -> Schema:
     return Schema(
         required={"concept_id": str},
-        optional={},
+        optional={
+            "namespace": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+        },
         allow_unknown=True,
         description="concept_exists input: concept_id (str)",
     )

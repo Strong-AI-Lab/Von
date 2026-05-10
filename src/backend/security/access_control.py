@@ -13,6 +13,7 @@ from ..db.mongo_client import get_concepts_collection
 from .visibility_predicates import (
     SPECIFIC_TO_ORG_PREDICATES_READ,
     SPECIFIC_TO_USER_PREDICATES,
+    get_specific_to_org_values,
     get_specific_to_user_values,
 )
 
@@ -64,22 +65,47 @@ def _get_specific_to_user_values(relationships: Dict[str, Any]) -> List[Any]:
     return list(get_specific_to_user_values(relationships))
 
 
-def _document_visible_to_user(doc: Dict[str, Any], user_id: Optional[str]) -> bool:
+def _specific_allows_actor(spec: Any, actor_id: Optional[str]) -> bool:
+    return _specific_allows_user(spec, actor_id)
+
+
+def _document_visible_to_actor(
+    doc: Dict[str, Any],
+    user_id: Optional[str],
+    org_id: Optional[str],
+) -> bool:
     relationships = doc.get("relationships") if isinstance(doc, dict) else None
     if not isinstance(relationships, dict):
         return True
-    # Check all predicate variants for specific_to_user
-    combined_spec = _get_specific_to_user_values(relationships)
-    if not combined_spec:
-        return True  # No restriction
-    return _specific_allows_user(combined_spec, user_id)
+
+    user_specific = _get_specific_to_user_values(relationships)
+    org_specific = list(get_specific_to_org_values(relationships))
+    if not user_specific and not org_specific:
+        return True
+    if user_specific and _specific_allows_actor(user_specific, user_id):
+        return True
+    if org_specific and _specific_allows_actor(org_specific, org_id):
+        return True
+    return False
+
+
+def _document_visible_to_user(doc: Dict[str, Any], user_id: Optional[str]) -> bool:
+    """Compatibility wrapper for older callers that only pass user context."""
+
+    return _document_visible_to_actor(doc, user_id, None)
 
 
 class AccessEvaluator:
     """Cache per-request visibility decisions for related concept identifiers."""
 
-    def __init__(self, user_id: Optional[str], enforce: bool) -> None:
+    def __init__(
+        self,
+        user_id: Optional[str],
+        org_id: Optional[str],
+        enforce: bool,
+    ) -> None:
         self.user_id = user_id
+        self.org_id = org_id
         self.enforce = enforce
         self._cache: Dict[str, bool] = {}
         self._collection = None
@@ -122,17 +148,34 @@ class AccessEvaluator:
         else:
             doc = coll.find_one(
                 {"concept_id": normalised},
-                {f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
+                {
+                    **{f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
+                    **{
+                        f"relationships.{p}": 1
+                        for p in SPECIFIC_TO_ORG_PREDICATES_READ
+                    },
+                },
             )
             if doc:
                 rels = doc.get("relationships", {})
                 user_specific = _get_specific_to_user_values(rels) if rels else None
+                org_specific = (
+                    get_specific_to_org_values(rels) if rels else None
+                )
                 if user_specific:
                     # Log user-specific concept access
                     _log.info(
                         f"[access_filter] concept_id={normalised} specific_to_user={user_specific} authenticated_user={self.user_id}"
                     )
-                allowed = _document_visible_to_user(doc, self.user_id)
+                if org_specific:
+                    _log.info(
+                        f"[access_filter] concept_id={normalised} specific_to_org={org_specific} authenticated_org={self.org_id}"
+                    )
+                allowed = _document_visible_to_actor(
+                    doc,
+                    self.user_id,
+                    self.org_id,
+                )
             else:
                 allowed = False
         self._cache[normalised] = allowed
@@ -252,6 +295,19 @@ def get_effective_user_concept_id() -> Optional[str]:
     return None
 
 
+def get_effective_organisation_concept_id() -> Optional[str]:
+    manual = _MANUAL_ORG.get()
+    if manual is not None:
+        return manual
+    if not has_request_context():
+        return None
+    for key in ("organisation_concept_id", "org_concept_id", "org_id"):
+        candidate = _normalise_concept_id(session.get(key))
+        if candidate:
+            return candidate
+    return None
+
+
 def is_bypass_enabled() -> bool:
     return _BYPASS.get()
 
@@ -259,7 +315,7 @@ def is_bypass_enabled() -> bool:
 def should_enforce_access_control() -> bool:
     if is_bypass_enabled():
         return False
-    if _MANUAL_USER.get() is not None:
+    if _MANUAL_USER.get() is not None or _MANUAL_ORG.get() is not None:
         return True
     return has_request_context()
 
@@ -267,11 +323,123 @@ def should_enforce_access_control() -> bool:
 def _current_evaluator() -> AccessEvaluator:
     current = _EVALUATOR.get()
     user_id = get_effective_user_concept_id()
+    org_id = get_effective_organisation_concept_id()
     enforce = should_enforce_access_control()
-    if current is None or current.user_id != user_id or current.enforce != enforce:
-        current = AccessEvaluator(user_id, enforce)
+    if (
+        current is None
+        or current.user_id != user_id
+        or current.org_id != org_id
+        or current.enforce != enforce
+    ):
+        current = AccessEvaluator(user_id, org_id, enforce)
         _EVALUATOR.set(current)
     return current
+
+
+def describe_concept_access(concept_id: Any) -> Dict[str, Any]:
+    """Return safe access diagnostics for exact concept access decisions."""
+
+    user_id = get_effective_user_concept_id()
+    org_id = get_effective_organisation_concept_id()
+    normalised = _normalise_concept_id(concept_id)
+    details: Dict[str, Any] = {
+        "concept_id": normalised or concept_id,
+        "authenticated_user_concept_id": user_id,
+        "organisation_concept_id": org_id,
+        "access_control_enforced": should_enforce_access_control(),
+        "visibility_predicate_families": ["specific_to_user", "specific_to_org"],
+    }
+    if not should_enforce_access_control():
+        details.update(
+            {
+                "exists": None,
+                "accessible": True,
+                "restriction_families_present": [],
+            }
+        )
+        return details
+    if normalised is None:
+        details.update(
+            {
+                "exists": True,
+                "accessible": True,
+                "restriction_families_present": [],
+            }
+        )
+        return details
+
+    try:
+        from ..vontology.code_concepts_registry import is_code_concept_id
+
+        if is_code_concept_id(normalised):
+            details.update(
+                {
+                    "exists": True,
+                    "accessible": True,
+                    "restriction_families_present": [],
+                }
+            )
+            return details
+    except Exception:
+        pass
+
+    coll = get_concepts_collection()
+    if coll is None:
+        details.update(
+            {
+                "exists": None,
+                "accessible": True,
+                "restriction_families_present": [],
+            }
+        )
+        return details
+
+    doc = coll.find_one(
+        {"concept_id": normalised},
+        {
+            **{f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
+            **{f"relationships.{p}": 1 for p in SPECIFIC_TO_ORG_PREDICATES_READ},
+        },
+    )
+    if not isinstance(doc, dict):
+        details.update(
+            {
+                "exists": False,
+                "accessible": False,
+                "restriction_families_present": [],
+            }
+        )
+        return details
+
+    relationships = doc.get("relationships")
+    relationships = relationships if isinstance(relationships, dict) else {}
+    user_specific = _get_specific_to_user_values(relationships)
+    org_specific = list(get_specific_to_org_values(relationships))
+    restriction_families = []
+    if user_specific:
+        restriction_families.append("specific_to_user")
+    if org_specific:
+        restriction_families.append("specific_to_org")
+    details.update(
+        {
+            "exists": True,
+            "accessible": _document_visible_to_actor(doc, user_id, org_id),
+            "restriction_families_present": restriction_families,
+            "specific_to_user_restricted": bool(user_specific),
+            "specific_to_org_restricted": bool(org_specific),
+        }
+    )
+    return details
+
+
+def _field_has_no_visibility_restriction(field: str) -> Dict[str, Any]:
+    return {
+        "$or": [
+            {field: {"$exists": False}},
+            {field: {"$eq": None}},
+            {field: {"$size": 0}},
+        ]
+    }
 
 
 def build_visibility_filter() -> Optional[Dict[str, Any]]:
@@ -280,14 +448,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         return None
     user_id = get_effective_user_concept_id()
 
-    # Get user's current organisation context (Phase 1)
-    user_org_id = _MANUAL_ORG.get()
-    if user_org_id is None:
-        try:
-            if has_request_context():
-                user_org_id = session.get("organisation_concept_id")
-        except Exception:
-            pass
+    user_org_id = get_effective_organisation_concept_id()
 
     # Get user email for detailed logging
     user_email = "unknown"
@@ -301,24 +462,21 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         f"[access_filter] Building visibility filter - authenticated_user={user_id} org={user_org_id} email={user_email}"
     )
 
-    # Concepts are visible if NONE of the specific_to_user predicates restrict them,
-    # OR if any of them includes the current user.
-    # Build "no restriction" clauses for ALL predicate variants
-    no_restriction_clauses: List[Dict[str, Any]] = []
-    for predicate in SPECIFIC_TO_USER_PREDICATES:
-        field = f"relationships.{predicate}"
-        no_restriction_clauses.extend(
-            [
-                {field: {"$exists": False}},
-                {field: {"$eq": None}},
-                {field: {"$size": 0}},
+    # Query/list visibility mirrors exact access checks: globally visible when
+    # no supported user/org visibility predicate restricts the document, or
+    # visible when any current actor component matches a restriction.
+    all_visibility_predicates = (
+        *SPECIFIC_TO_USER_PREDICATES,
+        *SPECIFIC_TO_ORG_PREDICATES_READ,
+    )
+    clauses: List[Dict[str, Any]] = [
+        {
+            "$and": [
+                _field_has_no_visibility_restriction(f"relationships.{predicate}")
+                for predicate in all_visibility_predicates
             ]
-        )
-
-    # A concept with no restriction on ANY variant is visible
-    # This requires ALL variants to have no restriction (use $and for strictness)
-    # But for backwards compatibility, if EITHER field is empty, treat as no restriction
-    clauses: List[Dict[str, Any]] = no_restriction_clauses.copy()
+        }
+    ]
 
     # User-specific visibility: user appears in ANY of the predicate variants
     if user_id:
@@ -436,9 +594,12 @@ def sanitize_concept_document(
     concept_id = doc.get("concept_id", "unknown_concept")
     user_specific = doc.get("relationships", {}).get("specific_to_user")
 
-    if not _document_visible_to_user(doc, user_id):
+    org_id = get_effective_organisation_concept_id()
+    org_specific = get_specific_to_org_values(doc.get("relationships", {}))
+
+    if not _document_visible_to_actor(doc, user_id, org_id):
         _log.info(
-            f"[access_filter] BLOCKED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}"
+            f"[access_filter] BLOCKED concept_id={concept_id} specific_to_user={user_specific} specific_to_org={org_specific} authenticated_user={user_id} authenticated_org={org_id} email={user_email}"
         )
         return None
 
@@ -446,6 +607,10 @@ def sanitize_concept_document(
     if user_specific:
         _log.info(
             f"[access_filter] ALLOWED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}"
+        )
+    if org_specific:
+        _log.info(
+            f"[access_filter] ALLOWED concept_id={concept_id} specific_to_org={org_specific} authenticated_org={org_id} email={user_email}"
         )
     relationships = doc.get("relationships")
     if not isinstance(relationships, dict):
@@ -476,7 +641,8 @@ def cache_scope_key() -> str:
     if not should_enforce_access_control():
         return "global"
     user_id = get_effective_user_concept_id()
-    return f"user:{user_id}" if user_id else "user:anon"
+    org_id = get_effective_organisation_concept_id()
+    return f"user:{user_id or 'anon'}|org:{org_id or 'none'}"
 
 
 @contextmanager

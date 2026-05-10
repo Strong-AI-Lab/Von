@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
 
 from .schemas import (
     Schema,
@@ -171,6 +172,62 @@ class InternalMCPGateway:
         if method_name not in self._method_metrics:
             self._method_metrics[method_name] = MethodMetrics()
 
+    @staticmethod
+    def _clean_concept_id(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned if cleaned.startswith("#V#") else None
+
+    @classmethod
+    def _resolve_access_actor_context(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> tuple[str | None, str | None]:
+        user_id = cls._clean_concept_id(
+            payload.get("user_concept_id") or payload.get("user_id")
+        )
+        org_id = cls._clean_concept_id(
+            payload.get("organisation_concept_id")
+            or payload.get("org_concept_id")
+            or payload.get("organisation_id")
+            or payload.get("org_id")
+        )
+        namespace = payload.get("namespace")
+        if isinstance(namespace, str) and namespace.strip():
+            try:
+                from src.backend.services.namespace_service import (
+                    derive_actor_context_from_namespace,
+                )
+
+                namespace_user, namespace_org = derive_actor_context_from_namespace(
+                    namespace
+                )
+            except Exception:
+                namespace_user, namespace_org = None, None
+            user_id = user_id or cls._clean_concept_id(namespace_user)
+            org_id = org_id or cls._clean_concept_id(namespace_org)
+        return user_id, org_id
+
+    @staticmethod
+    @contextmanager
+    def _access_actor_context(
+        user_id: str | None,
+        org_id: str | None,
+    ) -> Iterator[None]:
+        if not user_id and not org_id:
+            yield
+            return
+        from src.backend.security.access_control import (
+            override_current_organisation,
+            override_current_user,
+        )
+
+        with override_current_user(user_id), override_current_organisation(org_id):
+            yield
+
     def invoke(
         self, method_name: str, payload: Optional[MutableMapping[str, Any]] = None
     ) -> TransportResult:
@@ -213,13 +270,15 @@ class InternalMCPGateway:
 
         timeout = definition.resolved_timeout(self._transport)
         try:
-            transport_result = self._transport.execute(
-                method_name=definition.name,
-                handler=definition.handler,
-                payload=dict(payload_dict),
-                timeout_sec=timeout,
-                log_tag=self._log_tag,
-            )
+            user_id, org_id = self._resolve_access_actor_context(payload_dict)
+            with self._access_actor_context(user_id, org_id):
+                transport_result = self._transport.execute(
+                    method_name=definition.name,
+                    handler=definition.handler,
+                    payload=dict(payload_dict),
+                    timeout_sec=timeout,
+                    log_tag=self._log_tag,
+                )
         except Exception as exc:
             message = str(exc)
             logger.exception(

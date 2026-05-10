@@ -821,10 +821,17 @@ def _find_concept_by_exact_concept_id(
     )
     if not isinstance(concept_doc, dict):
         return None
-    return _finalise_concept_lookup_doc(
+    finalised = _finalise_concept_lookup_doc(
         concept_doc,
         requested_concept_id=concept_id,
     )
+    try:
+        from ..security.access_control import sanitize_concept_document
+
+        finalised = sanitize_concept_document(finalised)
+    except Exception:
+        pass
+    return finalised if isinstance(finalised, dict) else None
 
 
 def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
