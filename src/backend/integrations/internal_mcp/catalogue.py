@@ -20096,6 +20096,8 @@ def _gmail_list_messages(**kwargs):
         max_results = kwargs.get("max_results")
         if max_results is None:
             max_results = kwargs.get("maxResults")
+        if max_results is None:
+            max_results = kwargs.get("limit")
         result = gs.list_messages(
             profile_id=profile,
             query=caller_query,
@@ -27599,6 +27601,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "max_results": (int, type(None)),
             "maxResults": (int, type(None)),
             "order_by": str,
+            "order": str,
+            "scope": str,
             "include_metadata": list,
             "bypass_profile_query_prefix": bool,
         },
@@ -27607,8 +27611,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "List Gmail messages for a profile with optional query/labels "
             "(read-only). Set bypass_profile_query_prefix=true to ignore the "
             "profile's configured query_prefix and label_filter for this call. "
-            "The 'limit' alias maps to max_results; order_by and include_metadata "
-            "are accepted as read-only planning hints."
+            "The 'limit' alias maps to max_results; order/order_by, scope, and "
+            "include_metadata are accepted as read-only planning hints."
         ),
         aliases={
             "profile_id": "profile",
@@ -28262,9 +28266,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_external_integration_definitions() -> (
+    List[MethodDefinition]
+):
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -28765,9 +28769,9 @@ def _build_default_catalogue_external_integration_definitions() -> List[
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_diagnostics_and_research_definitions() -> (
+    List[MethodDefinition]
+):
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",

@@ -2854,9 +2854,19 @@ def _normalise_predicate_terms(
     for candidate in values:
         if not isinstance(candidate, str):
             continue
-        token = candidate.strip().lower()
-        if token:
-            terms.append(token)
+        raw_token = candidate.strip()
+        if raw_token.startswith("[") and raw_token.endswith("]") and "," in raw_token:
+            split_tokens = [
+                item.strip().strip("\"'")
+                for item in raw_token[1:-1].split(",")
+                if item.strip().strip("\"'")
+            ]
+        else:
+            split_tokens = [raw_token]
+        for split_token in split_tokens:
+            token = split_token.strip().lower()
+            if token:
+                terms.append(token)
     return terms
 
 

@@ -109,14 +109,18 @@ def test_internal_mcp_gmail_list_profiles_registered_and_handler_returns_summari
     method = catalogue.get("gmail_list_profiles")
     assert method is not None
     assert method.category == "read"
-    assert "authorised" in (method.description or "").lower() or "authorized" in (
-        method.description or ""
-    ).lower()
+    assert (
+        "authorised" in (method.description or "").lower()
+        or "authorized" in (method.description or "").lower()
+    )
 
     monkeypatch.setattr(
         "src.backend.integrations.google.gmail_service.list_profile_summaries",
         lambda: [
-            {"profile_id": "zhan-gmail", "authorised_email": "zhanvonwitbrock@gmail.com"},
+            {
+                "profile_id": "zhan-gmail",
+                "authorised_email": "zhanvonwitbrock@gmail.com",
+            },
             {"profile_id": "vonwitbrock-gmail", "authorised_email": None},
         ],
     )
@@ -228,9 +232,7 @@ def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
         profile_id="vonwitbrock-gmail",
         token_path="/tmp/fake-token.json",
         label_filter=["INBOX"],
-        query_prefix=(
-            "to:zhanvonwitbrock@gmail.com OR from:zhanvonwitbrock@gmail.com"
-        ),
+        query_prefix=("to:zhanvonwitbrock@gmail.com OR from:zhanvonwitbrock@gmail.com"),
     )
 
     monkeypatch.setattr(gs, "list_messages", fake_list_messages)
@@ -327,6 +329,8 @@ def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
         "profile": "zhan-gmail",
         "limit": 10,
         "order_by": "newest",
+        "order": "desc",
+        "scope": "received",
         "include_metadata": ["id", "from", "subject", "date"],
     }
 
@@ -336,6 +340,38 @@ def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
     assert ok, errors
     assert payload["max_results"] == 10
     assert "limit" not in payload
+
+
+def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
+    monkeypatch,
+):
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [], "resultSizeEstimate": 0}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="zhan-gmail",
+        token_path="/tmp/fake-token.json",
+    )
+
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        limit=10,
+        order="desc",
+        scope="received",
+    )
+
+    assert payload["messages"] == []
+    assert captured_kwargs["profile_id"] == "zhan-gmail"
+    assert captured_kwargs["max_results"] == 10
 
 
 def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeypatch):

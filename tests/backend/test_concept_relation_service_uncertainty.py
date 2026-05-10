@@ -315,6 +315,41 @@ def test_relation_previews_and_predicate_incidence_groundings_include_type_ids()
     ]
 
 
+def test_find_relations_with_argument_splits_bracketed_predicate_filter_string() -> (
+    None
+):
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_relation_service import (
+        find_relations_with_argument,
+    )
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#michael_witbrock",
+            "relationships": {
+                "#V#has_authorised_mail_profile": ["#V#gmail_profile_zhan_gmail"],
+                "#V#has_default_mail_profile": ["#V#gmail_profile_vonwitbrock_gmail"],
+            },
+        }
+    )
+
+    relation_payload = find_relations_with_argument(
+        "#V#michael_witbrock",
+        predicate_filter=[
+            "[#V#has_authorised_mail_profile,#V#has_default_mail_profile]"
+        ],
+        argument_index="subject",
+        relation_kind="binary",
+    )
+
+    assert {
+        hit.get("predicate_concept_id") for hit in relation_payload.get("hits") or []
+    } == {
+        "#V#has_authorised_mail_profile",
+        "#V#has_default_mail_profile",
+    }
+
+
 def test_get_predicate_incidence_counts_other_argument_types() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence
