@@ -91,3 +91,26 @@
   experiment template as covered by `JVNAUTOSCI-1579` absent fresh runtime
   production-authority evidence.
 - No production code was changed.
+
+## 2026-05-11T02:05:21.5376153+12:00
+
+- Read required repo guidance, repo-local drift-review memories, and attempted
+  the global automation memory path, which was absent at run start.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero and `repo_seed_authority_drift_path_count=1`.
+- Reviewed commits since `2026-05-09T14:01:44Z`, including workflow authority
+  actor scoping, required-evidence completion gates, local-model fail-closed UI
+  changes, and the `JVNAUTOSCI-2300` general mail workflow profile handoff.
+- Treated the new Gmail profile concept-to-runtime-alias bridge in
+  `catalogue.py` as low-level integration plumbing covered by `JVNAUTOSCI-2296`
+  unless it starts authoring mail-profile vocabulary/facts or fail-open policy.
+  Treated the new mail-review repo-seed prompt/control edits as covered by the
+  existing repo-seed/workflow-purity track (`JVNAUTOSCI-2080`,
+  `JVNAUTOSCI-2260`).
+- Created `JVNAUTOSCI-2302` for
+  `workflow_introspection_maintenance_workflow.py`: it defines a Python-built
+  durable workflow, `source="built_in"` registration, diagnosis heuristics,
+  prompt repair wording, Jira remediation wording, and tool-family/domain
+  semantics that should move to Vontology-stored VWL/prompt/KB authority.
+  Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-1298`, and `JVNAUTOSCI-2080`.
+- No production code was changed.
