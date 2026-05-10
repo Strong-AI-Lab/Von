@@ -443,3 +443,48 @@ def test_kr_required_tools_allow_completion_after_write_and_readback() -> None:
         and check.get("status") == "verified"
         for check in record["postcondition_checks"]
     )
+
+
+def test_contract_required_gmail_profile_and_relation_tools_block_generic_chat() -> (
+    None
+):
+    record = build_turn_execution_record(
+        request_id="req-gmail-predicate-required-evidence",
+        session_id="session-gmail-predicate-required-evidence",
+        namespace="#V#user@org",
+        actor_concept_id="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text=(
+            "What gmail profiles can you see, and let me know if any are connected "
+            "to me via predicates"
+        ),
+        response_text="#V#michael_witbrock",
+        interaction_timestamp_utc="2026-05-10T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#chat_assistant_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[],
+        turn_expected_outcome_contract={
+            "required_tools": [
+                "gmail_list_profiles",
+                "find_relations_with_argument",
+            ]
+        },
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is False
+    assert "prompt_required_evidence_gmail_list_profiles_missing" in (
+        gate["blocking_failure_codes"]
+    )
+    assert "prompt_required_evidence_find_relations_with_argument_missing" in (
+        gate["blocking_failure_codes"]
+    )
+    summary = record["execution"]["summary"]
+    assert summary["required_tool_obligations"]["unsatisfied_required_tools"] == [
+        "gmail_list_profiles",
+        "find_relations_with_argument",
+    ]

@@ -568,6 +568,193 @@ def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metada
     )
 
 
+def test_direct_response_turn_contract_required_tools_recover_to_tool_pipeline(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    structured_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "List visible Gmail profiles and inspect whether any are related to "
+            "the authenticated user by represented predicates."
+        ),
+        grounding_requirement=(
+            "The profile list must come from Gmail and predicate links must come "
+            "from represented relation lookup."
+        ),
+        selector_guidance=(
+            "Use Gmail profile inventory and Vontology relation-bearing evidence."
+        ),
+        required_tools=("gmail_list_profiles", "find_relations_with_argument"),
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt"),
+    )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "gmail_list_profiles": {"category": "read"},
+            "find_relations_with_argument": {"category": "read"},
+        },
+    )
+    dispatch_metadata = {
+        "gmail_list_profiles": _dispatch_surface("gmail", external_surface=True),
+        "find_relations_with_argument": _dispatch_surface("knowledge_base"),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
+
+    execute_calls: list[str] = []
+    tool_pipeline_payload: dict[str, Any] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        tool_pipeline_payload.update(dict(kwargs))
+        return SimpleNamespace(
+            data={
+                "final_response": "Recovered with Gmail and predicate evidence.",
+                "tool_messages": [],
+                "invocations": [
+                    {"tool": "gmail_list_profiles", "payload": {"success": True}},
+                    {
+                        "tool": "find_relations_with_argument",
+                        "payload": {"success": True},
+                    },
+                ],
+                "iteration_count": 2,
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "What gmail profiles can you see, and let me know if any are "
+            "connected to me via predicates"
+        ),
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "confidence": 0.91,
+                        "reasoning": (
+                            "This looks like an identity/context question."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "name": "Chat Assistant Workflow",
+                    "description": "General direct response workflow.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.76,
+                    "confidence_score": 0.76,
+                },
+                {
+                    "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                    "name": "Tool Calling Workflow",
+                    "description": "General tool workflow.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.74,
+                    "confidence_score": 0.74,
+                },
+            ],
+            "candidates": [
+                {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID},
+                {"concept_id": TOOL_CALLING_WORKFLOW_ID},
+            ],
+            "match_count": 2,
+            **structured_contract,
+        },
+    )
+
+    assert execute_calls == [TOOL_CALLING_WORKFLOW_ID]
+    assert result.response_text == "Recovered with Gmail and predicate evidence."
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.source == "selector_override"
+    assert tool_pipeline_payload["data"]["turn_expected_outcome_contract_state"][
+        "required_tools"
+    ] == [
+        "gmail_list_profiles",
+        "find_relations_with_argument",
+    ]
+
+    contract_check_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_turn_contract_check"
+        ),
+        None,
+    )
+    assert contract_check_entry is not None
+    assert (
+        contract_check_entry.get("status")
+        == "direct_response_route_requires_tool_pipeline"
+    )
+    assert (
+        contract_check_entry.get("override_reason")
+        == "direct_response_route_cannot_satisfy_required_turn_tools"
+    )
+    assert contract_check_entry.get("selected_workflow_id") == (
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
+    assert contract_check_entry.get("selected_workflow_can_satisfy_contract") is False
+    assert contract_check_entry.get("required_surface_families") == [
+        "gmail",
+        "knowledge_base",
+    ]
+    assert contract_check_entry.get("external_surface_families") == ["gmail"]
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "direct_response_route_cannot_satisfy_required_turn_tools"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == (
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
+    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry.get("turn_contract_required_tools") == [
+        "gmail_list_profiles",
+        "find_relations_with_argument",
+    ]
+
+
 
 def test_completed_custom_workflow_missing_required_tools_recovers_to_tool_pipeline(
     monkeypatch,

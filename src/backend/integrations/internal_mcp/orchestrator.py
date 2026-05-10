@@ -479,6 +479,23 @@ class _CustomWorkflowDispatchSupport:
                 ),
                 **common_kwargs,
             )
+        if (
+            state.selected_prefers_direct_response
+            and not state.selected_uses_tool_pipeline_contract
+        ):
+            return _TurnContractDispatchPreflightResult(
+                status="direct_response_route_requires_tool_pipeline",
+                selected_workflow_can_satisfy_contract=False,
+                override_reason=(
+                    "direct_response_route_cannot_satisfy_required_turn_tools"
+                ),
+                reasoning=(
+                    "The selected direct-response route cannot itself satisfy "
+                    "contract-required tool obligations, so dispatch must use the "
+                    "general tool workflow before the turn can finalise."
+                ),
+                **common_kwargs,
+            )
         if len(required_surface_families_tuple) < 2:
             return _TurnContractDispatchPreflightResult(
                 status="single_surface_contract",
@@ -608,14 +625,25 @@ class _CustomWorkflowDispatchSupport:
                     state.selected_workflow_id_text
                 ),
             )
-        elif result.status == "override_required":
+        elif result.status in {
+            "override_required",
+            "direct_response_route_requires_tool_pipeline",
+        }:
+            if result.status == "direct_response_route_requires_tool_pipeline":
+                result_summary = (
+                    "Selected direct-response workflow could not satisfy "
+                    "contract-required tool obligations; using the general tool "
+                    "workflow instead."
+                )
+            else:
+                result_summary = (
+                    "Selected custom workflow could not satisfy the multi-surface "
+                    "turn contract; using the general tool workflow instead."
+                )
             self.record_dispatch_prepare_note(
                 step_id="turn_contract_dispatch_preflight",
                 step_label="Verify dispatch turn contract",
-                result_summary=(
-                    "Selected custom workflow could not satisfy the multi-surface "
-                    "turn contract; using the general tool workflow instead."
-                ),
+                result_summary=result_summary,
                 workflow_id=TOOL_CALLING_WORKFLOW_ID,
                 workflow_name=self.resolve_selected_workflow_name(
                     TOOL_CALLING_WORKFLOW_ID

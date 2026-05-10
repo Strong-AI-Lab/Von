@@ -7930,9 +7930,24 @@ def build_turn_execution_record(
             required_tool_obligation_ledger_payload.get("blocking_failure_codes") or []
         )
     }
+    represented_required_tool_keys = {
+        _tool_requirement_key(tool_name)
+        for effect in required_effects
+        if isinstance(effect, Mapping)
+        for tool_name in _dedupe_string_sequence(effect.get("required_tools") or [])
+    }
+    unrepresented_unsatisfied_required_tools = [
+        tool_name
+        for tool_name in _dedupe_string_sequence(
+            required_tool_obligation_ledger_payload.get("unsatisfied_required_tools")
+            or []
+        )
+        if _tool_requirement_key(tool_name) not in represented_required_tool_keys
+    ]
     if isinstance(required_tool_effect, Mapping) and (
         not required_effects
         or bool(required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED})
+        or bool(unrepresented_unsatisfied_required_tools)
     ):
         required_effects.append(dict(required_tool_effect))
 
