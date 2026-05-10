@@ -106,9 +106,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert "#V#represented_artefact_creation_workflow" in expected_outcome_text
     assert "grounded `parent_id`" in expected_outcome_text
-    assert "with `#V#thing` as the parent, is not sufficient" in (
-        expected_outcome_text
-    )
+    assert "with `#V#thing` as the parent, is not sufficient" in (expected_outcome_text)
     assert "Listing existing external-system labels" in expected_outcome_text
     assert "write-only required tool list is not sufficient" in (expected_outcome_text)
     assert "Do not invent tools such as `diary_create`" in expected_outcome_text
@@ -299,18 +297,30 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "find_relations_with_argument" in mail_review_resolver_action.llm_policy.get(
         "required_tools", []
     )
-    assert "#V#has_authorised_mail_profile" in mail_review_resolver_action.llm_policy[
-        "response_contract_text"
-    ]
-    assert "environment defaults" in mail_review_resolver_action.llm_policy[
-        "response_contract_text"
-    ]
-    assert "runtime_profile_alias" in mail_review_resolver_action.llm_policy[
-        "response_contract_text"
-    ]
-    assert "must not start with #V#" in mail_review_resolver_action.llm_policy[
-        "response_contract_text"
-    ]
+    assert (
+        "#V#has_authorised_mail_profile"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "environment defaults"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "runtime_profile_alias"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "predicate_filter"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "do not use predicate_concept_id"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "must not start with #V#"
+        in mail_review_resolver_action.llm_policy["response_contract_text"]
+    )
     resolver_branch_targets = {
         transition.to_state
         for transition in mail_review_definition.states[

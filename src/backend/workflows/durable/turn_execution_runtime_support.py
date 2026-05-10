@@ -197,10 +197,14 @@ def _build_turn_execution_budget_diagnostics(
         "missing_tool_call_retry": {
             "attempts": missing_tool_retry_attempts,
             "budget": missing_tool_retry_budget,
-            "remaining": max(0, missing_tool_retry_budget - missing_tool_retry_attempts),
+            "remaining": max(
+                0, missing_tool_retry_budget - missing_tool_retry_attempts
+            ),
             "suppressed": bool(data.get("missing_tool_call_retry_suppressed")),
             "stop_reason": _safe_str(data.get("missing_tool_call_retry_stop_reason")),
-            "recovery_outcome": _safe_str(data.get("missing_tool_call_recovery_outcome")),
+            "recovery_outcome": _safe_str(
+                data.get("missing_tool_call_recovery_outcome")
+            ),
         },
         "internal_mcp_tool_invocations": {
             "observed_invocation_count": max(0, int(invocation_count)),
@@ -748,9 +752,7 @@ def _derive_required_effect_invocations_from_workflow_steps(
         if not action_id or action_id.lower() not in required_lookup:
             continue
         raw_output_payload = envelope.get("output_payload")
-        output_payload: dict[str, Any] = (
-            {}
-        )
+        output_payload: dict[str, Any] = {}
         if isinstance(raw_output_payload, Mapping):
             for key, value in raw_output_payload.items():
                 output_payload[str(key)] = value
@@ -1001,9 +1003,7 @@ _SNAPSHOT_SALIENT_FIELD_NAMES: set[str] = {
 
 def _snapshot_key_is_sensitive(key: str | None) -> bool:
     lowered = str(key or "").strip().lower()
-    return bool(lowered) and any(
-        part in lowered for part in _SNAPSHOT_SECRET_KEY_PARTS
-    )
+    return bool(lowered) and any(part in lowered for part in _SNAPSHOT_SECRET_KEY_PARTS)
 
 
 def _snapshot_scalar_value(value: Any, *, max_string_length: int) -> Any | None:
@@ -2848,6 +2848,12 @@ def run_turn_execution_completion_gate(
         loop_started_monotonic = float(loop_started_monotonic_raw)
     else:
         loop_started_monotonic = current_monotonic
+    loop_timer_started_at_gate = bool(
+        data.get("completion_gate_loop_timer_started_at_gate")
+    )
+    if loop_attempts == 0 and not loop_timer_started_at_gate:
+        loop_started_monotonic = current_monotonic
+        loop_timer_started_at_gate = True
     loop_elapsed_ms = max(0, int((current_monotonic - loop_started_monotonic) * 1000))
     loop_stall_started_monotonic_raw = data.get(
         "completion_gate_loop_stall_started_monotonic"
@@ -3395,6 +3401,7 @@ def run_turn_execution_completion_gate(
             "completion_gate_loop_elapsed_ms": loop_elapsed_ms,
             "completion_gate_loop_max_elapsed_ms": loop_max_elapsed_ms,
             "completion_gate_loop_started_monotonic": loop_started_monotonic,
+            "completion_gate_loop_timer_started_at_gate": loop_timer_started_at_gate,
             "completion_gate_loop_no_progress_streak": loop_no_progress_streak,
             "completion_gate_loop_no_progress_limit": loop_no_progress_limit,
             "completion_gate_loop_stall_events": loop_stall_events,

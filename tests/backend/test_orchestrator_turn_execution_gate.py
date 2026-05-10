@@ -12,7 +12,10 @@ from src.backend.services.turn_execution_record_service import (
     _derive_execution_signal_completion_blocker,
     build_turn_execution_correctness_summary,
 )
-from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
+from src.backend.workflows.action_registry import (
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
 
 
 class _DummyGateway:
@@ -222,7 +225,9 @@ def test_turn_execution_critic_prefers_explicit_actor_concept_id() -> None:
     assert record.get("actor_concept_id") == "#V#github_copilot_instance"
 
 
-def test_turn_execution_critic_blocks_missing_prompt_required_evidence_surface() -> None:
+def test_turn_execution_critic_blocks_missing_prompt_required_evidence_surface() -> (
+    None
+):
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.critic",
@@ -371,7 +376,9 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
     assert result.outputs.get("completion_gate_blocking_failure_codes") == [
         "worker_unavailable_zero_execution"
     ]
-    unresolved_preconditions = result.outputs.get("completion_gate_unresolved_preconditions")
+    unresolved_preconditions = result.outputs.get(
+        "completion_gate_unresolved_preconditions"
+    )
     assert isinstance(unresolved_preconditions, list)
     assert unresolved_preconditions
 
@@ -393,7 +400,9 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
     )
 
 
-def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditions() -> None:
+def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditions() -> (
+    None
+):
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.completion_gate",
@@ -430,7 +439,9 @@ def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditio
     ]
 
 
-def test_turn_completion_gate_replaces_unsafe_answer_for_missing_grounded_evidence() -> None:
+def test_turn_completion_gate_replaces_unsafe_answer_for_missing_grounded_evidence() -> (
+    None
+):
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.completion_gate",
@@ -606,7 +617,9 @@ def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None
     effect = required_effects[0]
     assert effect.get("effect_type") == "tool_execution"
     assert effect.get("status") == "not_executed"
-    assert "worker_unavailable_zero_execution" in list(effect.get("failure_codes") or [])
+    assert "worker_unavailable_zero_execution" in list(
+        effect.get("failure_codes") or []
+    )
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
@@ -618,11 +631,16 @@ def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
-    assert completion_gate.get("decision_reason") == "Required tool execution was not observed."
+    assert (
+        completion_gate.get("decision_reason")
+        == "Required tool execution was not observed."
+    )
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
-def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatch) -> None:
+def test_turn_execution_critic_flags_missing_scholarly_representation(
+    monkeypatch,
+) -> None:
     _patch_representation_profile_loader(monkeypatch)
     orchestrator = _build_orchestrator()
     request = _build_request(
@@ -672,7 +690,9 @@ def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatc
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
-def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypatch) -> None:
+def test_turn_execution_critic_marks_scholarly_representation_satisfied(
+    monkeypatch,
+) -> None:
     _patch_representation_profile_loader(monkeypatch)
     orchestrator = _build_orchestrator()
     request = _build_request(
@@ -812,9 +832,7 @@ def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
             "turn_id": "req-turn-critic-custom-workflow-fail",
             "conversation_session_id": "session-critic-custom-workflow-fail",
             "workflow_discovery_result": {
-                "matches": [
-                    {"concept_id": "#V#sail_phd_student_onboarding_workflow"}
-                ]
+                "matches": [{"concept_id": "#V#sail_phd_student_onboarding_workflow"}]
             },
             "workflow_routing": {
                 "workflow_id": "#V#sail_phd_student_onboarding_workflow",
@@ -935,8 +953,7 @@ def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None
     ]
     assert all(effect.get("status") == "not_satisfied" for effect in required_effects)
     assert all(
-        "required_evidence_permission_denied"
-        in list(effect.get("failure_codes") or [])
+        "required_evidence_permission_denied" in list(effect.get("failure_codes") or [])
         for effect in required_effects
     )
 
@@ -963,7 +980,9 @@ def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None
     )
 
 
-def test_turn_execution_correctness_flags_completed_planned_tool_run_without_success_as_false_success() -> None:
+def test_turn_execution_correctness_flags_completed_planned_tool_run_without_success_as_false_success() -> (
+    None
+):
     correctness = build_turn_execution_correctness_summary(
         completion_gate={
             "decision": "completed",
@@ -998,7 +1017,9 @@ def test_turn_execution_correctness_flags_completed_planned_tool_run_without_suc
     assert correctness["metric_labels"]["false_success"] is True
 
 
-def test_derive_completion_gate_blocks_workflow_terminal_failure_without_required_effects() -> None:
+def test_derive_completion_gate_blocks_workflow_terminal_failure_without_required_effects() -> (
+    None
+):
     completion_gate = _derive_completion_gate(
         required_effects=[],
         postcondition_checks=[],
@@ -1038,7 +1059,9 @@ def test_derive_completion_gate_blocks_workflow_terminal_failure_without_require
     )
 
 
-def test_derive_completion_gate_fails_when_contracted_workflow_status_is_unexpected() -> None:
+def test_derive_completion_gate_fails_when_contracted_workflow_status_is_unexpected() -> (
+    None
+):
     completion_gate = _derive_completion_gate(
         required_effects=[],
         postcondition_checks=[],
@@ -1068,9 +1091,7 @@ def test_derive_completion_gate_fails_when_contracted_workflow_status_is_unexpec
                     "schema_version": "workflow_terminal_success_evaluation.v1",
                     "success": False,
                     "terminal_status": "failed",
-                    "failure_codes": [
-                        "contracted_workflow_terminal_status_unexpected"
-                    ],
+                    "failure_codes": ["contracted_workflow_terminal_status_unexpected"],
                     "decision_reason": (
                         "Contracted workflow terminal status failed is not listed as a success status."
                     ),
@@ -1091,7 +1112,9 @@ def test_derive_completion_gate_fails_when_contracted_workflow_status_is_unexpec
     )
 
 
-def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_missing() -> None:
+def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_missing() -> (
+    None
+):
     completion_gate = _derive_completion_gate(
         required_effects=[],
         postcondition_checks=[],
@@ -1119,9 +1142,7 @@ def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_m
                     "schema_version": "workflow_terminal_success_evaluation.v1",
                     "success": False,
                     "terminal_status": None,
-                    "failure_codes": [
-                        "contracted_workflow_terminal_status_missing"
-                    ],
+                    "failure_codes": ["contracted_workflow_terminal_status_missing"],
                     "decision_reason": (
                         "Contracted workflow did not report a terminal status."
                     ),
@@ -1387,9 +1408,7 @@ def test_execution_signal_blocker_respects_selected_workflow_trace_fallback() ->
             "dispatch_event_count": 0,
             "dispatch_terminal_status": "failed",
             "dispatch_terminal_failure_reason": "child_workflow_failed",
-            "dispatch_terminal_failure_detail": (
-                "arxiv_mcp_server_missing_file_path"
-            ),
+            "dispatch_terminal_failure_detail": ("arxiv_mcp_server_missing_file_path"),
             "planned_count": 0,
             "executed_count": 0,
             "successful_invocation_count": 0,
@@ -1507,6 +1526,98 @@ def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     evidence_payload = result.outputs.get("completion_gate_evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("terminal_outcome") == "retrying"
+    assert result.outputs.get("completion_gate_loop_timer_started_at_gate") is True
+
+
+def test_turn_completion_gate_first_evaluation_elapsed_timer_starts_at_gate() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required evidence was not retrieved.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": [
+                        "effect_prompt_required_evidence_gmail_list_messages_1"
+                    ],
+                    "blocking_failure_codes": [
+                        "prompt_required_evidence_gmail_list_messages_missing"
+                    ],
+                }
+            },
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": 2,
+            "completion_gate_loop_started_monotonic": time.monotonic() - 120.0,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is True
+    assert result.outputs.get("completion_gate_loop_attempts") == 1
+    assert result.outputs.get("completion_gate_loop_stop_reason") is None
+    assert result.outputs.get("completion_gate_terminal_outcome") == "retrying"
+    assert result.outputs.get("completion_gate_loop_timer_started_at_gate") is True
+    assert int(result.outputs.get("completion_gate_loop_elapsed_ms") or 0) < 60_000
+
+
+def test_turn_completion_gate_elapsed_budget_applies_after_loop_started() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required evidence was not retrieved.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": [
+                        "effect_prompt_required_evidence_gmail_list_messages_1"
+                    ],
+                    "blocking_failure_codes": [
+                        "prompt_required_evidence_gmail_list_messages_missing"
+                    ],
+                }
+            },
+            "completion_gate_loop_attempts": 1,
+            "completion_gate_loop_max_attempts": 2,
+            "completion_gate_loop_started_monotonic": time.monotonic() - 120.0,
+            "completion_gate_loop_timer_started_at_gate": True,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
+    assert (
+        result.outputs.get("completion_gate_loop_stop_reason")
+        == "elapsed_budget_exhausted"
+    )
+    assert (
+        result.outputs.get("completion_gate_terminal_outcome")
+        == "elapsed_budget_exhausted"
+    )
 
 
 def test_turn_completion_gate_defaults_blocker_repeat_to_closed() -> None:
@@ -1561,7 +1672,9 @@ def test_turn_completion_gate_defaults_blocker_repeat_to_closed() -> None:
     )
 
 
-def test_turn_completion_gate_emits_execution_signal_blocker_override_annotation() -> None:
+def test_turn_completion_gate_emits_execution_signal_blocker_override_annotation() -> (
+    None
+):
     orchestrator = _build_orchestrator()
     aux_llm_calls: list[dict[str, Any]] = []
     request = _build_request(
@@ -1701,7 +1814,9 @@ def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> 
     )
 
 
-def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted() -> None:
+def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted() -> (
+    None
+):
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.completion_gate",
