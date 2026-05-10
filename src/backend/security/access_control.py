@@ -659,10 +659,30 @@ def override_current_user(concept_id: Optional[str]):
 @contextmanager
 def override_current_organisation(concept_id: Optional[str]):
     token = _MANUAL_ORG.set(_normalise_concept_id(concept_id))
+    eval_token = _EVALUATOR.set(None)
     try:
         yield
     finally:
+        _EVALUATOR.reset(eval_token)
         _MANUAL_ORG.reset(token)
+
+
+@contextmanager
+def override_current_actor(
+    user_concept_id: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+):
+    """Apply one explicit actor scope to access-controlled support lookups."""
+
+    user_token = _MANUAL_USER.set(_normalise_concept_id(user_concept_id))
+    org_token = _MANUAL_ORG.set(_normalise_concept_id(organisation_concept_id))
+    eval_token = _EVALUATOR.set(None)
+    try:
+        yield
+    finally:
+        _EVALUATOR.reset(eval_token)
+        _MANUAL_ORG.reset(org_token)
+        _MANUAL_USER.reset(user_token)
 
 
 @contextmanager

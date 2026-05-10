@@ -1638,6 +1638,29 @@ def test_terminal_progress_payload_reflects_completion_gate_follow_up() -> None:
     assert payload["orchestrator_status"] == "follow_up_required"
 
 
+def test_terminal_progress_payload_prefers_persisted_completion_gate() -> None:
+    payload = von_routes._build_terminal_tool_progress_payload(
+        request_id="req-persisted-gate",
+        aux_calls=[],
+        completion_gate={
+            "decision": "escalation_required",
+            "decision_reason": "Workflow dispatch failed before execution.",
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+            "blocking_effect_ids": ["effect_workflow_execution_1"],
+        },
+    )
+
+    assert payload["status"] == "follow_up_required"
+    assert payload["success"] is False
+    assert payload["completion_gate_requires_follow_up"] is True
+    assert payload["completion_gate_safe_to_claim_completion"] is False
+    assert payload["completion_gate_decision"] == "escalation_required"
+    assert payload["completion_gate_blocking_effect_ids"] == [
+        "effect_workflow_execution_1"
+    ]
+
+
 def test_response_finalising_payload_is_non_terminal_with_eta() -> None:
     payload = von_routes._build_response_finalising_tool_progress_payload(
         request_id="req-finalise",

@@ -37,6 +37,7 @@ from ...services.namespace_service import (
     derive_actor_context_from_namespace,
     resolve_canonical_namespace,
 )
+from ...security.access_control import override_current_actor
 from ..engine import WorkflowDefinition
 from ..mcp_tool_bridge import candidate_internal_mcp_tool_names
 from ..vontology_loader import (
@@ -281,6 +282,9 @@ def _build_runnable_feature_signature() -> dict[str, Any]:
 
 def _resolve_registered_workflow_runtime(
     workflow_id: str,
+    *,
+    actor_user_id: str | None = None,
+    actor_org_id: str | None = None,
 ) -> tuple[Any, WorkflowDefinition | None, str, tuple[str, ...]]:
     from .registry_factory import resolve_workflow_definition_from_authority
 
@@ -288,6 +292,8 @@ def _resolve_registered_workflow_runtime(
         workflow_id,
         use_current_shared_registry=True,
         register_authoritative_fallback=True,
+        actor_user_id=actor_user_id,
+        actor_org_id=actor_org_id,
     )
     return (
         resolution.registry,
@@ -301,11 +307,17 @@ def _resolve_submission_launch_inputs(
     *,
     workflow_id: str,
     inputs: Mapping[str, Any],
+    actor_user_id: str | None = None,
+    actor_org_id: str | None = None,
 ) -> tuple[WorkflowDefinition | None, WorkflowLaunchInputResolution]:
     workflow_definition: WorkflowDefinition | None = None
     try:
         _registry, workflow_definition, _source, _known_workflow_ids = (
-            _resolve_registered_workflow_runtime(workflow_id)
+            _resolve_registered_workflow_runtime(
+                workflow_id,
+                actor_user_id=actor_user_id,
+                actor_org_id=actor_org_id,
+            )
         )
     except Exception:
         workflow_definition = None
@@ -614,12 +626,30 @@ def _verify_workflow_runnable_uncached(
     graph: Mapping[str, Any] | None = None
     graph_warnings: Sequence[Any] = ()
     graph_error: str | None = None
+    actor_context = (
+        feature_signature.get("actor_context")
+        if isinstance(feature_signature, Mapping)
+        else None
+    )
+    actor_user_id = (
+        str(actor_context.get("user_id")).strip()
+        if isinstance(actor_context, Mapping)
+        and isinstance(actor_context.get("user_id"), str)
+        else None
+    )
+    actor_org_id = (
+        str(actor_context.get("org_id")).strip()
+        if isinstance(actor_context, Mapping)
+        and isinstance(actor_context.get("org_id"), str)
+        else None
+    )
     try:
-        if definition is not None:
-            graph = build_workflow_process_graph_from_definition(definition)
-            graph_warnings = ()
-        else:
-            graph, graph_warnings = build_workflow_process_graph(workflow_id)
+        with override_current_actor(actor_user_id, actor_org_id):
+            if definition is not None:
+                graph = build_workflow_process_graph_from_definition(definition)
+                graph_warnings = ()
+            else:
+                graph, graph_warnings = build_workflow_process_graph(workflow_id)
     except Exception as exc:  # pragma: no cover - defensive
         graph_error = f"workflow_graph_build_failed:{type(exc).__name__}"
         graph = None
@@ -776,6 +806,8 @@ def verify_workflow_runnable(
     workflow_id: str,
     *,
     action_registry_override: Any | None = None,
+    actor_user_id: str | None = None,
+    actor_org_id: str | None = None,
 ) -> WorkflowRunnableVerification:
     """Evaluate whether a workflow is runnable in the current runtime context."""
 
@@ -796,6 +828,11 @@ def verify_workflow_runnable(
 
     try:
         feature_signature = _build_runnable_feature_signature()
+        if actor_user_id or actor_org_id:
+            feature_signature["actor_context"] = {
+                "user_id": str(actor_user_id or "").strip(),
+                "org_id": str(actor_org_id or "").strip(),
+            }
         _invalidate_cache_if_feature_signature_changed(feature_signature)
 
         prep_started = perf_counter()
@@ -806,7 +843,11 @@ def verify_workflow_runnable(
         # submission aligned with the authoritative runtime registry that the
         # worker itself will use once the instance starts executing.
         registry, definition, registration_source, known_workflow_ids = (
-            _resolve_registered_workflow_runtime(workflow_id)
+            _resolve_registered_workflow_runtime(
+                workflow_id,
+                actor_user_id=actor_user_id,
+                actor_org_id=actor_org_id,
+            )
         )
 
         def _resolve_workflow_definition_for_validation(
@@ -824,6 +865,8 @@ def verify_workflow_runnable(
                     use_current_shared_registry=True,
                     promote_to_registry=registry,
                     register_authoritative_fallback=True,
+                    actor_user_id=actor_user_id,
+                    actor_org_id=actor_org_id,
                 )
                 return resolution.definition
             except Exception:
@@ -1089,6 +1132,8 @@ def submit_verified_workflow_instance(
     preflight = verify_workflow_runnable(
         workflow_id,
         action_registry_override=action_registry_override,
+        actor_user_id=resolved_user_id,
+        actor_org_id=resolved_org_id,
     )
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
@@ -1113,6 +1158,8 @@ def submit_verified_workflow_instance(
     workflow_definition, launch_resolution = _resolve_submission_launch_inputs(
         workflow_id=workflow_id,
         inputs=inputs_payload,
+        actor_user_id=resolved_user_id,
+        actor_org_id=resolved_org_id,
     )
     launch_diagnostics = dict(launch_resolution.diagnostics)
     verification_payload["workflow_launch_input_resolution"] = launch_diagnostics
@@ -1202,6 +1249,8 @@ def submit_verified_workflow_instance(
         else verify_workflow_runnable(
             workflow_id,
             action_registry_override=action_registry_override,
+            actor_user_id=resolved_user_id,
+            actor_org_id=resolved_org_id,
         )
     )
     verification_payload = _build_submission_verification_payload(

@@ -45,6 +45,7 @@ from ..workflow_description_quality_service import (
     summarise_workflow_description_quality,
 )
 from ..workflow_purity_report import build_workflow_purity_report
+from ...security.access_control import override_current_actor
 
 logger = logging.getLogger(__name__)
 _inventory_lock = Lock()
@@ -253,6 +254,8 @@ def register_workflow_from_vontology(
     registry: WorkflowRegistry,
     workflow_id: str,
     replace_existing: bool = False,
+    actor_user_id: str | None = None,
+    actor_org_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """Try to register a single Vontology-defined workflow into ``registry``.
 
@@ -268,7 +271,8 @@ def register_workflow_from_vontology(
     if existing_registration is not None and not replace_existing:
         return True, None
 
-    definition = load_workflow_definition_from_vontology(workflow_id)
+    with override_current_actor(actor_user_id, actor_org_id):
+        definition = load_workflow_definition_from_vontology(workflow_id)
     if definition is None:
         return False, "definition_not_loadable"
 
@@ -352,6 +356,8 @@ def resolve_workflow_definition_from_authority(
     use_current_shared_registry: bool = True,
     promote_to_registry: WorkflowRegistry | None = None,
     register_authoritative_fallback: bool = True,
+    actor_user_id: str | None = None,
+    actor_org_id: str | None = None,
 ) -> WorkflowDefinitionAuthorityResolution:
     """Resolve an executable workflow definition through one runtime authority path.
 
@@ -393,48 +399,54 @@ def resolve_workflow_definition_from_authority(
         "used_current_shared_registry": bool(use_current_shared_registry),
         "had_supplied_registry": registry is not None,
         "promote_to_supplied_registry": promote_to_registry is not None,
+        "actor_context_supplied": bool(actor_user_id or actor_org_id),
     }
     registration: WorkflowRegistration | None = None
     definition: WorkflowDefinition | None = None
     error_code: str | None = None
 
-    try:
-        definition = active_registry.get(workflow_id_text)
-        registration = active_registry.get_registration(workflow_id_text)
-    except Exception as exc:
-        error_code = f"registry_lookup_failed:{type(exc).__name__}"
-        logger.debug(
-            "workflow definition registry lookup failed for %s",
-            workflow_id_text,
-            exc_info=True,
-        )
-
-    if definition is None and register_authoritative_fallback:
+    with override_current_actor(actor_user_id, actor_org_id):
         try:
-            registered, register_error = register_workflow_from_vontology(
-                registry=active_registry,
-                workflow_id=workflow_id_text,
-            )
-            diagnostics["vontology_registration_attempted"] = True
-            diagnostics["vontology_registration_success"] = bool(registered)
-            if register_error:
-                diagnostics["vontology_registration_error_code"] = register_error
-            if registered:
-                definition = active_registry.get(workflow_id_text)
-                registration = active_registry.get_registration(workflow_id_text)
-                error_code = None if definition is not None else "definition_not_loadable"
-            elif not error_code:
-                error_code = register_error or "definition_not_loadable"
+            definition = active_registry.get(workflow_id_text)
+            registration = active_registry.get_registration(workflow_id_text)
         except Exception as exc:
-            diagnostics["vontology_registration_attempted"] = True
-            diagnostics["vontology_registration_success"] = False
-            diagnostics["vontology_registration_exception_type"] = type(exc).__name__
-            error_code = f"vontology_registration_failed:{type(exc).__name__}"
+            error_code = f"registry_lookup_failed:{type(exc).__name__}"
             logger.debug(
-                "workflow definition Vontology registration failed for %s",
+                "workflow definition registry lookup failed for %s",
                 workflow_id_text,
                 exc_info=True,
             )
+
+        if definition is None and register_authoritative_fallback:
+            try:
+                registered, register_error = register_workflow_from_vontology(
+                    registry=active_registry,
+                    workflow_id=workflow_id_text,
+                    actor_user_id=actor_user_id,
+                    actor_org_id=actor_org_id,
+                )
+                diagnostics["vontology_registration_attempted"] = True
+                diagnostics["vontology_registration_success"] = bool(registered)
+                if register_error:
+                    diagnostics["vontology_registration_error_code"] = register_error
+                if registered:
+                    definition = active_registry.get(workflow_id_text)
+                    registration = active_registry.get_registration(workflow_id_text)
+                    error_code = (
+                        None if definition is not None else "definition_not_loadable"
+                    )
+                elif not error_code:
+                    error_code = register_error or "definition_not_loadable"
+            except Exception as exc:
+                diagnostics["vontology_registration_attempted"] = True
+                diagnostics["vontology_registration_success"] = False
+                diagnostics["vontology_registration_exception_type"] = type(exc).__name__
+                error_code = f"vontology_registration_failed:{type(exc).__name__}"
+                logger.debug(
+                    "workflow definition Vontology registration failed for %s",
+                    workflow_id_text,
+                    exc_info=True,
+                )
 
     registration_source = _registration_source_for(
         registration,

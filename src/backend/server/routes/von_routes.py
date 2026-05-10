@@ -5210,9 +5210,16 @@ def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
 
 
 def _build_terminal_tool_progress_payload(
-    *, request_id: str, aux_calls: Any
+    *,
+    request_id: str,
+    aux_calls: Any,
+    completion_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    completion_gate = _latest_turn_completion_gate(aux_calls)
+    completion_gate = (
+        dict(completion_gate)
+        if isinstance(completion_gate, Mapping)
+        else _latest_turn_completion_gate(aux_calls)
+    )
     requires_follow_up = bool(
         completion_gate.get("requires_follow_up", False)
         if isinstance(completion_gate, dict)
@@ -11736,9 +11743,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
         if show_tool_use_progress:
+            turn_record_completion_gate = None
+            turn_execution_record = llm_debug_info.get("turn_execution_record")
+            if isinstance(turn_execution_record, Mapping):
+                raw_gate = turn_execution_record.get("completion_gate")
+                if isinstance(raw_gate, Mapping):
+                    turn_record_completion_gate = raw_gate
             final_progress_payload = _build_terminal_tool_progress_payload(
                 request_id=request_id,
                 aux_calls=auxiliary_llm_calls,
+                completion_gate=turn_record_completion_gate,
             )
             _stop_tool_progress_heartbeat(
                 progress_heartbeat_stop_event, progress_heartbeat_thread

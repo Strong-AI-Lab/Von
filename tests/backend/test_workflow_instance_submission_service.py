@@ -533,7 +533,103 @@ def test_verify_workflow_runnable_attempts_shared_registry_refresh_for_missing_w
     mock_register.assert_called_once_with(
         registry=registry,
         workflow_id="#V#candidate_workflow",
+        actor_user_id=None,
+        actor_org_id=None,
     )
+
+
+def test_submit_verified_workflow_instance_uses_namespace_actor_for_authority_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "#V#conversation_turn_execution_workflow"
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=(WorkflowActionInvocation(action_id="tool.initial"),),
+                terminal=True,
+            )
+        },
+        termination_states=("#V#start",),
+    )
+    graph = {
+        "workflow_id": workflow_id,
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": "tool.initial",
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    observed_actor_contexts: list[tuple[str | None, str | None]] = []
+
+    def _load_from_vontology(candidate_id: str) -> WorkflowDefinition | None:
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        actor_context = (
+            get_effective_user_concept_id(),
+            get_effective_organisation_concept_id(),
+        )
+        observed_actor_contexts.append(actor_context)
+        if actor_context != (
+            "#V#michael_witbrock",
+            "#V#university_of_auckland_strong_ai_lab",
+        ):
+            return None
+        return definition if candidate_id == workflow_id else None
+
+    import src.backend.workflows.durable.registry_factory as registry_factory
+    import src.backend.workflows.durable.workflow_instance_submission_service as submission_service
+
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        _load_from_vontology,
+    )
+    monkeypatch.setattr(
+        submission_service,
+        "build_workflow_process_graph_from_definition",
+        lambda _definition: graph,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "get_shared_durable_action_registry",
+        lambda: _make_action_registry(supports_action=True),
+    )
+
+    manager = MagicMock()
+    manager.create_instance.return_value = "instance-1"
+
+    result = submit_verified_workflow_instance(
+        manager=manager,
+        workflow_id=workflow_id,
+        user_id="#V#michael_witbrock",
+        org_id="university_of_auckland_strong_ai_lab",
+        namespace=(
+            "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        ),
+        inputs={},
+        max_retries=1,
+    )
+
+    assert result.success is True
+    assert result.status == "pending"
+    assert result.verification["preflight"]["runnable_verification_success"] is True
+    assert (
+        "#V#michael_witbrock",
+        "#V#university_of_auckland_strong_ai_lab",
+    ) in observed_actor_contexts
+    manager.create_instance.assert_called_once()
 
 
 def test_verify_workflow_runnable_rejects_missing_transition_from_action_state() -> None:
@@ -1157,6 +1253,8 @@ def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_po
     mock_verify.assert_called_once_with(
         "#V#candidate_workflow",
         action_registry_override=None,
+        actor_user_id="#V#user_alice",
+        actor_org_id="#V#org_nao",
     )
 
 
