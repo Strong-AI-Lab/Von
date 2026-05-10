@@ -55,3 +55,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2296` - mail-profile resource vocabulary, Gmail profile alias
   concepts, authorised/default profile predicates, and user-profile facts in
   Python rather than represented Vontology/profile authority.
+- `JVNAUTOSCI-2302` - workflow-introspection maintenance workflow graph,
+  diagnosis/repair policy, prompt patch text, and Jira remediation wording in
+  Python rather than Vontology-stored VWL/prompt authority.
