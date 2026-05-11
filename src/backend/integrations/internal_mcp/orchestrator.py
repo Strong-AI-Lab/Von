@@ -78,6 +78,7 @@ from src.backend.services.python_decision_authority_service import (
 from src.backend.services.selected_workflow_handoff_service import (
     evaluate_selected_workflow_handoff,
     evaluate_workflow_required_effects_tool_policy as _evaluate_workflow_required_effects_tool_policy_support,
+    workflow_result_tool_invocations,
     workflow_required_tools_from_contract as _workflow_required_tools_from_contract_support,
 )
 from ...workflows.action_registry import (
@@ -41930,8 +41931,8 @@ class InternalMCPChatOrchestrator:
                     wf_extra_messages = _coerce_message_sequence(
                         wf_result.data.get("extra_messages")
                     )
-                    wf_tool_invocations = _coerce_message_sequence(
-                        wf_result.data.get("tool_invocations")
+                    wf_tool_invocations = tuple(
+                        workflow_result_tool_invocations(wf_result)
                     )
                     aux_llm_calls.append(
                         _build_workflow_execution_aux_entry(

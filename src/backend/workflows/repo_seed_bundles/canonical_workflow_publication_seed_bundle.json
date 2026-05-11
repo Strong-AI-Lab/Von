@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "14",
+  "seed_version": "15",
   "workflows": [
     {
       "publication_spec": {
@@ -2036,7 +2036,6 @@
               "output_format": "json_value",
               "required_json_fields": [
                 "requested_message_count",
-                "mail_query",
                 "label_ids",
                 "extraction_reason"
               ],

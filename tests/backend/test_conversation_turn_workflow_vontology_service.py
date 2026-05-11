@@ -462,6 +462,15 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_extract_action.llm_policy.get("tool_mode") == "none"
     assert mail_review_extract_action.llm_policy.get("required_tools") == []
     assert "last 3" in mail_review_extract_action.llm_policy["response_contract_text"]
+    extract_required_fields = (
+        mail_review_extract_action.validation_policy or {}
+    ).get("required_json_fields")
+    assert "mail_query" not in extract_required_fields
+    assert set(extract_required_fields) == {
+        "requested_message_count",
+        "label_ids",
+        "extraction_reason",
+    }
     assert "mail_review_effective_limit" in mail_review_definition.states[
         mail_review_extract_step_id
     ].metadata.get("writes_context_keys", [])
