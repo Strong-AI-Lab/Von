@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "13",
+  "seed_version": "14",
   "workflows": [
     {
       "publication_spec": {
@@ -1700,7 +1700,7 @@
                   ]
                 },
                 "reason": "represented_mail_profile_resolved",
-                "to_state": "prepare_mail_review_tool_prompt"
+                "to_state": "extract_mail_review_request_parameters"
               },
               {
                 "condition_spec": {
@@ -1918,7 +1918,7 @@
                   "kind": "always"
                 },
                 "reason": "mail_review_tool_prompt_ready",
-                "to_state": "delegate_to_tool_pipeline"
+                "to_state": "list_recent_mail_messages"
               }
             ],
             "execution_mode": "deterministic",
@@ -1954,72 +1954,51 @@
           },
           {
             "action_concept_id": null,
-            "action_id": "workflow_invoke_subworkflow",
+            "action_id": "mail_review.extract_request_parameters",
             "concept_id": null,
-            "conditional_transitions": [],
-            "context_input_mapping_specs": [
+            "conditional_transitions": [
               {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt",
-                "context_key": "mail_review_tool_prompt",
-                "required": true,
-                "tool_param": "prompt"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt_for_requirements",
-                "context_key": "mail_review_tool_prompt",
-                "required": true,
-                "tool_param": "prompt_for_requirements"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_gmail_profile_to_gmail_profile",
-                "context_key": "gmail_profile",
-                "required": true,
-                "tool_param": "gmail_profile"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_profile_id_to_mail_review_profile_id",
-                "context_key": "mail_review_profile_id",
-                "required": false,
-                "tool_param": "mail_review_profile_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_limit_to_mail_review_limit",
-                "context_key": "mail_review_limit",
-                "required": false,
-                "tool_param": "mail_review_limit"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_query_to_mail_review_query",
-                "context_key": "mail_review_query",
-                "required": false,
-                "tool_param": "mail_review_query"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_label_filter_to_mail_review_label_filter",
-                "context_key": "mail_review_label_filter",
-                "required": false,
-                "tool_param": "mail_review_label_filter"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_output_shape_to_mail_review_output_shape",
-                "context_key": "mail_review_output_shape",
-                "required": false,
-                "tool_param": "mail_review_output_shape"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_output_fields_to_mail_review_output_fields",
-                "context_key": "mail_review_output_fields",
-                "required": false,
-                "tool_param": "mail_review_output_fields"
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "mail_review_request_parameters_extracted",
+                "to_state": "prepare_mail_review_tool_prompt"
               }
             ],
+            "context_input_mapping_specs": [],
             "context_input_mappings": [],
             "effects": [],
-            "execution_mode": "subworkflow",
-            "invoked_workflow_id": "#V#tool_calling_workflow",
-            "llm_policy": null,
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "mail_review_request_parameter_extraction",
+              "prompt_text": "Extract bounded Gmail review parameters from the user request and workflow context. Do not call tools. Return JSON only.",
+              "tool_mode": "none",
+              "allowed_tools": [],
+              "required_tools": [],
+              "max_tool_invocations": 0,
+              "response_contract_text": "Return JSON with keys requested_message_count, mail_query, label_ids, and extraction_reason. requested_message_count must be an integer from 1 to 25. Prefer an explicit numeric count in the current request. If the request says last 3 or latest three, return 3. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels.",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current mail-review request"
+                },
+                {
+                  "context_key": "mail_review_limit",
+                  "label": "Selector-provided message limit, if any"
+                },
+                {
+                  "context_key": "mail_review_query",
+                  "label": "Selector-provided Gmail query, if any"
+                },
+                {
+                  "context_key": "mail_review_label_filter",
+                  "label": "Selector-provided label filter, if any"
+                }
+              ]
+            },
             "mutation_authority": null,
-            "next_state": "completed",
+            "next_state": null,
             "on_approval_required_state": null,
             "on_break_state": null,
             "on_continue_state": null,
@@ -2028,24 +2007,435 @@
             "on_true_state": null,
             "on_unknown_state": null,
             "prompt_concept_ids": [],
-            "state_id": "delegate_to_tool_pipeline",
+            "state_id": "extract_mail_review_request_parameters",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_requested_message_count_to_mail_review_effective_limit",
+                "tool_output_field": "validated_json.requested_message_count",
+                "context_key": "mail_review_effective_limit"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_mail_query_to_mail_review_effective_query",
+                "tool_output_field": "validated_json.mail_query",
+                "context_key": "mail_review_effective_query"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_label_ids_to_mail_review_effective_label_ids",
+                "tool_output_field": "validated_json.label_ids",
+                "context_key": "mail_review_effective_label_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_parameter_extraction_reason_to_mail_review_parameter_extraction_reason",
+                "tool_output_field": "validated_json.extraction_reason",
+                "context_key": "mail_review_parameter_extraction_reason"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "requested_message_count",
+                "mail_query",
+                "label_ids",
+                "extraction_reason"
+              ],
+              "json_field_defaults": {
+                "requested_message_count": 3,
+                "mail_query": null,
+                "label_ids": [],
+                "extraction_reason": "Defaulted to three recent messages because no reliable count was extracted."
+              }
+            },
+            "writes_context_keys": [
+              "mail_review_effective_limit",
+              "mail_review_effective_query",
+              "mail_review_effective_label_ids",
+              "mail_review_parameter_extraction_reason"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "gmail_list_messages",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "recent_mail_messages_listed",
+                "to_state": "record_mail_list_invocation"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "list_recent_mail_messages",
             "static_input_bindings": [
               [
-                "inherit_parent_context",
-                true
+                "profile",
+                {
+                  "$context_key": "gmail_profile"
+                }
               ],
               [
-                "llm_allowed_tools",
+                "max_results",
+                {
+                  "$context_key": "mail_review_effective_limit"
+                }
+              ],
+              [
+                "bypass_profile_query_prefix",
+                true
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_list_messages_result_to_mail_review_list_result",
+                "tool_output_field": "result",
+                "context_key": "mail_review_list_result"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_list_messages_to_mail_review_listed_messages",
+                "tool_output_field": "result.messages",
+                "context_key": "mail_review_listed_messages"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "mail_review_list_result",
+              "mail_review_listed_messages"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_set",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "mail_list_invocation_recorded",
+                "to_state": "fetch_mail_message_details"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "record_mail_list_invocation",
+            "static_input_bindings": [
+              [
+                "assignments",
                 [
-                  "gmail_list_messages",
-                  "gmail_get_message"
+                  {
+                    "key": "invocations",
+                    "value": [
+                      {
+                        "tool": "gmail_list_messages",
+                        "status": "ok",
+                        "workflow_step_evidence": true,
+                        "effective_payload": {
+                          "$context_key": "mail_review_list_result"
+                        }
+                      }
+                    ]
+                  }
                 ]
               ]
             ],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "invocations"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.for_each",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "mail_message_details_fetched",
+                "to_state": "render_mail_review_response"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "fetch_mail_message_details",
+            "static_input_bindings": [
+              [
+                "workflow_id",
+                "#V#gmail_message_detail_fetch_workflow"
+              ],
+              [
+                "items_context_key",
+                "mail_review_listed_messages"
+              ],
+              [
+                "item_context_key",
+                "current_mail_message"
+              ],
+              [
+                "index_context_key",
+                "mail_message_index"
+              ],
+              [
+                "max_items",
+                {
+                  "$context_key": "mail_review_effective_limit"
+                }
+              ],
+              [
+                "max_transitions",
+                8
+              ],
+              [
+                "success_policy",
+                "allow_partial"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_iteration_results_to_mail_message_detail_results",
+                "tool_output_field": "iteration_results",
+                "context_key": "mail_message_detail_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_invocations_to_invocations",
+                "tool_output_field": "invocations",
+                "context_key": "invocations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_success_count_to_mail_detail_success_count",
+                "tool_output_field": "for_each_success_count",
+                "context_key": "mail_detail_success_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_error_count_to_mail_detail_error_count",
+                "tool_output_field": "for_each_error_count",
+                "context_key": "mail_detail_error_count"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "mail_message_detail_results",
+              "invocations",
+              "mail_detail_success_count",
+              "mail_detail_error_count"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "mail_review.render_grounded_response",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "mail_review_response_rendered",
+                "to_state": "return_mail_review_response"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "mail_review_response_rendering",
+              "prompt_text": "Render the grounded mail-review answer from retrieved Gmail list and message-detail evidence. Do not call tools. Return JSON only.",
+              "tool_mode": "none",
+              "allowed_tools": [],
+              "required_tools": [],
+              "max_tool_invocations": 0,
+              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results and mail_review_list_result. For each message requested, include subject, sender/from, date, and a short snippet/body preview when present. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current mail-review request"
+                },
+                {
+                  "context_key": "gmail_profile",
+                  "label": "Resolved represented Gmail profile"
+                },
+                {
+                  "context_key": "mail_review_effective_limit",
+                  "label": "Requested/effective message count"
+                },
+                {
+                  "context_key": "mail_review_list_result",
+                  "label": "Gmail list result"
+                },
+                {
+                  "context_key": "mail_message_detail_results",
+                  "label": "Per-message Gmail detail retrieval results"
+                },
+                {
+                  "context_key": "mail_detail_success_count",
+                  "label": "Successful detail fetch count"
+                },
+                {
+                  "context_key": "mail_detail_error_count",
+                  "label": "Failed detail fetch count"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "render_mail_review_response",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_render_response_text_to_response_text",
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_render_response_text_to_final_response",
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "final_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_render_response_text_to_current_response",
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "current_response"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "response_text"
+              ],
+              "json_field_defaults": {
+                "response_text": "I retrieved Gmail evidence but could not safely render the requested mail list from the available message details."
+              }
+            },
+            "writes_context_keys": [
+              "response_text",
+              "final_response",
+              "current_response"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_set",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "return_mail_review_response",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "control_signal",
+                    "value": "return"
+                  },
+                  {
+                    "key": "return_payload",
+                    "value": {
+                      "response_text": {
+                        "$context_key": "response_text"
+                      },
+                      "final_response": {
+                        "$context_key": "final_response"
+                      },
+                      "current_response": {
+                        "$context_key": "current_response"
+                      },
+                      "invocations": {
+                        "$context_key": "invocations"
+                      },
+                      "mail_review_list_result": {
+                        "$context_key": "mail_review_list_result"
+                      },
+                      "mail_message_detail_results": {
+                        "$context_key": "mail_message_detail_results"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "control_signal",
+              "return_payload"
+            ]
           },
           {
             "action_concept_id": null,
@@ -2117,6 +2507,186 @@
           "lang": "en-NZ"
         }
       ]
+    },
+    {
+      "workflow_id": "#V#gmail_message_detail_fetch_workflow",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "publication_spec": {
+        "initial_state": "extract_current_message_id",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_set",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "current_message_id_extracted",
+                "to_state": "fetch_message_detail"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "extract_current_message_id",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "current_message_id",
+                    "value_from_context_options": [
+                      "current_mail_message.message_id",
+                      "current_mail_message.id"
+                    ]
+                  }
+                ]
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "current_message_id"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "gmail_get_message",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "message_detail_fetched",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "fetch_message_detail",
+            "static_input_bindings": [
+              [
+                "profile",
+                {
+                  "$context_key": "gmail_profile"
+                }
+              ],
+              [
+                "message_id",
+                {
+                  "$context_key": "current_message_id"
+                }
+              ],
+              [
+                "format",
+                "metadata"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_to_gmail_message_detail",
+                "tool_output_field": "result",
+                "context_key": "gmail_message_detail"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "gmail_message_detail"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "completed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
     },
     {
       "publication_spec": {

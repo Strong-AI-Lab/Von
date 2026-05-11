@@ -38,6 +38,7 @@ RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_postcondition_critic"
 GENERAL_MAIL_REVIEW_WORKFLOW_ID = "#V#general_mail_review_workflow"
+GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID = "#V#gmail_message_detail_fetch_workflow"
 
 
 @pytest.fixture
@@ -241,7 +242,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 7
+    assert counts.get("workflows_published") == 8
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -389,7 +390,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert {
         authority_service._step_concept_id(
             workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
-            state_id="prepare_mail_review_tool_prompt",
+            state_id="extract_mail_review_request_parameters",
         ),
         authority_service._step_concept_id(
             workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
@@ -446,40 +447,151 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         and "bypass_profile_query_prefix" in str(item.get("template") or "")
         for item in prompt_assignments
     )
-    mail_review_delegate_step_id = authority_service._step_concept_id(
+    mail_review_extract_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
-        state_id="delegate_to_tool_pipeline",
+        state_id="extract_mail_review_request_parameters",
     )
-    mail_review_delegate_action = mail_review_definition.states[
-        mail_review_delegate_step_id
+    mail_review_extract_action = mail_review_definition.states[
+        mail_review_extract_step_id
     ].actions[0]
-    assert mail_review_delegate_action.action_id == "workflow_invoke_subworkflow"
-    assert mail_review_delegate_action.subworkflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert mail_review_delegate_action.inputs["inherit_parent_context"] is True
-    assert mail_review_delegate_action.inputs["prompt"] == {
-        "$context_key": "mail_review_tool_prompt",
-        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt",
-        "$required": True,
+    assert mail_review_extract_action.action_id == (
+        "mail_review.extract_request_parameters"
+    )
+    assert mail_review_extract_action.execution_mode == "llm"
+    assert mail_review_extract_action.llm_policy is not None
+    assert mail_review_extract_action.llm_policy.get("tool_mode") == "none"
+    assert mail_review_extract_action.llm_policy.get("required_tools") == []
+    assert "last 3" in mail_review_extract_action.llm_policy["response_contract_text"]
+    assert "mail_review_effective_limit" in mail_review_definition.states[
+        mail_review_extract_step_id
+    ].metadata.get("writes_context_keys", [])
+    assert any(
+        mapping.get("tool_output_field") == "validated_json.requested_message_count"
+        and mapping.get("context_key") == "mail_review_effective_limit"
+        for mapping in mail_review_definition.states[
+            mail_review_extract_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
+    mail_review_list_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="list_recent_mail_messages",
+    )
+    mail_review_list_action = mail_review_definition.states[
+        mail_review_list_step_id
+    ].actions[0]
+    assert mail_review_list_action.action_id == "gmail_list_messages"
+    assert mail_review_list_action.inputs["profile"]["$context_key"] == (
+        "gmail_profile"
+    )
+    assert mail_review_list_action.inputs["max_results"]["$context_key"] == (
+        "mail_review_effective_limit"
+    )
+    assert mail_review_list_action.inputs["bypass_profile_query_prefix"] is True
+    assert any(
+        mapping.get("tool_output_field") == "result.messages"
+        and mapping.get("context_key") == "mail_review_listed_messages"
+        for mapping in mail_review_definition.states[
+            mail_review_list_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
+    mail_review_for_each_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="fetch_mail_message_details",
+    )
+    mail_review_for_each_action = mail_review_definition.states[
+        mail_review_for_each_step_id
+    ].actions[0]
+    assert mail_review_for_each_action.action_id == "workflow_control.for_each"
+    assert mail_review_for_each_action.inputs["workflow_id"] == (
+        GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID
+    )
+    assert mail_review_for_each_action.inputs["items_context_key"] == (
+        "mail_review_listed_messages"
+    )
+    assert mail_review_for_each_action.inputs["item_context_key"] == (
+        "current_mail_message"
+    )
+    assert mail_review_for_each_action.inputs["max_items"]["$context_key"] == (
+        "mail_review_effective_limit"
+    )
+    assert mail_review_for_each_action.inputs["success_policy"] == "allow_partial"
+    assert any(
+        mapping.get("tool_output_field") == "invocations"
+        and mapping.get("context_key") == "invocations"
+        for mapping in mail_review_definition.states[
+            mail_review_for_each_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
+    mail_review_render_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="render_mail_review_response",
+    )
+    mail_review_render_action = mail_review_definition.states[
+        mail_review_render_step_id
+    ].actions[0]
+    assert mail_review_render_action.action_id == "mail_review.render_grounded_response"
+    assert mail_review_render_action.llm_policy is not None
+    assert mail_review_render_action.llm_policy.get("tool_mode") == "none"
+    assert "mail_message_detail_results" in {
+        field.get("context_key")
+        for field in mail_review_render_action.llm_policy.get("context_fields", [])
+        if isinstance(field, dict)
     }
-    assert mail_review_delegate_action.inputs["prompt_for_requirements"] == {
-        "$context_key": "mail_review_tool_prompt",
-        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_tool_prompt_to_prompt_for_requirements",
-        "$required": True,
-    }
-    assert mail_review_delegate_action.inputs["llm_allowed_tools"] == [
-        "gmail_list_messages",
-        "gmail_get_message",
+    mail_review_return_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="return_mail_review_response",
+    )
+    mail_review_return_action = mail_review_definition.states[
+        mail_review_return_step_id
+    ].actions[0]
+    assert mail_review_return_action.action_id == "workflow_control.context_set"
+    return_assignments = mail_review_return_action.inputs.get("assignments")
+    assert isinstance(return_assignments, list)
+    assert any(
+        item.get("key") == "control_signal" and item.get("value") == "return"
+        for item in return_assignments
+        if isinstance(item, dict)
+    )
+    assert any(
+        item.get("key") == "return_payload"
+        and isinstance(item.get("value"), dict)
+        and item["value"].get("final_response", {}).get("$context_key")
+        == "final_response"
+        and item["value"].get("invocations", {}).get("$context_key") == "invocations"
+        for item in return_assignments
+        if isinstance(item, dict)
+    )
+    assert not any(
+        "delegate_to_tool_pipeline" in state_id
+        for state_id in mail_review_definition.states
+    )
+    detail_fetch_definition = load_workflow_definition_from_vontology(
+        GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID
+    )
+    assert detail_fetch_definition is not None
+    detail_extract_step_id = authority_service._step_concept_id(
+        workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+        state_id="extract_current_message_id",
+    )
+    detail_extract_action = detail_fetch_definition.states[
+        detail_extract_step_id
+    ].actions[0]
+    assert detail_extract_action.action_id == "workflow_control.context_set"
+    assert detail_extract_action.inputs["assignments"][0][
+        "value_from_context_options"
+    ] == ["current_mail_message.message_id", "current_mail_message.id"]
+    detail_fetch_step_id = authority_service._step_concept_id(
+        workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+        state_id="fetch_message_detail",
+    )
+    detail_fetch_action = detail_fetch_definition.states[detail_fetch_step_id].actions[
+        0
     ]
-    assert mail_review_delegate_action.inputs["gmail_profile"] == {
-        "$context_key": "gmail_profile",
-        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_gmail_profile_to_gmail_profile",
-        "$required": True,
-    }
-    assert mail_review_delegate_action.inputs["mail_review_profile_id"] == {
-        "$context_key": "mail_review_profile_id",
-        "$mapping_concept_id": "#V#workflow_mapping_general_mail_review_delegate_mail_review_profile_id_to_mail_review_profile_id",
-        "$required": False,
-    }
+    assert detail_fetch_action.action_id == "gmail_get_message"
+    assert detail_fetch_action.inputs["profile"]["$context_key"] == "gmail_profile"
+    assert detail_fetch_action.inputs["message_id"]["$context_key"] == (
+        "current_message_id"
+    )
     launch_contract = mail_review_definition.metadata.get("launch_input_contract")
     assert isinstance(launch_contract, dict)
     assert launch_contract.get("required_inputs") == ["prompt"]
