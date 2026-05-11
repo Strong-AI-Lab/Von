@@ -25,6 +25,16 @@ from src.backend.workflows import (
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     workflow_concept_authority_service as authority_service,
 )
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+)
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
+from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
 )
@@ -692,6 +702,90 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert detail_fetch_action.inputs["message_id"]["$context_key"] == (
         "current_message_id"
     )
+    detail_return_step_id = authority_service._step_concept_id(
+        workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+        state_id="return_message_detail",
+    )
+    assert any(
+        transition.to_state == detail_return_step_id
+        for transition in detail_fetch_definition.states[
+            detail_fetch_step_id
+        ].transitions
+    )
+    detail_fetch_mappings = detail_fetch_definition.states[
+        detail_fetch_step_id
+    ].metadata.get("tool_output_context_mappings", [])
+    assert {
+        ("result", "gmail_message_detail"),
+        ("result.message_id", "message_detail_message_id"),
+        ("result.sender", "message_detail_sender"),
+        ("result.from", "message_detail_from"),
+        ("result.subject", "message_detail_subject"),
+        ("result.date", "message_detail_date"),
+        ("result.snippet", "message_detail_snippet"),
+    }.issubset(
+        {
+            (mapping.get("tool_output_field"), mapping.get("context_key"))
+            for mapping in detail_fetch_mappings
+            if isinstance(mapping, dict)
+        }
+    )
+    assert {
+        "gmail_message_detail",
+        "message_detail_message_id",
+        "message_detail_sender",
+        "message_detail_from",
+        "message_detail_subject",
+        "message_detail_date",
+        "message_detail_snippet",
+    }.issubset(
+        set(
+            detail_fetch_definition.states[detail_fetch_step_id].metadata.get(
+                "writes_context_keys", []
+            )
+        )
+    )
+    detail_return_action = detail_fetch_definition.states[
+        detail_return_step_id
+    ].actions[0]
+    assert detail_return_action.action_id == "workflow_control.context_set"
+    detail_return_assignments = detail_return_action.inputs.get("assignments")
+    assert isinstance(detail_return_assignments, list)
+    assert any(
+        item.get("key") == "control_signal" and item.get("value") == "return"
+        for item in detail_return_assignments
+        if isinstance(item, dict)
+    )
+    detail_return_payload = next(
+        (
+            item.get("value")
+            for item in detail_return_assignments
+            if isinstance(item, dict) and item.get("key") == "return_payload"
+        ),
+        {},
+    )
+    assert isinstance(detail_return_payload, dict)
+    assert detail_return_payload.get("message_id", {}).get("$context_key") == (
+        "message_detail_message_id"
+    )
+    assert detail_return_payload.get("sender", {}).get("$context_key") == (
+        "message_detail_sender"
+    )
+    assert detail_return_payload.get("from", {}).get("$context_key") == (
+        "message_detail_from"
+    )
+    assert detail_return_payload.get("subject", {}).get("$context_key") == (
+        "message_detail_subject"
+    )
+    assert detail_return_payload.get("date", {}).get("$context_key") == (
+        "message_detail_date"
+    )
+    assert detail_return_payload.get("snippet", {}).get("$context_key") == (
+        "message_detail_snippet"
+    )
+    assert detail_return_payload.get("gmail_message_detail", {}).get(
+        "$context_key"
+    ) == "gmail_message_detail"
     launch_contract = mail_review_definition.metadata.get("launch_input_contract")
     assert isinstance(launch_contract, dict)
     assert launch_contract.get("required_inputs") == ["prompt"]
@@ -728,6 +822,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "gmail review" in mail_exemplar_text
     assert "ordinary mailbox listing" in mail_exemplar_text
     assert "Do not choose arXiv" in mail_exemplar_text
+
     assert "mail_profile_id" in mail_exemplar_text
 
     turn_definition = load_workflow_definition_from_vontology(
@@ -1039,6 +1134,74 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         for mapping in narration_mappings
         if isinstance(mapping, dict)
     )
+
+
+def test_gmail_message_detail_fetch_workflow_returns_compact_declared_payload(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_conversation_turn_workflows()
+    detail_fetch_definition = load_workflow_definition_from_vontology(
+        GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID
+    )
+    assert detail_fetch_definition is not None
+
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: load_workflow_definition_from_vontology(
+            workflow_id
+        ),
+    )
+
+    def fake_gmail_get_message(request: Any) -> WorkflowActionResult:
+        assert request.inputs["profile"] == "default-profile"
+        assert request.inputs["message_id"] == "msg-1"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "message_id": "msg-1",
+                    "sender": "Sender <sender@example.test>",
+                    "from": "Sender <sender@example.test>",
+                    "subject": "Subject line",
+                    "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+                    "snippet": "Short preview",
+                }
+            },
+        )
+
+    registry.register(
+        ActionSpec(action_id="gmail_get_message", handler=fake_gmail_get_message)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        detail_fetch_definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "gmail_profile": "default-profile",
+            "current_mail_message": {"message_id": "msg-1"},
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state.endswith("_return_message_detail")
+    assert result.result_envelope is not None
+    payload = result.result_envelope.get("declared_output_payload")
+    assert payload == {
+        "message_id": "msg-1",
+        "sender": "Sender <sender@example.test>",
+        "from": "Sender <sender@example.test>",
+        "subject": "Subject line",
+        "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+        "snippet": "Short preview",
+        "gmail_message_detail": {
+            "message_id": "msg-1",
+            "sender": "Sender <sender@example.test>",
+            "from": "Sender <sender@example.test>",
+            "subject": "Subject line",
+            "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+            "snippet": "Short preview",
+        },
+    }
 
 
 def test_turn_and_episode_prompt_authority_resolve_on_live_surface(

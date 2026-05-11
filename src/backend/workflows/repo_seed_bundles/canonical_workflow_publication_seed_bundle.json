@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "16",
+  "seed_version": "17",
   "workflows": [
     {
       "publication_spec": {
@@ -2724,7 +2724,7 @@
                   "kind": "always"
                 },
                 "reason": "message_detail_fetched",
-                "to_state": "completed"
+                "to_state": "return_message_detail"
               }
             ],
             "context_input_mapping_specs": [],
@@ -2768,11 +2768,114 @@
                 "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_to_gmail_message_detail",
                 "tool_output_field": "result",
                 "context_key": "gmail_message_detail"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_message_id_to_message_detail_message_id",
+                "tool_output_field": "result.message_id",
+                "context_key": "message_detail_message_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_sender_to_message_detail_sender",
+                "tool_output_field": "result.sender",
+                "context_key": "message_detail_sender"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_from_to_message_detail_from",
+                "tool_output_field": "result.from",
+                "context_key": "message_detail_from"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_subject_to_message_detail_subject",
+                "tool_output_field": "result.subject",
+                "context_key": "message_detail_subject"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_date_to_message_detail_date",
+                "tool_output_field": "result.date",
+                "context_key": "message_detail_date"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_snippet_to_message_detail_snippet",
+                "tool_output_field": "result.snippet",
+                "context_key": "message_detail_snippet"
               }
             ],
             "validation_policy": null,
             "writes_context_keys": [
-              "gmail_message_detail"
+              "gmail_message_detail",
+              "message_detail_message_id",
+              "message_detail_sender",
+              "message_detail_from",
+              "message_detail_subject",
+              "message_detail_date",
+              "message_detail_snippet"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_set",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "return_message_detail",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "control_signal",
+                    "value": "return"
+                  },
+                  {
+                    "key": "return_payload",
+                    "value": {
+                      "message_id": {
+                        "$context_key": "message_detail_message_id"
+                      },
+                      "sender": {
+                        "$context_key": "message_detail_sender"
+                      },
+                      "from": {
+                        "$context_key": "message_detail_from"
+                      },
+                      "subject": {
+                        "$context_key": "message_detail_subject"
+                      },
+                      "date": {
+                        "$context_key": "message_detail_date"
+                      },
+                      "snippet": {
+                        "$context_key": "message_detail_snippet"
+                      },
+                      "gmail_message_detail": {
+                        "$context_key": "gmail_message_detail"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "control_signal",
+              "return_payload"
             ]
           },
           {
