@@ -295,9 +295,94 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_capture_user_action.action_id == (
         "workflow_control.context_template"
     )
+    assert {
+        authority_service._step_concept_id(
+            workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+            state_id="lookup_default_mail_profile",
+        )
+    }.issubset(
+        {
+            transition.to_state
+            for transition in mail_review_definition.states[
+                mail_review_capture_user_step_id
+            ].transitions
+        }
+    )
     assert "mail_review_authenticated_user_concept_id" in mail_review_definition.states[
         mail_review_capture_user_step_id
     ].metadata.get("writes_context_keys", [])
+    mail_review_default_lookup_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="lookup_default_mail_profile",
+    )
+    mail_review_default_lookup_action = mail_review_definition.states[
+        mail_review_default_lookup_step_id
+    ].actions[0]
+    assert mail_review_default_lookup_action.action_id == "workflow_mcp.invoke_tool"
+    assert mail_review_default_lookup_action.execution_mode == "deterministic"
+    assert mail_review_default_lookup_action.inputs["tool_name"] == (
+        "find_relations_with_argument"
+    )
+    assert mail_review_default_lookup_action.inputs["tool_arguments"] == {
+        "concept_id": {"$context_key": "mail_review_authenticated_user_concept_id"},
+        "argument_index": "subject",
+        "predicate_filter": ["#V#has_default_mail_profile"],
+        "relation_kind": "any",
+        "include_concept_preview": True,
+        "include_text_snippets": False,
+        "limit": 5,
+    }
+    assert any(
+        mapping.get("tool_output_field") == "result"
+        and mapping.get("context_key") == "default_mail_profile_relation_lookup_result"
+        for mapping in mail_review_definition.states[
+            mail_review_default_lookup_step_id
+        ].metadata.get("tool_output_context_mappings", [])
+    )
+    mail_review_apply_default_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="apply_default_mail_profile_from_relations",
+    )
+    mail_review_apply_default_action = mail_review_definition.states[
+        mail_review_apply_default_step_id
+    ].actions[0]
+    assert mail_review_apply_default_action.action_id == "workflow_control.context_set"
+    default_assignments = mail_review_apply_default_action.inputs["assignments"]
+    assert {
+        (
+            assignment.get("key"),
+            assignment.get("value_from_context"),
+            assignment.get("skip_if_unresolved"),
+        )
+        for assignment in default_assignments
+    } == {
+        (
+            "gmail_profile",
+            "default_mail_profile_relation_lookup_result.hits.0.target_value",
+            True,
+        ),
+        (
+            "mail_profile_resource_concept_id",
+            "default_mail_profile_relation_lookup_result.hits.0.target_value",
+            True,
+        ),
+    }
+    apply_default_branch_targets = {
+        transition.to_state
+        for transition in mail_review_definition.states[
+            mail_review_apply_default_step_id
+        ].transitions
+    }
+    assert {
+        authority_service._step_concept_id(
+            workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+            state_id="extract_mail_review_request_parameters",
+        ),
+        authority_service._step_concept_id(
+            workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+            state_id="lookup_represented_mail_profiles",
+        ),
+    }.issubset(apply_default_branch_targets)
     mail_review_lookup_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="lookup_represented_mail_profiles",
@@ -462,6 +547,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_extract_action.llm_policy.get("tool_mode") == "none"
     assert mail_review_extract_action.llm_policy.get("required_tools") == []
     assert "last 3" in mail_review_extract_action.llm_policy["response_contract_text"]
+    assert "last four" in mail_review_extract_action.llm_policy[
+        "response_contract_text"
+    ]
+    assert "one through twenty-five" in mail_review_extract_action.llm_policy[
+        "response_contract_text"
+    ]
     extract_required_fields = (
         mail_review_extract_action.validation_policy or {}
     ).get("required_json_fields")

@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "15",
+  "seed_version": "16",
   "workflows": [
     {
       "publication_spec": {
@@ -1560,7 +1560,7 @@
                   "kind": "always"
                 },
                 "reason": "authenticated_mail_user_captured",
-                "to_state": "lookup_represented_mail_profiles"
+                "to_state": "lookup_default_mail_profile"
               }
             ],
             "context_input_mapping_specs": [],
@@ -1602,6 +1602,153 @@
             "validation_policy": null,
             "writes_context_keys": [
               "mail_review_authenticated_user_concept_id"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_mcp.invoke_tool",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "default_mail_profile_relation_loaded",
+                "to_state": "apply_default_mail_profile_from_relations"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "lookup_default_mail_profile",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "find_relations_with_argument"
+              ],
+              [
+                "tool_arguments",
+                {
+                  "concept_id": {
+                    "$context_key": "mail_review_authenticated_user_concept_id"
+                  },
+                  "argument_index": "subject",
+                  "predicate_filter": [
+                    "#V#has_default_mail_profile"
+                  ],
+                  "relation_kind": "any",
+                  "include_concept_preview": true,
+                  "include_text_snippets": false,
+                  "limit": 5
+                }
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_default_mail_profile_relation_lookup_result_to_default_mail_profile_relation_lookup_result",
+                "tool_output_field": "result",
+                "context_key": "default_mail_profile_relation_lookup_result"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "default_mail_profile_relation_lookup_result"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_control.context_set",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "gmail_profile",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "gmail_profile",
+                      "expected": false
+                    },
+                    {
+                      "condition": {
+                        "kind": "context_value_equals",
+                        "key": "gmail_profile",
+                        "value": ""
+                      },
+                      "kind": "not"
+                    }
+                  ]
+                },
+                "reason": "represented_default_mail_profile_resolved",
+                "to_state": "extract_mail_review_request_parameters"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "default_mail_profile_not_available",
+                "to_state": "lookup_represented_mail_profiles"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "apply_default_mail_profile_from_relations",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "gmail_profile",
+                    "value_from_context": "default_mail_profile_relation_lookup_result.hits.0.target_value",
+                    "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "mail_profile_resource_concept_id",
+                    "value_from_context": "default_mail_profile_relation_lookup_result.hits.0.target_value",
+                    "skip_if_unresolved": true
+                  }
+                ]
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "gmail_profile",
+              "mail_profile_resource_concept_id"
             ]
           },
           {
@@ -1977,7 +2124,7 @@
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
-              "response_contract_text": "Return JSON with keys requested_message_count, mail_query, label_ids, and extraction_reason. requested_message_count must be an integer from 1 to 25. Prefer an explicit numeric count in the current request. If the request says last 3 or latest three, return 3. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels.",
+              "response_contract_text": "Return JSON with keys requested_message_count, mail_query, label_ids, and extraction_reason. requested_message_count must be an integer from 1 to 25. Treat written number words from one through twenty-five as explicit counts. If the request says last 3, latest three, last four, or latest four, return 3 or 4 respectively. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels.",
               "context_fields": [
                 {
                   "context_key": "prompt",
