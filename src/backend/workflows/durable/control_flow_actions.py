@@ -634,6 +634,13 @@ def _build_for_each_handler(
 
         success_count = len([item for item in iteration_results if item["completed"]])
         error_count = len(iteration_results) - success_count
+        successful_results = [
+            dict(result_payload)
+            for item in iteration_results
+            if item["completed"]
+            and isinstance((result_payload := item.get("result")), Mapping)
+            and result_payload
+        ]
         outputs: Dict[str, Any] = {
             "items_source": items_source or None,
             "for_each_item_count": len(iteration_results),
@@ -644,6 +651,7 @@ def _build_for_each_handler(
             "for_each_error_count": error_count,
             "for_each_partial_success": success_count > 0 and error_count > 0,
             "iteration_results": iteration_results,
+            "successful_results": successful_results,
         }
         existing_invocations = request.data.get("invocations")
         if isinstance(existing_invocations, list) or child_step_invocations:

@@ -625,12 +625,26 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         "mail_review_effective_limit"
     )
     assert mail_review_for_each_action.inputs["success_policy"] == "allow_partial"
+    detail_mappings = mail_review_definition.states[
+        mail_review_for_each_step_id
+    ].metadata.get("tool_output_context_mappings", [])
+    assert any(
+        mapping.get("tool_output_field") == "successful_results"
+        and mapping.get("context_key") == "mail_message_detail_results"
+        for mapping in detail_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("tool_output_field") == "iteration_results"
+        and mapping.get("context_key") == "mail_message_detail_iteration_results"
+        for mapping in detail_mappings
+        if isinstance(mapping, dict)
+    )
     assert any(
         mapping.get("tool_output_field") == "invocations"
         and mapping.get("context_key") == "invocations"
-        for mapping in mail_review_definition.states[
-            mail_review_for_each_step_id
-        ].metadata.get("tool_output_context_mappings", [])
+        for mapping in detail_mappings
+        if isinstance(mapping, dict)
     )
     mail_review_render_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
@@ -642,7 +656,15 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_render_action.action_id == "mail_review.render_grounded_response"
     assert mail_review_render_action.llm_policy is not None
     assert mail_review_render_action.llm_policy.get("tool_mode") == "none"
+    render_contract = mail_review_render_action.llm_policy["response_contract_text"]
+    assert "compact list of Gmail message detail objects" in render_contract
+    assert "do not claim that details cannot be displayed" in render_contract
     assert "mail_message_detail_results" in {
+        field.get("context_key")
+        for field in mail_review_render_action.llm_policy.get("context_fields", [])
+        if isinstance(field, dict)
+    }
+    assert "mail_message_detail_iteration_results" in {
         field.get("context_key")
         for field in mail_review_render_action.llm_policy.get("context_fields", [])
         if isinstance(field, dict)
@@ -668,6 +690,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         and item["value"].get("final_response", {}).get("$context_key")
         == "final_response"
         and item["value"].get("invocations", {}).get("$context_key") == "invocations"
+        and item["value"]
+        .get("mail_message_detail_iteration_results", {})
+        .get("$context_key")
+        == "mail_message_detail_iteration_results"
         for item in return_assignments
         if isinstance(item, dict)
     )

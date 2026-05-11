@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "17",
+  "seed_version": "18",
   "workflows": [
     {
       "publication_spec": {
@@ -2389,9 +2389,14 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_mail_review_detail_iteration_results_to_mail_message_detail_results",
-                "tool_output_field": "iteration_results",
+                "concept_id": "#V#workflow_mapping_mail_review_detail_successful_results_to_mail_message_detail_results",
+                "tool_output_field": "successful_results",
                 "context_key": "mail_message_detail_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_iteration_results_to_mail_message_detail_iteration_results",
+                "tool_output_field": "iteration_results",
+                "context_key": "mail_message_detail_iteration_results"
               },
               {
                 "concept_id": "#V#workflow_mapping_mail_review_detail_invocations_to_invocations",
@@ -2412,6 +2417,7 @@
             "validation_policy": null,
             "writes_context_keys": [
               "mail_message_detail_results",
+              "mail_message_detail_iteration_results",
               "invocations",
               "mail_detail_success_count",
               "mail_detail_error_count"
@@ -2442,7 +2448,7 @@
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
-              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results and mail_review_list_result. For each message requested, include subject, sender/from, date, and a short snippet/body preview when present. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
+              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results and mail_review_list_result. mail_message_detail_results is a compact list of Gmail message detail objects; each object may expose direct keys message_id, subject, sender, from, date, and snippet. For each message requested, include subject, sender/from, date, and a short snippet/body preview when present. If mail_message_detail_results contains entries, render those entries and do not claim that details cannot be displayed. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -2462,7 +2468,11 @@
                 },
                 {
                   "context_key": "mail_message_detail_results",
-                  "label": "Per-message Gmail detail retrieval results"
+                  "label": "Compact per-message Gmail detail results"
+                },
+                {
+                  "context_key": "mail_message_detail_iteration_results",
+                  "label": "Per-message Gmail detail retrieval iteration diagnostics"
                 },
                 {
                   "context_key": "mail_detail_success_count",
@@ -2569,6 +2579,9 @@
                       },
                       "mail_message_detail_results": {
                         "$context_key": "mail_message_detail_results"
+                      },
+                      "mail_message_detail_iteration_results": {
+                        "$context_key": "mail_message_detail_iteration_results"
                       }
                     }
                   }

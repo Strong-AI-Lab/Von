@@ -165,6 +165,10 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
     assert isinstance(results, list)
     assert results[0]["result"] == {"item_value": "A", "item_index": 0}
     assert results[1]["result"] == {"item_value": "B", "item_index": 1}
+    assert result.outputs.get("successful_results") == [
+        {"item_value": "A", "item_index": 0},
+        {"item_value": "B", "item_index": 1},
+    ]
     invocations = result.outputs.get("invocations")
     assert isinstance(invocations, list)
     assert [item.get("tool") for item in invocations] == [
@@ -215,6 +219,7 @@ def test_for_each_action_respects_partial_success_policy() -> None:
     assert result.outputs.get("for_each_success_count") == 1
     assert result.outputs.get("for_each_error_count") == 1
     assert result.outputs.get("for_each_partial_success") is True
+    assert result.outputs.get("successful_results") == [{"item_value": "good"}]
 
 
 # ---------------------------------------------------------------------------
