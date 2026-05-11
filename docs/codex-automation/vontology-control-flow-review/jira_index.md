@@ -58,3 +58,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2302` - workflow-introspection maintenance workflow graph,
   diagnosis/repair policy, prompt patch text, and Jira remediation wording in
   Python rather than Vontology-stored VWL/prompt authority.
+- `JVNAUTOSCI-2311` - episode self-improvement profile concept ids, canonical
+  policy payloads, workflow links, fallback profile resolution, and bootstrap
+  materialisation in Python rather than Vontology-owned profile authority.

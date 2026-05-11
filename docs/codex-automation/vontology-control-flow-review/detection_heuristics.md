@@ -61,6 +61,11 @@ represented authority before filing Jira work.
   are strong drift candidates. Even "maintenance" workflows should be
   Vontology-stored VWL; Python should expose only reusable actions and
   telemetry.
+- Vontology-backed profile materialisers that create or repopulate canonical
+  profile JSON from Python defaults/blueprints remain drift candidates even
+  after the live consumer reads a represented profile. A hard-coded default
+  profile id fallback is especially suspect when missing linkage should fail
+  closed.
 
 ## Recent Examples
 
@@ -74,3 +79,6 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2302` - workflow-introspection maintenance workflow graph,
   diagnosis/repair policy, prompt patch text, and Jira remediation wording in
   Python.
+- `JVNAUTOSCI-2311` - episode self-improvement profile concept ids, canonical
+  launch/benchmark policy payloads, workflow links, and fail-open default
+  profile resolution in Python.

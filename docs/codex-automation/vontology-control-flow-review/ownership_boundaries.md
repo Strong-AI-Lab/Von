@@ -47,6 +47,9 @@ predicates, and KB assertions should own durable:
 - maintenance/introspection workflow graphs and policy, including diagnosis
   causes, repair selection, prompt guardrail wording, Jira remediation wording,
   transition/control definitions, and tool-family/domain semantics.
+- episode self-improvement profiles, including profile concept/link authority,
+  launch budget, priority ordering, target-surface eligibility, dedupe identity,
+  benchmark evidence budget, and profile-description policy.
 
 ## Python Support
 
@@ -82,6 +85,9 @@ Python can remain the surface for:
 - generic maintenance/introspection support actions that gather evidence,
   invoke bounded MCP tools, apply explicitly represented text-relation or Jira
   operations, validate outputs, and emit telemetry;
+- generic episode self-improvement profile loading, validation, normalisation,
+  application, and fail-closed diagnostics when represented profile authority is
+  absent or invalid;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,

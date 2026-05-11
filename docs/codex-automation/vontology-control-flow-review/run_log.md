@@ -114,3 +114,25 @@
   semantics that should move to Vontology-stored VWL/prompt/KB authority.
   Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-1298`, and `JVNAUTOSCI-2080`.
 - No production code was changed.
+
+## 2026-05-12T02:09:54.7106020+12:00
+
+- Read required repo guidance, repo-local drift-review memories, and attempted
+  the global automation memory path, which was absent at run start.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero and `repo_seed_authority_drift_path_count=1`.
+- Reviewed commits since `2026-05-10T14:00:50Z`, especially general mail review
+  workflow seed publication, Gmail detail fan-out, represented mail-profile
+  resolution, compact Gmail evidence payloads, and workflow result flattening.
+- Treated the recent mail-review repo-seed prompt/control edits as already
+  covered by `JVNAUTOSCI-2080` and `JVNAUTOSCI-2260`; added a fresh note to
+  `JVNAUTOSCI-2260` instead of filing a duplicate. The direct Python changes in
+  the same range looked like target-workflow registration plus generic
+  tool/runtime support.
+- Created `JVNAUTOSCI-2311` for residual episode self-improvement profile
+  authority in Python: `episode_self_improvement_profile_vontology_service.py`
+  still defines canonical profile concept ids, policy payloads, workflow links,
+  fallback profile resolution, and bootstrap materialisation for launch budget,
+  priority order, target surfaces, dedupe identity, and benchmark evidence
+  budgets. Linked it to `JVNAUTOSCI-1913` and `JVNAUTOSCI-1993`.
+- No production code was changed.

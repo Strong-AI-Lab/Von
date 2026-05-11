@@ -90,6 +90,12 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
 - Recent mail-review repo-seed prompt/control edits are covered by the existing
   repo-seed/workflow-purity track (`JVNAUTOSCI-2080`, `JVNAUTOSCI-2260`) unless
   they become a distinct runtime authority path not represented in Vontology.
+- 2026-05-12: commits `72d8e7c1..0a438ac8` expanded
+  `#V#general_mail_review_workflow` and `#V#gmail_message_detail_fetch_workflow`
+  seed content, including profile lookup, Gmail list/detail fan-out, and
+  grounded rendering. This reinforced `JVNAUTOSCI-2260`; no duplicate was filed.
+  The surrounding Python catalogue/runtime edits looked support-only unless they
+  start authoring mail facts or unrepresented profile policy.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
