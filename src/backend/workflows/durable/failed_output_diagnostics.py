@@ -1,4 +1,4 @@
-"""Bounded diagnostic outputs for failed durable workflow instances."""
+"""Bounded terminal outputs for durable workflow instances."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from typing import Any
 
 from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
+    WORKFLOW_RETURN_PAYLOAD_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
 
+COMPLETED_WORKFLOW_OUTPUTS_SCHEMA_VERSION = "workflow_completed_outputs.v1"
 FAILED_WORKFLOW_OUTPUTS_SCHEMA_VERSION = "workflow_failed_outputs.v1"
 
 _DEFAULT_TEXT_PREVIEW_CHARS = 2000
@@ -201,6 +203,135 @@ def _output_keys(output_payload: Mapping[str, Any] | None) -> list[str]:
     if not isinstance(output_payload, Mapping):
         return []
     return sorted(str(key) for key in output_payload.keys() if str(key))
+
+
+def _context_key_summary(
+    context: Mapping[str, Any],
+    *,
+    max_keys: int = 80,
+) -> dict[str, Any]:
+    keys = sorted(str(key) for key in context.keys() if str(key))
+    summary: dict[str, Any] = {
+        "key_count": len(keys),
+        "keys": keys[:max_keys],
+    }
+    if len(keys) > max_keys:
+        summary["omitted_key_count"] = len(keys) - max_keys
+    return summary
+
+
+def _declared_output_payload(
+    context: Mapping[str, Any],
+    result_envelope: Mapping[str, Any] | None,
+) -> Any:
+    if isinstance(result_envelope, Mapping) and "declared_output_payload" in result_envelope:
+        return result_envelope.get("declared_output_payload")
+    if WORKFLOW_RETURN_PAYLOAD_KEY in context:
+        return context.get(WORKFLOW_RETURN_PAYLOAD_KEY)
+    return None
+
+
+def build_completed_workflow_outputs(
+    run_data: Mapping[str, Any] | None,
+    *,
+    result_envelope: Mapping[str, Any] | None = None,
+    final_state: str | None = None,
+    execution_trace_id: str | None = None,
+    max_text_chars: int = _DEFAULT_TEXT_PREVIEW_CHARS,
+) -> dict[str, Any]:
+    """Build a compact terminal outputs payload for a completed durable run.
+
+    Durable checkpoints may keep the workflow context needed for resume and
+    telemetry, but terminal ``outputs`` are read-back/user-facing persistence.
+    Persist declared workflow outputs plus safe summaries here rather than
+    duplicating the full context, which may contain raw mail, document text, or
+    large tool payloads.
+    """
+
+    context = dict(run_data) if isinstance(run_data, Mapping) else {}
+    envelope = _mapping(result_envelope) or _mapping(
+        context.get(WORKFLOW_RESULT_ENVELOPE_KEY)
+    )
+    declared_outputs = _declared_output_payload(context, envelope)
+    metadata_events = _mapping_list(context.get(WORKFLOW_METADATA_EVENTS_KEY))
+    last_metadata_event = _mapping(context.get(LAST_METADATA_EVENT_KEY))
+    latest_step = _latest_step_envelope(context)
+
+    outputs: dict[str, Any] = {
+        "schema_version": COMPLETED_WORKFLOW_OUTPUTS_SCHEMA_VERSION,
+        "terminal_status": "completed",
+        "completed": True,
+        "final_state": str(final_state).strip() if final_state else None,
+        "execution_trace_id": (
+            str(execution_trace_id).strip() if execution_trace_id else None
+        ),
+        "workflow_result_envelope": _compact_value(
+            envelope,
+            key=WORKFLOW_RESULT_ENVELOPE_KEY,
+            max_text_chars=max_text_chars,
+        ),
+        "metadata_validation": {
+            "event_count": len(metadata_events),
+            "last_event": _compact_value(
+                last_metadata_event,
+                key=LAST_METADATA_EVENT_KEY,
+                max_text_chars=max_text_chars,
+            ),
+        },
+        "context_summary": _context_key_summary(context),
+    }
+
+    if isinstance(latest_step, Mapping):
+        outputs["latest_step_result_summary"] = {
+            "state_id": latest_step.get("state_id"),
+            "action_id": latest_step.get("action_id"),
+            "action_status": latest_step.get("action_status"),
+            "action_outcome": latest_step.get("action_outcome"),
+        }
+
+    if declared_outputs is not None:
+        compact_declared = _compact_value(
+            declared_outputs,
+            key="declared_output_payload",
+            max_text_chars=max_text_chars,
+        )
+        outputs["declared_outputs"] = compact_declared
+        outputs["terminal_output_source"] = "declared_output_payload"
+        if isinstance(declared_outputs, Mapping):
+            for raw_key, raw_value in declared_outputs.items():
+                key = _stringify_key(raw_key)
+                if not key or key in outputs:
+                    continue
+                outputs[key] = _compact_value(
+                    raw_value,
+                    key=key,
+                    max_text_chars=max_text_chars,
+                )
+        else:
+            outputs["result"] = compact_declared
+    elif "result" in context:
+        outputs["terminal_output_source"] = "context.result"
+        outputs["result"] = _compact_value(
+            context.get("result"),
+            key="result",
+            max_text_chars=max_text_chars,
+        )
+    else:
+        outputs["terminal_output_source"] = "workflow_result_envelope"
+
+    for key in (
+        "workflow_execution_summary",
+        "turn_execution_outcome",
+    ):
+        if key in outputs or key not in context:
+            continue
+        outputs[key] = _compact_value(
+            context.get(key),
+            key=key,
+            max_text_chars=max_text_chars,
+        )
+
+    return outputs
 
 
 def build_failed_workflow_outputs(

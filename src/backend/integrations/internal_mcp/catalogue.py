@@ -19875,7 +19875,7 @@ def _annotate_gmail_list_messages_payload(
             if isinstance(message_id, str) and message_id.strip():
                 row.setdefault("message_id", message_id.strip())
             messages.append(row)
-        payload["messages"] = messages
+    payload["messages"] = messages
 
     if effective_query is not None:
         payload["effective_query"] = dict(effective_query)

@@ -19,7 +19,10 @@ from ..engine import WorkflowDefinition
 from ..action_registry import ActionRegistry
 from .instance_manager import WorkflowInstanceManager
 from .durable_executor import DurableWorkflowExecutor, DurableWorkflowResult
-from .failed_output_diagnostics import build_failed_workflow_outputs
+from .failed_output_diagnostics import (
+    build_completed_workflow_outputs,
+    build_failed_workflow_outputs,
+)
 from .models import WorkflowInstance
 
 logger = logging.getLogger(__name__)
@@ -320,11 +323,17 @@ class DurableWorkflowWorker:
 
             # Update status based on result
             if result.completed:
+                completed_outputs = build_completed_workflow_outputs(
+                    result.data,
+                    result_envelope=result.result_envelope,
+                    final_state=result.final_state,
+                    execution_trace_id=result.execution_trace_id,
+                )
                 _retry_store_call(
                     "mark_completed",
                     lambda: self._instance_manager.mark_completed(
                         instance_id,
-                        outputs=result.data,
+                        outputs=completed_outputs,
                         final_state=result.final_state,
                         execution_trace_id=result.execution_trace_id,
                     ),

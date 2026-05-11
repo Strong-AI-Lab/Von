@@ -206,6 +206,35 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     assert detail_payload["snippet"] == "Short preview"
 
 
+def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_list_messages(**kwargs):
+        assert kwargs["profile_id"] == "zhan-gmail"
+        return {"resultSizeEstimate": 0}
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_messages",
+        fake_list_messages,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_profile",
+        lambda _profile: SimpleNamespace(query_prefix=None, label_filter=[]),
+    )
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        query="from:(no-such-sender@example.invalid)",
+        max_results=1,
+    )
+
+    assert payload["messages"] == []
+    assert payload["resultSizeEstimate"] == 0
+    assert payload["_tool_follow_up"]["item_array_field"] == "messages"
+
+
 def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
     monkeypatch,
 ):
