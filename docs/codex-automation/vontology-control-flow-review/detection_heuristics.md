@@ -66,6 +66,12 @@ represented authority before filing Jira work.
   after the live consumer reads a represented profile. A hard-coded default
   profile id fallback is especially suspect when missing linkage should fail
   closed.
+- Test or bootstrap helpers that publish Vontology workflow graphs from
+  Python `WorkflowRegistration(source="built_in")` definitions are still drift
+  candidates when the helper is the only reproducible source for the graph,
+  transitions, or action mappings. A later runtime load from Vontology does not
+  prove independent VWL authority if the Vontology graph was generated from the
+  Python builder.
 
 ## Recent Examples
 
@@ -82,3 +88,6 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2311` - episode self-improvement profile concept ids, canonical
   launch/benchmark policy payloads, workflow links, and fail-open default
   profile resolution in Python.
+- `JVNAUTOSCI-2315` - Jira incremental import workflow graph and transition
+  policy published from a Python `source="built_in"` registration rather than
+  independently authored Vontology-stored VWL.
