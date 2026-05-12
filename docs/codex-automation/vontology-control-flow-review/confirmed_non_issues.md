@@ -101,6 +101,11 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   bounds persisted outputs and avoids raw context duplication; the Gmail change
   ensures `messages=[]` is exposed for empty lists. No new workflow/KB authority
   drift was filed for those support changes.
+- 2026-05-13: generic `WorkflowDefinition`/`WorkflowRegistration` test builders
+  remain watch items while `_register_python_defined_workflows()` stays empty
+  and the production registry is Vontology-discovered. File only where the test
+  builder or bootstrap helper is the reproducible source for workflow policy, as
+  with `JVNAUTOSCI-2315`.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
