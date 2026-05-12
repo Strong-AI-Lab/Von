@@ -64,3 +64,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2315` - Jira incremental import workflow graph/control policy
   still originates from Python `WorkflowDefinition`/`WorkflowRegistration`
   test-bootstrap code instead of independently authored Vontology-stored VWL.
+- `JVNAUTOSCI-2316` - multilingual concept-enrichment target languages,
+  candidate eligibility thresholds, confidence gate, mutation budget, and
+  managed schedule defaults are owned by Python/env defaults rather than
+  represented workflow/profile authority.
