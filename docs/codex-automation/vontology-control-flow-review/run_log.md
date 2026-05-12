@@ -155,3 +155,25 @@
   `JVNAUTOSCI-1523`, `JVNAUTOSCI-1407`, `JVNAUTOSCI-2205`, and
   `JVNAUTOSCI-2302`, and added a visible user-impact comment.
 - No production code was changed.
+
+## 2026-05-13T11:43:36.5962830+12:00
+
+- Read required repo guidance, situation-specific workflow/prompt/memory and
+  operational docs, repo-local drift-review memories, and the global automation
+  memory path, which was empty/absent at run start.
+- Found the local memory Markdown files line-collapsed while `origin/main`
+  already contained the formatted prior-run updates. Restored the working
+  copies from the formatted `origin/main` versions before appending this run.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate passed with
+  all failure counters zero and `repo_seed_authority_drift_path_count=1`.
+- Reviewed registry authority and drift-prone durable surfaces. Treated generic
+  `WorkflowDefinition` test builders as watch items while production registry
+  loading stays Vontology-discovered and `_register_python_defined_workflows()`
+  remains empty.
+- Created `JVNAUTOSCI-2316` for multilingual concept-enrichment policy in
+  Python/env defaults: target languages, language aliases, candidate thresholds,
+  confidence gate, mutation budget, reanalysis window, and managed schedule
+  default inputs should be represented workflow/profile policy. Linked it to
+  `JVNAUTOSCI-1913`, `JVNAUTOSCI-2080`, and `JVNAUTOSCI-2315`, and added a
+  visible user-impact comment.
+- No production code was changed.
