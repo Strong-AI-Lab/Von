@@ -96,6 +96,11 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   grounded rendering. This reinforced `JVNAUTOSCI-2260`; no duplicate was filed.
   The surrounding Python catalogue/runtime edits looked support-only unless they
   start authoring mail facts or unrepresented profile policy.
+- 2026-05-13: commit `35e196af` changed durable terminal-output persistence and
+  Gmail zero-result payload handling. `build_completed_workflow_outputs()`
+  bounds persisted outputs and avoids raw context duplication; the Gmail change
+  ensures `messages=[]` is exposed for empty lists. No new workflow/KB authority
+  drift was filed for those support changes.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
