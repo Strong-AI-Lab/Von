@@ -72,6 +72,10 @@ represented authority before filing Jira work.
   transitions, or action mappings. A later runtime load from Vontology does not
   prove independent VWL authority if the Vontology graph was generated from the
   Python builder.
+- Background workflow schedule bootstraps are authority surfaces when they set
+  default workflow inputs that determine entity eligibility, target languages,
+  confidence thresholds, mutation budgets, cadence, or reanalysis windows. Env
+  overrides do not make those defaults represented policy.
 
 ## Recent Examples
 
@@ -91,3 +95,7 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2315` - Jira incremental import workflow graph and transition
   policy published from a Python `source="built_in"` registration rather than
   independently authored Vontology-stored VWL.
+- `JVNAUTOSCI-2316` - multilingual concept-enrichment target languages,
+  candidate thresholds, confidence gate, mutation budget, and managed schedule
+  defaults in Python/env defaults rather than represented workflow/profile
+  policy.
