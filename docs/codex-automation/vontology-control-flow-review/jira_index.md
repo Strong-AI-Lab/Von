@@ -61,3 +61,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2311` - episode self-improvement profile concept ids, canonical
   policy payloads, workflow links, fallback profile resolution, and bootstrap
   materialisation in Python rather than Vontology-owned profile authority.
+- `JVNAUTOSCI-2315` - Jira incremental import workflow graph/control policy
+  still originates from Python `WorkflowDefinition`/`WorkflowRegistration`
+  test-bootstrap code instead of independently authored Vontology-stored VWL.
