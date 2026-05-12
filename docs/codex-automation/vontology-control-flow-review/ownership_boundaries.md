@@ -50,6 +50,9 @@ predicates, and KB assertions should own durable:
 - episode self-improvement profiles, including profile concept/link authority,
   launch budget, priority ordering, target-surface eligibility, dedupe identity,
   benchmark evidence budget, and profile-description policy.
+- Jira task import workflow graphs, including step topology, transition
+  reasons, action contracts, launch inputs, lifecycle metadata, and any
+  schedule/event binding policy.
 
 ## Python Support
 
@@ -88,6 +91,9 @@ Python can remain the surface for:
 - generic episode self-improvement profile loading, validation, normalisation,
   application, and fail-closed diagnostics when represented profile authority is
   absent or invalid;
+- generic Jira task import action support that coerces workflow context into
+  `JiraTaskMigrationOptions`, invokes the shared migration runner, returns
+  structured outputs, and emits diagnostics;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
