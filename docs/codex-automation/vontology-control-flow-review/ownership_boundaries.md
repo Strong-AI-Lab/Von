@@ -53,6 +53,10 @@ predicates, and KB assertions should own durable:
 - Jira task import workflow graphs, including step topology, transition
   reasons, action contracts, launch inputs, lifecycle metadata, and any
   schedule/event binding policy.
+- Background KB-enrichment policy, including target language sets, candidate
+  eligibility thresholds, confidence gates, mutation budgets, schedule cadence,
+  reanalysis windows, and alias/normalisation choices that affect which facts
+  are written.
 
 ## Python Support
 
@@ -94,6 +98,9 @@ Python can remain the surface for:
 - generic Jira task import action support that coerces workflow context into
   `JiraTaskMigrationOptions`, invokes the shared migration runner, returns
   structured outputs, and emits diagnostics;
+- generic background schedule persistence and action support that applies
+  represented enrichment policy, validates numeric/list bounds, invokes prompts,
+  writes through canonical Vontology services, and emits fallback diagnostics;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
