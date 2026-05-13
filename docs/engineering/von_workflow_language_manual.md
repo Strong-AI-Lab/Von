@@ -203,7 +203,8 @@ Runtime semantics:
 
 - workflow context bindings inside `tool_arguments` are resolved by the normal action-input resolver before invocation;
 - authenticated namespace context is propagated into the MCP payload as `namespace` when available;
-- the action returns the full structured MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
+- the action returns the workflow-visible MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
+- when the invoked tool has a represented tool-evidence projection, `result` and `mcp_result` carry that compact projected payload and projection telemetry instead of raw source-specific bulk data;
 - `tool_output_context_mappings` should map fields from `result.<field>` or `mcp_result.<field>` into workflow context for downstream steps and subworkflows.
 
 Validation semantics:

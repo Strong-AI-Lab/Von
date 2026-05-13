@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "18",
+  "seed_version": "19",
   "workflows": [
     {
       "publication_spec": {
@@ -2794,7 +2794,7 @@
               },
               {
                 "concept_id": "#V#workflow_mapping_gmail_message_detail_fetch_result_from_to_message_detail_from",
-                "tool_output_field": "result.from",
+                "tool_output_field": "result.sender",
                 "context_key": "message_detail_from"
               },
               {

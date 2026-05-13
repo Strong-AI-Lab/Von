@@ -4155,7 +4155,9 @@ class InternalMCPChatOrchestrator:
         gateway payload.
 
         Outputs on success:
-            mcp_result (dict): The raw payload returned by the gateway.
+            mcp_result (dict): The workflow-visible gateway payload; when a
+                represented tool evidence projection exists, this is the
+                compact projected payload rather than raw source-specific data.
             mcp_tool (str): The tool name that was invoked.
             mcp_duration_ms (float): Execution time in milliseconds.
             result (Any): Alias of mcp_result for condition evaluation.

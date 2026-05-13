@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -15,6 +16,9 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
 )
 from src.backend.services.episode_evaluation_workflow_vontology_service import (
     bootstrap_canonical_episode_evaluation_workflow,
+)
+from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
+    bootstrap_gmail_tool_evidence_contract,
 )
 from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.workflows import (
@@ -35,6 +39,9 @@ from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
 from src.backend.workflows.engine import WorkflowExecutor
+from src.backend.workflows.mcp_tool_bridge import (
+    workflow_action_result_from_mcp_payload,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
 )
@@ -745,7 +752,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         ("result", "gmail_message_detail"),
         ("result.message_id", "message_detail_message_id"),
         ("result.sender", "message_detail_sender"),
-        ("result.from", "message_detail_from"),
+        ("result.sender", "message_detail_from"),
         ("result.subject", "message_detail_subject"),
         ("result.date", "message_detail_date"),
         ("result.snippet", "message_detail_snippet"),
@@ -1228,6 +1235,84 @@ def test_gmail_message_detail_fetch_workflow_returns_compact_declared_payload(
             "snippet": "Short preview",
         },
     }
+
+
+def test_gmail_message_detail_fetch_workflow_uses_projected_mcp_payload(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_gmail_tool_evidence_contract()
+    bootstrap_canonical_conversation_turn_workflows()
+    detail_fetch_definition = load_workflow_definition_from_vontology(
+        GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID
+    )
+    assert detail_fetch_definition is not None
+
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: load_workflow_definition_from_vontology(
+            workflow_id
+        ),
+    )
+
+    large_marker = "RAW_BODY_SHOULD_NOT_REACH_WORKFLOW_CONTEXT"
+
+    def fake_mcp_fallback(request: Any) -> WorkflowActionResult:
+        assert request.action_id == "gmail_get_message"
+        assert request.inputs["profile"] == "default-profile"
+        assert request.inputs["message_id"] == "msg-1"
+        return workflow_action_result_from_mcp_payload(
+            tool_name=request.action_id,
+            payload={
+                "message_id": "msg-1",
+                "threadId": "thread-1",
+                "labelIds": ["INBOX"],
+                "sender": "Sender <sender@example.test>",
+                "from": "Sender <sender@example.test>",
+                "subject": "Subject line",
+                "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+                "snippet": "Short preview",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": "Subject line"}],
+                    "parts": [{"body": large_marker * 64}],
+                },
+            },
+            duration_ms=1.0,
+        )
+
+    registry.set_fallback_handler(fake_mcp_fallback)
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        detail_fetch_definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "gmail_profile": "default-profile",
+            "current_mail_message": {"message_id": "msg-1"},
+        },
+    )
+
+    assert result.completed is True
+    assert result.result_envelope is not None
+    payload = result.result_envelope.get("declared_output_payload")
+    assert isinstance(payload, dict)
+    detail_payload = payload.get("gmail_message_detail")
+    assert isinstance(detail_payload, dict)
+    assert detail_payload["_llm_view"] == "tool_evidence_projection.v1"
+    assert detail_payload["message_id"] == "msg-1"
+    assert detail_payload["subject"] == "Subject line"
+    assert "payload" not in detail_payload
+
+    detail_step = next(
+        envelope
+        for envelope in result.data.get("workflow_step_result_envelopes", [])
+        if isinstance(envelope, dict)
+        and envelope.get("action_id") == "gmail_get_message"
+    )
+    detail_outputs = detail_step["output_payload"]
+    assert detail_outputs["mcp_result_projection_applied"] is True
+    assert detail_outputs["mcp_raw_result_omitted_from_workflow_context"] is True
+    assert detail_outputs["result"]["_llm_view"] == "tool_evidence_projection.v1"
+    assert "payload" not in detail_outputs["result"]
+    assert large_marker not in json.dumps(result.data, sort_keys=True, default=str)
 
 
 def test_turn_and_episode_prompt_authority_resolve_on_live_surface(

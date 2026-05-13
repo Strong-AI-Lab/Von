@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 from .action_registry import WorkflowActionResult
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_mcp_error_message(*, tool_name: str, payload: Mapping[str, Any]) -> str:
@@ -163,12 +166,17 @@ def workflow_action_result_from_mcp_payload(
     execution completed.
     """
 
+    workflow_payload, projection_metadata = _workflow_visible_mcp_payload(
+        tool_name=tool_name,
+        payload=payload,
+    )
     outputs = {
-        "mcp_result": payload,
+        "mcp_result": workflow_payload,
         "mcp_tool": tool_name,
         "mcp_duration_ms": duration_ms,
-        "result": payload,
+        "result": workflow_payload,
     }
+    outputs.update(projection_metadata)
     if isinstance(payload, Mapping) and payload.get("success") is False:
         return WorkflowActionResult(
             status="failed",
@@ -182,6 +190,50 @@ def workflow_action_result_from_mcp_payload(
         outputs=dict(outputs),
         duration_ms=duration_ms,
     )
+
+
+def _workflow_visible_mcp_payload(
+    *,
+    tool_name: str,
+    payload: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Return the payload safe for workflow context and result envelopes.
+
+    When Vontology declares a tool evidence projection, workflows should carry
+    that compact represented view rather than the raw MCP payload. The raw
+    payload may contain large or sensitive source-specific objects; keeping it
+    out of workflow context prevents later LLM render stages from seeing
+    accidental authority-free bulk data.
+    """
+
+    if not isinstance(payload, Mapping) or payload.get("success") is False:
+        return payload, {}
+
+    try:
+        from ..services.tool_evidence_projection_service import (
+            project_tool_payload_for_llm,
+        )
+
+        projected = project_tool_payload_for_llm(tool_name, payload)
+    except Exception:
+        logger.debug(
+            "[workflow_mcp] tool evidence projection unavailable for %s",
+            tool_name,
+            exc_info=True,
+        )
+        return payload, {}
+
+    if not isinstance(projected, Mapping):
+        return payload, {}
+
+    telemetry = projected.get("_tool_evidence_projection")
+    metadata: dict[str, Any] = {
+        "mcp_result_projection_applied": True,
+        "mcp_raw_result_omitted_from_workflow_context": True,
+    }
+    if isinstance(telemetry, Mapping):
+        metadata["mcp_result_projection"] = dict(telemetry)
+    return dict(projected), metadata
 
 
 __all__ = [
