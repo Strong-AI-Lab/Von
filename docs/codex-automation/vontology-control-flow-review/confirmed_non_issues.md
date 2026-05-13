@@ -106,6 +106,21 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   and the production registry is Vontology-discovered. File only where the test
   builder or bootstrap helper is the reproducible source for workflow policy, as
   with `JVNAUTOSCI-2315`.
+- 2026-05-14: `failure_case_intake_service.py` remains a watch item, not a
+  filed issue, while it only resolves an already selected same-conversation
+  reference mode to a request id using generic telemetry. File if it starts
+  classifying utterance intent, failure cause, prompt hypothesis, or remediation
+  policy in Python.
+- 2026-05-14: `turn_response_surface_service.py` looks support-only while it
+  reconciles deterministic response hashes/statuses and preserves final-answer
+  surfaces. Update `JVNAUTOSCI-2324` if this layer starts deciding answer
+  correctness, promotion eligibility, or replay-learning policy without a
+  represented rubric.
+- 2026-05-14: the new Jira incremental import repo-seed bootstrap path is
+  covered by `JVNAUTOSCI-2315`; do not file a duplicate merely because
+  `jira_task_incremental_import_workflow_vontology_service.py` appears in the
+  workflow-purity repo-seed count. Watch the purity baseline and ensure the
+  represented workflow becomes independent of repo seed publication.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

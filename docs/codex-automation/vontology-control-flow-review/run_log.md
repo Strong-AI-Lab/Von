@@ -177,3 +177,31 @@
   `JVNAUTOSCI-1913`, `JVNAUTOSCI-2080`, and `JVNAUTOSCI-2315`, and added a
   visible user-impact comment.
 - No production code was changed.
+
+## 2026-05-14T02:09:18.5848307+12:00
+
+- Read required repo guidance, situation-specific workflow/prompt/memory docs,
+  repo-local drift-review memories, and the global automation memory.
+- Reviewed commits since `2026-05-12T23:38:22.251Z`, including Jira import
+  workflow materialisation, replay prompt-variant arms, bounded workflow MCP
+  evidence projections, turn response reconciliation, same-conversation failure
+  triggers, and replay experiment helper extraction.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate failed on
+  `repo_seed_authority_drift_path_count`: baseline `1`, current `2`, delta `1`.
+  The reported paths were
+  `src/backend/services/jira_task_incremental_import_workflow_vontology_service.py`
+  and `src/backend/services/kr_materialisation_workflow_vontology_service.py`.
+  KR materialisation remains covered by `JVNAUTOSCI-2271`; Jira import remains
+  covered by `JVNAUTOSCI-2315`, so no duplicate was filed.
+- Created `JVNAUTOSCI-2324` for replay evaluation policy in Python:
+  `scripts/run_live_kb_tool_prompt_sampler.py` owns prompt-bank cases,
+  response-marker rubrics, user-happiness scoring, required-tool expectations,
+  promotion blockers, and policy-update reporting; companion replay experiment
+  services turn those Python decisions into persisted observations and
+  pass/partial/fail verdicts. Linked it to `JVNAUTOSCI-1913`,
+  `JVNAUTOSCI-1894`, `JVNAUTOSCI-2318`, `JVNAUTOSCI-2322`, and
+  `JVNAUTOSCI-2323`, and added visible Jira comments.
+- Treated failure-case intake reference resolution, turn-response surface
+  reconciliation, Vontology-authored tool-result hints, and bounded MCP
+  projection support as support/watch items rather than new tasks.
+- No production code was changed.

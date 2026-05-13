@@ -57,6 +57,10 @@ predicates, and KB assertions should own durable:
   eligibility thresholds, confidence gates, mutation budgets, schedule cadence,
   reanalysis windows, and alias/normalisation choices that affect which facts
   are written.
+- Replay/evaluation authority, including replay case prompt banks, expected
+  tool/knowledge-surface requirements, answer-quality rubrics, failure-marker
+  semantics, prompt/model promotion blockers, policy-update criteria,
+  pass/partial/fail verdict definitions, and experiment observation meaning.
 
 ## Python Support
 
@@ -101,6 +105,10 @@ Python can remain the surface for:
 - generic background schedule persistence and action support that applies
   represented enrichment policy, validates numeric/list bounds, invokes prompts,
   writes through canonical Vontology services, and emits fallback diagnostics;
+- generic replay/evaluation launchers, telemetry collectors, bounded evidence
+  projections, structural consistency checks, and canonical experiment writes
+  when case expectations, rubrics, verdicts, and promotion policy come from
+  represented authority;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,

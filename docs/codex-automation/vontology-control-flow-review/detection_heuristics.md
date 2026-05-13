@@ -76,6 +76,12 @@ represented authority before filing Jira work.
   default workflow inputs that determine entity eligibility, target languages,
   confidence thresholds, mutation budgets, cadence, or reanalysis windows. Env
   overrides do not make those defaults represented policy.
+- Replay/evaluation tooling becomes an authority surface when Python prompt
+  banks, response-marker lists, required-tool lists, answer-quality booleans,
+  promotion blockers, pass/partial/fail verdicts, or experiment observations
+  feed prompt/model/workflow learning. Smoke-test launchers and evidence
+  collectors can be support-only, but durable rubrics and case expectations
+  should be represented.
 
 ## Recent Examples
 
@@ -99,3 +105,7 @@ represented authority before filing Jira work.
   candidate thresholds, confidence gate, mutation budget, and managed schedule
   defaults in Python/env defaults rather than represented workflow/profile
   policy.
+- `JVNAUTOSCI-2324` - replay sampler/evaluation prompt bank, response-marker
+  rubric, user-happiness scoring, promotion blockers, pass/partial/fail
+  verdicts, and experiment observation policy in Python rather than represented
+  replay-evaluation authority.
