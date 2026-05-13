@@ -3,6 +3,35 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
+def _emitted_von_conversation_ref(
+    *,
+    session_id: str = "ff9be41d-28f8-4864-ab0b-8c201e3152d0",
+    user_concept_id: str = "#V#michael_witbrock",
+    namespace: str = "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+    organisation_concept_id: str = "university_of_auckland_strong_ai_lab",
+) -> dict:
+    return {
+        "kind": "von_conversation_ref",
+        "conversation_ref": {
+            "session_id": session_id,
+            "user_concept_id": user_concept_id,
+            "namespace": namespace,
+            "organisation_concept_id": organisation_concept_id,
+            "include_legacy": False,
+        },
+        "chat_history_lookup": {
+            "user_id": user_concept_id,
+            "session_id": session_id,
+            "namespace": namespace,
+            "include_legacy": False,
+        },
+        "display": {
+            "session_name": "gem 6",
+            "current_user_concept_id": user_concept_id,
+        },
+    }
+
+
 def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
@@ -179,6 +208,130 @@ def test_chat_history_get_segments_accepts_bound_conversation_ref(monkeypatch):
     assert result["identifier_binding"]["validation_status"] == "verified"
 
 
+def test_chat_history_get_segments_accepts_emitted_von_conversation_ref_wrapper(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    conversation_ref = _emitted_von_conversation_ref()
+    namespace = "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#michael_witbrock",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#michael_witbrock"
+            and session_id == "ff9be41d-28f8-4864-ab0b-8c201e3152d0"
+            and namespace == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        ),
+    )
+
+    def get_segments(*args, **kwargs):
+        assert kwargs["namespace"] == namespace
+        assert kwargs["include_legacy"] is False
+        return ([{"segment_index": 0, "history": []}], {})
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        get_segments,
+    )
+
+    result = cat._chat_history_get_segments(conversation_ref=conversation_ref)
+
+    assert result["success"] is True
+    assert result["session_id"] == "ff9be41d-28f8-4864-ab0b-8c201e3152d0"
+    assert result["history_owner_user_id"] == "#V#michael_witbrock"
+    assert result["requested_user_id"] == "#V#michael_witbrock"
+    assert result["namespace"] == namespace
+    assert result["identifier_binding"]["mode"] == "public_conversation_ref"
+    assert result["identifier_binding"]["validation_status"] == "normalised"
+    assert result["identifier_binding"]["signature_verified"] is False
+    assert result["identifier_binding"]["input_shape"] == (
+        "emitted_von_conversation_ref_wrapper"
+    )
+
+
+def test_chat_history_get_segments_accepts_flattened_von_conversation_ref(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    conversation_ref = {
+        "kind": "von_conversation_ref",
+        "session_id": "chat-flat-1",
+        "user_concept_id": "#V#owner",
+        "namespace": "#V#owner@org",
+        "organisation_concept_id": "#V#org",
+        "include_legacy": False,
+    }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#owner",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#owner"
+            and session_id == "chat-flat-1"
+            and namespace == "#V#owner@org"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *args, **kwargs: ([{"segment_index": 0, "history": []}], {}),
+    )
+
+    result = cat._chat_history_get_segments(conversation_ref=conversation_ref)
+
+    assert result["success"] is True
+    assert result["session_id"] == "chat-flat-1"
+    assert result["identifier_binding"]["mode"] == "public_conversation_ref"
+    assert result["identifier_binding"]["input_shape"] == (
+        "flattened_von_conversation_ref"
+    )
+
+
+def test_chat_history_get_segments_rejects_mismatched_emitted_ref_fields() -> None:
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    cases = [
+        ({"conversation_session_id": "different-session"}, "session_id"),
+        ({"user_concept_id": "#V#different_user"}, "user_concept_id"),
+        ({"namespace": "#V#different_user@different_org"}, "namespace"),
+        ({"organisation_concept_id": "#V#different_org"}, "organisation_concept_id"),
+    ]
+
+    for explicit_payload, expected_field in cases:
+        result = cat._chat_history_get_segments(
+            conversation_ref=_emitted_von_conversation_ref(),
+            **explicit_payload,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "INVALID_CONTEXT_BINDING"
+        assert result["error_details"]["identifier_binding"]["mode"] == (
+            "public_conversation_ref"
+        )
+        assert result["error_details"]["identifier_binding"]["validation_status"] == (
+            "field_mismatch"
+        )
+        assert result["error_details"]["field_conflicts"][0]["field"] == (
+            expected_field
+        )
+
+
 def test_chat_history_get_segments_accepts_conversation_session_id(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
@@ -352,7 +505,10 @@ def test_workflow_list_definitions_filters_by_workflow_id(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
-        lambda registry, workflow_id: {"workflow_id": workflow_id, "name": workflow_id},
+        lambda registry, workflow_id, **kwargs: {
+            "workflow_id": workflow_id,
+            "name": workflow_id,
+        },
     )
     monkeypatch.setattr(
         "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",

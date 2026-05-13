@@ -12853,7 +12853,7 @@ def _chat_history_get_segments(**kwargs):
     include_debug = kwargs.get("include_debug", True)
     if not isinstance(include_debug, bool):
         include_debug = bool(include_debug)
-    include_legacy = kwargs.get("include_legacy", True)
+    include_legacy = kwargs.get("include_legacy", access.get("include_legacy", True))
     if not isinstance(include_legacy, bool):
         include_legacy = bool(include_legacy)
 
@@ -12927,7 +12927,7 @@ def _chat_history_get_debug_entry(**kwargs):
             ],
         )
 
-    include_legacy = kwargs.get("include_legacy", True)
+    include_legacy = kwargs.get("include_legacy", access.get("include_legacy", True))
     if not isinstance(include_legacy, bool):
         include_legacy = bool(include_legacy)
 
@@ -13010,7 +13010,9 @@ def _conversation_telemetry_get_locator(**kwargs):
             organisation_concept_id=_normalise_optional_concept_id(
                 access.get("organisation_concept_id")
             ),
-            include_legacy=bool(kwargs.get("include_legacy", True)),
+            include_legacy=bool(
+                kwargs.get("include_legacy", access.get("include_legacy", True))
+            ),
         )
     except Exception as exc:
         return make_error_response(
@@ -26013,6 +26015,278 @@ def _is_user_member_of_organisation(
     return False
 
 
+def _looks_like_signed_conversation_scope_binding(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        _clean_optional_string(value.get("schema_version"))
+        == "conversation_scope_binding.v1"
+        and _clean_optional_string(value.get("binding_kind")) == "conversation_scope"
+        and bool(_clean_optional_string(value.get("signature")))
+    )
+
+
+def _normalise_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower()
+    if cleaned in {"true", "1", "yes"}:
+        return True
+    if cleaned in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _public_conversation_ref_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _normalise_public_conversation_ref_fields(
+    raw_ref: Mapping[str, Any],
+    lookup: Mapping[str, Any],
+    *,
+    input_shape: str,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    field_sources: dict[str, str] = {}
+    field_conflicts: list[dict[str, Any]] = []
+
+    def add_field(
+        key: str,
+        value: Any,
+        source: str,
+        *,
+        normaliser: Any = _clean_optional_string,
+    ) -> None:
+        normalised = normaliser(value)
+        if normalised is None:
+            return
+        if key in fields and fields[key] != normalised:
+            field_conflicts.append(
+                {
+                    "field": key,
+                    "existing_value": fields[key],
+                    "existing_source": field_sources.get(key),
+                    "conflicting_value": normalised,
+                    "conflicting_source": source,
+                }
+            )
+            return
+        fields[key] = normalised
+        field_sources[key] = source
+
+    add_field("session_id", raw_ref.get("session_id"), f"{input_shape}.session_id")
+    add_field(
+        "session_id",
+        raw_ref.get("chat_session_id"),
+        f"{input_shape}.chat_session_id",
+    )
+    add_field("session_id", lookup.get("session_id"), "chat_history_lookup.session_id")
+    add_field(
+        "user_concept_id",
+        raw_ref.get("user_concept_id"),
+        f"{input_shape}.user_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "user_concept_id",
+        raw_ref.get("history_owner_user_id"),
+        f"{input_shape}.history_owner_user_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "user_concept_id",
+        lookup.get("user_concept_id"),
+        "chat_history_lookup.user_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "user_concept_id",
+        lookup.get("user_id"),
+        "chat_history_lookup.user_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field("namespace", raw_ref.get("namespace"), f"{input_shape}.namespace")
+    add_field(
+        "namespace",
+        raw_ref.get("read_namespace"),
+        f"{input_shape}.read_namespace",
+    )
+    add_field("namespace", lookup.get("namespace"), "chat_history_lookup.namespace")
+    add_field(
+        "organisation_concept_id",
+        raw_ref.get("organisation_concept_id"),
+        f"{input_shape}.organisation_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "organisation_concept_id",
+        raw_ref.get("org_id"),
+        f"{input_shape}.org_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "organisation_concept_id",
+        lookup.get("organisation_concept_id"),
+        "chat_history_lookup.organisation_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    add_field(
+        "include_legacy",
+        raw_ref.get("include_legacy"),
+        f"{input_shape}.include_legacy",
+        normaliser=_normalise_optional_bool,
+    )
+    add_field(
+        "include_legacy",
+        lookup.get("include_legacy"),
+        "chat_history_lookup.include_legacy",
+        normaliser=_normalise_optional_bool,
+    )
+
+    return {
+        "fields": fields,
+        "field_sources": field_sources,
+        "field_conflicts": field_conflicts,
+    }
+
+
+def _normalise_chat_history_conversation_ref_argument(value: Any) -> dict[str, Any]:
+    raw = _public_conversation_ref_mapping(value)
+    if not raw:
+        return {"recognised_public_ref": False}
+    if _looks_like_signed_conversation_scope_binding(raw):
+        return {
+            "recognised_public_ref": False,
+            "signed_conversation_ref": raw,
+        }
+
+    if raw.get("kind") != "von_conversation_ref":
+        return {"recognised_public_ref": False}
+
+    nested_ref = _public_conversation_ref_mapping(raw.get("conversation_ref"))
+    nested_lookup = _public_conversation_ref_mapping(raw.get("chat_history_lookup"))
+    if nested_ref and _looks_like_signed_conversation_scope_binding(nested_ref):
+        return {
+            "recognised_public_ref": False,
+            "signed_conversation_ref": nested_ref,
+        }
+
+    ref_payload = nested_ref or raw
+    input_shape = (
+        "conversation_ref.conversation_ref"
+        if nested_ref
+        else "conversation_ref"
+    )
+    normalised = _normalise_public_conversation_ref_fields(
+        ref_payload,
+        nested_lookup,
+        input_shape=input_shape,
+    )
+    field_sources = normalised["field_sources"]
+    fields = normalised["fields"]
+    return {
+        "recognised_public_ref": True,
+        "input_shape": (
+            "emitted_von_conversation_ref_wrapper"
+            if nested_ref
+            else "flattened_von_conversation_ref"
+        ),
+        "fields": fields,
+        "field_conflicts": normalised["field_conflicts"],
+        "identifier_binding": {
+            "mode": "public_conversation_ref",
+            "reference_kind": "von_conversation_ref",
+            "validation_status": "normalised",
+            "signature_verified": False,
+            "input_shape": (
+                "emitted_von_conversation_ref_wrapper"
+                if nested_ref
+                else "flattened_von_conversation_ref"
+            ),
+            "chat_session_id_source": field_sources.get("session_id"),
+            "requested_user_id_source": field_sources.get("user_concept_id"),
+            "requested_namespace_source": field_sources.get("namespace"),
+            "organisation_concept_id_source": field_sources.get(
+                "organisation_concept_id"
+            ),
+            "include_legacy_source": field_sources.get("include_legacy"),
+            "normalised_conversation_ref": {
+                key: value
+                for key, value in {
+                    "session_id": fields.get("session_id"),
+                    "user_concept_id": fields.get("user_concept_id"),
+                    "namespace": fields.get("namespace"),
+                    "organisation_concept_id": fields.get("organisation_concept_id"),
+                    "include_legacy": fields.get("include_legacy"),
+                }.items()
+                if value is not None
+            },
+        },
+    }
+
+
+def _merge_public_conversation_ref_fields_into_payload(
+    payload: dict[str, Any],
+    fields: Mapping[str, Any],
+    identifier_binding: dict[str, Any],
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+
+    def merge(
+        payload_key: str,
+        field_key: str,
+        *,
+        normaliser: Any = _clean_optional_string,
+    ) -> None:
+        ref_value = fields.get(field_key)
+        if ref_value is None:
+            return
+        current = normaliser(payload.get(payload_key))
+        normalised_ref = normaliser(ref_value)
+        if (
+            current is not None
+            and normalised_ref is not None
+            and current != normalised_ref
+        ):
+            conflicts.append(
+                {
+                    "field": field_key,
+                    "payload_key": payload_key,
+                    "payload_value": current,
+                    "conversation_ref_value": normalised_ref,
+                }
+            )
+            return
+        if current is None and normalised_ref is not None:
+            payload[payload_key] = normalised_ref
+
+    merge("session_id", "session_id")
+    merge("conversation_session_id", "session_id")
+    merge(
+        "user_concept_id",
+        "user_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    merge("namespace", "namespace")
+    merge(
+        "organisation_concept_id",
+        "organisation_concept_id",
+        normaliser=_normalise_optional_concept_id,
+    )
+    include_legacy = fields.get("include_legacy")
+    if include_legacy is not None and payload.get("include_legacy") is None:
+        payload["include_legacy"] = bool(include_legacy)
+
+    if conflicts:
+        identifier_binding["validation_status"] = "field_mismatch"
+    return conflicts
+
+
 def _resolve_chat_history_read_target(
     payload: Mapping[str, Any],
 ) -> dict[str, Any] | dict[str, object]:
@@ -26026,11 +26300,78 @@ def _resolve_chat_history_read_target(
         resolve_conversation_owner,
     )
 
-    user_concept_id, organisation_concept_id, _actor_concept_id, namespace = (
-        _resolve_shared_conversation_actor_context(payload)
+    def _binding_error_result(
+        *,
+        message: str,
+        identifier_binding_payload: Mapping[str, Any],
+        details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged_details = {
+            "identifier_binding": dict(identifier_binding_payload),
+        }
+        if isinstance(details, Mapping):
+            merged_details.update(dict(details))
+        return make_error_response(
+            "INVALID_CONTEXT_BINDING",
+            message,
+            details=merged_details,
+        )
+
+    normalised_conversation_ref = _normalise_chat_history_conversation_ref_argument(
+        payload.get("conversation_ref")
     )
-    raw_session_id = payload.get("session_id")
-    raw_conversation_session_id = payload.get("conversation_session_id")
+    payload_for_resolution = dict(payload)
+    public_ref_context: dict[str, Any] | None = None
+    public_ref_identifier_binding: dict[str, Any] | None = None
+
+    if normalised_conversation_ref.get("recognised_public_ref"):
+        public_ref_identifier_binding = dict(
+            normalised_conversation_ref.get("identifier_binding") or {}
+        )
+        conflicts = normalised_conversation_ref.get("field_conflicts")
+        if isinstance(conflicts, list) and conflicts:
+            return _binding_error_result(
+                message="conversation_ref contains conflicting locator fields",
+                identifier_binding_payload=public_ref_identifier_binding,
+                details={"field_conflicts": conflicts},
+            )
+
+        extracted_fields = (
+            normalised_conversation_ref.get("fields")
+            if isinstance(normalised_conversation_ref.get("fields"), Mapping)
+            else {}
+        )
+        explicit_conflicts = _merge_public_conversation_ref_fields_into_payload(
+            payload_for_resolution,
+            extracted_fields,
+            public_ref_identifier_binding,
+        )
+        if explicit_conflicts:
+            return _binding_error_result(
+                message="payload parameters do not match conversation_ref fields",
+                identifier_binding_payload=public_ref_identifier_binding,
+                details={"field_conflicts": explicit_conflicts},
+            )
+
+        public_ref_context = {
+            "history_owner_user_id": _normalise_optional_concept_id(
+                extracted_fields.get("user_concept_id")
+            ),
+            "read_namespace": _clean_optional_string(extracted_fields.get("namespace")),
+            "organisation_concept_id": _normalise_optional_concept_id(
+                extracted_fields.get("organisation_concept_id")
+            ),
+        }
+    elif normalised_conversation_ref.get("signed_conversation_ref") is not None:
+        payload_for_resolution["conversation_ref"] = normalised_conversation_ref[
+            "signed_conversation_ref"
+        ]
+
+    user_concept_id, organisation_concept_id, _actor_concept_id, namespace = (
+        _resolve_shared_conversation_actor_context(payload_for_resolution)
+    )
+    raw_session_id = payload_for_resolution.get("session_id")
+    raw_conversation_session_id = payload_for_resolution.get("conversation_session_id")
     session_id = _clean_optional_string(raw_session_id or raw_conversation_session_id)
     identifier_binding: dict[str, Any] = {
         "mode": "raw_parameters",
@@ -26053,24 +26394,15 @@ def _resolve_chat_history_read_target(
     bound_conversation_context: dict[str, Any] | None = None
     bound_history_index: int | None = None
 
-    def _binding_error_result(
-        *,
-        message: str,
-        identifier_binding_payload: Mapping[str, Any],
-        details: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        merged_details = {
-            "identifier_binding": dict(identifier_binding_payload),
-        }
-        if isinstance(details, Mapping):
-            merged_details.update(dict(details))
-        return make_error_response(
-            "INVALID_CONTEXT_BINDING",
-            message,
-            details=merged_details,
-        )
+    if public_ref_identifier_binding is not None:
+        identifier_binding = public_ref_identifier_binding
+        bound_conversation_context = public_ref_context
 
-    conversation_ref = payload.get("conversation_ref")
+    conversation_ref = (
+        None
+        if public_ref_identifier_binding is not None
+        else payload_for_resolution.get("conversation_ref")
+    )
     if conversation_ref is not None:
         verified_conversation = verify_conversation_scope_binding(conversation_ref)
         if not verified_conversation.get("success"):
@@ -26098,7 +26430,7 @@ def _resolve_chat_history_read_target(
         session_id = bound_session_id
         identifier_binding = dict(verified_conversation["identifier_binding"])
 
-    history_location_ref = payload.get("history_location_ref")
+    history_location_ref = payload_for_resolution.get("history_location_ref")
     if history_location_ref is not None:
         verified_history_location = verify_history_location_binding(
             history_location_ref
@@ -26126,7 +26458,7 @@ def _resolve_chat_history_read_target(
                     "bound_chat_session_id": bound_session_id,
                 },
             )
-        raw_history_index = payload.get("history_index")
+        raw_history_index = payload_for_resolution.get("history_index")
         history_index_value = (
             raw_history_index if isinstance(raw_history_index, int) else None
         )
@@ -26289,6 +26621,7 @@ def _resolve_chat_history_read_target(
             "access_mode": "invitee",
             "organisation_concept_id": effective_org,
             "history_index": bound_history_index,
+            "include_legacy": payload_for_resolution.get("include_legacy"),
             "identifier_binding": {
                 **identifier_binding,
                 "requested_user_id": user_concept_id,
@@ -26389,6 +26722,7 @@ def _resolve_chat_history_read_target(
         "access_mode": "owner" if read_user_id == user_concept_id else "delegated",
         "organisation_concept_id": organisation_concept_id,
         "history_index": bound_history_index,
+        "include_legacy": payload_for_resolution.get("include_legacy"),
         "identifier_binding": {
             **identifier_binding,
             "requested_user_id": user_concept_id,

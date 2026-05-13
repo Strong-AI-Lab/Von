@@ -25,6 +25,29 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
+def _emitted_von_conversation_ref() -> dict:
+    return {
+        "kind": "von_conversation_ref",
+        "conversation_ref": {
+            "session_id": "ff9be41d-28f8-4864-ab0b-8c201e3152d0",
+            "user_concept_id": "#V#michael_witbrock",
+            "namespace": (
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            ),
+            "organisation_concept_id": "university_of_auckland_strong_ai_lab",
+            "include_legacy": False,
+        },
+        "chat_history_lookup": {
+            "user_id": "#V#michael_witbrock",
+            "session_id": "ff9be41d-28f8-4864-ab0b-8c201e3152d0",
+            "namespace": (
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            ),
+            "include_legacy": False,
+        },
+    }
+
+
 def _assert_schema_conformance(
     gateway: InternalMCPGateway,
     method: str,
@@ -81,6 +104,55 @@ def test_chat_history_get_segments_gateway_accepts_bound_conversation_ref(
     assert payload.get("success") is True
     assert payload.get("identifier_binding", {}).get("mode") == "server_bound_reference"
     assert payload.get("identifier_binding", {}).get("validation_status") == "verified"
+    _assert_schema_conformance(gateway, "chat_history_get_segments", payload)
+
+
+def test_chat_history_get_segments_gateway_accepts_emitted_von_conversation_ref(
+    monkeypatch,
+) -> None:
+    gateway = _build_gateway()
+    namespace = "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#michael_witbrock",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#michael_witbrock"
+            and session_id == "ff9be41d-28f8-4864-ab0b-8c201e3152d0"
+            and namespace == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        ),
+    )
+
+    def get_segments(*args, **kwargs):
+        assert kwargs["namespace"] == namespace
+        assert kwargs["include_legacy"] is False
+        return ([{"segment_index": 0, "history": []}], {})
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        get_segments,
+    )
+
+    payload = gateway.invoke(
+        "chat_history_get_segments",
+        {"conversation_ref": _emitted_von_conversation_ref()},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("session_id") == "ff9be41d-28f8-4864-ab0b-8c201e3152d0"
+    assert payload.get("identifier_binding", {}).get("mode") == (
+        "public_conversation_ref"
+    )
+    assert payload.get("identifier_binding", {}).get("validation_status") == (
+        "normalised"
+    )
     _assert_schema_conformance(gateway, "chat_history_get_segments", payload)
 
 
