@@ -30,6 +30,8 @@ from ...services.output_hint_contracts import (
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
 )
 from ...services.tool_result_hints import (
+    LLMGenerationError,
+    LLMGenerationResult,
     extract_signals_from_tool_result,
     resolve_hint_body,
 )
@@ -73,6 +75,147 @@ def _resolve_tool_payload(inputs: Mapping[str, Any], data: Mapping[str, Any]) ->
     return data.get("tool_payload")
 
 
+def _copy_mapping_sequence(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(
+        {str(key): item for key, item in entry.items() if isinstance(key, str)}
+        for entry in value
+        if isinstance(entry, Mapping)
+    )
+
+
+def _resolve_model_policy_stage(
+    request: WorkflowActionRequest,
+    inputs: Mapping[str, Any],
+) -> str:
+    llm_policy = request.llm_policy if isinstance(request.llm_policy, Mapping) else {}
+    return (
+        _safe_str(inputs.get("policy_stage"))
+        or _safe_str(inputs.get("model_policy_stage"))
+        or _safe_str(llm_policy.get("policy_stage"))
+        or _safe_str(request.action_id)
+        or EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID
+    )
+
+
+def _build_model_policy_generate(
+    request: WorkflowActionRequest,
+    *,
+    policy_stage: str,
+):
+    if request.environment.gateway is None:
+        return None
+
+    def _generate(
+        *,
+        prompt: str,
+        context: Any | None = None,
+        model: str | None = None,
+    ) -> LLMGenerationResult:
+        from ..llm_step_executor import (
+            _build_gateway_runtime,
+            _prefer_default_model_for_request,
+        )
+
+        llm_calls: list[dict[str, Any]] = []
+        aux_llm_calls: list[Mapping[str, Any]] = []
+        (
+            orchestrator,
+            policy_state,
+            registry_snapshot,
+            user_concept_id,
+            org_concept_id,
+        ) = _build_gateway_runtime(request)
+        emit_progress = (
+            request.data.get("emit_progress")
+            if callable(request.data.get("emit_progress"))
+            else None
+        )
+
+        def _record_llm_call(
+            *,
+            call_type: str,
+            model_name: str | None,
+            duration_ms: float | None,
+            usage: Mapping[str, Any] | None = None,
+            note: str | None = None,
+            stage: str | None = None,
+            provider: str | None = None,
+            candidate: Mapping[str, Any] | None = None,
+            workflow_stage_id: str | None = None,
+            exchange_blob_ref: Mapping[str, Any] | None = None,
+        ) -> None:
+            entry: dict[str, Any] = {
+                "type": call_type,
+                "model_name": model_name,
+                "duration_ms": duration_ms,
+                "stage": stage,
+            }
+            if usage:
+                entry["usage"] = dict(usage)
+            if note:
+                entry["note"] = note
+            if provider:
+                entry["provider"] = provider
+            if isinstance(candidate, Mapping):
+                entry["candidate"] = dict(candidate)
+            if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
+                entry["workflow_stage_id"] = workflow_stage_id.strip()
+            if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
+                entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+            llm_calls.append(entry)
+
+        stage = (
+            _safe_str(request.action_id)
+            or EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID
+        )
+        workflow_stage_id = _safe_str(request.workflow_state_id) or None
+        try:
+            response, selected_model, selected_candidate = (
+                orchestrator._run_llm_with_fallbacks(
+                    stage=stage,
+                    policy_stage=policy_stage,
+                    prompt=prompt,
+                    context=context,
+                    default_client=request.environment.llm_client,
+                    default_model=model or request.environment.model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=_record_llm_call,
+                    emit_progress=emit_progress,
+                    prefer_default_model=_prefer_default_model_for_request(request),
+                    workflow_stage_id=workflow_stage_id,
+                    workflow_id=request.workflow_id,
+                )
+            )
+        except Exception as exc:
+            raise LLMGenerationError(
+                str(exc) or type(exc).__name__,
+                error_class=type(exc).__name__,
+                llm_calls=tuple(llm_calls),
+                aux_llm_calls=tuple(aux_llm_calls),
+            ) from exc
+
+        return LLMGenerationResult(
+            response=response,
+            selected_model=selected_model,
+            selected_candidate=(
+                dict(selected_candidate)
+                if isinstance(selected_candidate, Mapping)
+                else None
+            ),
+            llm_calls=tuple(llm_calls),
+            aux_llm_calls=tuple(aux_llm_calls),
+        )
+
+    return _generate
+
+
 def _handle_extract_signals_from_tool_result(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
@@ -110,9 +253,14 @@ def _handle_extract_signals_from_tool_result(
     )
     lang = _safe_str(inputs.get("lang")) or "en-NZ"
     model = _safe_str(inputs.get("model")) or None
+    policy_stage = _resolve_model_policy_stage(request, inputs)
+    llm_generate = _build_model_policy_generate(
+        request,
+        policy_stage=policy_stage,
+    )
 
     llm_client = request.environment.llm_client
-    if llm_client is None:
+    if llm_client is None and llm_generate is None:
         return WorkflowActionResult(
             status="failed",
             error=(
@@ -127,10 +275,13 @@ def _handle_extract_signals_from_tool_result(
         turn_context=data,
         llm_client=llm_client,
         model=model,
+        llm_generate=llm_generate,
         hint_predicate_id=hint_predicate_id,
         lang=lang,
     )
 
+    llm_calls = _copy_mapping_sequence(result.llm_calls)
+    aux_llm_calls = _copy_mapping_sequence(result.aux_llm_calls)
     outputs: dict[str, Any] = {
         "signals": dict(result.signals) if isinstance(result.signals, Mapping) else result.signals,
         "hint_resolved": bool(result.hint_resolved),
@@ -139,6 +290,15 @@ def _handle_extract_signals_from_tool_result(
         "raw_response": result.raw_response,
         "source_tool_concept": source_tool_concept,
         "hint_predicate_id": hint_predicate_id,
+        "policy_stage": policy_stage,
+        "selected_model": result.selected_model,
+        "selected_model_candidate": (
+            dict(result.selected_candidate)
+            if isinstance(result.selected_candidate, Mapping)
+            else None
+        ),
+        "llm_calls": list(llm_calls),
+        "aux_llm_calls": list(aux_llm_calls),
     }
 
     # Treat "hint not authored" or any LLM-side failure as a workflow failure

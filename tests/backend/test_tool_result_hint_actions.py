@@ -45,8 +45,13 @@ def registry() -> ActionRegistry:
     return reg
 
 
-def _env(llm_client: Any) -> WorkflowEnvironment:
-    return WorkflowEnvironment(llm_client=llm_client)
+def _env(
+    llm_client: Any,
+    *,
+    gateway: Any | None = None,
+    model: str | None = None,
+) -> WorkflowEnvironment:
+    return WorkflowEnvironment(llm_client=llm_client, gateway=gateway, model=model)
 
 
 def _make_request(
@@ -54,12 +59,18 @@ def _make_request(
     inputs: dict[str, Any] | None = None,
     data: dict[str, Any] | None = None,
     llm_client: Any = None,
+    gateway: Any | None = None,
+    model: str | None = None,
+    workflow_id: str | None = None,
+    workflow_state_id: str | None = None,
 ) -> WorkflowActionRequest:
     return WorkflowActionRequest(
         action_id=EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID,
         inputs=inputs or {},
-        environment=_env(llm_client),
+        environment=_env(llm_client, gateway=gateway, model=model),
         data=data if data is not None else {},
+        workflow_id=workflow_id,
+        workflow_state_id=workflow_state_id,
     )
 
 
@@ -156,6 +167,180 @@ def test_payload_falls_back_to_data(
     result = spec.handler(req)
     assert result.status == "success"
     assert result.outputs["signals"] == {"items": []}
+
+
+def test_action_uses_workflow_model_policy_fallback_with_gateway(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        svc,
+        "resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": "Extract signals.",
+    )
+    captured: dict[str, Any] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs: Any):
+            captured.update(kwargs)
+            kwargs["record_llm_call"](
+                call_type="llm.generate",
+                model_name="gpt-4.1-mini",
+                duration_ms=10,
+                note="llm.generate failed; trying fallback",
+                stage=kwargs["stage"],
+                provider="openai",
+                candidate={"provider": "openai"},
+                workflow_stage_id=kwargs["workflow_stage_id"],
+            )
+            kwargs["record_llm_call"](
+                call_type="llm.generate",
+                model_name="granite3.3:2b",
+                duration_ms=5,
+                note="Fallback chain generate()",
+                stage=kwargs["stage"],
+                provider="ollama",
+                candidate={"provider": "ollama"},
+                workflow_stage_id=kwargs["workflow_stage_id"],
+            )
+            kwargs["aux_log"].append(
+                {
+                    "type": "workflow_model_policy_stage",
+                    "stage": kwargs["stage"],
+                    "policy_stage": kwargs["policy_stage"],
+                    "fallback_used": True,
+                    "fallback_attempt_count": 2,
+                    "fallback_attempts": [
+                        {
+                            "attempt_no": 1,
+                            "provider": "openai",
+                            "status": "failed",
+                            "failure_kind": "quota_exhausted",
+                        },
+                        {
+                            "attempt_no": 2,
+                            "provider": "ollama",
+                            "status": "succeeded",
+                        },
+                    ],
+                }
+            )
+            return (
+                '{"items": [{"kind": "url", "url": "https://example.com"}]}',
+                "granite3.3:2b",
+                {"provider": "ollama", "model": "granite3.3:2b"},
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {"models": []}, "user", "org"),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._prefer_default_model_for_request",
+        lambda request: False,
+    )
+
+    spec = registry.get(EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID)
+    assert spec is not None
+    req = _make_request(
+        inputs={
+            "source_tool_concept": "#V#some_tool",
+            "tool_payload": {"body": "see https://example.com"},
+            "policy_stage": "signal_extraction",
+        },
+        llm_client=_FakeLLM("should not be called by stub"),
+        gateway=object(),
+        model="gpt-4.1-mini",
+        workflow_id="#V#workflow_x",
+        workflow_state_id="extract",
+    )
+
+    result = spec.handler(req)
+
+    assert result.status == "success", result.error
+    assert captured["stage"] == EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID
+    assert captured["policy_stage"] == "signal_extraction"
+    assert captured["default_model"] == "gpt-4.1-mini"
+    assert captured["workflow_stage_id"] == "extract"
+    assert result.outputs["signals"]["items"][0]["url"] == "https://example.com"
+    assert result.outputs["selected_model"] == "granite3.3:2b"
+    assert result.outputs["selected_model_candidate"]["provider"] == "ollama"
+    assert result.outputs["llm_calls"][0]["provider"] == "openai"
+    stage_summary = result.outputs["aux_llm_calls"][0]
+    assert stage_summary["fallback_attempt_count"] == 2
+    assert stage_summary["fallback_attempts"][0]["failure_kind"] == "quota_exhausted"
+
+
+def test_action_preserves_model_policy_failure_telemetry(
+    registry: ActionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        svc,
+        "resolve_hint_body",
+        lambda concept_id, predicate_id, lang="en-NZ": "Extract signals.",
+    )
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs: Any):
+            kwargs["record_llm_call"](
+                call_type="llm.generate",
+                model_name="gpt-4.1-mini",
+                duration_ms=10,
+                note="llm.generate failed; trying fallback",
+                stage=kwargs["stage"],
+                provider="openai",
+                candidate={"provider": "openai"},
+            )
+            kwargs["aux_log"].append(
+                {
+                    "type": "workflow_model_policy_stage",
+                    "stage": kwargs["stage"],
+                    "policy_stage": kwargs["policy_stage"],
+                    "fallback_used": True,
+                    "fallback_attempt_count": 1,
+                    "fallback_attempts": [
+                        {
+                            "attempt_no": 1,
+                            "provider": "openai",
+                            "status": "failed",
+                            "failure_kind": "quota_exhausted",
+                        }
+                    ],
+                }
+            )
+            raise RuntimeError("insufficient_quota")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {"models": []}, "user", "org"),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._prefer_default_model_for_request",
+        lambda request: False,
+    )
+
+    spec = registry.get(EXTRACT_SIGNALS_FROM_TOOL_RESULT_ACTION_ID)
+    assert spec is not None
+    req = _make_request(
+        inputs={
+            "source_tool_concept": "#V#some_tool",
+            "tool_payload": {"body": "x"},
+            "policy_stage": "signal_extraction",
+        },
+        llm_client=None,
+        gateway=object(),
+        model="gpt-4.1-mini",
+    )
+
+    result = spec.handler(req)
+
+    assert result.status == "failed"
+    assert "llm_error:RuntimeError" in (result.error or "")
+    assert result.outputs["llm_calls"][0]["provider"] == "openai"
+    stage_summary = result.outputs["aux_llm_calls"][0]
+    assert stage_summary["fallback_attempt_count"] == 1
+    assert stage_summary["fallback_attempts"][0]["failure_kind"] == "quota_exhausted"
 
 
 def test_hint_not_authored_returns_failure(

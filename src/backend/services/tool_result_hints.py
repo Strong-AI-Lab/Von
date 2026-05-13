@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .output_hint_contracts import (
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
@@ -30,6 +30,34 @@ from .text_value_service import get_texts_for_concept
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LLMGenerationResult:
+    """Provider-agnostic LLM result plus optional model-policy telemetry."""
+
+    response: Any
+    selected_model: str | None = None
+    selected_candidate: Mapping[str, Any] | None = None
+    llm_calls: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    aux_llm_calls: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+
+
+class LLMGenerationError(RuntimeError):
+    """LLM generation failed, but the caller has telemetry worth preserving."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str,
+        llm_calls: tuple[Mapping[str, Any], ...] = (),
+        aux_llm_calls: tuple[Mapping[str, Any], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+        self.llm_calls = llm_calls
+        self.aux_llm_calls = aux_llm_calls
 
 
 @dataclass(frozen=True)
@@ -49,6 +77,10 @@ class StructuredSignals:
         raw_response: The raw LLM response string (for telemetry / diagnosis).
         warnings: Non-fatal issues encountered during extraction (e.g. JSON
             parse failure, empty payload).
+        llm_calls: Provider call telemetry captured by the caller, when the
+            extraction used the workflow model-policy runner.
+        aux_llm_calls: Model-policy and fallback-chain telemetry captured by
+            the caller, when available.
     """
 
     signals: Mapping[str, Any]
@@ -56,6 +88,10 @@ class StructuredSignals:
     hint_resolved: bool
     raw_response: str = ""
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    llm_calls: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    aux_llm_calls: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    selected_model: str | None = None
+    selected_candidate: Mapping[str, Any] | None = None
 
 
 def resolve_hint_body(
@@ -160,6 +196,42 @@ def _serialise_payload(payload: Any, *, max_chars: int = 12_000) -> str:
     return serialised
 
 
+def _normalise_generation_result(
+    generation_result: Any,
+) -> tuple[
+    str,
+    tuple[Mapping[str, Any], ...],
+    tuple[Mapping[str, Any], ...],
+    str | None,
+    Mapping[str, Any] | None,
+]:
+    if isinstance(generation_result, LLMGenerationResult):
+        response = generation_result.response
+        selected_candidate = (
+            dict(generation_result.selected_candidate)
+            if isinstance(generation_result.selected_candidate, Mapping)
+            else None
+        )
+        return (
+            response if isinstance(response, str) else str(response),
+            tuple(generation_result.llm_calls),
+            tuple(generation_result.aux_llm_calls),
+            generation_result.selected_model,
+            selected_candidate,
+        )
+    return (
+        (
+            generation_result
+            if isinstance(generation_result, str)
+            else str(generation_result)
+        ),
+        (),
+        (),
+        None,
+        None,
+    )
+
+
 def extract_signals_from_tool_result(
     source_tool_concept_id: str,
     tool_payload: Any,
@@ -167,6 +239,7 @@ def extract_signals_from_tool_result(
     *,
     llm_client: Any,
     model: Optional[str] = None,
+    llm_generate: Callable[..., Any] | None = None,
     hint_predicate_id: str = OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
     lang: str = "en-NZ",
 ) -> StructuredSignals:
@@ -195,6 +268,9 @@ def extract_signals_from_tool_result(
             Injected so the primitive remains testable and respects the model
             portfolio at call sites.
         model: Optional model override forwarded to ``generate``.
+        llm_generate: Optional provider-agnostic generation hook. Callers that
+            need workflow model-policy fallbacks can provide this without
+            changing the Vontology-authored hint body or embedding policy here.
         hint_predicate_id: The predicate to resolve. Defaults to the canonical
             signal-extraction hint; overridable for testing or for alternative
             hint families with the same shape.
@@ -223,7 +299,7 @@ def extract_signals_from_tool_result(
             warnings=("hint_not_authored",),
         )
 
-    if llm_client is None:
+    if llm_client is None and llm_generate is None:
         return StructuredSignals(
             signals={},
             hint_body=hint_body,
@@ -241,12 +317,28 @@ def extract_signals_from_tool_result(
     )
 
     try:
-        raw_response = llm_client.generate(
-            prompt=prompt,
-            context=None,
-            model=model,
-        )
+        if llm_generate is not None:
+            generation_result = llm_generate(
+                prompt=prompt,
+                context=None,
+                model=model,
+            )
+        else:
+            generation_result = llm_client.generate(
+                prompt=prompt,
+                context=None,
+                model=model,
+            )
     except Exception as exc:
+        error_class = (
+            exc.error_class
+            if isinstance(exc, LLMGenerationError)
+            else type(exc).__name__
+        )
+        llm_calls = exc.llm_calls if isinstance(exc, LLMGenerationError) else ()
+        aux_llm_calls = (
+            exc.aux_llm_calls if isinstance(exc, LLMGenerationError) else ()
+        )
         logger.warning(
             "extract_signals_from_tool_result LLM call failed for %s: %s",
             source_tool_concept_id,
@@ -257,10 +349,18 @@ def extract_signals_from_tool_result(
             hint_body=hint_body,
             hint_resolved=True,
             raw_response="",
-            warnings=(f"llm_error:{type(exc).__name__}",),
+            warnings=(f"llm_error:{error_class}",),
+            llm_calls=tuple(llm_calls),
+            aux_llm_calls=tuple(aux_llm_calls),
         )
 
-    response_text = raw_response if isinstance(raw_response, str) else str(raw_response)
+    (
+        response_text,
+        llm_calls,
+        aux_llm_calls,
+        selected_model,
+        selected_candidate,
+    ) = _normalise_generation_result(generation_result)
     signals, warnings = _parse_signals(response_text)
     return StructuredSignals(
         signals=signals,
@@ -268,10 +368,16 @@ def extract_signals_from_tool_result(
         hint_resolved=True,
         raw_response=response_text,
         warnings=warnings,
+        llm_calls=llm_calls,
+        aux_llm_calls=aux_llm_calls,
+        selected_model=selected_model,
+        selected_candidate=selected_candidate,
     )
 
 
 __all__ = [
+    "LLMGenerationError",
+    "LLMGenerationResult",
     "StructuredSignals",
     "extract_signals_from_tool_result",
     "resolve_hint_body",

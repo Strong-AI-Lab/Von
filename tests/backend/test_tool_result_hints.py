@@ -11,6 +11,8 @@ from src.backend.services.output_hint_contracts import (
     OUTPUT_ITEM_SIGNAL_EXTRACTION_HINT_PREDICATE_ID,
 )
 from src.backend.services.tool_result_hints import (
+    LLMGenerationError,
+    LLMGenerationResult,
     StructuredSignals,
     extract_signals_from_tool_result,
     resolve_hint_body,
@@ -181,6 +183,81 @@ def test_extract_signals_handles_llm_exception(
     assert result.signals == {}
     assert any(w.startswith("llm_error:") for w in result.warnings)
     assert result.hint_resolved is True
+
+
+def test_extract_signals_accepts_generation_hook_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tool_result_hints,
+        "get_texts_for_concept",
+        lambda **_: [{"text": "hint"}],
+    )
+    llm_calls = ({"type": "llm.generate", "stage": "signal_extraction"},)
+    aux_calls = (
+        {
+            "type": "workflow_model_policy_stage",
+            "fallback_attempt_count": 2,
+        },
+    )
+
+    def generate(**_: Any) -> LLMGenerationResult:
+        return LLMGenerationResult(
+            response='{"ok": true}',
+            selected_model="granite3.3:2b",
+            selected_candidate={"provider": "ollama"},
+            llm_calls=llm_calls,
+            aux_llm_calls=aux_calls,
+        )
+
+    result = extract_signals_from_tool_result(
+        "#V#tool_x",
+        {"items": [1]},
+        None,
+        llm_client=None,
+        llm_generate=generate,
+    )
+
+    assert result.signals == {"ok": True}
+    assert result.selected_model == "granite3.3:2b"
+    assert result.selected_candidate == {"provider": "ollama"}
+    assert result.llm_calls == llm_calls
+    assert result.aux_llm_calls == aux_calls
+
+
+def test_extract_signals_preserves_generation_failure_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tool_result_hints,
+        "get_texts_for_concept",
+        lambda **_: [{"text": "hint"}],
+    )
+    aux_calls = (
+        {
+            "type": "workflow_model_policy_stage",
+            "fallback_attempts": [{"failure_kind": "quota_exhausted"}],
+        },
+    )
+
+    def generate(**_: Any) -> LLMGenerationResult:
+        raise LLMGenerationError(
+            "insufficient_quota",
+            error_class="RateLimitError",
+            aux_llm_calls=aux_calls,
+        )
+
+    result = extract_signals_from_tool_result(
+        "#V#tool_x",
+        {"items": [1]},
+        None,
+        llm_client=None,
+        llm_generate=generate,
+    )
+
+    assert result.signals == {}
+    assert result.warnings == ("llm_error:RateLimitError",)
+    assert result.aux_llm_calls == aux_calls
 
 
 def test_extract_signals_default_predicate_is_canonical() -> None:
