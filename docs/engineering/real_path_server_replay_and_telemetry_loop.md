@@ -193,7 +193,34 @@ answer-grounding architecture is healthy. They are not a separate invitation to
 introduce an easier, narrower success path that the harder compositional turns
 would never use.
 
-### 5.1 Random Prompt Sampling
+### 5.1 Prompt-Variant Failure Replays
+
+For replay-backed prompt improvement, keep the prompt hypothesis and promotion
+policy represented. The live sampler can provide the generic execution surface:
+model arms, prompt-variant arm metadata, prompt-variant selection telemetry, and
+experiment-run observations.
+
+Minimal local command shape:
+
+```powershell
+pdm run python scripts/run_live_kb_tool_prompt_sampler.py `
+  --prompt-text "List my last six email messages." `
+  --replay-case-id "mail-listing-failure" `
+  --model "gemma4:26b" `
+  --compare-model "gpt-5.4-mini" `
+  --base-prompt-id "#V#mail_answer_prompt" `
+  --prompt-variant-id "#V#gemma_mail_answer_prompt_v2" `
+  --workflow-id "#V#general_mail_review_workflow" `
+  --workflow-stage-id "turn_answer" `
+  --experiment-run-id "#V#experiment_run_mail_prompt_variants"
+```
+
+This records whether the normal runtime selected the represented prompt variant;
+it does not inject raw prompt text or promote a variant. A telemetry-inconsistent
+arm can remain useful comparator evidence, but it is non-promotable until the
+response surfaces, completion gate, and user-visible answer agree.
+
+### 5.2 Random Prompt Sampling
 
 Von already has a maintained live prompt bank and replay harness for this:
 

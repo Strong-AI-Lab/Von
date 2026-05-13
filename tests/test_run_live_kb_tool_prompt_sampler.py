@@ -1485,6 +1485,168 @@ def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None
     )
 
 
+def test_build_replay_arm_plan_adds_prompt_variant_arms() -> None:
+    model_arms = sampler._build_model_arm_plan(
+        requested_model="gemma4:26b",
+        compare_models=["gpt-5.4-mini"],
+        include_active_model_arm=False,
+    )
+
+    arms = sampler._build_replay_arm_plan(
+        model_arms=model_arms,
+        base_prompt_id="#V#mail_answer_prompt",
+        prompt_variant_ids=["#V#gemma_mail_answer_prompt_v2"],
+        workflow_stage_id="turn_answer",
+        target_workflow_id="#V#general_mail_review_workflow",
+        replay_set_id="JVNAUTOSCI-2318",
+        replay_case_id="mail-listing-failure",
+    )
+
+    assert [arm["candidate_prompt_variant_id"] for arm in arms] == [
+        None,
+        "#V#gemma_mail_answer_prompt_v2",
+        None,
+        "#V#gemma_mail_answer_prompt_v2",
+    ]
+    assert {arm["base_prompt_id"] for arm in arms} == {"#V#mail_answer_prompt"}
+    assert {arm["workflow_stage_id"] for arm in arms} == {"turn_answer"}
+    assert {arm["target_workflow_id"] for arm in arms} == {
+        "#V#general_mail_review_workflow"
+    }
+
+
+def test_build_summary_records_prompt_variant_selection_and_scoring_blockers() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "mail-listing-failure",
+            "category": "failure_case_replay",
+            "complexity_class": "tool_augmented",
+            "prompt": "List my last six email messages.",
+            "knowledge_surfaces": ["conversation_history"],
+            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
+            "requires_tool_use": True,
+        },
+        task_id="task-mail",
+        session_id="session-mail",
+        request_id="request-mail",
+        history_location={"history_index": 9, "session_id": "session-mail"},
+        generate_payload={
+            "response": "Here are the six messages.",
+            "request_id": "request-mail",
+            "session_id": "session-mail",
+        },
+        llm_debug_data={
+            "model": "gemma4:26b",
+            "prompt_variant_selection": {
+                "base_prompt_concept_id": "#V#mail_answer_prompt",
+                "selected_prompt_concept_id": "#V#gemma_mail_answer_prompt_v2",
+                "match_reason": "model_family",
+                "fallback_reason": None,
+            },
+            "completion_gate_verdict": {"decision": "partial"},
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#general_mail_review_workflow",
+                        "selected_execution_mode": "custom_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "gmail_list_messages", "success": True},
+                    {"tool": "gmail_get_message", "success": True},
+                ],
+                "response_surfaces": {
+                    "evidence_consistency": {
+                        "status": "inconsistent",
+                        "scoring_caveats": [
+                            "completion_gate_non_success_with_user_visible_response"
+                        ],
+                        "disagreement_codes": [
+                            "critic_pass_with_completion_gate_non_success"
+                        ],
+                    }
+                },
+            },
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["tool_augmented"],
+        seed=17,
+        requested_model="gemma4:26b",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        arm_metadata={
+            "arm_id": "arm_2",
+            "label": "gemma:variant",
+            "requested_model": "gemma4:26b",
+            "base_prompt_id": "#V#mail_answer_prompt",
+            "candidate_prompt_variant_id": "#V#gemma_mail_answer_prompt_v2",
+        },
+    )
+
+    prompt_variant = summary["prompt_variant_evaluation"]
+    assert prompt_variant["candidate_prompt_variant_selected"] is True
+    assert prompt_variant["match_reason"] == "model_family"
+    assert prompt_variant["promotion_blockers"] == []
+    scoring = summary["replay_scoring_consistency"]
+    assert scoring["non_promotable"] is True
+    assert "response_surface_inconsistent" in scoring["promotion_blockers"]
+    answer_evidence = summary["model_portfolio_evaluation"]["stage_evidence"][1]
+    assert answer_evidence["prompt_id"] == "#V#mail_answer_prompt"
+    assert answer_evidence["prompt_variant_id"] == "#V#gemma_mail_answer_prompt_v2"
+    assert "response_surface_inconsistent" in answer_evidence["promotion_blockers"]
+
+
+def test_experiment_observation_captures_prompt_variant_arm() -> None:
+    summary = {
+        "arm": {
+            "arm_id": "arm_2",
+            "label": "gemma:variant",
+            "requested_model": "gemma4:26b",
+            "replay_set_id": "JVNAUTOSCI-2318",
+            "replay_case_id": "mail-listing-failure",
+        },
+        "prompt": {"id": "mail-listing-failure"},
+        "conversation": {
+            "request_id": "request-mail",
+            "history_location": {"session_id": "session-mail", "history_index": 9},
+        },
+        "telemetry": {
+            "model": "gemma4:26b",
+            "selected_workflow_id": "#V#general_mail_review_workflow",
+            "selected_execution_mode": "custom_workflow",
+            "tool_count": 2,
+            "tool_history": [{"tool": "gmail_get_message", "success": True}],
+        },
+        "evaluation": {"should_user_be_happy": True, "reasons": []},
+        "response": {"text": "Here are the six messages."},
+        "prompt_variant_evaluation": {
+            "base_prompt_id": "#V#mail_answer_prompt",
+            "candidate_prompt_variant_id": "#V#gemma_mail_answer_prompt_v2",
+            "selected_prompt_id": "#V#gemma_mail_answer_prompt_v2",
+            "candidate_prompt_variant_selected": True,
+            "normal_prompt_variant_resolution_observed": True,
+            "promotion_blockers": [],
+        },
+        "replay_scoring_consistency": {
+            "completion_gate_status": "pass",
+            "response_surface_status": "consistent",
+            "non_promotable": False,
+        },
+    }
+
+    observation = sampler._build_experiment_observation_from_arm_summary(summary)
+
+    assert observation["verdict"] == "pass"
+    assert observation["observed_outcome"]["candidate_prompt_variant_id"] == (
+        "#V#gemma_mail_answer_prompt_v2"
+    )
+    assert observation["candidate_validation"]["valid"] is True
+    assert observation["workflow_execution"]["workflow_id"] == (
+        "#V#general_mail_review_workflow"
+    )
+    assert observation["turn_execution_request_ids"] == ["request-mail"]
+
+
 def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1614,3 +1776,231 @@ def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
             "requested_model": "gpt-5.4-mini",
         },
     ]
+
+
+def test_main_records_prompt_variant_arms_to_experiment_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    replay_calls: list[dict[str, object]] = []
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
+    monkeypatch.setattr(
+        sampler,
+        "_load_prompt_bank",
+        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_collect_run_environment",
+        lambda **kwargs: {
+            "base_url": kwargs["base_url"],
+            "requested_model": kwargs["requested_model"],
+            "session_name": kwargs["session_name"],
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_server_diag",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_agent_test_instance": True,
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_active_llm_info",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_resolved_active_llm_model": "gpt-5.4-mini",
+        },
+    )
+
+    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
+        replay_calls.append(kwargs)
+        arm_raw = kwargs["arm_metadata"]
+        assert isinstance(arm_raw, dict)
+        arm: dict[str, object] = dict(arm_raw)
+        return {
+            "status": "ok",
+            "arm": arm,
+            "prompt": {"id": "mail-listing-failure"},
+            "conversation": {"request_id": f"req-{len(replay_calls)}"},
+            "evaluation": {"should_user_be_happy": True},
+            "telemetry": {
+                "model": kwargs["requested_model"],
+                "selected_workflow_id": "#V#general_mail_review_workflow",
+                "selected_execution_mode": "custom_workflow",
+            },
+            "response": {"text": "Replay response."},
+            "prompt_variant_evaluation": {
+                "base_prompt_id": arm.get("base_prompt_id"),
+                "candidate_prompt_variant_id": arm.get("candidate_prompt_variant_id"),
+                "selected_prompt_id": arm.get("candidate_prompt_variant_id")
+                or arm.get("base_prompt_id"),
+                "candidate_prompt_variant_selected": (
+                    arm.get("candidate_prompt_variant_id") is not None
+                ),
+                "promotion_blockers": [],
+            },
+            "replay_scoring_consistency": {"non_promotable": False},
+            "model_portfolio_evaluation": {
+                "stage_evidence": [],
+                "empty_success_suspects": [],
+            },
+        }
+
+    def fake_record_experiment_observations(**kwargs: object) -> dict[str, object]:
+        recorded.update(kwargs)
+        return {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observation_count": len(kwargs["arm_summaries"]),  # type: ignore[arg-type]
+        }
+
+    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
+    monkeypatch.setattr(
+        sampler,
+        "_record_experiment_observations",
+        fake_record_experiment_observations,
+    )
+
+    exit_code = sampler.main(
+        [
+            "--prompt-text",
+            "List my last six email messages.",
+            "--replay-case-id",
+            "mail-listing-failure",
+            "--model",
+            "gemma4:26b",
+            "--base-prompt-id",
+            "#V#mail_answer_prompt",
+            "--prompt-variant-id",
+            "#V#gemma_mail_answer_prompt_v2",
+            "--experiment-run-id",
+            "#V#experiment_run_mail_prompt_variants",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert [call["requested_model"] for call in replay_calls] == [
+        "gemma4:26b",
+        "gemma4:26b",
+    ]
+    assert [
+        call["arm_metadata"]["candidate_prompt_variant_id"]  # type: ignore[index]
+        for call in replay_calls
+    ] == [None, "#V#gemma_mail_answer_prompt_v2"]
+    assert recorded["run_id"] == "#V#experiment_run_mail_prompt_variants"
+    assert len(recorded["arm_summaries"]) == 2  # type: ignore[arg-type]
+    assert output["experiment_recording"]["recorded_observation_count"] == 2
+
+
+def test_main_can_start_from_failure_conversation_ref_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    replay_calls: list[dict[str, object]] = []
+    failure_intake_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
+    monkeypatch.setattr(
+        sampler,
+        "_load_prompt_bank",
+        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_collect_run_environment",
+        lambda **kwargs: {
+            "base_url": kwargs["base_url"],
+            "requested_model": kwargs["requested_model"],
+            "session_name": kwargs["session_name"],
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_server_diag",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_agent_test_instance": True,
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_active_llm_info",
+        lambda **kwargs: kwargs["run_environment"],
+    )
+
+    def fake_collect_failure_case_prompt_entry(
+        **kwargs: object,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        failure_intake_calls.append(kwargs)
+        return (
+            {
+                "id": "req-failure",
+                "category": "failure_case_replay",
+                "complexity_class": "tool_augmented",
+                "prompt": "List my last six email messages.",
+                "knowledge_surfaces": ["conversation_history"],
+                "likely_tools": ["gmail_get_message"],
+                "requires_tool_use": True,
+                "source_kind": "failure_case_intake",
+                "source_request_id": "req-failure",
+                "source_workflow_id": "#V#general_mail_review_workflow",
+            },
+            {"success": True, "request_id": "req-failure"},
+        )
+
+    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
+        replay_calls.append(kwargs)
+        prompt_entry = kwargs["prompt_entry"]
+        assert isinstance(prompt_entry, dict)
+        return {
+            "status": "ok",
+            "prompt": {"id": prompt_entry["id"], "text": prompt_entry["prompt"]},
+            "conversation": {"request_id": "req-replay"},
+            "evaluation": {"should_user_be_happy": True},
+            "telemetry": {
+                "model": kwargs["requested_model"],
+                "selected_workflow_id": "#V#general_mail_review_workflow",
+                "selected_execution_mode": "custom_workflow",
+            },
+            "response": {"text": "Replay response."},
+            "prompt_variant_evaluation": {"promotion_blockers": []},
+            "replay_scoring_consistency": {"non_promotable": False},
+            "model_portfolio_evaluation": {
+                "stage_evidence": [],
+                "empty_success_suspects": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        sampler,
+        "_collect_failure_case_prompt_entry",
+        fake_collect_failure_case_prompt_entry,
+    )
+    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
+
+    exit_code = sampler.main(
+        [
+            "--failure-conversation-ref-json",
+            '{"kind":"von_conversation_ref","conversation_ref":{"session_id":"session-1"}}',
+            "--failure-request-id",
+            "req-failure",
+            "--model",
+            "gemma4:26b",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert failure_intake_calls[0]["request_id"] == "req-failure"
+    assert failure_intake_calls[0]["conversation_ref"] == {
+        "kind": "von_conversation_ref",
+        "conversation_ref": {"session_id": "session-1"},
+    }
+    first_prompt_entry = replay_calls[0]["prompt_entry"]
+    assert isinstance(first_prompt_entry, dict)
+    assert first_prompt_entry["prompt"] == "List my last six email messages."
+    assert output["failure_case_intake"] == {"success": True, "request_id": "req-failure"}

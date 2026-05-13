@@ -59,6 +59,10 @@ DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
 MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION = "model_portfolio_replay_report.v1"
+PROMPT_VARIANT_REPLAY_REPORT_SCHEMA_VERSION = "prompt_variant_replay_report.v1"
+LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION = (
+    "live_prompt_sampler_experiment_observation.v1"
+)
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
 CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
 CHAT_SESSION_CREATED_BY_ACTOR_TYPE = "#V#coding_agent"
@@ -188,6 +192,45 @@ DIAGNOSTIC_EVIDENCE_TOOLS = frozenset(
         "chat_history_get_debug_entry",
         "turn_execution_get_diagnostics",
         "workflow_get_execution_trace",
+    }
+)
+PROMPT_VARIANT_SELECTION_KEYS = frozenset(
+    {
+        "base_prompt_concept_id",
+        "selected_prompt_concept_id",
+        "selected_prompt_id",
+        "match_reason",
+        "fallback_reason",
+        "matched_model",
+        "matched_model_family",
+        "matched_model_capability",
+        "model_selection",
+    }
+)
+PROMPT_VARIANT_PROMPT_ID_KEYS = frozenset(
+    {
+        "base_prompt_id",
+        "base_prompt_concept_id",
+        "prompt_concept_id",
+        "prompt_id",
+        "resolved_prompt_concept_id",
+        "selected_prompt_id",
+        "selected_prompt_concept_id",
+    }
+)
+NON_SUCCESS_COMPLETION_STATUSES = frozenset(
+    {
+        "blocked",
+        "deny",
+        "denied",
+        "error",
+        "fail",
+        "failed",
+        "follow_up_required",
+        "incomplete",
+        "needs_replay",
+        "partial",
+        "requires_follow_up",
     }
 )
 
@@ -761,6 +804,189 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(value)
     return []
+
+
+def _dedupe_texts(values: Sequence[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _safe_text(value)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _load_json_mapping_argument(value: str, *, argument_name: str) -> dict[str, Any]:
+    cleaned = _safe_text(value)
+    if not cleaned:
+        return {}
+    raw_text = cleaned
+    if cleaned.startswith("@"):
+        raw_text = Path(cleaned[1:]).read_text(encoding="utf-8")
+    elif cleaned.startswith("{"):
+        raw_text = cleaned
+    else:
+        candidate_path = Path(cleaned)
+        try:
+            path_exists = candidate_path.exists() and candidate_path.is_file()
+        except OSError:
+            path_exists = False
+        if path_exists:
+            raw_text = candidate_path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{argument_name} must be JSON or @path to JSON: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{argument_name} must decode to a JSON object.")
+    return {str(key): item for key, item in payload.items() if isinstance(key, str)}
+
+
+def _iter_nested_mappings(value: Any, *, max_depth: int = 6) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    def _walk(item: Any, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(item, Mapping):
+            mapping = {
+                str(key): child for key, child in item.items() if isinstance(key, str)
+            }
+            found.append(mapping)
+            for child in mapping.values():
+                _walk(child, depth + 1)
+            return
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            for child in list(item)[:80]:
+                _walk(child, depth + 1)
+
+    _walk(value, 0)
+    return found
+
+
+def _normalise_prompt_entry(
+    *,
+    prompt_text: str,
+    replay_case_id: str,
+    category: str,
+    likely_tools: Sequence[Any] = (),
+    knowledge_surfaces: Sequence[Any] = (),
+    requires_tool_use: bool | None = None,
+    source_kind: str | None = None,
+    source_request_id: str | None = None,
+    source_workflow_id: str | None = None,
+) -> dict[str, Any]:
+    cleaned_prompt = _safe_text(prompt_text)
+    _assert(bool(cleaned_prompt), "Replay prompt text cannot be empty.")
+    tool_names = _dedupe_texts(likely_tools)
+    surfaces = _dedupe_texts(knowledge_surfaces)
+    return {
+        "id": _safe_text(replay_case_id) or f"ad_hoc_replay_{uuid.uuid4().hex[:12]}",
+        "category": _safe_text(category) or "ad_hoc_replay",
+        "complexity_class": "tool_augmented" if tool_names else "vontology_grounded",
+        "prompt": cleaned_prompt,
+        "knowledge_surfaces": surfaces or ["turn_context"],
+        "likely_tools": tool_names,
+        "requires_tool_use": bool(tool_names)
+        if requires_tool_use is None
+        else bool(requires_tool_use),
+        "source_kind": _safe_text(source_kind) or None,
+        "source_request_id": _safe_text(source_request_id) or None,
+        "source_workflow_id": _safe_text(source_workflow_id) or None,
+    }
+
+
+def _build_prompt_entry_from_failure_case(
+    failure_case: Mapping[str, Any],
+    *,
+    replay_case_id: str | None,
+) -> dict[str, Any]:
+    turn = _as_mapping(failure_case.get("turn"))
+    prompt_payload = _as_mapping(turn.get("prompt"))
+    prompt_text = _safe_text(prompt_payload.get("text"))
+    workflow = _as_mapping(failure_case.get("workflow"))
+    tool_ledger = _as_mapping(failure_case.get("tool_ledger"))
+    by_tool = [
+        _safe_text(_as_mapping(item).get("tool"))
+        for item in _as_list(tool_ledger.get("by_tool"))
+    ]
+    required_tools = [
+        _safe_text(item) for item in _as_list(tool_ledger.get("required_tools"))
+    ]
+    request_id = _safe_text(failure_case.get("request_id"))
+    case_id = _safe_text(replay_case_id) or request_id or "failure_case_replay"
+    return _normalise_prompt_entry(
+        prompt_text=prompt_text,
+        replay_case_id=case_id,
+        category="failure_case_replay",
+        likely_tools=[*by_tool, *required_tools],
+        knowledge_surfaces=["conversation_history", "turn_execution_diagnostics"],
+        requires_tool_use=bool(by_tool or required_tools),
+        source_kind="failure_case_intake",
+        source_request_id=request_id or None,
+        source_workflow_id=_safe_text(workflow.get("selected_workflow_id")) or None,
+    )
+
+
+def _collect_failure_case_prompt_entry(
+    *,
+    conversation_ref: Mapping[str, Any] | None,
+    chat_history_lookup: Mapping[str, Any] | None,
+    request_id: str | None,
+    session_id: str | None,
+    namespace: str | None,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    target_model: str | None,
+    comparator_model: str | None,
+    workflow_id: str | None,
+    stage_id: str | None,
+    current_request_id: str | None,
+    reference_mode: str | None,
+    reference_phrase: str | None,
+    include_legacy: bool | None,
+    history_tail_limit: int | None,
+    replay_case_id: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from src.backend.services.failure_case_intake_service import (
+        collect_failure_case_intake,
+    )
+
+    failure_case = collect_failure_case_intake(
+        conversation_ref=conversation_ref,
+        chat_history_lookup=chat_history_lookup,
+        request_id=request_id,
+        session_id=session_id,
+        namespace=namespace,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        target_model=target_model,
+        comparator_model=comparator_model,
+        workflow_id=workflow_id,
+        stage_id=stage_id,
+        current_request_id=current_request_id,
+        reference_mode=reference_mode,
+        reference_phrase=reference_phrase,
+        include_legacy=include_legacy,
+        history_tail_limit=history_tail_limit,
+    )
+    if failure_case.get("success") is False:
+        raise RuntimeError(
+            "Failure-case intake did not produce a replayable prompt: "
+            f"{json.dumps(failure_case, ensure_ascii=True, sort_keys=True)[:1200]}"
+        )
+    return (
+        _build_prompt_entry_from_failure_case(
+            failure_case,
+            replay_case_id=replay_case_id,
+        ),
+        dict(failure_case),
+    )
 
 
 def _optional_bool(value: Any) -> bool | None:
@@ -1932,6 +2158,221 @@ def _extract_timing_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_prompt_variant_observations(
+    llm_debug_data: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None, str | None]] = set()
+    for mapping in _iter_nested_mappings(llm_debug_data):
+        selection = mapping.get("prompt_variant_selection")
+        if not isinstance(selection, Mapping):
+            continue
+        compact = {
+            key: value
+            for key, value in {
+                str(key): item
+                for key, item in selection.items()
+                if isinstance(key, str)
+            }.items()
+            if key in PROMPT_VARIANT_SELECTION_KEYS
+        }
+        if not compact:
+            continue
+        selected_prompt_id = (
+            _safe_text(compact.get("selected_prompt_concept_id"))
+            or _safe_text(compact.get("selected_prompt_id"))
+            or None
+        )
+        base_prompt_id = _safe_text(compact.get("base_prompt_concept_id")) or None
+        key = (
+            base_prompt_id,
+            selected_prompt_id,
+            _safe_text(compact.get("match_reason")) or None,
+            _safe_text(compact.get("fallback_reason")) or None,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        observations.append(
+            {
+                **compact,
+                "base_prompt_concept_id": base_prompt_id,
+                "selected_prompt_concept_id": selected_prompt_id,
+            }
+        )
+    return observations
+
+
+def _extract_prompt_ids_from_debug(llm_debug_data: Mapping[str, Any]) -> list[str]:
+    prompt_ids: list[str] = []
+    for mapping in _iter_nested_mappings(llm_debug_data, max_depth=5):
+        for key, value in mapping.items():
+            if key in PROMPT_VARIANT_PROMPT_ID_KEYS:
+                prompt_id = _safe_text(value)
+                if prompt_id:
+                    prompt_ids.append(prompt_id)
+    return _dedupe_texts(prompt_ids)
+
+
+def _select_prompt_variant_observation(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    expected_prompt_variant_id: str | None,
+) -> dict[str, Any]:
+    expected = _safe_text(expected_prompt_variant_id)
+    if expected:
+        for observation in observations:
+            selected = _safe_text(observation.get("selected_prompt_concept_id"))
+            if selected and selected.lower() == expected.lower():
+                return dict(observation)
+    for observation in observations:
+        selected = _safe_text(observation.get("selected_prompt_concept_id"))
+        base = _safe_text(observation.get("base_prompt_concept_id"))
+        if selected and selected != base:
+            return dict(observation)
+    return dict(observations[0]) if observations else {}
+
+
+def _build_prompt_variant_evaluation(
+    *,
+    llm_debug_data: Mapping[str, Any],
+    arm_metadata: Mapping[str, Any] | None,
+    requested_model: str | None,
+) -> dict[str, Any]:
+    arm = _as_mapping(arm_metadata)
+    expected_base_prompt_id = _safe_text(arm.get("base_prompt_id")) or None
+    expected_variant_id = _safe_text(arm.get("candidate_prompt_variant_id")) or None
+    observations = _extract_prompt_variant_observations(llm_debug_data)
+    selected_observation = _select_prompt_variant_observation(
+        observations,
+        expected_prompt_variant_id=expected_variant_id,
+    )
+    prompt_ids = _extract_prompt_ids_from_debug(llm_debug_data)
+    observed_base_prompt_id = (
+        _safe_text(selected_observation.get("base_prompt_concept_id"))
+        or expected_base_prompt_id
+    )
+    selected_prompt_id = _safe_text(
+        selected_observation.get("selected_prompt_concept_id")
+    )
+    if not selected_prompt_id and prompt_ids:
+        selected_prompt_id = prompt_ids[0]
+
+    blockers: list[str] = []
+    candidate_selected: bool | None = None
+    if expected_variant_id:
+        if not observations:
+            blockers.append("prompt_variant_selection_not_observed")
+        if not selected_prompt_id:
+            blockers.append("selected_prompt_id_missing")
+            candidate_selected = False
+        else:
+            candidate_selected = selected_prompt_id.lower() == expected_variant_id.lower()
+            if not candidate_selected:
+                blockers.append("candidate_prompt_variant_not_selected")
+    if (
+        expected_base_prompt_id
+        and observed_base_prompt_id
+        and observed_base_prompt_id.lower() != expected_base_prompt_id.lower()
+    ):
+        blockers.append("observed_base_prompt_differs_from_requested_base_prompt")
+
+    return {
+        "schema_version": PROMPT_VARIANT_REPLAY_REPORT_SCHEMA_VERSION,
+        "requested_model": _safe_text(requested_model) or None,
+        "base_prompt_id": observed_base_prompt_id or expected_base_prompt_id,
+        "requested_base_prompt_id": expected_base_prompt_id,
+        "candidate_prompt_variant_id": expected_variant_id,
+        "selected_prompt_id": selected_prompt_id or None,
+        "candidate_prompt_variant_selected": candidate_selected,
+        "normal_prompt_variant_resolution_observed": bool(observations),
+        "match_reason": _safe_text(selected_observation.get("match_reason")) or None,
+        "fallback_reason": _safe_text(selected_observation.get("fallback_reason"))
+        or None,
+        "observed_prompt_ids": prompt_ids,
+        "prompt_variant_selection": selected_observation or None,
+        "prompt_variant_selection_count": len(observations),
+        "promotion_blockers": _dedupe_texts(blockers),
+        "policy_update": {
+            "authorised": False,
+            "reason": (
+                "Prompt-variant replay arms only measure represented prompt "
+                "variant resolution. This runner does not inject raw prompt text "
+                "or mutate production prompt policy."
+            ),
+        },
+    }
+
+
+def _extract_response_surface_consistency(
+    llm_debug_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    for payload in (
+        llm_debug_data,
+        _as_mapping(llm_debug_data.get("turn_execution_diagnostics")),
+    ):
+        surfaces = _as_mapping(payload.get("response_surfaces"))
+        consistency = _as_mapping(surfaces.get("evidence_consistency"))
+        if consistency:
+            return consistency
+    return {}
+
+
+def _completion_gate_status(
+    completion_gate: Mapping[str, Any],
+) -> str | None:
+    return (
+        _safe_text(
+            completion_gate.get("status")
+            or completion_gate.get("verdict")
+            or completion_gate.get("decision")
+        )
+        or None
+    )
+
+
+def _build_replay_scoring_consistency(
+    *,
+    llm_debug_data: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+    response_text: str,
+) -> dict[str, Any]:
+    completion_gate = _as_mapping(llm_debug_data.get("completion_gate_verdict"))
+    completion_status = _completion_gate_status(completion_gate)
+    response_surface_consistency = _extract_response_surface_consistency(llm_debug_data)
+    surface_status = _safe_text(response_surface_consistency.get("status")) or None
+    caveats = [
+        _safe_text(item)
+        for item in _as_list(response_surface_consistency.get("scoring_caveats"))
+        if _safe_text(item)
+    ]
+    disagreement_codes = [
+        _safe_text(item)
+        for item in _as_list(response_surface_consistency.get("disagreement_codes"))
+        if _safe_text(item)
+    ]
+    blockers: list[str] = []
+    if surface_status == "inconsistent":
+        blockers.append("response_surface_inconsistent")
+    blockers.extend(caveats)
+    if completion_status and completion_status.lower() in NON_SUCCESS_COMPLETION_STATUSES:
+        if response_text:
+            blockers.append("completion_gate_non_success_with_user_visible_response")
+        if bool(evaluation.get("should_user_be_happy")):
+            blockers.append("completion_gate_non_success_on_happy_arm")
+    if disagreement_codes:
+        blockers.extend(f"response_surface_{code}" for code in disagreement_codes)
+    return {
+        "schema_version": "replay_scoring_consistency.v1",
+        "completion_gate_status": completion_status,
+        "response_surface_status": surface_status,
+        "response_surface_scoring_caveats": caveats,
+        "response_surface_disagreement_codes": disagreement_codes,
+        "promotion_blockers": _dedupe_texts(blockers),
+        "non_promotable": bool(blockers),
+    }
+
+
 def _build_model_portfolio_arm_evaluation(
     *,
     summary: Mapping[str, Any],
@@ -1962,6 +2403,10 @@ def _build_model_portfolio_arm_evaluation(
     missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
     missing_evidence = _as_list(evaluation.get("missing_evidence"))
     tool_history = _as_list(telemetry.get("tool_history"))
+    prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
+    replay_scoring_consistency = _as_mapping(
+        summary.get("replay_scoring_consistency")
+    )
     structured_output_valid = selector_evidence.get("structured_output_valid")
     should_user_be_happy = bool(evaluation.get("should_user_be_happy"))
     selector_metrics = {
@@ -2010,7 +2455,13 @@ def _build_model_portfolio_arm_evaluation(
         ),
         **_extract_timing_metrics(diagnostics),
     }
-    promotion_blockers = ["single_prompt_replay_evidence_only"]
+    promotion_blockers = _dedupe_texts(
+        [
+            "single_prompt_replay_evidence_only",
+            *_as_list(prompt_variant_evaluation.get("promotion_blockers")),
+            *_as_list(replay_scoring_consistency.get("promotion_blockers")),
+        ]
+    )
     selector_verdict = (
         "passed"
         if selector_metrics.get("selected_workflow_id") and structured_output_valid is not False
@@ -2023,6 +2474,18 @@ def _build_model_portfolio_arm_evaluation(
     observed_model = _safe_text(telemetry.get("model")) or _safe_text(requested_model)
     replay_case_id = _safe_text(prompt_entry.get("id"))
     replay_set_id = DEFAULT_REPLAY_SET_ID
+    answer_prompt_id = (
+        _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
+        or _safe_text(prompt_entry.get("id"))
+        or None
+    )
+    answer_prompt_variant_id = (
+        _safe_text(prompt_variant_evaluation.get("selected_prompt_id"))
+        or _safe_text(prompt_variant_evaluation.get("candidate_prompt_variant_id"))
+        or None
+    )
+    if answer_prompt_variant_id and answer_prompt_variant_id == answer_prompt_id:
+        answer_prompt_variant_id = None
     selector_evidence_payload = build_model_stage_suitability_evidence(
         model=observed_model,
         stage="workflow_selector",
@@ -2044,7 +2507,8 @@ def _build_model_portfolio_arm_evaluation(
         model=observed_model,
         stage="turn_answer",
         workflow_id=_safe_text(telemetry.get("selected_workflow_id")) or None,
-        prompt_id=_safe_text(prompt_entry.get("id")) or None,
+        prompt_id=answer_prompt_id,
+        prompt_variant_id=answer_prompt_variant_id,
         replay_set_id=replay_set_id,
         replay_case_id=replay_case_id,
         request_id=_safe_text(conversation.get("request_id")) or None,
@@ -2056,6 +2520,8 @@ def _build_model_portfolio_arm_evaluation(
             "response_preview": response_text[:400],
             "empty_success_suspects": empty_success_suspects,
             "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
+            "prompt_variant_evaluation": prompt_variant_evaluation,
+            "replay_scoring_consistency": replay_scoring_consistency,
         },
         promotion_blockers=promotion_blockers,
     )
@@ -2098,6 +2564,12 @@ def _build_model_portfolio_comparison_report(
         report = _as_mapping(arm_summary.get("model_portfolio_evaluation"))
         if not report:
             continue
+        prompt_variant_evaluation = _as_mapping(
+            arm_summary.get("prompt_variant_evaluation")
+        )
+        scoring_consistency = _as_mapping(
+            arm_summary.get("replay_scoring_consistency")
+        )
         arm_reports.append(
             {
                 "arm_id": _safe_text(arm.get("arm_id")) or None,
@@ -2105,6 +2577,24 @@ def _build_model_portfolio_comparison_report(
                 "requested_model": _safe_text(arm.get("requested_model")) or None,
                 "observed_model": _safe_text(report.get("observed_model")) or None,
                 "replay_case_id": _safe_text(report.get("replay_case_id")) or None,
+                "base_prompt_id": _safe_text(
+                    prompt_variant_evaluation.get("base_prompt_id")
+                )
+                or None,
+                "candidate_prompt_variant_id": _safe_text(
+                    prompt_variant_evaluation.get("candidate_prompt_variant_id")
+                )
+                or None,
+                "selected_prompt_id": _safe_text(
+                    prompt_variant_evaluation.get("selected_prompt_id")
+                )
+                or None,
+                "candidate_prompt_variant_selected": prompt_variant_evaluation.get(
+                    "candidate_prompt_variant_selected"
+                ),
+                "telemetry_consistency_non_promotable": bool(
+                    scoring_consistency.get("non_promotable")
+                ),
                 "empty_success_suspect_count": len(
                     _as_list(report.get("empty_success_suspects"))
                 ),
@@ -2140,8 +2630,213 @@ def _build_model_portfolio_comparison_report(
     }
 
 
-def _build_prompt_summary(prompt_entry: Mapping[str, Any]) -> dict[str, Any]:
+def _normalise_experiment_verdict(summary: Mapping[str, Any]) -> str:
+    evaluation = _as_mapping(summary.get("evaluation"))
+    scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
+    prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
+    if bool(evaluation.get("should_user_be_happy")) and not bool(
+        scoring_consistency.get("non_promotable")
+    ) and not _as_list(prompt_variant_evaluation.get("promotion_blockers")):
+        return "pass"
+    if bool(evaluation.get("should_user_be_happy")):
+        return "partial"
+    return "fail"
+
+
+def _compact_tool_invocations(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    telemetry = _as_mapping(summary.get("telemetry"))
+    for item in _as_list(telemetry.get("tool_history"))[:40]:
+        if not isinstance(item, Mapping):
+            continue
+        tool_name = _safe_text(item.get("tool") or item.get("method"))
+        if not tool_name:
+            continue
+        compact.append(
+            {
+                "tool_name": tool_name,
+                "status": _safe_text(item.get("status") or item.get("result_status"))
+                or None,
+                "success": item.get("success") if isinstance(item.get("success"), bool) else None,
+            }
+        )
+    return compact
+
+
+def _build_experiment_observation_from_arm_summary(
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    arm = _as_mapping(summary.get("arm"))
+    prompt = _as_mapping(summary.get("prompt"))
+    conversation = _as_mapping(summary.get("conversation"))
+    telemetry = _as_mapping(summary.get("telemetry"))
+    evaluation = _as_mapping(summary.get("evaluation"))
+    prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
+    scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
+    response = _as_mapping(summary.get("response"))
+    request_id = _safe_text(conversation.get("request_id")) or None
+    selected_workflow_id = _safe_text(telemetry.get("selected_workflow_id")) or None
+    candidate_prompt_variant_id = _safe_text(
+        prompt_variant_evaluation.get("candidate_prompt_variant_id")
+    )
+    selected_prompt_id = _safe_text(prompt_variant_evaluation.get("selected_prompt_id"))
+    candidate_valid = not _as_list(prompt_variant_evaluation.get("promotion_blockers"))
+    label_parts = [
+        "prompt_variant_arm",
+        _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id")) or "single_arm",
+    ]
     return {
+        "schema_version": LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION,
+        "label": ":".join(label_parts),
+        "verdict": _normalise_experiment_verdict(summary),
+        "observed_outcome": {
+            "schema_version": LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION,
+            "arm_id": _safe_text(arm.get("arm_id")) or None,
+            "arm_label": _safe_text(arm.get("label")) or None,
+            "replay_set_id": _safe_text(arm.get("replay_set_id"))
+            or DEFAULT_REPLAY_SET_ID,
+            "replay_case_id": _safe_text(arm.get("replay_case_id"))
+            or _safe_text(prompt.get("id"))
+            or None,
+            "request_id": request_id,
+            "model": _safe_text(telemetry.get("model"))
+            or _safe_text(arm.get("requested_model"))
+            or None,
+            "base_prompt_id": _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
+            or None,
+            "candidate_prompt_variant_id": candidate_prompt_variant_id or None,
+            "selected_prompt_id": selected_prompt_id or None,
+            "candidate_prompt_variant_selected": prompt_variant_evaluation.get(
+                "candidate_prompt_variant_selected"
+            ),
+            "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
+            "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
+        },
+        "workflow_execution": {
+            "workflow_id": selected_workflow_id,
+            "selected_execution_mode": _safe_text(
+                telemetry.get("selected_execution_mode")
+            )
+            or None,
+            "request_id": request_id,
+            "history_location": _as_mapping(conversation.get("history_location")),
+        },
+        "candidate_validation": {
+            "candidate_kind": "prompt_variant",
+            "valid": candidate_valid,
+            "base_prompt_id": _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
+            or None,
+            "candidate_prompt_variant_id": candidate_prompt_variant_id or None,
+            "selected_prompt_id": selected_prompt_id or None,
+            "normal_prompt_variant_resolution_observed": bool(
+                prompt_variant_evaluation.get(
+                    "normal_prompt_variant_resolution_observed"
+                )
+            ),
+            "promotion_blockers": _as_list(
+                prompt_variant_evaluation.get("promotion_blockers")
+            ),
+        },
+        "trace_summary": {
+            "request_id": request_id,
+            "response_length": len(_safe_text(response.get("text"))),
+            "tool_count": telemetry.get("tool_count"),
+            "completion_gate_status": scoring_consistency.get(
+                "completion_gate_status"
+            ),
+            "response_surface_status": scoring_consistency.get(
+                "response_surface_status"
+            ),
+        },
+        "policy_decisions": [
+            {
+                "decision": "production_prompt_policy_unchanged",
+                "authorised": False,
+                "reason": (
+                    "Live prompt sampler records replay evidence only; prompt "
+                    "promotion remains a represented Vontology workflow decision."
+                ),
+            }
+        ],
+        "quality_signals": {
+            "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
+            "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
+            "reasons": _as_list(evaluation.get("reasons"))[:20],
+        },
+        "repair_hints": [
+            {
+                "scope": "prompt_variant_resolution",
+                "reason_code": reason_code,
+            }
+            for reason_code in _as_list(
+                prompt_variant_evaluation.get("promotion_blockers")
+            )
+        ],
+        "tool_invocations": _compact_tool_invocations(summary),
+        "assertion_classes": [
+            "model_prompt_variant_arm_replay",
+            "experiment_observation",
+        ],
+        "turn_execution_request_ids": [request_id] if request_id else [],
+    }
+
+
+def _record_experiment_observations(
+    *,
+    run_id: str,
+    arm_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    observations = [
+        _build_experiment_observation_from_arm_summary(summary)
+        for summary in arm_summaries
+        if isinstance(summary, Mapping)
+    ]
+    turn_execution_request_ids = _dedupe_texts(
+        [
+            request_id
+            for observation in observations
+            for request_id in _as_list(observation.get("turn_execution_request_ids"))
+        ]
+    )
+    if not observations:
+        return {
+            "success": False,
+            "error": "no_arm_summaries_to_record",
+            "recorded_observation_count": 0,
+        }
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "experiment_record_observation",
+        {
+            "run_id": run_id,
+            "observations": observations,
+            "turn_execution_request_ids": turn_execution_request_ids,
+        },
+    )
+    payload = _as_mapping(result.payload)
+    return {
+        "success": bool(payload.get("success")),
+        "run_id": payload.get("run_id") or run_id,
+        "recorded_observation_count": len(_as_list(payload.get("recorded_observations"))),
+        "turn_execution_request_ids": turn_execution_request_ids,
+        "mcp_tool": "experiment_record_observation",
+        "mcp_duration_ms": result.duration_ms,
+        "error": payload.get("error"),
+    }
+
+
+def _build_prompt_summary(prompt_entry: Mapping[str, Any]) -> dict[str, Any]:
+    summary = {
         "id": _safe_text(prompt_entry.get("id")),
         "category": _safe_text(prompt_entry.get("category")),
         "complexity_class": _safe_text(prompt_entry.get("complexity_class")),
@@ -2153,6 +2848,11 @@ def _build_prompt_summary(prompt_entry: Mapping[str, Any]) -> dict[str, Any]:
             prompt_entry.get("allows_grounded_empty_result")
         ),
     }
+    for source_key in ("source_kind", "source_request_id", "source_workflow_id"):
+        source_value = _safe_text(prompt_entry.get(source_key))
+        if source_value:
+            summary[source_key] = source_value
+    return summary
 
 
 def _build_selection_summary(
@@ -2175,6 +2875,19 @@ def _build_selection_summary(
                 "arm_id": _safe_text(entry.get("arm_id")) or None,
                 "label": _safe_text(entry.get("label")) or None,
                 "requested_model": _safe_text(entry.get("requested_model")) or None,
+                **{
+                    optional_key: optional_value
+                    for optional_key in (
+                        "model_arm_id",
+                        "base_prompt_id",
+                        "candidate_prompt_variant_id",
+                        "workflow_stage_id",
+                        "target_workflow_id",
+                        "replay_set_id",
+                        "replay_case_id",
+                    )
+                    if (optional_value := _safe_text(entry.get(optional_key)))
+                },
             }
             for entry in requested_model_arms
             if isinstance(entry, Mapping)
@@ -2203,6 +2916,21 @@ def _build_summary(
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
     dispatch = _as_mapping(routing.get("dispatch"))
     tool_history = _as_list(diagnostics.get("tool_history"))
+    response_text = (
+        _safe_text(generate_payload.get("response"))
+        or _safe_text(generate_payload.get("response_text"))
+        or _safe_text(llm_debug_data.get("response"))
+    )
+    prompt_variant_evaluation = _build_prompt_variant_evaluation(
+        llm_debug_data=llm_debug_data,
+        arm_metadata=arm_metadata,
+        requested_model=requested_model,
+    )
+    replay_scoring_consistency = _build_replay_scoring_consistency(
+        llm_debug_data=llm_debug_data,
+        evaluation=evaluation,
+        response_text=response_text,
+    )
     summary = {
         "status": "ok",
         "guidance": {
@@ -2224,11 +2952,7 @@ def _build_summary(
             "history_location": dict(history_location),
         },
         "response": {
-            "text": (
-                _safe_text(generate_payload.get("response"))
-                or _safe_text(generate_payload.get("response_text"))
-                or _safe_text(llm_debug_data.get("response"))
-            ),
+            "text": response_text,
         },
         "telemetry": {
             "model": _safe_text(llm_debug_data.get("model")),
@@ -2255,6 +2979,8 @@ def _build_summary(
             "workflow_routing_diagnostics": routing,
         },
         "evaluation": dict(evaluation),
+        "prompt_variant_evaluation": prompt_variant_evaluation,
+        "replay_scoring_consistency": replay_scoring_consistency,
     }
     if arm_metadata:
         summary["arm"] = {
@@ -2262,6 +2988,18 @@ def _build_summary(
             "label": _safe_text(arm_metadata.get("label")) or None,
             "requested_model": _safe_text(arm_metadata.get("requested_model")) or None,
         }
+        for optional_key in (
+            "model_arm_id",
+            "base_prompt_id",
+            "candidate_prompt_variant_id",
+            "workflow_stage_id",
+            "target_workflow_id",
+            "replay_set_id",
+            "replay_case_id",
+        ):
+            optional_value = _safe_text(arm_metadata.get(optional_key))
+            if optional_value:
+                summary["arm"][optional_key] = optional_value
     summary["model_portfolio_evaluation"] = _build_model_portfolio_arm_evaluation(
         summary=summary,
         llm_debug_data=llm_debug_data,
@@ -2306,6 +3044,86 @@ def _build_model_arm_plan(
     return planned_arms
 
 
+def _build_replay_arm_plan(
+    *,
+    model_arms: Sequence[Mapping[str, Any]],
+    base_prompt_id: str | None,
+    prompt_variant_ids: Sequence[Any],
+    workflow_stage_id: str | None,
+    target_workflow_id: str | None,
+    replay_set_id: str | None,
+    replay_case_id: str | None,
+) -> list[dict[str, Any]]:
+    base_prompt = _safe_text(base_prompt_id) or None
+    variants = _dedupe_texts(prompt_variant_ids)
+    stage_id = _safe_text(workflow_stage_id) or None
+    workflow_id = _safe_text(target_workflow_id) or None
+    set_id = _safe_text(replay_set_id) or (
+        DEFAULT_REPLAY_SET_ID if variants else None
+    )
+    case_id = _safe_text(replay_case_id) or None
+
+    if not variants:
+        planned: list[dict[str, Any]] = []
+        for model_arm in model_arms:
+            arm = dict(model_arm)
+            if base_prompt:
+                arm["base_prompt_id"] = base_prompt
+            if stage_id:
+                arm["workflow_stage_id"] = stage_id
+            if workflow_id:
+                arm["target_workflow_id"] = workflow_id
+            if set_id:
+                arm["replay_set_id"] = set_id
+            if case_id:
+                arm["replay_case_id"] = case_id
+            planned.append(arm)
+        return planned
+
+    planned = []
+    for model_arm in model_arms:
+        model_label = _safe_text(model_arm.get("label")) or _safe_text(
+            model_arm.get("arm_id")
+        )
+        base_arm = dict(model_arm)
+        base_arm.update(
+            {
+                "arm_id": f"arm_{len(planned) + 1}",
+                "model_arm_id": _safe_text(model_arm.get("arm_id")) or None,
+                "label": f"{model_label}:base_prompt" if model_label else "base_prompt",
+                "base_prompt_id": base_prompt,
+                "candidate_prompt_variant_id": None,
+                "workflow_stage_id": stage_id,
+                "target_workflow_id": workflow_id,
+                "replay_set_id": set_id,
+                "replay_case_id": case_id,
+            }
+        )
+        planned.append(base_arm)
+        for variant_id in variants:
+            variant_label = variant_id.rsplit("#", 1)[-1].replace("#V", "V")
+            arm = dict(model_arm)
+            arm.update(
+                {
+                    "arm_id": f"arm_{len(planned) + 1}",
+                    "model_arm_id": _safe_text(model_arm.get("arm_id")) or None,
+                    "label": (
+                        f"{model_label}:{variant_label}"
+                        if model_label
+                        else variant_label
+                    ),
+                    "base_prompt_id": base_prompt,
+                    "candidate_prompt_variant_id": variant_id,
+                    "workflow_stage_id": stage_id,
+                    "target_workflow_id": workflow_id,
+                    "replay_set_id": set_id,
+                    "replay_case_id": case_id,
+                }
+            )
+            planned.append(arm)
+    return planned
+
+
 def _build_arm_session_name(
     *, base_session_name: str, arm_metadata: Mapping[str, Any] | None
 ) -> str:
@@ -2334,6 +3152,18 @@ def _build_arm_run_environment(
         run_environment["comparison_arm_label"] = (
             _safe_text(arm_metadata.get("label")) or None
         )
+        for optional_key in (
+            "model_arm_id",
+            "base_prompt_id",
+            "candidate_prompt_variant_id",
+            "workflow_stage_id",
+            "target_workflow_id",
+            "replay_set_id",
+            "replay_case_id",
+        ):
+            optional_value = _safe_text(arm_metadata.get(optional_key))
+            if optional_value:
+                run_environment[optional_key] = optional_value
     return run_environment
 
 
@@ -2577,6 +3407,111 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--prompt-id", default="")
     parser.add_argument(
+        "--prompt-text",
+        default="",
+        help=(
+            "Use an explicit prompt text instead of sampling the prompt bank. "
+            "Useful for fixed failure-case replays after a workflow has already "
+            "resolved the replay case."
+        ),
+    )
+    parser.add_argument(
+        "--replay-case-id",
+        default="",
+        help="Stable replay case id to attach to reports for explicit prompt/failure-case runs.",
+    )
+    parser.add_argument(
+        "--replay-set-id",
+        default="",
+        help="Replay set id to attach to prompt-variant arm metadata.",
+    )
+    parser.add_argument(
+        "--workflow-id",
+        default="",
+        help="Expected or target workflow id for replay-case provenance.",
+    )
+    parser.add_argument(
+        "--workflow-stage-id",
+        default="",
+        help="Workflow stage id whose prompt variants are being evaluated.",
+    )
+    parser.add_argument(
+        "--base-prompt-id",
+        default="",
+        help="Base Vontology prompt concept id for prompt-variant replay arms.",
+    )
+    parser.add_argument(
+        "--prompt-variant-id",
+        dest="prompt_variant_ids",
+        action="append",
+        default=[],
+        help=(
+            "Candidate represented prompt variant concept id. Repeat to create "
+            "candidate arms. The runner records whether normal runtime prompt "
+            "variant resolution selected this id; it does not inject raw prompt text."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-run-id",
+        default="",
+        help=(
+            "Existing experiment_run concept id. When supplied, replay arm "
+            "observations are appended through the internal MCP experiment surface."
+        ),
+    )
+    parser.add_argument(
+        "--failure-conversation-ref-json",
+        default="",
+        help=(
+            "JSON object, path, or @path for a conversation_ref accepted by "
+            "failure-case intake."
+        ),
+    )
+    parser.add_argument(
+        "--failure-chat-history-lookup-json",
+        default="",
+        help="JSON object, path, or @path for optional chat_history_lookup context.",
+    )
+    parser.add_argument(
+        "--failure-request-id",
+        default="",
+        help="Existing failed turn request_id to resolve into a replay prompt.",
+    )
+    parser.add_argument(
+        "--failure-current-request-id",
+        default="",
+        help="Current request id to exclude when resolving same-conversation failure references.",
+    )
+    parser.add_argument(
+        "--failure-reference-mode",
+        default="",
+        help=(
+            "Failure reference mode, for example latest_prior_failure, when no "
+            "exact failure request id is supplied."
+        ),
+    )
+    parser.add_argument(
+        "--failure-reference-phrase",
+        default="",
+        help="User phrase that triggered same-conversation failure-case resolution.",
+    )
+    parser.add_argument(
+        "--namespace",
+        default="",
+        help="Namespace to use for failure-case intake and experiment provenance.",
+    )
+    parser.add_argument(
+        "--include-legacy-history",
+        action="store_true",
+        help="Allow failure-case intake to include legacy chat-history records.",
+    )
+    parser.add_argument(
+        "--history-tail-limit",
+        type=int,
+        default=None,
+        help="Optional history tail limit for failure-case intake.",
+    )
+    parser.add_argument(
         "--complexity-class",
         dest="complexity_classes",
         action="append",
@@ -2641,13 +3576,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    prompt_entry = _choose_prompt(
-        prompt_bank,
-        seed=args.seed,
-        prompt_id=_safe_text(args.prompt_id) or None,
-        allowed_complexity_classes=allowed_complexity_classes,
-    )
-
     base_url = resolve_live_test_base_url(args.base_url)
     requested_model = _safe_text(args.model) or None
     compare_models = [
@@ -2659,6 +3587,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         requested_model=requested_model,
         compare_models=compare_models,
         include_active_model_arm=bool(args.include_active_model_arm),
+    )
+    replay_case_id = _safe_text(args.replay_case_id) or None
+    replay_set_id = _safe_text(args.replay_set_id) or None
+    target_workflow_id = _safe_text(args.workflow_id) or None
+    workflow_stage_id = _safe_text(args.workflow_stage_id) or None
+    base_prompt_id = _safe_text(args.base_prompt_id) or None
+    prompt_variant_ids = _dedupe_texts(_as_list(args.prompt_variant_ids))
+    failure_case_intake: dict[str, Any] | None = None
+    explicit_prompt_text = _safe_text(args.prompt_text)
+    failure_conversation_ref = _load_json_mapping_argument(
+        args.failure_conversation_ref_json,
+        argument_name="--failure-conversation-ref-json",
+    )
+    failure_chat_history_lookup = _load_json_mapping_argument(
+        args.failure_chat_history_lookup_json,
+        argument_name="--failure-chat-history-lookup-json",
+    )
+    failure_request_id = _safe_text(args.failure_request_id) or None
+    failure_reference_mode = _safe_text(args.failure_reference_mode) or None
+    failure_reference_phrase = _safe_text(args.failure_reference_phrase) or None
+    if (
+        failure_conversation_ref
+        or failure_chat_history_lookup
+        or failure_request_id
+        or failure_reference_mode
+    ):
+        prompt_entry, failure_case_intake = _collect_failure_case_prompt_entry(
+            conversation_ref=failure_conversation_ref or None,
+            chat_history_lookup=failure_chat_history_lookup or None,
+            request_id=failure_request_id,
+            session_id=None,
+            namespace=_safe_text(args.namespace) or None,
+            user_concept_id=_safe_text(args.user_concept_id) or None,
+            organisation_concept_id=_safe_text(args.organisation_concept_id) or None,
+            target_model=requested_model,
+            comparator_model=compare_models[0] if compare_models else None,
+            workflow_id=target_workflow_id,
+            stage_id=workflow_stage_id,
+            current_request_id=_safe_text(args.failure_current_request_id) or None,
+            reference_mode=failure_reference_mode,
+            reference_phrase=failure_reference_phrase,
+            include_legacy=bool(args.include_legacy_history),
+            history_tail_limit=args.history_tail_limit,
+            replay_case_id=replay_case_id,
+        )
+        replay_case_id = _safe_text(prompt_entry.get("id")) or replay_case_id
+        target_workflow_id = (
+            target_workflow_id
+            or _safe_text(prompt_entry.get("source_workflow_id"))
+            or None
+        )
+    elif explicit_prompt_text:
+        prompt_entry = _normalise_prompt_entry(
+            prompt_text=explicit_prompt_text,
+            replay_case_id=replay_case_id or f"ad_hoc_replay_{uuid.uuid4().hex[:12]}",
+            category="ad_hoc_replay",
+            likely_tools=[],
+            knowledge_surfaces=["turn_context"],
+            requires_tool_use=False,
+            source_kind="explicit_prompt_text",
+        )
+        replay_case_id = _safe_text(prompt_entry.get("id")) or replay_case_id
+    else:
+        prompt_entry = _choose_prompt(
+            prompt_bank,
+            seed=args.seed,
+            prompt_id=_safe_text(args.prompt_id) or None,
+            allowed_complexity_classes=allowed_complexity_classes,
+        )
+    replay_arms = _build_replay_arm_plan(
+        model_arms=model_arms,
+        base_prompt_id=base_prompt_id,
+        prompt_variant_ids=prompt_variant_ids,
+        workflow_stage_id=workflow_stage_id,
+        target_workflow_id=target_workflow_id,
+        replay_set_id=replay_set_id,
+        replay_case_id=replay_case_id,
     )
     authenticated_user_concept_id = (
         _safe_text(args.user_concept_id) or DEFAULT_USER_CONCEPT_ID
@@ -2694,7 +3699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         organisation_concept_id=authenticated_organisation_concept_id,
         run_environment=run_environment,
     )
-    if len(model_arms) == 1:
+    if len(replay_arms) == 1:
         summary = _run_prompt_replay_arm(
             prompt_entry=prompt_entry,
             base_url=base_url,
@@ -2708,7 +3713,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prompt_bank_schema_version=prompt_bank_schema_version,
             requested_complexity_classes=requested_complexity_classes,
             seed=args.seed,
-            arm_metadata=None,
+            arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
         )
         should_user_be_happy = bool(
             _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
@@ -2730,7 +3735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 arm_metadata=arm,
             )
-            for arm in model_arms
+            for arm in replay_arms
         ]
         summary = _build_multi_arm_summary(
             prompt_entry=prompt_entry,
@@ -2738,13 +3743,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_complexity_classes=requested_complexity_classes,
             seed=args.seed,
             requested_model=requested_model,
-            requested_model_arms=model_arms,
+            requested_model_arms=replay_arms,
             run_environment=run_environment,
             arm_summaries=arm_summaries,
         )
         should_user_be_happy = bool(
             _as_mapping(summary.get("comparison")).get("all_should_user_be_happy")
         )
+    if failure_case_intake is not None:
+        summary["failure_case_intake"] = failure_case_intake
+    experiment_run_id = _safe_text(args.experiment_run_id)
+    if experiment_run_id:
+        arm_summaries_for_recording = (
+            _as_list(summary.get("arms"))
+            if isinstance(summary.get("arms"), Sequence)
+            else [summary]
+        )
+        experiment_recording = _record_experiment_observations(
+            run_id=experiment_run_id,
+            arm_summaries=[
+                entry for entry in arm_summaries_for_recording if isinstance(entry, Mapping)
+            ],
+        )
+        summary["experiment_recording"] = experiment_recording
+        if not bool(experiment_recording.get("success")):
+            raise RuntimeError(
+                "Experiment observation recording failed: "
+                f"{json.dumps(experiment_recording, ensure_ascii=True, sort_keys=True)}"
+            )
     output_json = _safe_text(args.output_json)
     if output_json:
         _write_json_output(output_json, summary)
