@@ -51,7 +51,6 @@ from src.backend.workflows.durable.entity_identity_resolution_workflow import (
 )
 from src.backend.workflows.durable.jira_task_incremental_import_workflow import (
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
-    build_jira_task_incremental_import_workflow_test_registration,
 )
 from src.backend.workflows.durable.multilingual_concept_enrichment_workflow import (
     MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
@@ -407,8 +406,12 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
     from src.backend.services.entity_identity_resolution_workflow_vontology_service import (
         bootstrap_canonical_entity_identity_resolution_workflow,
     )
+    from src.backend.services.jira_task_incremental_import_workflow_vontology_service import (
+        bootstrap_canonical_jira_task_incremental_import_workflow,
+    )
 
     bootstrap_canonical_entity_identity_resolution_workflow()
+    jira_bootstrap_report = bootstrap_canonical_jira_task_incremental_import_workflow()
 
     registry = WorkflowRegistry()
     for registration in (
@@ -416,15 +419,16 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
         build_enrichment_workflow_test_registration(),
         build_workflow_introspection_maintenance_workflow_test_registration(),
         build_entity_identity_resolution_workflow_test_registration(),
-        build_jira_task_incremental_import_workflow_test_registration(),
         build_multilingual_concept_enrichment_workflow_test_registration(),
     ):
         registry.register(registration)
 
-    return authority_service.bootstrap_workflow_concepts(
+    report = authority_service.bootstrap_workflow_concepts(
         registry=registry,
         target_workflow_ids=AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
     )
+    report["jira_task_incremental_import_workflow_bootstrap"] = jira_bootstrap_report
+    return report
 
 
 def bootstrap_authoritative_file_copy_workflows() -> dict[str, Any]:

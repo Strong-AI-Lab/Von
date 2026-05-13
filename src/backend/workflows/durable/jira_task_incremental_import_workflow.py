@@ -20,17 +20,9 @@ from ..action_registry import (
     WorkflowActionRequest,
     WorkflowActionResult,
 )
-from ..engine import (
-    WorkflowActionInvocation,
-    WorkflowDefinition,
-    WorkflowStateSpec,
-    WorkflowTransitionSpec,
-)
-from ..workflow_registry import WorkflowRegistration
 
 JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID = "#V#jira_task_incremental_import_workflow"
 JIRA_TASK_INCREMENTAL_IMPORT_ACTION_ID = "jira_task_incremental_import.run_sync"
-JIRA_TASK_INCREMENTAL_IMPORT_VERSION = "jira_task_incremental_import.v1"
 
 
 def _clean_text(value: Any) -> str:
@@ -139,61 +131,6 @@ def _handle_run_sync(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
-def build_jira_task_incremental_import_workflow_test_definition() -> WorkflowDefinition:
-    run_sync = WorkflowStateSpec(
-        state_id="run_sync",
-        actions=(
-            WorkflowActionInvocation(
-                action_id=JIRA_TASK_INCREMENTAL_IMPORT_ACTION_ID,
-                description=(
-                    "Synchronise Jira tasks into Von using the shared migration runner."
-                ),
-            ),
-        ),
-        transitions=(
-            WorkflowTransitionSpec(
-                to_state="failed",
-                condition=lambda ctx: bool(ctx.get("last_action_failed")),
-                reason="sync_failed",
-            ),
-            WorkflowTransitionSpec(
-                to_state="complete",
-                condition=lambda _ctx: True,
-                reason="sync_complete",
-            ),
-        ),
-    )
-
-    complete = WorkflowStateSpec(state_id="complete", terminal=True)
-    failed = WorkflowStateSpec(state_id="failed", terminal=True)
-
-    return WorkflowDefinition(
-        workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
-        initial_state="run_sync",
-        states={
-            "run_sync": run_sync,
-            "complete": complete,
-            "failed": failed,
-        },
-        termination_states=("complete", "failed"),
-        purpose=(
-            "Scheduled incremental Jira task import that reuses the canonical "
-            "Jira discovery and task_import_jira_issues gateway path."
-        ),
-    )
-
-
-def build_jira_task_incremental_import_workflow_test_registration() -> WorkflowRegistration:
-    return WorkflowRegistration(
-        workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
-        definition=build_jira_task_incremental_import_workflow_test_definition(),
-        purpose=(
-            "Background incremental Jira task import using the shared migration runner."
-        ),
-        source="built_in",
-    )
-
-
 def register_jira_task_incremental_import_actions(registry: ActionRegistry) -> None:
     registry.register_if_absent(
         ActionSpec(
@@ -207,9 +144,6 @@ def register_jira_task_incremental_import_actions(registry: ActionRegistry) -> N
 
 __all__ = [
     "JIRA_TASK_INCREMENTAL_IMPORT_ACTION_ID",
-    "JIRA_TASK_INCREMENTAL_IMPORT_VERSION",
     "JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID",
-    "build_jira_task_incremental_import_workflow_test_definition",
-    "build_jira_task_incremental_import_workflow_test_registration",
     "register_jira_task_incremental_import_actions",
 ]

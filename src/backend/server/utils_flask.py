@@ -454,6 +454,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.entity_identity_resolution_workflow_vontology_service import (
             bootstrap_canonical_entity_identity_resolution_workflow,
         )
+        from ..services.jira_task_incremental_import_workflow_vontology_service import (
+            bootstrap_canonical_jira_task_incremental_import_workflow,
+        )
         from ..services.paper_recommendation_workflow_vontology_service import (
             bootstrap_canonical_paper_recommendation_workflow,
         )
@@ -536,6 +539,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="entity identity-resolution workflow",
             bootstrap_fn=bootstrap_canonical_entity_identity_resolution_workflow,
         )
+        jira_task_incremental_import_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="Jira task incremental import workflow",
+                bootstrap_fn=bootstrap_canonical_jira_task_incremental_import_workflow,
+            )
+        )
         paper_recommendation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper recommendation workflow",
             bootstrap_fn=bootstrap_canonical_paper_recommendation_workflow,
@@ -617,6 +626,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         )
         result["entity_identity_resolution_workflow_bootstrap"] = (
             entity_identity_resolution_workflow_bootstrap_report
+        )
+        result["jira_task_incremental_import_workflow_bootstrap"] = (
+            jira_task_incremental_import_workflow_bootstrap_report
         )
         result["paper_recommendation_workflow_bootstrap"] = (
             paper_recommendation_workflow_bootstrap_report
@@ -708,6 +720,16 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] entity identity-resolution workflow bootstrap failed: %s",
                 entity_identity_resolution_workflow_bootstrap_report,
+            )
+        if not bool(
+            jira_task_incremental_import_workflow_bootstrap_report.get(
+                "success",
+                False,
+            )
+        ):
+            app_logger.warning(
+                "[durable_workflows] Jira task incremental import workflow bootstrap failed: %s",
+                jira_task_incremental_import_workflow_bootstrap_report,
             )
         if not bool(
             paper_recommendation_workflow_bootstrap_report.get("success", False)

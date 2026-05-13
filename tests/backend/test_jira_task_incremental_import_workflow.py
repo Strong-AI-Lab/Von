@@ -1,11 +1,65 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
+from src.backend.services.jira_task_incremental_import_workflow_vontology_service import (
+    bootstrap_canonical_jira_task_incremental_import_workflow,
+)
+from src.backend.services.workflow_discovery_service import (
+    invalidate_workflow_discovery_executability_caches,
+)
+from src.backend.workflows import workflow_concept_authority_service as authority_service
 from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
 from src.backend.workflows.durable import jira_task_incremental_import_workflow as mod
 from src.backend.workflows.engine import WorkflowExecutor
+from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 
 
-def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None:
+@pytest.fixture
+def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+    invalidate_workflow_discovery_executability_caches()
+    yield
+    invalidate_workflow_discovery_executability_caches()
+    authority_service.clear_workflow_type_resolution_cache()
+
+
+def test_incremental_import_workflow_requires_vontology_materialisation(
+    _reset_mock_db: Any,
+) -> None:
+    definition = load_workflow_definition_from_vontology(
+        mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID
+    )
+
+    assert definition is None
+    assert not hasattr(
+        mod,
+        "build_jira_task_incremental_import_workflow_test_definition",
+    )
+    assert not hasattr(
+        mod,
+        "build_jira_task_incremental_import_workflow_test_registration",
+    )
+
+
+def test_incremental_import_workflow_executes_shared_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_mock_db: Any,
+) -> None:
     captured: dict[str, object] = {}
 
     def _fake_run(options):
@@ -20,12 +74,18 @@ def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None
 
     monkeypatch.setattr(mod, "run_jira_task_migration_sync", _fake_run)
 
-    registration = mod.build_jira_task_incremental_import_workflow_test_registration()
+    bootstrap_report = bootstrap_canonical_jira_task_incremental_import_workflow()
+    assert bootstrap_report["success"] is True
+    definition = load_workflow_definition_from_vontology(
+        mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID
+    )
+    assert definition is not None
+
     registry = ActionRegistry()
     mod.register_jira_task_incremental_import_actions(registry)
 
     result = WorkflowExecutor(registry=registry, max_transitions=5).run(
-        registration.definition,
+        definition,
         environment=WorkflowEnvironment(
             llm_client=None,
             user_namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
@@ -40,7 +100,10 @@ def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None
     )
 
     assert result.completed is True
-    assert result.final_state == "complete"
+    assert result.final_state == authority_service._step_concept_id(
+        workflow_id=mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+        state_id="complete",
+    )
     assert result.data["jira_task_migration_summary"]["total_issues"] == 3
     assert result.data["jira_task_migration_missing_target_issue_keys"] == [
         "JVNAUTOSCI-1199"
@@ -48,12 +111,18 @@ def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None
     options = captured["options"]
     assert isinstance(options, mod.JiraTaskMigrationOptions)
     assert options.actor_concept_id == "#V#michael_witbrock"
-    assert options.namespace == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    assert (
+        options.namespace
+        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    )
     assert options.updated_within_hours == 24
     assert options.import_referenced_targets is True
 
 
-def test_registry_factory_registers_incremental_import_workflow(monkeypatch) -> None:
+def test_registry_factory_registers_incremental_import_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_mock_db: Any,
+) -> None:
     import src.backend.workflows.durable.registry_factory as factory
     from workflow_test_support import (
         bootstrap_authoritative_support_maintenance_workflows,
