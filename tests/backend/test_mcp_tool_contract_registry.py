@@ -1,7 +1,9 @@
 import asyncio
 from typing import Any, cast
 
-from src.backend.integrations.internal_mcp import tool_contract_registry as registry_module
+from src.backend.integrations.internal_mcp import (
+    tool_contract_registry as registry_module,
+)
 from src.backend.integrations.internal_mcp.tool_contract_registry import (
     SURFACE_JIRA_FAMILY_SERVER,
     SURFACE_VONTOLOGY_STDIO,
@@ -139,7 +141,9 @@ def test_jira_family_surface_tracks_tool_metadata_exposure(monkeypatch) -> None:
         invalidate_canonical_tool_registry()
 
 
-def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
+def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> (
+    None
+):
     payloads = get_surface_tool_payloads(SURFACE_VONTOLOGY_STDIO)
     names = {item["name"] for item in payloads}
 
@@ -148,6 +152,7 @@ def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface
         "turn_execution_get",
         "turn_execution_get_diagnostics",
         "failure_case_intake_collect",
+        "failure_case_reference_resolve",
         "turn_execution_get_critic_bundle",
         "turn_execution_search_failures",
         "turn_execution_build_benchmark",

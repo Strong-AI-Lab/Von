@@ -13,6 +13,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_get" in methods
     assert "turn_execution_get_diagnostics" in methods
     assert "failure_case_intake_collect" in methods
+    assert "failure_case_reference_resolve" in methods
     assert "turn_execution_get_critic_bundle" in methods
     assert "turn_execution_search_failures" in methods
     assert "turn_execution_build_benchmark" in methods

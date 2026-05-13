@@ -1734,6 +1734,31 @@
                             "null"
                         ]
                     },
+                    "current_request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "reference_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "reference_phrase": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "exclude_request_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
                     "include_legacy": {
                         "type": [
                             "boolean",
@@ -1741,6 +1766,12 @@
                         ]
                     },
                     "history_tail_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "max_reference_candidates": {
                         "type": [
                             "integer",
                             "null"
@@ -1755,7 +1786,118 @@
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "Collect compact replay-ready evidence for a failed turn. Provide request_id for exact intake, or conversation/session details plus target_model/workflow_id when resolving a unique candidate turn."
+                "description": "Collect compact replay-ready evidence for a failed turn. Provide request_id for exact intake. For same-conversation follow-ups such as an already selected 'that failure case' reference, pass reference_mode='latest_prior_failure' plus current_request_id and conversation/session details."
+            }
+        },
+        {
+            "name": "failure_case_reference_resolve",
+            "description": "Resolve a same-conversation failure reference to the concrete prior request_id so represented workflows can start failure-case learning from a follow-up turn without Python phrase matching.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_ref": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "chat_history_lookup": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "conversation_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "current_request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "exclude_request_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "target_model": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "reference_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "reference_phrase": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "history_tail_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "max_reference_candidates": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Resolve an already selected same-conversation failure reference, such as 'that failure case', to a prior failed or incomplete request_id using generic turn telemetry."
             }
         },
         {

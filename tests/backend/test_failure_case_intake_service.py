@@ -5,11 +5,20 @@ from typing import Any, Mapping
 from src.backend.services.failure_case_intake_service import (
     FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
     FAILURE_CASE_INTAKE_SCHEMA_VERSION,
+    FAILURE_CASE_REFERENCE_RESOLVE_ACTION_ID,
+    FAILURE_CASE_REFERENCE_SCHEMA_VERSION,
     collect_failure_case_intake,
+    resolve_failure_case_reference,
 )
 from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
 from src.backend.workflows.durable.failure_case_prompt_improvement_actions import (
     register_failure_case_prompt_improvement_actions,
+)
+from src.backend.workflows.workflow_authoring_service import (
+    build_workflow_definition_from_authoring_spec,
+)
+from src.backend.workflows.workflow_definition_identity_service import (
+    validate_workflow_definition_contract,
 )
 
 
@@ -249,6 +258,183 @@ def test_collect_failure_case_intake_requires_unique_turn_without_request_id() -
     assert [tool for tool, _ in invoker.calls] == ["chat_history_get_segments"]
 
 
+def test_resolve_failure_case_reference_selects_latest_prior_failed_turn() -> None:
+    invoker = RecordingInvoker(
+        {
+            "chat_history_get_segments": {
+                "success": True,
+                "session_id": "session-1",
+                "chat_session_id": "session-1",
+                "namespace": "#V#user@org",
+                "segment_count": 1,
+                "segments": [
+                    [
+                        {"role": "user", "content": "Do the first thing"},
+                        {
+                            "role": "assistant",
+                            "content": "First thing done",
+                            "llm_debug_data": {
+                                "request_id": "req-success",
+                                "model": "gemma-3-27b-it",
+                                "workflow_selection": {
+                                    "selected_workflow_id": "#V#some_workflow"
+                                },
+                            },
+                        },
+                        {"role": "user", "content": "Do the second thing"},
+                        {
+                            "role": "assistant",
+                            "content": "I could not complete it.",
+                            "llm_debug_data": {
+                                "request_id": "req-failure",
+                                "model": "gemma-3-27b-it",
+                                "workflow_selection": {
+                                    "selected_workflow_id": "#V#some_workflow"
+                                },
+                            },
+                        },
+                    ]
+                ],
+            },
+            "turn_execution_list": {
+                "success": True,
+                "total": 2,
+                "items": [
+                    {"request_id": "req-success", "decision": "success"},
+                    {
+                        "request_id": "req-failure",
+                        "decision": "partial",
+                        "blocking_effect_ids": ["effect-answer-contract"],
+                    },
+                ],
+            },
+        }
+    )
+
+    payload = resolve_failure_case_reference(
+        session_id="session-1",
+        namespace="#V#user@org",
+        current_request_id="req-current",
+        reference_mode="that_failure_case",
+        reference_phrase="try to fix that failure case",
+        mcp_invoker=invoker,
+    )
+
+    assert payload["schema_version"] == FAILURE_CASE_REFERENCE_SCHEMA_VERSION
+    assert payload["success"] is True
+    assert payload["failure_case_reference_resolved"] is True
+    assert payload["resolved_request_id"] == "req-failure"
+    assert payload["selected_candidate"]["failure_reference_status"][
+        "is_failure_candidate"
+    ]
+    assert (
+        "decision:partial"
+        in payload["selected_candidate"]["failure_reference_status"]["failure_signals"]
+    )
+    assert payload["policy_boundary"]["utterance_classification_performed"] is False
+    assert [tool for tool, _ in invoker.calls] == [
+        "chat_history_get_segments",
+        "turn_execution_list",
+    ]
+
+
+def test_collect_failure_case_intake_can_start_from_same_conversation_reference() -> (
+    None
+):
+    invoker = RecordingInvoker(
+        {
+            "chat_history_get_segments": {
+                "success": True,
+                "session_id": "session-1",
+                "chat_session_id": "session-1",
+                "namespace": "#V#user@org",
+                "segment_count": 1,
+                "segments": [
+                    [
+                        {"role": "user", "content": "List my recent messages"},
+                        {
+                            "role": "assistant",
+                            "content": "I retrieved them but did not render the list.",
+                            "history_location": {
+                                "session_id": "session-1",
+                                "history_index": 3,
+                            },
+                            "llm_debug_data": {
+                                "request_id": "req-failure",
+                                "model": "gemma-3-27b-it",
+                                "workflow_selection": {
+                                    "selected_workflow_id": "#V#mail_workflow",
+                                    "selector_verdict": "rag_selected",
+                                },
+                                "selected_prompt_id": "#V#mail_prompt",
+                            },
+                        },
+                        {"role": "user", "content": "try to fix that failure case"},
+                    ]
+                ],
+            },
+            "turn_execution_list": {
+                "success": True,
+                "total": 1,
+                "items": [
+                    {
+                        "request_id": "req-failure",
+                        "decision": "partial",
+                        "blocking_effect_ids": ["effect-answer-contract"],
+                    }
+                ],
+            },
+            "turn_execution_get_diagnostics": {
+                "success": True,
+                "request_id": "req-failure",
+                "namespace": "#V#user@org",
+                "diagnostics_source": "mongo.turn_execution_records",
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#mail_workflow",
+                    "selector_verdict": "rag_selected",
+                },
+                "completion_gate": {"decision": "partial"},
+            },
+            "turn_execution_get": {
+                "success": True,
+                "request_id": "req-failure",
+                "final_response": {
+                    "text": "I retrieved them but did not render the list."
+                },
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#mail_workflow",
+                    "selector_verdict": "rag_selected",
+                },
+            },
+        }
+    )
+
+    payload = collect_failure_case_intake(
+        session_id="session-1",
+        namespace="#V#user@org",
+        current_request_id="req-current",
+        reference_mode="latest_prior_failure",
+        reference_phrase="try to fix that failure case",
+        mcp_invoker=invoker,
+    )
+
+    assert payload["success"] is True
+    assert payload["failure_case_intake_collected"] is True
+    assert payload["request_id"] == "req-failure"
+    assert payload["request_resolution"]["provided_request_id"] is None
+    assert payload["request_resolution"]["reference_resolution"][
+        "resolved_request_id"
+    ] == ("req-failure")
+    assert payload["turn"]["prompt"]["text"] == "List my recent messages"
+    assert payload["workflow"]["selected_workflow_id"] == "#V#mail_workflow"
+    assert [tool for tool, _ in invoker.calls].count("chat_history_get_segments") == 2
+    assert all(
+        args.get("request_id") != "req-current"
+        for _, args in invoker.calls
+        if isinstance(args, dict)
+    )
+
+
 def test_failure_case_intake_action_delegates_to_service(monkeypatch) -> None:
     from src.backend.workflows.durable import failure_case_prompt_improvement_actions
 
@@ -286,3 +472,218 @@ def test_failure_case_intake_action_delegates_to_service(monkeypatch) -> None:
     assert captured["user_concept_id"] == "#V#user"
     assert captured["organisation_concept_id"] == "#V#org"
     assert captured["mcp_invoker"] is not None
+
+
+def test_failure_case_intake_action_treats_context_request_id_as_current_for_reference(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import failure_case_prompt_improvement_actions
+
+    captured: dict[str, Any] = {}
+
+    def fake_collect_failure_case_intake(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"success": True, "request_id": "req-failure"}
+
+    monkeypatch.setattr(
+        failure_case_prompt_improvement_actions,
+        "collect_failure_case_intake",
+        fake_collect_failure_case_intake,
+    )
+
+    registry = ActionRegistry()
+    register_failure_case_prompt_improvement_actions(registry)
+    result = registry.execute(
+        FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
+        inputs={
+            "conversation_ref": {"session_id": "session-1"},
+            "reference_mode": "latest_prior_failure",
+        },
+        context={"request_id": "req-current"},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=object(),
+            user_namespace="#V#user@org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert captured["request_id"] is None
+    assert captured["current_request_id"] == "req-current"
+    assert captured["reference_mode"] == "latest_prior_failure"
+
+
+def test_failure_case_reference_action_delegates_to_resolver(monkeypatch) -> None:
+    from src.backend.workflows.durable import failure_case_prompt_improvement_actions
+
+    captured: dict[str, Any] = {}
+
+    def fake_resolve_failure_case_reference(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"success": True, "resolved_request_id": "req-failure"}
+
+    monkeypatch.setattr(
+        failure_case_prompt_improvement_actions,
+        "resolve_failure_case_reference",
+        fake_resolve_failure_case_reference,
+    )
+
+    registry = ActionRegistry()
+    register_failure_case_prompt_improvement_actions(registry)
+    result = registry.execute(
+        FAILURE_CASE_REFERENCE_RESOLVE_ACTION_ID,
+        inputs={"conversation_ref": {"session_id": "session-1"}},
+        context={"request_id": "req-current"},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=object(),
+            user_namespace="#V#user@org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["resolved_request_id"] == "req-failure"
+    assert captured["current_request_id"] == "req-current"
+
+
+def test_failure_case_prompt_improvement_workflow_spec_uses_reference_context() -> None:
+    spec = {
+        "workflow_id": "#V#failure_case_prompt_improvement_workflow",
+        "workflow_name": "Failure case prompt improvement workflow",
+        "workflow_description": (
+            "Starts replay-backed improvement from a prior failed or incomplete "
+            "turn by collecting grounded failure-case evidence. Same-conversation "
+            "reference interpretation is supplied by represented routing metadata; "
+            "the deterministic step only resolves the selected latest-prior-failure "
+            "mode and collects intake."
+        ),
+        "parent_type_id": "#V#durable_workflow",
+        "initial_state_key": "collect_failure_case_intake",
+        "steps": [
+            {
+                "state_id": "collect_failure_case_intake",
+                "state_key": "collect_failure_case_intake",
+                "action_id": FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
+                "execution_mode": "deterministic",
+                "static_input_bindings": [
+                    {"tool_param": "reference_mode", "value": "latest_prior_failure"},
+                    {"tool_param": "history_tail_limit", "value": 80},
+                    {"tool_param": "max_reference_candidates", "value": 24},
+                    {"tool_param": "max_text_chars", "value": 4000},
+                ],
+                "context_input_mappings": [
+                    {
+                        "tool_param": "request_id",
+                        "context_key": "failure_request_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "conversation_ref",
+                        "context_key": "conversation_ref",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "chat_history_lookup",
+                        "context_key": "chat_history_lookup",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "session_id",
+                        "context_key": "session_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "current_request_id",
+                        "context_key": "request_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "target_model",
+                        "context_key": "target_model",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "comparator_model",
+                        "context_key": "comparator_model",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "workflow_id",
+                        "context_key": "failed_workflow_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "namespace",
+                        "context_key": "namespace",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "user_concept_id",
+                        "context_key": "user_concept_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "organisation_concept_id",
+                        "context_key": "organisation_concept_id",
+                        "required": False,
+                    },
+                    {
+                        "tool_param": "reference_phrase",
+                        "context_key": "prompt",
+                        "required": False,
+                    },
+                ],
+                "writes_context_keys": [
+                    "failure_case_intake_collected",
+                    "request_id",
+                    "request_resolution",
+                    "turn",
+                    "workflow",
+                    "prompt",
+                    "completion_gate",
+                    "critic",
+                    "policy_boundary",
+                ],
+                "tool_output_context_mappings": [
+                    {
+                        "tool_output_field": "request_id",
+                        "context_key": "failure_request_id",
+                    },
+                    {
+                        "tool_output_field": "request_resolution.reference_resolution",
+                        "context_key": "failure_case_reference_resolution",
+                    },
+                ],
+                "next_state_key": "completed",
+                "on_failure_state_key": "failed",
+            },
+            {"state_id": "completed", "state_key": "completed", "terminal": True},
+            {"state_id": "failed", "state_key": "failed", "terminal": True},
+        ],
+    }
+
+    definition = build_workflow_definition_from_authoring_spec(spec)
+    start = definition.states["collect_failure_case_intake"]
+    action = start.actions[0]
+
+    assert action.inputs["reference_mode"] == "latest_prior_failure"
+    assert action.inputs["history_tail_limit"] == 80
+    assert action.inputs["request_id"] == {
+        "$context_key": "failure_request_id",
+        "$required": False,
+    }
+    assert action.inputs["current_request_id"] == {
+        "$context_key": "request_id",
+        "$required": False,
+    }
+    assert action.inputs["target_model"] == {
+        "$context_key": "target_model",
+        "$required": False,
+    }
+
+    validation = validate_workflow_definition_contract(
+        definition=definition,
+        supported_action_ids=(FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,),
+        enforce_supported_actions=True,
+    )
+    assert validation["valid"] is True

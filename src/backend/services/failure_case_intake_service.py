@@ -14,11 +14,43 @@ from dataclasses import dataclass
 from typing import Any
 
 FAILURE_CASE_INTAKE_SCHEMA_VERSION = "failure_case_intake.v1"
+FAILURE_CASE_REFERENCE_SCHEMA_VERSION = "failure_case_reference.v1"
 FAILURE_CASE_INTAKE_COLLECT_ACTION_ID = "failure_case.intake.collect"
+FAILURE_CASE_REFERENCE_RESOLVE_ACTION_ID = "failure_case.reference.resolve"
 FAILURE_CASE_INTAKE_MCP_TOOL_NAME = "failure_case_intake_collect"
+FAILURE_CASE_REFERENCE_MCP_TOOL_NAME = "failure_case_reference_resolve"
 
 _DEFAULT_TEXT_LIMIT = 4000
 _MAX_CANDIDATE_TURNS = 24
+_DEFAULT_REFERENCE_MODE = "latest_prior_failure"
+# Generic telemetry status tokens used only to identify a referenced prior turn.
+# Failure cause classification and prompt-improvement policy remain workflow-owned.
+_FAILUREISH_STATUS_VALUES = frozenset(
+    {
+        "blocked",
+        "error",
+        "fail",
+        "failed",
+        "failure",
+        "incomplete",
+        "needs_replay",
+        "needs_retry",
+        "partial",
+        "requires_follow_up",
+        "unsatisfied",
+    }
+)
+_SUCCESSISH_STATUS_VALUES = frozenset(
+    {
+        "complete",
+        "completed",
+        "ok",
+        "pass",
+        "passed",
+        "success",
+        "succeeded",
+    }
+)
 _PROMPT_ID_KEYS = frozenset(
     {
         "base_prompt_id",
@@ -395,9 +427,16 @@ def _candidate_model_id(payload: Mapping[str, Any]) -> str | None:
 
 def _build_turn_candidates(
     entries: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = _MAX_CANDIDATE_TURNS,
+    newest_first: bool = False,
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    for index, entry in enumerate(entries):
+    indexed_entries = list(enumerate(entries))
+    if newest_first:
+        indexed_entries = list(reversed(indexed_entries))
+    candidate_limit = max(1, _safe_int(limit) or _MAX_CANDIDATE_TURNS)
+    for index, entry in indexed_entries:
         if entry.get("role") != "assistant":
             continue
         debug = _mapping(entry.get("llm_debug_data"))
@@ -416,7 +455,7 @@ def _build_turn_candidates(
                 "entry_index": index,
             }
         )
-        if len(candidates) >= _MAX_CANDIDATE_TURNS:
+        if len(candidates) >= candidate_limit:
             break
     return candidates
 
@@ -745,6 +784,389 @@ def _find_turn_summary(
     return items[0] if len(items) == 1 else {}
 
 
+def _normalise_reference_mode(value: Any) -> str | None:
+    text = (_safe_str(value) or "").lower().replace("-", "_")
+    if not text:
+        return None
+    if text in {
+        "latest_failure",
+        "latest_prior_failure",
+        "most_recent_failure",
+        "previous_failure",
+        "that_failure",
+        "that_failure_case",
+    }:
+        return _DEFAULT_REFERENCE_MODE
+    return text
+
+
+def _normalise_status_value(value: Any) -> str | None:
+    text = _safe_str(value)
+    if not text:
+        return None
+    return text.lower().replace("-", "_").replace(" ", "_")
+
+
+def _truthy_failure_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        text = _normalise_status_value(value)
+        return text in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _sequence_has_values(value: Any) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        and bool(value)
+    )
+
+
+def _summarise_failure_reference_status(
+    *,
+    turn_summary: Mapping[str, Any],
+    diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostics_map = _mapping(diagnostics)
+    gate = _extract_completion_gate(
+        diagnostics_map,
+        {},
+        turn_summary,
+    )
+    critic = _extract_critic(diagnostics_map, {}, turn_summary)
+    signals: list[str] = []
+    observed_statuses: list[str] = []
+
+    for label, value in (
+        ("turn_status", turn_summary.get("status")),
+        ("decision", turn_summary.get("decision")),
+        ("completion_gate_decision", gate.get("decision")),
+        ("completion_gate_status", gate.get("status")),
+        ("completion_status", turn_summary.get("completion_status")),
+        ("critic_verdict", _first_path(critic, ("verdict",), ("summary", "verdict"))),
+    ):
+        normalised = _normalise_status_value(value)
+        if not normalised:
+            continue
+        observed_statuses.append(f"{label}:{normalised}")
+        if normalised in _FAILUREISH_STATUS_VALUES:
+            signals.append(f"{label}:{normalised}")
+
+    if gate.get("safe_to_claim_completion") is False:
+        signals.append("completion_gate:safe_to_claim_completion_false")
+    if _truthy_failure_flag(gate.get("requires_follow_up")) or _truthy_failure_flag(
+        turn_summary.get("requires_follow_up")
+    ):
+        signals.append("completion_gate:requires_follow_up")
+    for key in ("blocking_effect_ids", "blocking_failures", "missing_required_effects"):
+        if _sequence_has_values(gate.get(key)) or _sequence_has_values(
+            turn_summary.get(key)
+        ):
+            signals.append(f"completion_gate:{key}")
+
+    has_success_status = any(
+        status.rsplit(":", 1)[-1] in _SUCCESSISH_STATUS_VALUES
+        for status in observed_statuses
+    )
+    return {
+        "is_failure_candidate": bool(signals),
+        "failure_signals": _dedupe_strings(signals),
+        "observed_statuses": _dedupe_strings(observed_statuses),
+        "has_success_status": has_success_status,
+    }
+
+
+def _turn_summary_by_request_id(
+    turn_list_payload: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for item in _mapping_list(turn_list_payload.get("items")):
+        request_id = _safe_str(item.get("request_id"))
+        if request_id:
+            summaries[request_id] = item
+    return summaries
+
+
+def _chat_session_id_from_sources(
+    segments_payload: Mapping[str, Any],
+    diagnostics_payload: Mapping[str, Any] | None = None,
+) -> str | None:
+    diagnostics_map = _mapping(diagnostics_payload)
+    return (
+        _safe_str(segments_payload.get("chat_session_id"))
+        or _safe_str(segments_payload.get("session_id"))
+        or _safe_str(diagnostics_map.get("chat_session_id"))
+        or _safe_str(
+            _mapping(diagnostics_map.get("history_location")).get("session_id")
+        )
+    )
+
+
+def _filter_reference_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    current_request_id: str | None,
+    exclude_request_ids: Sequence[Any] | None,
+    target_model: str | None,
+    workflow_id: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    excluded = {item.lower() for item in _dedupe_strings(exclude_request_ids or [])}
+    current_id = _safe_str(current_request_id)
+    if current_id:
+        excluded.add(current_id.lower())
+
+    anchor_index: int | None = None
+    if current_id:
+        for candidate in candidates:
+            if (
+                _safe_str(candidate.get("request_id")) or ""
+            ).lower() == current_id.lower():
+                raw_index = candidate.get("entry_index")
+                if isinstance(raw_index, int):
+                    anchor_index = raw_index
+                    break
+
+    filtered: list[dict[str, Any]] = []
+    model_filter = _safe_str(target_model)
+    workflow_filter = _safe_str(workflow_id)
+    for candidate in candidates:
+        request_id = _safe_str(candidate.get("request_id"))
+        if not request_id or request_id.lower() in excluded:
+            continue
+        raw_index = candidate.get("entry_index")
+        if (
+            anchor_index is not None
+            and isinstance(raw_index, int)
+            and raw_index >= anchor_index
+        ):
+            continue
+        if model_filter and (
+            (_safe_str(candidate.get("model")) or "").lower() != model_filter.lower()
+        ):
+            continue
+        if workflow_filter and (
+            (_safe_str(candidate.get("selected_workflow_id")) or "").lower()
+            != workflow_filter.lower()
+        ):
+            continue
+        filtered.append(dict(candidate))
+
+    diagnostics = {
+        "candidate_count": len(candidates),
+        "filtered_candidate_count": len(filtered),
+        "current_request_id": current_id,
+        "anchor_entry_index": anchor_index,
+        "excluded_request_ids": sorted(excluded),
+        "target_model_filter": model_filter,
+        "workflow_id_filter": workflow_filter,
+    }
+    return filtered, diagnostics
+
+
+def resolve_failure_case_reference(
+    *,
+    conversation_ref: Mapping[str, Any] | None = None,
+    chat_history_lookup: Mapping[str, Any] | None = None,
+    session_id: str | None = None,
+    conversation_session_id: str | None = None,
+    namespace: str | None = None,
+    user_concept_id: str | None = None,
+    organisation_concept_id: str | None = None,
+    current_request_id: str | None = None,
+    exclude_request_ids: Sequence[Any] | None = None,
+    target_model: str | None = None,
+    workflow_id: str | None = None,
+    reference_mode: str | None = _DEFAULT_REFERENCE_MODE,
+    reference_phrase: str | None = None,
+    include_legacy: bool | None = None,
+    history_tail_limit: int | None = None,
+    max_candidates: int = _MAX_CANDIDATE_TURNS,
+    mcp_invoker: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve a same-conversation failure reference to a concrete request_id.
+
+    This is a support primitive for represented workflows. It does not decide
+    that an utterance means "fix this failure"; it only resolves an already
+    selected reference mode against generic turn telemetry.
+    """
+
+    mode = _normalise_reference_mode(reference_mode) or _DEFAULT_REFERENCE_MODE
+    invoker = mcp_invoker or _DefaultMCPInvoker()
+    source_calls: list[dict[str, Any]] = []
+    namespace_value = _safe_str(namespace)
+    conversation_args, reference_diagnostics = _conversation_tool_arguments(
+        conversation_ref=conversation_ref,
+        chat_history_lookup=chat_history_lookup,
+        session_id=_safe_str(session_id) or _safe_str(conversation_session_id),
+        namespace=namespace_value,
+        user_concept_id=_safe_str(user_concept_id),
+        organisation_concept_id=_safe_str(organisation_concept_id),
+        include_legacy=include_legacy,
+    )
+    if not conversation_args.get("conversation_ref") and not conversation_args.get(
+        "session_id"
+    ):
+        return {
+        "schema_version": FAILURE_CASE_REFERENCE_SCHEMA_VERSION,
+        "success": False,
+        "failure_case_reference_resolved": False,
+        "error_code": "conversation_required_for_failure_case_reference",
+            "error": (
+                "A same-conversation failure reference needs conversation_ref, "
+                "session_id, or conversation_session_id."
+            ),
+            "reference_mode": mode,
+            "source_reference": reference_diagnostics,
+            "source_calls": source_calls,
+            "policy_boundary": {
+                "utterance_classification_performed": False,
+                "failure_classification_performed": False,
+            },
+        }
+
+    segment_args = {**conversation_args, "include_debug": True}
+    history_tail_limit_value = _safe_int(history_tail_limit)
+    if history_tail_limit_value is not None:
+        segment_args["history_tail_limit"] = history_tail_limit_value
+    segments_payload, call = _invoke_mcp(
+        invoker,
+        "chat_history_get_segments",
+        segment_args,
+    )
+    source_calls.append(call)
+    entries = (
+        _flatten_segments(segments_payload)
+        if segments_payload.get("success") is not False
+        else []
+    )
+    raw_candidates = _build_turn_candidates(
+        entries,
+        limit=max_candidates,
+        newest_first=True,
+    )
+    filtered_candidates, filter_diagnostics = _filter_reference_candidates(
+        raw_candidates,
+        current_request_id=current_request_id,
+        exclude_request_ids=exclude_request_ids,
+        target_model=target_model,
+        workflow_id=workflow_id,
+    )
+
+    chat_session_id = _chat_session_id_from_sources(segments_payload)
+    turn_list_payload: dict[str, Any] = {}
+    summaries_by_request_id: dict[str, dict[str, Any]] = {}
+    if chat_session_id or namespace_value:
+        list_args: dict[str, Any] = {
+            "namespace": namespace_value,
+            "limit": max(50, len(raw_candidates)),
+            "offset": 0,
+        }
+        if chat_session_id:
+            list_args["session_id"] = chat_session_id
+        turn_list_payload, call = _invoke_mcp(invoker, "turn_execution_list", list_args)
+        source_calls.append(call)
+        summaries_by_request_id = _turn_summary_by_request_id(turn_list_payload)
+
+    annotated_candidates: list[dict[str, Any]] = []
+    selected: dict[str, Any] | None = None
+    for candidate in filtered_candidates:
+        request_id = _safe_str(candidate.get("request_id"))
+        turn_summary = summaries_by_request_id.get(request_id or "", {})
+        failure_status = _summarise_failure_reference_status(
+            turn_summary=turn_summary,
+        )
+        annotated = {
+            **candidate,
+            "turn_summary_available": bool(turn_summary),
+            "failure_reference_status": failure_status,
+        }
+        annotated_candidates.append(annotated)
+        if failure_status["is_failure_candidate"] and selected is None:
+            selected = annotated
+
+    if selected is None:
+        for candidate in annotated_candidates:
+            request_id = _safe_str(candidate.get("request_id"))
+            if not request_id:
+                continue
+            diagnostics_payload, call = _invoke_mcp(
+                invoker,
+                "turn_execution_get_diagnostics",
+                {"request_id": request_id, "namespace": namespace_value},
+            )
+            source_calls.append(call)
+            failure_status = _summarise_failure_reference_status(
+                turn_summary=summaries_by_request_id.get(request_id, {}),
+                diagnostics=diagnostics_payload,
+            )
+            candidate["failure_reference_status"] = failure_status
+            candidate["diagnostics_checked"] = True
+            if failure_status["is_failure_candidate"]:
+                selected = candidate
+                break
+
+    success = selected is not None
+    return {
+        "schema_version": FAILURE_CASE_REFERENCE_SCHEMA_VERSION,
+        "success": success,
+        "failure_case_reference_resolved": success,
+        "error_code": None if success else "failure_case_reference_not_resolved",
+        "error": (
+            None
+            if success
+            else "No prior failed or incomplete turn matched the reference filters."
+        ),
+        "reference_mode": mode,
+        "reference_phrase": _safe_str(reference_phrase),
+        "resolved_request_id": (
+            _safe_str(selected.get("request_id")) if selected else None
+        ),
+        "selected_candidate": selected,
+        "turn_candidates": annotated_candidates,
+        "conversation": {
+            "chat_session_id": chat_session_id,
+            "namespace": (
+                _safe_str(segments_payload.get("namespace")) or namespace_value
+            ),
+            "access_mode": segments_payload.get("access_mode"),
+            "identifier_binding": segments_payload.get("identifier_binding"),
+        },
+        "source_reference": reference_diagnostics,
+        "request_resolution": filter_diagnostics,
+        "source_calls": source_calls,
+        "telemetry": {
+            "source_status": {
+                "chat_history_segments": {
+                    "success": segments_payload.get("success") is not False,
+                    "entry_count": len(entries),
+                    "candidate_count": len(raw_candidates),
+                },
+                "turn_execution_list": {
+                    "attempted": bool(turn_list_payload),
+                    "success": (
+                        turn_list_payload.get("success") is not False
+                        if turn_list_payload
+                        else None
+                    ),
+                    "total": turn_list_payload.get("total"),
+                },
+            }
+        },
+        "policy_boundary": {
+            "utterance_classification_performed": False,
+            "failure_classification_performed": False,
+            "prompt_hypothesis_generated": False,
+            "promotion_recommendation_generated": False,
+            "reason": (
+                "Reference resolution only maps an already selected same-conversation "
+                "reference mode onto a prior request_id using generic turn telemetry."
+            ),
+        },
+    }
+
+
 def _failure_response(
     *,
     error_code: str,
@@ -757,6 +1179,7 @@ def _failure_response(
     payload: dict[str, Any] = {
         "schema_version": FAILURE_CASE_INTAKE_SCHEMA_VERSION,
         "success": False,
+        "failure_case_intake_collected": False,
         "error_code": error_code,
         "error": message,
         "source_reference": dict(source_reference),
@@ -783,8 +1206,13 @@ def collect_failure_case_intake(
     comparator_model: str | None = None,
     workflow_id: str | None = None,
     stage_id: str | None = None,
+    current_request_id: str | None = None,
+    reference_mode: str | None = None,
+    reference_phrase: str | None = None,
+    exclude_request_ids: Sequence[Any] | None = None,
     include_legacy: bool | None = None,
     history_tail_limit: int | None = None,
+    max_reference_candidates: int = _MAX_CANDIDATE_TURNS,
     max_text_chars: int = _DEFAULT_TEXT_LIMIT,
     mcp_invoker: Any | None = None,
 ) -> dict[str, Any]:
@@ -798,11 +1226,52 @@ def collect_failure_case_intake(
     invoker = mcp_invoker or _DefaultMCPInvoker()
     source_calls: list[dict[str, Any]] = []
     request_id_value = _safe_str(request_id)
+    provided_request_id_value = request_id_value
     namespace_value = _safe_str(namespace)
     text_limit = _safe_int(max_text_chars)
     if text_limit is None:
         text_limit = _DEFAULT_TEXT_LIMIT
     history_tail_limit_value = _safe_int(history_tail_limit)
+    reference_resolution: dict[str, Any] | None = None
+    reference_mode_value = _normalise_reference_mode(reference_mode)
+    if not request_id_value and reference_mode_value:
+        reference_resolution = resolve_failure_case_reference(
+            conversation_ref=conversation_ref,
+            chat_history_lookup=chat_history_lookup,
+            session_id=session_id,
+            conversation_session_id=conversation_session_id,
+            namespace=namespace_value,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            current_request_id=current_request_id,
+            exclude_request_ids=exclude_request_ids,
+            target_model=target_model,
+            workflow_id=workflow_id,
+            reference_mode=reference_mode_value,
+            reference_phrase=reference_phrase,
+            include_legacy=include_legacy,
+            history_tail_limit=history_tail_limit,
+            max_candidates=max_reference_candidates,
+            mcp_invoker=invoker,
+        )
+        source_calls.extend(_mapping_list(reference_resolution.get("source_calls")))
+        request_id_value = _safe_str(reference_resolution.get("resolved_request_id"))
+        if not request_id_value:
+            return _failure_response(
+                error_code=_safe_str(reference_resolution.get("error_code"))
+                or "failure_case_reference_not_resolved",
+                message=_safe_str(reference_resolution.get("error"))
+                or "Could not resolve the referenced failure case.",
+                source_calls=source_calls,
+                source_reference=_mapping(reference_resolution.get("source_reference")),
+                turn_candidates=_mapping_list(
+                    reference_resolution.get("turn_candidates")
+                ),
+                request_resolution={
+                    "provided_request_id": _safe_str(request_id),
+                    "reference_resolution": reference_resolution,
+                },
+            )
     conversation_args, reference_diagnostics = _conversation_tool_arguments(
         conversation_ref=conversation_ref,
         chat_history_lookup=chat_history_lookup,
@@ -833,7 +1302,11 @@ def collect_failure_case_intake(
             entries = _flatten_segments(segments_payload)
 
     turn_candidates = _build_turn_candidates(entries)
-    request_resolution: dict[str, Any] = {"provided_request_id": request_id_value}
+    request_resolution: dict[str, Any] = {
+        "provided_request_id": provided_request_id_value
+    }
+    if reference_resolution is not None:
+        request_resolution["reference_resolution"] = reference_resolution
     if not request_id_value:
         request_id_value, resolution = _resolve_request_id_from_candidates(
             turn_candidates,
@@ -1049,6 +1522,7 @@ def collect_failure_case_intake(
     payload = {
         "schema_version": FAILURE_CASE_INTAKE_SCHEMA_VERSION,
         "success": not missing_core_sources,
+        "failure_case_intake_collected": not missing_core_sources,
         "error_code": (
             "failure_case_intake_incomplete" if missing_core_sources else None
         ),

@@ -92,6 +92,7 @@ if TYPE_CHECKING:
         _experiment_run_list,
         _experiment_start_run,
         _failure_case_intake_collect,
+        _failure_case_reference_resolve,
         _jira_add_attachment,
         _jira_add_comment,
         _jira_create_issue,
@@ -394,6 +395,7 @@ _bind_imports(
         "_experiment_run_list",
         "_experiment_start_run",
         "_failure_case_intake_collect",
+        "_failure_case_reference_resolve",
         "_testing_cleanup_arxiv_paper_ingestion_artifacts",
         "_testing_prepare_arxiv_paper_ingestion_fixture",
         "_testing_prepare_experiment_spec",
@@ -2752,13 +2754,11 @@ async def _handle_gmail_get_message(arguments: dict[str, Any]) -> list[TextConte
 async def _handle_gmail_send_message(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     to = (
-        arguments.get("to")
-        or arguments.get("recipient")
-        or arguments.get("recipients")
+        arguments.get("to") or arguments.get("recipient") or arguments.get("recipients")
     )
     subject = arguments.get("subject")
-    body_text = arguments.get("body_text") or arguments.get("body") or arguments.get(
-        "message"
+    body_text = (
+        arguments.get("body_text") or arguments.get("body") or arguments.get("message")
     )
     profile_text = profile if isinstance(profile, str) and profile.strip() else None
     to_value = to if isinstance(to, (str, list)) and to else None
@@ -3811,6 +3811,16 @@ async def _handle_failure_case_intake_collect(
     )
 
 
+async def _handle_failure_case_reference_resolve(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _failure_case_reference_resolve,
+        arguments,
+        tool_family_label="FailureCase",
+    )
+
+
 async def _handle_turn_execution_get_live_progress(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4495,6 +4505,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_get": _handle_turn_execution_get,
     "turn_execution_get_diagnostics": _handle_turn_execution_get_diagnostics,
     "failure_case_intake_collect": _handle_failure_case_intake_collect,
+    "failure_case_reference_resolve": _handle_failure_case_reference_resolve,
     "turn_execution_get_live_progress": _handle_turn_execution_get_live_progress,
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,

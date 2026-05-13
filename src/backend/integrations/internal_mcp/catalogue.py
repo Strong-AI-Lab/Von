@@ -13158,6 +13158,12 @@ def _failure_case_intake_collect(**kwargs):
     return collect_failure_case_intake(**kwargs)
 
 
+def _failure_case_reference_resolve(**kwargs):
+    from ...services.failure_case_intake_service import resolve_failure_case_reference
+
+    return resolve_failure_case_reference(**kwargs)
+
+
 def _turn_execution_get_critic_bundle(**kwargs):
     from ...services.episode_critic_evidence_service import (
         build_episode_critic_evidence_bundle,
@@ -29754,16 +29760,22 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "comparator_model": (str, type(None)),
                     "workflow_id": (str, type(None)),
                     "stage_id": (str, type(None)),
+                    "current_request_id": (str, type(None)),
+                    "reference_mode": (str, type(None)),
+                    "reference_phrase": (str, type(None)),
+                    "exclude_request_ids": (list, type(None)),
                     "include_legacy": (bool, type(None)),
                     "history_tail_limit": (int, type(None)),
+                    "max_reference_candidates": (int, type(None)),
                     "max_text_chars": (int, type(None)),
                 },
                 allow_unknown=True,
                 description=(
                     "Collect compact replay-ready evidence for a failed turn. "
-                    "Provide request_id for exact intake, or conversation/session "
-                    "details plus target_model/workflow_id when resolving a unique "
-                    "candidate turn."
+                    "Provide request_id for exact intake. For same-conversation "
+                    "follow-ups such as an already selected 'that failure case' "
+                    "reference, pass reference_mode='latest_prior_failure' plus "
+                    "current_request_id and conversation/session details."
                 ),
             ),
             output_schema=None,
@@ -29773,6 +29785,44 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                 "completion-gate, and user-visible-response evidence for one "
                 "failed turn without classifying the failure or proposing prompt "
                 "changes."
+            ),
+        ),
+        MethodDefinition(
+            name="failure_case_reference_resolve",
+            handler=_failure_case_reference_resolve,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "conversation_ref": (dict, type(None)),
+                    "chat_history_lookup": (dict, type(None)),
+                    "session_id": (str, type(None)),
+                    "conversation_session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "current_request_id": (str, type(None)),
+                    "exclude_request_ids": (list, type(None)),
+                    "target_model": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "reference_mode": (str, type(None)),
+                    "reference_phrase": (str, type(None)),
+                    "include_legacy": (bool, type(None)),
+                    "history_tail_limit": (int, type(None)),
+                    "max_reference_candidates": (int, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Resolve an already selected same-conversation failure "
+                    "reference, such as 'that failure case', to a prior failed "
+                    "or incomplete request_id using generic turn telemetry."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Resolve a same-conversation failure reference to the concrete "
+                "prior request_id so represented workflows can start failure-case "
+                "learning from a follow-up turn without Python phrase matching."
             ),
         ),
         MethodDefinition(
