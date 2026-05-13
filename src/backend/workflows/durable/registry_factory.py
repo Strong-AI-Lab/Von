@@ -1429,6 +1429,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .file_copy_upload_handler_workflow import (
         register_file_copy_upload_handler_actions,
     )
+    from .failure_case_prompt_improvement_actions import (
+        register_failure_case_prompt_improvement_actions,
+    )
     from .jira_task_full_reconciliation_workflow import (
         register_jira_task_full_reconciliation_actions,
     )
@@ -1478,6 +1481,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_file_copy_upload_classification_actions(registry)
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
+    register_failure_case_prompt_improvement_actions(registry)
     register_entity_identity_resolution_actions(registry)
     register_entity_representation_actions(registry)
     register_jira_task_incremental_import_actions(registry)

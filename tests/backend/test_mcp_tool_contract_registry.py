@@ -147,6 +147,7 @@ def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface
         "turn_execution_list",
         "turn_execution_get",
         "turn_execution_get_diagnostics",
+        "failure_case_intake_collect",
         "turn_execution_get_critic_bundle",
         "turn_execution_search_failures",
         "turn_execution_build_benchmark",

@@ -13152,6 +13152,12 @@ def _turn_execution_get_diagnostics(**kwargs):
     )
 
 
+def _failure_case_intake_collect(**kwargs):
+    from ...services.failure_case_intake_service import collect_failure_case_intake
+
+    return collect_failure_case_intake(**kwargs)
+
+
 def _turn_execution_get_critic_bundle(**kwargs):
     from ...services.episode_critic_evidence_service import (
         build_episode_critic_evidence_bundle,
@@ -29728,6 +29734,45 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             description=(
                 "Fetch the full persisted turn diagnostics payload by request_id, including progress history, "
                 "activity history, workflow routing diagnostics, stage diagnostics, and timing breakdown."
+            ),
+        ),
+        MethodDefinition(
+            name="failure_case_intake_collect",
+            handler=_failure_case_intake_collect,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "conversation_ref": (dict, type(None)),
+                    "chat_history_lookup": (dict, type(None)),
+                    "request_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "conversation_session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "target_model": (str, type(None)),
+                    "comparator_model": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "stage_id": (str, type(None)),
+                    "include_legacy": (bool, type(None)),
+                    "history_tail_limit": (int, type(None)),
+                    "max_text_chars": (int, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Collect compact replay-ready evidence for a failed turn. "
+                    "Provide request_id for exact intake, or conversation/session "
+                    "details plus target_model/workflow_id when resolving a unique "
+                    "candidate turn."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Collect compact prompt, model, workflow, tool-ledger, critic, "
+                "completion-gate, and user-visible-response evidence for one "
+                "failed turn without classifying the failure or proposing prompt "
+                "changes."
             ),
         ),
         MethodDefinition(

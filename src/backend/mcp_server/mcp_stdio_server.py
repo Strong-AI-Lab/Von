@@ -91,6 +91,7 @@ if TYPE_CHECKING:
         _experiment_run_get,
         _experiment_run_list,
         _experiment_start_run,
+        _failure_case_intake_collect,
         _jira_add_attachment,
         _jira_add_comment,
         _jira_create_issue,
@@ -392,6 +393,7 @@ _bind_imports(
         "_experiment_run_get",
         "_experiment_run_list",
         "_experiment_start_run",
+        "_failure_case_intake_collect",
         "_testing_cleanup_arxiv_paper_ingestion_artifacts",
         "_testing_prepare_arxiv_paper_ingestion_fixture",
         "_testing_prepare_experiment_spec",
@@ -3799,6 +3801,16 @@ async def _handle_turn_execution_get_diagnostics(
     )
 
 
+async def _handle_failure_case_intake_collect(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _failure_case_intake_collect,
+        arguments,
+        tool_family_label="FailureCase",
+    )
+
+
 async def _handle_turn_execution_get_live_progress(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4482,6 +4494,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,
     "turn_execution_get_diagnostics": _handle_turn_execution_get_diagnostics,
+    "failure_case_intake_collect": _handle_failure_case_intake_collect,
     "turn_execution_get_live_progress": _handle_turn_execution_get_live_progress,
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,

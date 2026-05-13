@@ -275,6 +275,24 @@
                 "properties": {
                     "concept_id": {
                         "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -1637,6 +1655,110 @@
             }
         },
         {
+            "name": "failure_case_intake_collect",
+            "description": "Collect compact prompt, model, workflow, tool-ledger, critic, completion-gate, and user-visible-response evidence for one failed turn without classifying the failure or proposing prompt changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_ref": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "chat_history_lookup": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "conversation_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_model": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "comparator_model": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "stage_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "history_tail_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "max_text_chars": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Collect compact replay-ready evidence for a failed turn. Provide request_id for exact intake, or conversation/session details plus target_model/workflow_id when resolving a unique candidate turn."
+            }
+        },
+        {
             "name": "fetch_concept",
             "description": "Fetch full details of ONE specific concept by its ID (format: #V#concept_name). Use when you already know the exact concept_id and need complete information (description, predicates, relationships). Don't use for searching.",
             "inputSchema": {
@@ -1644,6 +1766,24 @@
                 "properties": {
                     "concept_id": {
                         "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "include_relations_arg1": {
                         "type": "boolean"
@@ -2411,6 +2551,19 @@
                             "null"
                         ]
                     },
+                    "order_by": {
+                        "type": "string"
+                    },
+                    "order": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string"
+                    },
+                    "include_metadata": {
+                        "type": "array",
+                        "items": {}
+                    },
                     "bypass_profile_query_prefix": {
                         "type": "boolean"
                     }
@@ -2419,12 +2572,13 @@
                     "profile"
                 ],
                 "additionalProperties": false,
-                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call.",
+                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call. The 'limit' alias maps to max_results; order/order_by, scope, and include_metadata are accepted as read-only planning hints.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",
                     "user_id": "profile",
-                    "q": "query"
+                    "q": "query",
+                    "limit": "max_results"
                 },
                 "x-von-batch-propagated-fields": [
                     "profile"
@@ -5717,7 +5871,7 @@
         },
         {
             "name": "workflow_bind_event",
-            "description": "Register or update an event-to-workflow binding with optional input mapping. Set replace_existing=true to overwrite an existing conflicting binding.",
+            "description": "Register or update an event-to-workflow binding with optional input mapping and represented condition metadata. Set replace_existing=true to overwrite an existing conflicting binding.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5728,6 +5882,13 @@
                         "type": "string"
                     },
                     "input_mapping": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "condition": {
                         "type": [
                             "object",
                             "null"
@@ -5752,7 +5913,7 @@
                     "workflow_id"
                 ],
                 "additionalProperties": true,
-                "description": "Create or update an event -> workflow binding."
+                "description": "Create or update an event -> workflow binding with optional workflow-condition metadata."
             }
         },
         {

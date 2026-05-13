@@ -6,6 +6,7 @@ def test_mcp_stdio_server_has_turn_execution_diagnostics_handler() -> None:
     from src.backend.mcp_server import mcp_stdio_server
 
     assert "turn_execution_get_diagnostics" in mcp_stdio_server._TOOL_HANDLERS
+    assert "failure_case_intake_collect" in mcp_stdio_server._TOOL_HANDLERS
     assert "chat_history_get_segments" in mcp_stdio_server._TOOL_HANDLERS
     assert "chat_history_get_debug_entry" in mcp_stdio_server._TOOL_HANDLERS
     assert "conversation_telemetry_get_locator" in mcp_stdio_server._TOOL_HANDLERS
@@ -25,6 +26,7 @@ def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> No
     tools = data.get("tools") or []
     names = {t.get("name") for t in tools if isinstance(t, dict)}
     assert "turn_execution_get_diagnostics" in names
+    assert "failure_case_intake_collect" in names
     assert "chat_history_get_segments" in names
     assert "chat_history_get_debug_entry" in names
     assert "conversation_telemetry_get_locator" in names

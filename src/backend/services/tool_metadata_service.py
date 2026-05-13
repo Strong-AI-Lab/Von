@@ -900,6 +900,13 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Audit complete",
     },
+    "failure_case_intake_collect": {
+        "salience": "low",
+        "category": "workflow",
+        "display_template": "Failure-case intake: {request_id}",
+        "operation_category": "read",
+        "evidence_role": "verification",
+    },
     # NONE salience - internal, never show
     "get_context": {
         "salience": "none",
@@ -1019,6 +1026,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "episode_critique_build_benchmark",
     "episode_critique_memory_list",
     "episode_critique_memory_get",
+    "failure_case_intake_collect",
     "context_bundle_resolve_effective_context",
     "context_bundle_assemble_context_dossier",
     "context_bundle_update_report_revision",
