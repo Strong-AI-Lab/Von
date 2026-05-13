@@ -13,6 +13,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .turn_response_surface_service import build_turn_response_surface_reconciliation
+
 FAILURE_CASE_INTAKE_SCHEMA_VERSION = "failure_case_intake.v1"
 FAILURE_CASE_REFERENCE_SCHEMA_VERSION = "failure_case_reference.v1"
 FAILURE_CASE_INTAKE_COLLECT_ACTION_ID = "failure_case.intake.collect"
@@ -1420,10 +1422,17 @@ def collect_failure_case_intake(
         diagnostics=diagnostics_payload,
         turn_record=turn_record,
     )
+    response_surfaces = build_turn_response_surface_reconciliation(
+        target_message=target_entry,
+        turn_record=turn_record,
+        diagnostics=diagnostics_payload,
+        max_text_chars=text_limit,
+    )
+    user_visible_response_text = _safe_str(_mapping(target_entry).get("content"))
     response_text = (
-        _safe_str(_mapping(turn_record.get("final_response")).get("text"))
+        user_visible_response_text
+        or _safe_str(_mapping(turn_record.get("final_response")).get("text"))
         or _safe_str(_mapping(turn_record.get("final_response")).get("preview"))
-        or _safe_str(_mapping(target_entry).get("content"))
     )
     workflow = _selected_workflow_summary(
         diagnostics_payload,
@@ -1567,6 +1576,7 @@ def collect_failure_case_intake(
         "tool_ledger": tool_ledger,
         "completion_gate": completion_gate,
         "critic": critic,
+        "response_surfaces": response_surfaces,
         "required_effects": _mapping_list(turn_record.get("required_effects"))
         or _mapping_list(diagnostics_payload.get("required_effects")),
         "telemetry": {

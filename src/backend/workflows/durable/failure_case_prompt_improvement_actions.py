@@ -193,9 +193,9 @@ def register_failure_case_prompt_improvement_actions(registry: ActionRegistry) -
             action_id=FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
             handler=_failure_case_intake_handler,
             description=(
-                "Collect compact turn, prompt, tool, critic, and completion-gate "
-                "evidence for a failed turn without classifying the failure or "
-                "generating prompt hypotheses."
+                "Collect compact turn, prompt, tool, critic, completion-gate, "
+                "and response-surface evidence for a failed turn without "
+                "classifying the failure or generating prompt hypotheses."
             ),
         )
     )

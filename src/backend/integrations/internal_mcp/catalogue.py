@@ -29739,7 +29739,8 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             category="read",
             description=(
                 "Fetch the full persisted turn diagnostics payload by request_id, including progress history, "
-                "activity history, workflow routing diagnostics, stage diagnostics, and timing breakdown."
+                "activity history, workflow routing diagnostics, stage diagnostics, timing breakdown, "
+                "and response-surface reconciliation."
             ),
         ),
         MethodDefinition(
@@ -29782,9 +29783,9 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             category="read",
             description=(
                 "Collect compact prompt, model, workflow, tool-ledger, critic, "
-                "completion-gate, and user-visible-response evidence for one "
-                "failed turn without classifying the failure or proposing prompt "
-                "changes."
+                "completion-gate, user-visible-response, and response-surface "
+                "evidence for one failed turn without classifying the failure or "
+                "proposing prompt changes."
             ),
         ),
         MethodDefinition(

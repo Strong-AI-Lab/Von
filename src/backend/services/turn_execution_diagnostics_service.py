@@ -12,6 +12,7 @@ from .conversation_scope_binding_service import (
     build_history_location_binding,
 )
 from .debug_payload_store import hydrate_debug_payload_blob_refs
+from .turn_response_surface_service import build_turn_response_surface_reconciliation
 from .turn_execution_record_service import get_turn_execution_records_collection
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
@@ -1105,6 +1106,23 @@ def get_turn_execution_diagnostics_payload(
         }
         if isinstance(history_index, int) and payload.get("chat_session_id")
         else None
+    )
+    response_surface_target_message = (
+        dict(history_context.get("target_message"))
+        if isinstance(history_context, Mapping)
+        and isinstance(history_context.get("target_message"), Mapping)
+        else None
+    )
+    if isinstance(response_surface_target_message, dict) and not isinstance(
+        response_surface_target_message.get("history_location"), Mapping
+    ):
+        response_surface_target_message["history_location"] = payload.get(
+            "history_location"
+        )
+    payload["response_surfaces"] = build_turn_response_surface_reconciliation(
+        target_message=response_surface_target_message,
+        turn_record=turn_record,
+        diagnostics=payload,
     )
     payload["mcp_access"] = _build_turn_diagnostics_mcp_access(
         request_id=request_id_value,

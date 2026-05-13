@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Mapping
 
 from src.backend.services.failure_case_intake_service import (
@@ -206,6 +207,174 @@ def test_collect_failure_case_intake_uses_canonical_sources_for_unsigned_ref() -
         "turn_execution_get",
         "turn_execution_list",
     ]
+
+
+def test_collect_failure_case_intake_reconciles_visible_and_workflow_surfaces() -> (
+    None
+):
+    namespace = "#V#user@org"
+    request_id = "req-gpt-comparator"
+    visible_answer = (
+        "Here are your six most recent Gmail messages:\n"
+        "1. Meeting Summary - Michael - 2026-05-13\n"
+        "2. Meeting Summary - Yue - 2026-05-13"
+    )
+    workflow_error = (
+        "Invalid request to OpenAI API: context_length_exceeded while rendering "
+        "the selected workflow response."
+    )
+    visible_hash = hashlib.sha256(visible_answer.encode("utf-8")).hexdigest()
+    workflow_hash = hashlib.sha256(workflow_error.encode("utf-8")).hexdigest()
+    invoker = RecordingInvoker(
+        {
+            "chat_history_get_segments": {
+                "success": True,
+                "session_id": "session-1",
+                "chat_session_id": "session-1",
+                "namespace": namespace,
+                "segment_count": 1,
+                "segments": [
+                    [
+                        {"role": "user", "content": "List my last six email messages."},
+                        {
+                            "role": "assistant",
+                            "content": visible_answer,
+                            "history_location": {
+                                "session_id": "session-1",
+                                "history_index": 41,
+                            },
+                            "llm_debug_data": {
+                                "request_id": request_id,
+                                "model": "gpt-5.4-mini",
+                                "workflow_selection": {
+                                    "selected_workflow_id": (
+                                        "#V#general_mail_review_workflow"
+                                    ),
+                                    "selector_verdict": "rag_selected",
+                                },
+                            },
+                        },
+                    ]
+                ],
+            },
+            "turn_execution_get_diagnostics": {
+                "success": True,
+                "request_id": request_id,
+                "namespace": namespace,
+                "diagnostics_source": "chat_history.llm_debug_data",
+                "history_location": {
+                    "session_id": "session-1",
+                    "history_index": 41,
+                },
+                "prompt_preview": "List my last six email messages.",
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#general_mail_review_workflow",
+                    "selector_verdict": "rag_selected",
+                },
+                "completion_gate": {
+                    "decision": "failed",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "evidence_payload": {
+                        "blocking_failure_codes": ["child_workflow_failed"],
+                        "execution_signal_blocker": {
+                            "failure_code": "child_workflow_failed",
+                            "status": "not_satisfied",
+                            "status_reason": workflow_error,
+                            "workflow_id": "#V#general_mail_review_workflow",
+                        },
+                    },
+                },
+                "critic_verdict": {
+                    "verdict": "pass",
+                    "assessment_summary": (
+                        "The assistant correctly stated that Gmail results were "
+                        "not available in readable form."
+                    ),
+                },
+                "response_surfaces": {
+                    "schema_version": "turn_response_surfaces.v1",
+                    "selected_workflow_response": {
+                        "kind": "selected_workflow_response",
+                        "source": (
+                            "turn_execution_record.completion_report.response_text"
+                        ),
+                        "text_available": True,
+                        "text": workflow_error,
+                        "char_count": len(workflow_error),
+                        "sha256": workflow_hash,
+                        "truncated": False,
+                    },
+                },
+            },
+            "turn_execution_get": {
+                "success": True,
+                "request_id": request_id,
+                "final_response": {
+                    "response_sha256": visible_hash,
+                    "completion_claim_detected": False,
+                    "completion_claim_validated": True,
+                },
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#general_mail_review_workflow",
+                    "selector_verdict": "rag_selected",
+                },
+                "critic": {
+                    "verdict": {
+                        "verdict": "pass",
+                        "assessment_summary": (
+                            "The assistant correctly stated that Gmail results "
+                            "were not available in readable form."
+                        ),
+                    }
+                },
+                "completion_gate": {
+                    "decision": "failed",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                },
+                "execution": {
+                    "tool_invocations": [
+                        {"tool_name": "gmail_list_messages", "status": "success"},
+                        {"tool_name": "gmail_get_message", "status": "success"},
+                    ]
+                },
+            },
+            "turn_execution_list": {
+                "success": True,
+                "total": 1,
+                "items": [{"request_id": request_id}],
+            },
+        }
+    )
+
+    payload = collect_failure_case_intake(
+        session_id="session-1",
+        namespace=namespace,
+        request_id=request_id,
+        target_model="gpt-5.4-mini",
+        mcp_invoker=invoker,
+    )
+
+    assert payload["success"] is True
+    assert payload["turn"]["user_visible_response"]["text"] == visible_answer
+    surfaces = payload["response_surfaces"]
+    assert surfaces["user_visible_response"]["source"] == (
+        "chat_history.target_message.content"
+    )
+    assert surfaces["recorded_final_response"]["sha256"] == visible_hash
+    assert surfaces["selected_workflow_response"]["text"] == workflow_error
+    assert surfaces["evidence_consistency"]["agreement"] == {
+        "user_visible_matches_recorded_final_response": True,
+        "user_visible_matches_selected_workflow_response": False,
+        "recorded_final_response_matches_selected_workflow_response": False,
+    }
+    assert set(surfaces["evidence_consistency"]["disagreement_codes"]) == {
+        "user_visible_response_differs_from_selected_workflow_response",
+        "turn_record_final_response_differs_from_selected_workflow_response",
+        "critic_pass_with_completion_gate_non_success",
+    }
+    assert surfaces["policy_boundary"]["answer_correctness_classified"] is False
 
 
 def test_collect_failure_case_intake_requires_unique_turn_without_request_id() -> None:
@@ -642,6 +811,7 @@ def test_failure_case_prompt_improvement_workflow_spec_uses_reference_context() 
                     "prompt",
                     "completion_gate",
                     "critic",
+                    "response_surfaces",
                     "policy_boundary",
                 ],
                 "tool_output_context_mappings": [
