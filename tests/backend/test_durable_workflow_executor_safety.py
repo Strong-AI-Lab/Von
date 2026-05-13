@@ -6,9 +6,11 @@ transitions instead of always failing fast on action errors.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+from bson import BSON
 from pymongo.errors import PyMongoError
 
 from src.backend.workflows.action_registry import (
@@ -19,6 +21,11 @@ from src.backend.workflows.action_registry import (
     WorkflowEnvironment,
 )
 from src.backend.workflows.durable.durable_executor import DurableWorkflowExecutor
+from src.backend.workflows.durable.checkpoint_context_projection import (
+    CHECKPOINT_CONTEXT_PROJECTION_KEY,
+    CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
+    project_workflow_context_for_checkpoint,
+)
 from src.backend.workflows.durable.models import WorkflowInstance, WorkflowInstanceStatus
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
@@ -41,6 +48,146 @@ def _build_instance(workflow_id: str) -> WorkflowInstance:
         created_at=datetime.now(timezone.utc),
         inputs={},
     )
+
+
+def test_checkpoint_context_projection_bounds_diagnostic_payloads() -> None:
+    raw_body = "raw message body " + ("x" * 600_000)
+    context = {
+        "paper_id": "#V#paper_1",
+        "result": {
+            "paper_id": "#V#paper_1",
+            "raw_body": raw_body,
+        },
+        "last_action_outputs": {
+            "result": {
+                "paper_id": "#V#paper_1",
+                "raw_body": raw_body,
+            },
+            "api_token": "secret-token-value",
+        },
+        "workflow_step_result_envelopes": [
+            {
+                "state_id": "fetch",
+                "output_payload": {
+                    "raw_body": raw_body,
+                },
+            }
+        ],
+    }
+
+    projected = project_workflow_context_for_checkpoint(context)
+
+    assert projected["paper_id"] == "#V#paper_1"
+    metadata = projected[CHECKPOINT_CONTEXT_PROJECTION_KEY]
+    assert (
+        metadata["schema_version"]
+        == CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION
+    )
+    assert metadata["projected_key_count"] >= 3
+    assert BSON.encode({"workflow_data": projected})
+    serialised = json.dumps(projected, sort_keys=True, default=str)
+    assert raw_body not in serialised
+    assert "secret-token-value" not in serialised
+    assert projected["last_action_outputs"]["api_token"] == "[redacted]"
+    assert projected["result"]["raw_body"]["truncated"] is True
+
+
+def test_durable_executor_checkpoints_bounded_context_and_preserves_mapped_fields() -> None:
+    raw_body = "private email plus paper text " + ("z" * 900_000)
+
+    def _large_payload_action(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_id": "#V#paper_1",
+                    "raw_body": raw_body,
+                },
+                "mcp_result": {
+                    "paper_id": "#V#paper_1",
+                    "raw_body": raw_body,
+                },
+            },
+        )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="large_payload.fetch",
+            handler=_large_payload_action,
+        )
+    )
+    condition_spec, condition = build_transition_condition({"kind": "always"})
+    definition = WorkflowDefinition(
+        workflow_id="#V#bounded_checkpoint_context_workflow",
+        initial_state="fetch",
+        states={
+            "fetch": WorkflowStateSpec(
+                state_id="fetch",
+                actions=(WorkflowActionInvocation(action_id="large_payload.fetch"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=condition,
+                        condition_spec=condition_spec,
+                        reason="next_step",
+                    ),
+                ),
+                metadata={
+                    "tool_output_context_mappings": [
+                        {
+                            "tool_output_field": "result.paper_id",
+                            "context_key": "paper_id",
+                        }
+                    ]
+                },
+            ),
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+            ),
+        },
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-2314",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert result.data["paper_id"] == "#V#paper_1"
+    assert result.data["result"]["raw_body"] == raw_body
+    assert manager.checkpoint.call_args_list
+    for checkpoint_call in manager.checkpoint.call_args_list:
+        workflow_data = checkpoint_call.kwargs["workflow_data"]
+        assert workflow_data["paper_id"] == "#V#paper_1"
+        assert CHECKPOINT_CONTEXT_PROJECTION_KEY in workflow_data
+        assert len(BSON.encode({"workflow_data": workflow_data})) < 1_500_000
+        serialised = json.dumps(workflow_data, sort_keys=True, default=str)
+        assert raw_body not in serialised
 
 
 def test_durable_executor_persists_trace_and_checkpoints_trace_link() -> None:
@@ -1423,4 +1570,3 @@ def test_durable_executor_reuses_idempotent_action_result_with_shared_runtime_po
     idempotency_events = second_result.data.get("workflow_idempotency_events")
     assert isinstance(idempotency_events, list)
     assert any(event.get("status") == "idempotent_reuse" for event in idempotency_events)
-

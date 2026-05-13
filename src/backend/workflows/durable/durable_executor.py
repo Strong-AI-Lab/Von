@@ -40,6 +40,10 @@ from ..plan_state_runtime import (
     mark_workflow_plan_state_resume,
 )
 from ..trace_store import insert_workflow_execution_trace
+from .checkpoint_context_projection import (
+    CHECKPOINT_CONTEXT_PROJECTION_KEY,
+    project_workflow_context_for_checkpoint,
+)
 from .instance_manager import WorkflowInstanceManager
 
 logger = logging.getLogger(__name__)
@@ -214,6 +218,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         # Restore or initialise state
         if resume_from_checkpoint and instance.workflow_data:
             context = dict(instance.workflow_data)
+            context.pop(CHECKPOINT_CONTEXT_PROJECTION_KEY, None)
             current_state = instance.current_state or definition.initial_state
             step_index = instance.step_index
             mark_workflow_plan_state_resume(
@@ -347,7 +352,9 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     lambda: self._instance_manager.checkpoint(
                         instance_id,
                         current_state=final_state,
-                        workflow_data=context,
+                        workflow_data=project_workflow_context_for_checkpoint(
+                            context
+                        ),
                         step_index=step_index,
                         error=error,
                         error_step=error_step,
@@ -598,7 +605,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                 lambda: self._instance_manager.checkpoint(
                     instance_id,
                     current_state=resolved_next_state,
-                    workflow_data=context,
+                    workflow_data=project_workflow_context_for_checkpoint(context),
                     step_index=step_index,
                     progress_current=progress_current_value,
                     progress_total=progress_total_value,
