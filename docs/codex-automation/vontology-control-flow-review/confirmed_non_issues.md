@@ -121,6 +121,14 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   `jira_task_incremental_import_workflow_vontology_service.py` appears in the
   workflow-purity repo-seed count. Watch the purity baseline and ensure the
   represented workflow becomes independent of repo seed publication.
+- 2026-05-15: episode evaluator/critique policy tables remain covered by
+  `JVNAUTOSCI-2024`. Evidence rechecked this run:
+  `episode_evaluation_workflow_contracts.py` defines evaluator axes and
+  improvement surfaces; `episode_critique_memory_service.py` normalises
+  category/target/priority aliases; `episode_critique_benchmark_service.py`
+  owns audit bucket priority, proxy classification, recommendations, and
+  benchmark policy decisions. Update `JVNAUTOSCI-2024` rather than filing a
+  duplicate unless a distinct runtime authority path appears.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
