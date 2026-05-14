@@ -11,6 +11,10 @@ from ...services.failure_case_intake_service import (
     collect_failure_case_intake,
     resolve_failure_case_reference,
 )
+from ...services.failure_case_prompt_replay_experiment_service import (
+    FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID,
+    prepare_failure_case_prompt_replay_experiment,
+)
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -174,6 +178,60 @@ def _failure_case_reference_resolve_handler(
     )
 
 
+def _failure_case_prompt_replay_prepare_handler(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = _safe_mapping(request.inputs)
+    context = _safe_mapping(request.data)
+    failure_case_intake = inputs.get("failure_case_intake")
+    if not isinstance(failure_case_intake, Mapping):
+        failure_case_intake = context
+
+    payload = prepare_failure_case_prompt_replay_experiment(
+        failure_case_intake=failure_case_intake,
+        failure_request_id=_safe_str(inputs.get("failure_request_id"))
+        or _safe_str(inputs.get("request_id"))
+        or _safe_str(context.get("failure_request_id"))
+        or _safe_str(context.get("request_id")),
+        target_workflow_id=_safe_str(inputs.get("target_workflow_id"))
+        or _safe_str(inputs.get("workflow_id"))
+        or _safe_str(context.get("failed_workflow_id")),
+        workflow_stage_id=_safe_str(inputs.get("workflow_stage_id"))
+        or _safe_str(inputs.get("stage_id")),
+        base_prompt_id=_safe_str(inputs.get("base_prompt_id"))
+        or _safe_str(inputs.get("base_prompt_concept_id")),
+        prompt_variant_ids=inputs.get("prompt_variant_ids") or [],
+        model_arms=inputs.get("model_arms") or [],
+        target_model=_safe_str(inputs.get("target_model"))
+        or _safe_str(context.get("target_model")),
+        comparator_model=_safe_str(inputs.get("comparator_model"))
+        or _safe_str(context.get("comparator_model")),
+        replay_set_id=_safe_str(inputs.get("replay_set_id")),
+        replay_case_id=_safe_str(inputs.get("replay_case_id")),
+        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")),
+        experiment_name=_safe_str(inputs.get("experiment_name"))
+        or _safe_str(inputs.get("name")),
+        experiment_description=_safe_str(inputs.get("experiment_description"))
+        or _safe_str(inputs.get("description")),
+        target_capability_ids=inputs.get("target_capability_ids") or [],
+        candidate_workflow_ids=inputs.get("candidate_workflow_ids") or [],
+        baseline_workflow_id=_safe_str(inputs.get("baseline_workflow_id")),
+        expected_outcomes=inputs.get("expected_outcomes") or [],
+        allowed_side_effects=inputs.get("allowed_side_effects") or [],
+        forbidden_side_effects=inputs.get("forbidden_side_effects") or [],
+        verdict_rules=inputs.get("verdict_rules"),
+        replay_policy=inputs.get("replay_policy"),
+        promotion_policy=inputs.get("promotion_policy"),
+        metadata=inputs.get("metadata"),
+    )
+    success = bool(payload.get("success"))
+    return WorkflowActionResult(
+        status="success" if success else "failed",
+        outputs=dict(payload),
+        error=None if success else _safe_str(payload.get("error")),
+    )
+
+
 def register_failure_case_prompt_improvement_actions(registry: ActionRegistry) -> None:
     """Register support actions used by represented prompt-improvement workflows."""
 
@@ -196,6 +254,17 @@ def register_failure_case_prompt_improvement_actions(registry: ActionRegistry) -
                 "Collect compact turn, prompt, tool, critic, completion-gate, "
                 "and response-surface evidence for a failed turn without "
                 "classifying the failure or generating prompt hypotheses."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID,
+            handler=_failure_case_prompt_replay_prepare_handler,
+            description=(
+                "Prepare replay experiment inputs and arm metadata from collected "
+                "failure-case evidence without classifying the failure, generating "
+                "prompt text, scoring variants, or recommending promotion."
             ),
         )
     )
