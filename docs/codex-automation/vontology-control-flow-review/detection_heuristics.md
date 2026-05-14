@@ -82,6 +82,12 @@ represented authority before filing Jira work.
   feed prompt/model/workflow learning. Smoke-test launchers and evidence
   collectors can be support-only, but durable rubrics and case expectations
   should be represented.
+- Evaluator and critique-memory normalisers can be support-only when they
+  validate represented payloads, but Python alias/default tables for evaluator
+  axes, improvement categories, target surfaces, priority values,
+  false-positive/false-negative proxies, recommendation text, or audit-bucket
+  ordering are evaluator-policy evidence. Check `JVNAUTOSCI-2024` before
+  creating a new task.
 
 ## Recent Examples
 
@@ -109,3 +115,6 @@ represented authority before filing Jira work.
   rubric, user-happiness scoring, promotion blockers, pass/partial/fail
   verdicts, and experiment observation policy in Python rather than represented
   replay-evaluation authority.
+- `JVNAUTOSCI-2024` - episode evaluator criteria, benchmark proxy signals,
+  recommendations, and critic policy should be authority-backed evaluator
+  artefacts rather than Python proxy tables.
