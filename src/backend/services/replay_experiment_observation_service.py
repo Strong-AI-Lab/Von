@@ -10,11 +10,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .replay_evaluation_authority_service import (
+    ReplayEvaluationAuthorityUnavailable,
+    ReplayEvaluationRubric,
+    normalise_represented_replay_evaluation_result,
+    resolve_replay_evaluation_rubric,
+)
+
 
 PROMPT_VARIANT_REPLAY_REPORT_SCHEMA_VERSION = "prompt_variant_replay_report.v1"
 LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION = (
     "live_prompt_sampler_experiment_observation.v1"
 )
+REPLAY_EVALUATION_AUTHORITY_SCHEMA_VERSION = "replay_evaluation_authority.v1"
 PROMPT_VARIANT_SELECTION_KEYS = frozenset(
     {
         "base_prompt_concept_id",
@@ -246,6 +254,11 @@ def build_prompt_variant_evaluation(
         "prompt_variant_selection": selected_observation or None,
         "prompt_variant_selection_count": len(observations),
         "promotion_blockers": _dedupe_texts(blockers),
+        "structural_blockers": _dedupe_texts(blockers),
+        "blocker_authority": {
+            "source": "prompt_variant_resolution_structural_validator",
+            "authoritative_for_promotion": False,
+        },
         "policy_update": {
             "authorised": False,
             "reason": (
@@ -322,11 +335,18 @@ def build_replay_scoring_consistency(
         "response_surface_scoring_caveats": caveats,
         "response_surface_disagreement_codes": disagreement_codes,
         "promotion_blockers": _dedupe_texts(blockers),
+        "structural_blockers": _dedupe_texts(blockers),
+        "blocker_authority": {
+            "source": "response_surface_structural_validator",
+            "authoritative_for_promotion": False,
+        },
         "non_promotable": bool(blockers),
     }
 
 
 def normalise_experiment_verdict(summary: Mapping[str, Any]) -> str:
+    """Return the local smoke-test verdict for non-authoritative replay summaries."""
+
     evaluation = _as_mapping(summary.get("evaluation"))
     scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
     prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
@@ -339,6 +359,108 @@ def normalise_experiment_verdict(summary: Mapping[str, Any]) -> str:
     if bool(evaluation.get("should_user_be_happy")):
         return "partial"
     return "fail"
+
+
+def extract_represented_replay_evaluation(
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    for key in (
+        "represented_replay_evaluation",
+        "replay_evaluation_result",
+        "replay_evaluation",
+    ):
+        payload = _as_mapping(summary.get(key))
+        if payload:
+            return payload
+    evaluation = _as_mapping(summary.get("evaluation"))
+    for key in (
+        "represented_replay_evaluation",
+        "replay_evaluation_result",
+        "replay_evaluation",
+    ):
+        payload = _as_mapping(evaluation.get(key))
+        if payload:
+            return payload
+    return {}
+
+
+def _normalise_represented_result(
+    summary: Mapping[str, Any],
+    *,
+    replay_evaluation_rubric: ReplayEvaluationRubric | None,
+    require_represented_evaluation: bool,
+    replay_evaluation_authority_error: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+    base_authority: dict[str, Any] = {
+        "schema_version": REPLAY_EVALUATION_AUTHORITY_SCHEMA_VERSION,
+        "authoritative": False,
+        "status": "local_smoke_only",
+        "source": "python_structural_smoke_diagnostics",
+        "reason": (
+            "No represented replay-evaluation result was supplied; any verdict "
+            "derived here is local smoke evidence only."
+        ),
+    }
+    if replay_evaluation_authority_error:
+        authority = {
+            **base_authority,
+            "status": "blocked_missing_replay_evaluation_rubric",
+            "reason": replay_evaluation_authority_error,
+        }
+        return None, authority, "replay_evaluation_rubric_unavailable"
+
+    raw_result = extract_represented_replay_evaluation(summary)
+    if not raw_result:
+        if not require_represented_evaluation:
+            return None, base_authority, None
+        authority = {
+            **base_authority,
+            "status": "blocked_missing_represented_evaluation_result",
+            "reason": (
+                "Durable replay experiment observations require a represented "
+                "evaluation result produced by a Vontology/workflow authority."
+            ),
+        }
+        return None, authority, "represented_replay_evaluation_result_missing"
+
+    if replay_evaluation_rubric is None:
+        authority = {
+            **base_authority,
+            "status": "blocked_missing_replay_evaluation_rubric",
+            "reason": "represented replay evaluation result supplied without a loaded rubric",
+        }
+        return None, authority, "replay_evaluation_rubric_unavailable"
+
+    try:
+        represented_result = normalise_represented_replay_evaluation_result(
+            raw_result,
+            rubric=replay_evaluation_rubric,
+        )
+    except ReplayEvaluationAuthorityUnavailable as exc:
+        authority = {
+            **base_authority,
+            "status": "blocked_invalid_represented_evaluation_result",
+            "reason": str(exc),
+            **replay_evaluation_rubric.authority_payload,
+        }
+        return None, authority, "represented_replay_evaluation_result_invalid"
+
+    authority = {
+        "schema_version": REPLAY_EVALUATION_AUTHORITY_SCHEMA_VERSION,
+        "authoritative": True,
+        "status": "represented_evaluation_result_accepted",
+        "source": (
+            _safe_text(represented_result.get("authority_source"))
+            or "represented_replay_evaluation_result"
+        ),
+        **replay_evaluation_rubric.authority_payload,
+        "result_schema_version": _safe_text(represented_result.get("schema_version")),
+        "evaluation_workflow_id": _safe_text(
+            represented_result.get("evaluation_workflow_id")
+        )
+        or None,
+    }
+    return represented_result, authority, None
 
 
 def compact_tool_invocations(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -367,6 +489,9 @@ def build_experiment_observation_from_arm_summary(
     summary: Mapping[str, Any],
     *,
     default_replay_set_id: str | None = None,
+    replay_evaluation_rubric: ReplayEvaluationRubric | None = None,
+    require_represented_evaluation: bool = False,
+    replay_evaluation_authority_error: str | None = None,
 ) -> dict[str, Any]:
     arm = _as_mapping(summary.get("arm"))
     prompt = _as_mapping(summary.get("prompt"))
@@ -382,7 +507,38 @@ def build_experiment_observation_from_arm_summary(
         prompt_variant_evaluation.get("candidate_prompt_variant_id")
     )
     selected_prompt_id = _safe_text(prompt_variant_evaluation.get("selected_prompt_id"))
-    candidate_valid = not _as_list(prompt_variant_evaluation.get("promotion_blockers"))
+    represented_result, evaluation_authority, record_blocker = (
+        _normalise_represented_result(
+            summary,
+            replay_evaluation_rubric=replay_evaluation_rubric,
+            require_represented_evaluation=require_represented_evaluation,
+            replay_evaluation_authority_error=replay_evaluation_authority_error,
+        )
+    )
+    represented_policy_decisions = _as_list(
+        (represented_result or {}).get("policy_decisions")
+    )
+    represented_repair_hints = _as_list((represented_result or {}).get("repair_hints"))
+    represented_candidate_valid = (represented_result or {}).get("candidate_valid")
+    candidate_valid = (
+        represented_candidate_valid
+        if isinstance(represented_candidate_valid, bool)
+        else None
+    )
+    local_smoke_verdict = normalise_experiment_verdict(summary)
+    verdict = (
+        _safe_text((represented_result or {}).get("verdict"))
+        if represented_result is not None
+        else local_smoke_verdict
+    )
+    structural_prompt_blockers = _as_list(
+        prompt_variant_evaluation.get("structural_blockers")
+        or prompt_variant_evaluation.get("promotion_blockers")
+    )
+    structural_scoring_blockers = _as_list(
+        scoring_consistency.get("structural_blockers")
+        or scoring_consistency.get("promotion_blockers")
+    )
     label_parts = [
         "prompt_variant_arm",
         _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id")) or "single_arm",
@@ -392,8 +548,16 @@ def build_experiment_observation_from_arm_summary(
     )
     return {
         "schema_version": LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION,
+        "recordable": record_blocker is None,
+        "record_blocker": record_blocker,
         "label": ":".join(label_parts),
-        "verdict": normalise_experiment_verdict(summary),
+        "verdict": verdict,
+        "evidence": {
+            "evaluation_authority": evaluation_authority,
+            "local_smoke_verdict": local_smoke_verdict,
+            "structural_prompt_variant_blockers": structural_prompt_blockers,
+            "structural_replay_scoring_blockers": structural_scoring_blockers,
+        },
         "observed_outcome": {
             "schema_version": LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION,
             "arm_id": _safe_text(arm.get("arm_id")) or None,
@@ -415,6 +579,10 @@ def build_experiment_observation_from_arm_summary(
             ),
             "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
             "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
+            "represented_evaluation_verdict": _safe_text(
+                (represented_result or {}).get("verdict")
+            )
+            or None,
         },
         "workflow_execution": {
             "workflow_id": selected_workflow_id,
@@ -428,6 +596,7 @@ def build_experiment_observation_from_arm_summary(
         "candidate_validation": {
             "candidate_kind": "prompt_variant",
             "valid": candidate_valid,
+            "evaluation_authority": evaluation_authority,
             "base_prompt_id": _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
             or None,
             "candidate_prompt_variant_id": candidate_prompt_variant_id or None,
@@ -438,8 +607,10 @@ def build_experiment_observation_from_arm_summary(
                 )
             ),
             "promotion_blockers": _as_list(
-                prompt_variant_evaluation.get("promotion_blockers")
+                (represented_result or {}).get("promotion_blockers")
             ),
+            "structural_prompt_variant_blockers": structural_prompt_blockers,
+            "structural_replay_scoring_blockers": structural_scoring_blockers,
         },
         "trace_summary": {
             "request_id": request_id,
@@ -451,30 +622,23 @@ def build_experiment_observation_from_arm_summary(
             "response_surface_status": scoring_consistency.get(
                 "response_surface_status"
             ),
+            "evaluation_authority_status": evaluation_authority.get("status"),
         },
-        "policy_decisions": [
-            {
-                "decision": "production_prompt_policy_unchanged",
-                "authorised": False,
-                "reason": (
-                    "Live prompt sampler records replay evidence only; prompt "
-                    "promotion remains a represented Vontology workflow decision."
-                ),
-            }
-        ],
+        "policy_decisions": represented_policy_decisions,
         "quality_signals": {
             "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
             "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
             "reasons": _as_list(evaluation.get("reasons"))[:20],
+            "evaluation_authority": evaluation_authority,
         },
-        "repair_hints": [
+        "repair_hints": represented_repair_hints
+        or [
             {
                 "scope": "prompt_variant_resolution",
                 "reason_code": reason_code,
+                "authority": "structural_validator",
             }
-            for reason_code in _as_list(
-                prompt_variant_evaluation.get("promotion_blockers")
-            )
+            for reason_code in structural_prompt_blockers
         ],
         "tool_invocations": compact_tool_invocations(summary),
         "assertion_classes": [
@@ -491,11 +655,24 @@ def record_experiment_observations(
     arm_summaries: Sequence[Mapping[str, Any]],
     default_replay_set_id: str | None = None,
     gateway: Any | None = None,
+    replay_evaluation_rubric: ReplayEvaluationRubric | None = None,
+    require_represented_evaluation: bool = True,
 ) -> dict[str, Any]:
+    authority_error: str | None = None
+    active_rubric = replay_evaluation_rubric
+    if require_represented_evaluation and active_rubric is None:
+        try:
+            active_rubric = resolve_replay_evaluation_rubric()
+        except ReplayEvaluationAuthorityUnavailable as exc:
+            authority_error = str(exc)
+
     observations = [
         build_experiment_observation_from_arm_summary(
             summary,
             default_replay_set_id=default_replay_set_id,
+            replay_evaluation_rubric=active_rubric,
+            require_represented_evaluation=require_represented_evaluation,
+            replay_evaluation_authority_error=authority_error,
         )
         for summary in arm_summaries
         if isinstance(summary, Mapping)
@@ -512,6 +689,28 @@ def record_experiment_observations(
             "success": False,
             "error": "no_arm_summaries_to_record",
             "recorded_observation_count": 0,
+        }
+    blocked_observations = [
+        observation
+        for observation in observations
+        if observation.get("recordable") is False or observation.get("record_blocker")
+    ]
+    if blocked_observations:
+        blockers = _dedupe_texts(
+            [
+                observation.get("record_blocker")
+                for observation in blocked_observations
+                if observation.get("record_blocker")
+            ]
+        )
+        return {
+            "success": False,
+            "error": "replay_evaluation_authority_unavailable",
+            "recorded_observation_count": 0,
+            "blocked_observation_count": len(blocked_observations),
+            "blockers": blockers,
+            "turn_execution_request_ids": turn_execution_request_ids,
+            "authority_error": authority_error,
         }
     if gateway is None:
         from src.backend.integrations.internal_mcp import (

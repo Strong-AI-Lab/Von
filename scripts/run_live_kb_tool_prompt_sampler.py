@@ -1910,6 +1910,15 @@ def _evaluate_user_happiness(
     return {
         "verdict": verdict,
         "should_user_be_happy": should_user_be_happy,
+        "evaluation_authority": {
+            "authoritative": False,
+            "source": "live_prompt_sampler_local_smoke_check",
+            "reason": (
+                "This script-level check is diagnostic replay evidence only; "
+                "durable experiment verdicts require represented replay "
+                "evaluation authority."
+            ),
+        },
         "reasons": reasons,
         "diagnostic_evidence_complete": diagnostic_evidence_complete,
         "diagnostic_evidence_reasons": diagnostic_evidence_reasons,

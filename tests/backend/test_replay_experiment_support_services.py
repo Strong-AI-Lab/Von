@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.backend.services.replay_evaluation_authority_service import (
+    REPRESENTED_REPLAY_EVALUATION_RESULT_SCHEMA_VERSION,
+    REPLAY_EVALUATION_RUBRIC_SCHEMA_VERSION,
+    ReplayEvaluationRubric,
+)
 from src.backend.services import replay_arm_planning_service as arm_planning
 from src.backend.services import replay_experiment_observation_service as observations
 
@@ -11,7 +16,44 @@ from src.backend.services import replay_experiment_observation_service as observ
 SERVICE_FILES = [
     Path("src/backend/services/replay_arm_planning_service.py"),
     Path("src/backend/services/replay_experiment_observation_service.py"),
+    Path("src/backend/services/replay_evaluation_authority_service.py"),
 ]
+
+
+def _test_rubric() -> ReplayEvaluationRubric:
+    return ReplayEvaluationRubric(
+        concept_id="#V#live_prompt_sampler_replay_evaluation_rubric_v1",
+        source_predicate="#V#has_replay_evaluation_rubric_json",
+        raw_rubric={
+            "schema_version": REPLAY_EVALUATION_RUBRIC_SCHEMA_VERSION,
+            "rubric_id": "live_prompt_sampler_replay_evaluation",
+            "rubric_version": "test",
+            "expected_result_schema_version": (
+                REPRESENTED_REPLAY_EVALUATION_RESULT_SCHEMA_VERSION
+            ),
+            "verdict_values": ["pass", "partial", "fail", "inconclusive"],
+        },
+        diagnostics={},
+    )
+
+
+def _represented_evaluation(verdict: str = "pass") -> dict[str, Any]:
+    return {
+        "schema_version": REPRESENTED_REPLAY_EVALUATION_RESULT_SCHEMA_VERSION,
+        "verdict": verdict,
+        "rubric_concept_id": "#V#live_prompt_sampler_replay_evaluation_rubric_v1",
+        "rubric_version": "test",
+        "evaluation_workflow_id": "#V#live_prompt_sampler_replay_evaluation_workflow",
+        "authority_source": "represented_replay_evaluation_workflow",
+        "candidate_valid": verdict == "pass",
+        "policy_decisions": [
+            {
+                "decision": "production_prompt_policy_unchanged",
+                "authorised": False,
+                "source": "represented_replay_evaluation_workflow",
+            }
+        ],
+    }
 
 
 def test_extracted_services_do_not_encode_triggering_failure_policy() -> None:
@@ -77,7 +119,7 @@ def test_prompt_variant_evaluation_requires_observed_runtime_selection() -> None
     assert evaluation["policy_update"]["authorised"] is False
 
 
-def test_observation_builder_records_non_promotable_arm_without_authorising_policy() -> None:
+def test_observation_builder_marks_local_smoke_verdict_non_authoritative() -> None:
     observation = observations.build_experiment_observation_from_arm_summary(
         {
             "arm": {
@@ -118,21 +160,43 @@ def test_observation_builder_records_non_promotable_arm_without_authorising_poli
     )
 
     assert observation["verdict"] == "partial"
+    assert observation["recordable"] is True
     assert observation["observed_outcome"]["replay_set_id"] == "#V#replay_set"
     assert observation["observed_outcome"]["telemetry_non_promotable"] is True
-    assert observation["policy_decisions"] == [
-        {
-            "decision": "production_prompt_policy_unchanged",
-            "authorised": False,
-            "reason": (
-                "Live prompt sampler records replay evidence only; prompt "
-                "promotion remains a represented Vontology workflow decision."
-            ),
-        }
-    ]
+    authority = observation["evidence"]["evaluation_authority"]
+    assert authority["authoritative"] is False
+    assert authority["status"] == "local_smoke_only"
+    assert observation["policy_decisions"] == []
     assert observation["tool_invocations"] == [
         {"tool_name": "search_records", "status": None, "success": True}
     ]
+
+
+def test_observation_builder_uses_represented_evaluation_result_for_verdict() -> None:
+    observation = observations.build_experiment_observation_from_arm_summary(
+        {
+            "arm": {"arm_id": "arm_1", "requested_model": "local-small"},
+            "prompt": {"id": "case-1"},
+            "conversation": {"request_id": "request-1"},
+            "telemetry": {"model": "local-small"},
+            "evaluation": {"should_user_be_happy": True},
+            "response": {"text": "Looks useful."},
+            "prompt_variant_evaluation": {"promotion_blockers": []},
+            "replay_scoring_consistency": {"non_promotable": False},
+            "represented_replay_evaluation": _represented_evaluation("fail"),
+        },
+        default_replay_set_id="#V#replay_set",
+        replay_evaluation_rubric=_test_rubric(),
+        require_represented_evaluation=True,
+    )
+
+    assert observation["verdict"] == "fail"
+    assert observation["recordable"] is True
+    assert observation["evidence"]["local_smoke_verdict"] == "pass"
+    authority = observation["evidence"]["evaluation_authority"]
+    assert authority["authoritative"] is True
+    assert authority["status"] == "represented_evaluation_result_accepted"
+    assert observation["candidate_validation"]["valid"] is False
 
 
 @dataclass
@@ -170,10 +234,12 @@ def test_record_experiment_observations_uses_injected_gateway() -> None:
                 "response": {"text": ""},
                 "prompt_variant_evaluation": {"promotion_blockers": []},
                 "replay_scoring_consistency": {"non_promotable": False},
+                "represented_replay_evaluation": _represented_evaluation("fail"),
             }
         ],
         default_replay_set_id="#V#replay_set",
         gateway=gateway,
+        replay_evaluation_rubric=_test_rubric(),
     )
 
     assert result["success"] is True
@@ -182,3 +248,36 @@ def test_record_experiment_observations_uses_injected_gateway() -> None:
     assert result["mcp_tool"] == "experiment_record_observation"
     assert gateway.calls[0][0] == "experiment_record_observation"
     assert gateway.calls[0][1]["run_id"] == "#V#experiment_run"
+    recorded_observation = gateway.calls[0][1]["observations"][0]
+    assert recorded_observation["verdict"] == "fail"
+    assert recorded_observation["evidence"]["evaluation_authority"]["authoritative"] is True
+
+
+def test_record_experiment_observations_fails_closed_without_represented_result() -> None:
+    gateway = _FakeGateway()
+    result = observations.record_experiment_observations(
+        run_id="#V#experiment_run",
+        arm_summaries=[
+            {
+                "arm": {"arm_id": "arm_1", "requested_model": "local-small"},
+                "prompt": {"id": "case-1"},
+                "conversation": {"request_id": "request-1"},
+                "telemetry": {"model": "local-small"},
+                "evaluation": {"should_user_be_happy": True},
+                "response": {"text": "Looks useful."},
+                "prompt_variant_evaluation": {"promotion_blockers": []},
+                "replay_scoring_consistency": {"non_promotable": False},
+            }
+        ],
+        default_replay_set_id="#V#replay_set",
+        gateway=gateway,
+        replay_evaluation_rubric=_test_rubric(),
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "replay_evaluation_authority_unavailable"
+    assert result["recorded_observation_count"] == 0
+    assert result["blocked_observation_count"] == 1
+    assert result["blockers"] == ["represented_replay_evaluation_result_missing"]
+    assert result["turn_execution_request_ids"] == ["request-1"]
+    assert gateway.calls == []

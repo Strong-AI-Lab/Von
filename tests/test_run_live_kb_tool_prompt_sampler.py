@@ -1640,7 +1640,12 @@ def test_experiment_observation_captures_prompt_variant_arm() -> None:
     assert observation["observed_outcome"]["candidate_prompt_variant_id"] == (
         "#V#gemma_mail_answer_prompt_v2"
     )
-    assert observation["candidate_validation"]["valid"] is True
+    assert observation["candidate_validation"]["valid"] is None
+    assert observation["candidate_validation"]["structural_prompt_variant_blockers"] == []
+    assert (
+        observation["candidate_validation"]["evaluation_authority"]["authoritative"]
+        is False
+    )
     assert observation["workflow_execution"]["workflow_id"] == (
         "#V#general_mail_review_workflow"
     )
