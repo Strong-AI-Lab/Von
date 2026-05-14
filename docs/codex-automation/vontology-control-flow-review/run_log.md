@@ -205,3 +205,29 @@
   reconciliation, Vontology-authored tool-result hints, and bounded MCP
   projection support as support/watch items rather than new tasks.
 - No production code was changed.
+
+## 2026-05-15T02:07:00.5508972+12:00
+
+- Read required repo guidance, situation-specific workflow/prompt/memory and
+  operational docs, repo-local drift-review memories, and the global automation
+  memory.
+- Found no new commits on `main` since `2026-05-13T14:01:25Z`, but the
+  worktree contained dirty replay-evaluation authority changes. Treated those
+  as current code evidence without editing production code.
+- Ran `python scripts\check_workflow_purity.py --verbose`; the gate still
+  failed only on `repo_seed_authority_drift_path_count`: baseline `1`, current
+  `2`, delta `1`, with the same `jira_task_incremental_import` and
+  `kr_materialisation` repo-seed paths already covered by `JVNAUTOSCI-2315` and
+  `JVNAUTOSCI-2271`.
+- Reviewed the dirty replay-evaluation patch. It appears to be remediation for
+  `JVNAUTOSCI-2324`: local sampler verdicts are marked non-authoritative,
+  durable experiment observations fail closed unless a represented replay
+  evaluation result/rubric is supplied, and the new authority service loads and
+  validates a Vontology rubric rather than scoring arms itself. No duplicate
+  was filed.
+- Rechecked older episode evaluator/critique policy tables. Added fresh
+  evidence to `JVNAUTOSCI-2024` for Python-owned evaluator axes, improvement
+  category/target/priority aliases, audit-bucket priority, proxy
+  classifications, recommendations, and benchmark policy decisions. No new
+  Jira issue was created.
+- No production code was changed by this review run.
