@@ -61,6 +61,9 @@ predicates, and KB assertions should own durable:
   tool/knowledge-surface requirements, answer-quality rubrics, failure-marker
   semantics, prompt/model promotion blockers, policy-update criteria,
   pass/partial/fail verdict definitions, and experiment observation meaning.
+- Episode evaluator authority, including evaluator axes, improvement categories,
+  target surfaces, priority meanings, benchmark proxy definitions, audit bucket
+  ordering, recommendation wording, and promotion-impact interpretation.
 
 ## Python Support
 
@@ -109,6 +112,10 @@ Python can remain the surface for:
   projections, structural consistency checks, and canonical experiment writes
   when case expectations, rubrics, verdicts, and promotion policy come from
   represented authority;
+- generic episode-critic evidence collection, critique-memory persistence,
+  payload validation, projection storage, and benchmark aggregation when axes,
+  proxy definitions, recommendation/rubric policy, and improvement semantics
+  come from represented evaluator artefacts;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
