@@ -19,6 +19,8 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2172` - generic Vontology-backed entity profiles.
 - `JVNAUTOSCI-2177` - repo seed overwrite protection.
 - `JVNAUTOSCI-1971` - broad buttonify prose-extraction heuristic cleanup.
+- `JVNAUTOSCI-2024` - episode evaluator criteria, benchmark proxies,
+  recommendation wording, and critic signal policy in Python.
 
 ## Drift Tasks Filed By This Automation
 
