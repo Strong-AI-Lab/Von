@@ -129,6 +129,16 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   owns audit bucket priority, proxy classification, recommendations, and
   benchmark policy decisions. Update `JVNAUTOSCI-2024` rather than filing a
   duplicate unless a distinct runtime authority path appears.
+- 2026-05-16: `llm_step_executor.py` prompt-id constants and
+  `model_execution_budget_policy.py` Vontology-backed budget loading looked
+  support-only in this scan. File only if prompt bodies, user-facing recovery
+  copy, model-choice semantics, or budget policy defaults become Python-owned
+  rather than represented prompt/model metadata.
+- 2026-05-16: legacy durable modules containing `WorkflowDefinition(...)`
+  builders remain watch items, not automatic duplicates, while production
+  registry loading reports Vontology as the active source and
+  `built_in_registration_count=0`. File only where the Python builder or
+  publisher remains the reproducible source for workflow graph/control policy.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

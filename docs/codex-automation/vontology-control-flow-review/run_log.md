@@ -133,7 +133,7 @@
   authority in Python: `episode_self_improvement_profile_vontology_service.py`
   still defines canonical profile concept ids, policy payloads, workflow links,
   fallback profile resolution, and bootstrap materialisation for launch budget,
-  priority order, target surfaces, dedupe identity, and benchmark evidence
+  priority order, target-surfaces, dedupe identity, and benchmark evidence
   budgets. Linked it to `JVNAUTOSCI-1913` and `JVNAUTOSCI-1993`.
 - No production code was changed.
 
@@ -230,4 +230,34 @@
   category/target/priority aliases, audit-bucket priority, proxy
   classifications, recommendations, and benchmark policy decisions. No new
   Jira issue was created.
+- No production code was changed by this review run.
+
+## 2026-05-16T02:10:12.7619816+12:00
+
+- Read required repo guidance, situation-specific workflow/prompt/memory docs,
+  operational docs, repo-local drift-review memories, and checked the global
+  automation memory path. `$CODEX_HOME` was unset in the shell, so the configured
+  writable Codex home path was used directly for global memory.
+- Found no new commits on `main` since `2026-05-14T14:01:45Z`, but the worktree
+  still contained dirty replay-evaluation authority remediation from prior work.
+  Treated those changes as current evidence without editing production code.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  the gate still failed only on `repo_seed_authority_drift_path_count`: baseline
+  `1`, current `2`, delta `1`, with
+  `jira_task_incremental_import_workflow_vontology_service.py` and
+  `kr_materialisation_workflow_vontology_service.py` already covered by
+  `JVNAUTOSCI-2315` and `JVNAUTOSCI-2271`.
+- Created `JVNAUTOSCI-2326` for AI coding-session ingestion ontology/profile
+  authority in Python: `ENVIRONMENT_CONFIGS`, source-system labels, document and
+  file-copy type ids, predicates, and materialisation/validation from Python
+  constants. Linked it to `JVNAUTOSCI-1362` and `JVNAUTOSCI-1913`, and added a
+  visible user-impact comment.
+- Created `JVNAUTOSCI-2327` for benchmark/rubric authority in Python/repo seed
+  bundles across selector routing, context-bundle, and context-grounded-answering
+  benchmark services. Linked it to `JVNAUTOSCI-2065`, `JVNAUTOSCI-2324`,
+  `JVNAUTOSCI-2024`, `JVNAUTOSCI-1913`, and `JVNAUTOSCI-1995`, and added a
+  visible user-impact comment.
+- Treated prompt-id constants, Vontology-backed model budget loading, and legacy
+  `WorkflowDefinition` builders as watch/non-issues for this run where there was
+  no fresh evidence of active production Python authority.
 - No production code was changed by this review run.

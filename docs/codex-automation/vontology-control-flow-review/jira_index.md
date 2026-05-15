@@ -74,3 +74,9 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   rubric, user-happiness scoring, promotion blockers, pass/partial/fail
   verdicts, and experiment observation policy in Python rather than represented
   Vontology/VWL replay-evaluation authority.
+- `JVNAUTOSCI-2326` - AI coding-session ingestion source profiles, document and
+  file-copy type ids, predicate vocabulary, and per-environment ontology
+  catalogues live in Python instead of represented Vontology profile authority.
+- `JVNAUTOSCI-2327` - selector/context benchmark labels, expected outcomes,
+  coverage tags, expected sources, execution modes, and signal/rubric categories
+  live in Python/repo seed bundles instead of represented benchmark authority.

@@ -64,6 +64,13 @@ predicates, and KB assertions should own durable:
 - Episode evaluator authority, including evaluator axes, improvement categories,
   target surfaces, priority meanings, benchmark proxy definitions, audit bucket
   ordering, recommendation wording, and promotion-impact interpretation.
+- Source-ingestion profile authority, including source-family concept ids,
+  source-system labels, adapter/profile bindings, document and file-copy type
+  ids, predicate vocabulary, and per-environment profile facts that determine
+  how imported information-bearing objects are represented.
+- Benchmark/rubric authority, including benchmark suites/cases, expected
+  outcomes, coverage tags, expected authority sources, execution modes, strategy
+  labels, retention priorities, signal categories, and pass/fail rubric meaning.
 
 ## Python Support
 
@@ -116,6 +123,12 @@ Python can remain the surface for:
   payload validation, projection storage, and benchmark aggregation when axes,
   proxy definitions, recommendation/rubric policy, and improvement semantics
   come from represented evaluator artefacts;
+- generic source-ingestion adapters, local file discovery, hashing/idempotency,
+  upload/write mechanics, profile loading/validation, and telemetry when source
+  profile/type/predicate authority comes from Vontology;
+- generic benchmark loaders/reporters, telemetry joins, arithmetic, validation,
+  and serialisation when benchmark suites, cases, labels, and rubrics come from
+  represented authority;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,

@@ -88,6 +88,16 @@ represented authority before filing Jira work.
   false-positive/false-negative proxies, recommendation text, or audit-bucket
   ordering are evaluator-policy evidence. Check `JVNAUTOSCI-2024` before
   creating a new task.
+- Source-ingestion services are drift candidates when they define durable
+  ontology source profiles in Python: source-family concept ids, per-environment
+  document/file-copy types, predicate ids, profile names, source-system labels,
+  and default profile catalogues. Adapter discovery and idempotent writes can be
+  support-only, but represented profile authority should live in Vontology.
+- Benchmark services are drift candidates when they define outcome labels,
+  expected routes, coverage tags, expected authority sources, execution modes,
+  strategy names, retention priorities, or signal/rubric categories in Python or
+  repo seed bundles. Metric arithmetic can remain Python support, but the
+  benchmark case/rubric authority should be represented.
 
 ## Recent Examples
 
@@ -118,3 +128,7 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2024` - episode evaluator criteria, benchmark proxy signals,
   recommendations, and critic policy should be authority-backed evaluator
   artefacts rather than Python proxy tables.
+- `JVNAUTOSCI-2326` - AI coding-session ingestion source profiles and ontology
+  type/predicate catalogues in Python.
+- `JVNAUTOSCI-2327` - selector/context benchmark rubrics and coverage/source
+  categories in Python/repo seed bundles.
