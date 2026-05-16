@@ -98,6 +98,11 @@ represented authority before filing Jira work.
   strategy names, retention priorities, or signal/rubric categories in Python or
   repo seed bundles. Metric arithmetic can remain Python support, but the
   benchmark case/rubric authority should be represented.
+- Required-tool obligation ledgers are support surfaces, but Python prefix
+  classifiers and payload-key lists that decide operation class, evidence role,
+  target identity, or target-closure requirements are drift candidates. Keep the
+  counting/telemetry in Python and move semantic bindings to represented tool or
+  workflow metadata.
 
 ## Recent Examples
 
@@ -132,3 +137,6 @@ represented authority before filing Jira work.
   type/predicate catalogues in Python.
 - `JVNAUTOSCI-2327` - selector/context benchmark rubrics and coverage/source
   categories in Python/repo seed bundles.
+- `JVNAUTOSCI-2329` - required-tool operation classes and target-closure
+  semantics inferred from Python tool-name/payload-key heuristics rather than
+  represented tool/workflow metadata.
