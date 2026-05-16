@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "12",
-  "source_tag": "JVNAUTOSCI-2251-repair",
+  "seed_version": "13",
+  "source_tag": "JVNAUTOSCI-2333",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -1567,6 +1567,20 @@
             "extractor": "arxiv_id_list",
             "required": false,
             "source_expression": "inputs.prompt",
+            "target_context_key": "arxiv_ids"
+          },
+          {
+            "description": "Resolve an arXiv identifier from shared prior-turn context when the current request is deictic but the paper handle was established earlier.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.augmented_context",
+            "target_context_key": "arxiv_id"
+          },
+          {
+            "description": "Resolve all arXiv identifiers from shared prior-turn context when the current request refers to a prior set of papers.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.augmented_context",
             "target_context_key": "arxiv_ids"
           },
           {

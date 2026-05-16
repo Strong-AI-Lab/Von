@@ -52,6 +52,9 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
 )
+from src.backend.workflows.workflow_launch_input_contracts import (
+    resolve_workflow_launch_inputs,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PAPER_REPO_SEED_ASSET_PATH = (
@@ -766,6 +769,22 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert any(
         isinstance(item, dict)
         and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression") == "inputs.augmented_context"
+        and item.get("extractor") == "arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_ids"
+        and item.get("source_expression") == "inputs.augmented_context"
+        and item.get("extractor") == "arxiv_id_list"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
         and item.get("source_expression")
         == "inputs.turn_expected_outcome_contract.summary"
         and item.get("extractor") == "arxiv_id"
@@ -1189,6 +1208,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     }
     assert {
         "inputs.arxiv_id",
+        "inputs.augmented_context",
         "inputs.turn_expected_outcome_contract.summary",
         "inputs.turn_expected_outcome_contract_state.fields.summary",
         "inputs.workflow_discovery_result.discovery_query_input",
@@ -1201,6 +1221,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert {
         "inputs.arxiv_ids",
         "inputs.prompt",
+        "inputs.augmented_context",
         "inputs.turn_expected_outcome_contract.summary",
         "inputs.turn_expected_outcome_contract_state.fields.summary",
         "inputs.workflow_discovery_result.discovery_query_input",
@@ -1216,7 +1237,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "12" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "13" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -1236,6 +1257,78 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert required_effect["targets_extractor"] == "arxiv_id_list"
     assert "workflow_discovery_result.discovery_query_input" in (
         required_effect["targets_source_expressions"]
+    )
+
+
+def test_arxiv_launch_contract_resolves_deictic_paper_ids_from_prior_context(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    launch_contract, launch_source = resolve_workflow_launch_input_contract(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    assert isinstance(launch_contract, dict)
+
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        contract=launch_contract,
+        contract_source=launch_source,
+        inputs={
+            "prompt": "Now represent all three papers",
+            "augmented_context": [
+                {
+                    "role": "user",
+                    "content": (
+                        "List the three emails you found in a previous turn "
+                        "wiht arXiv papers"
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": (
+                        "[2605.03042] ARIS: Autonomous Research via "
+                        "Adversarial Multi-Agent Collaboration\n"
+                        "[2202.04044] Aging and the Narrowing of Scientific "
+                        "Innovation\n"
+                        "[2605.00347] Odysseus: Scaling VLMs to 100+ Turn "
+                        "Decision-Making in Games via Reinforcement Learning"
+                    ),
+                },
+            ],
+            "turn_expected_outcome_contract_state": {
+                "fields": {
+                    "summary": (
+                        "Represent the three arXiv papers as durable Vontology "
+                        "scholarly-article artefacts, with verified concept IDs "
+                        "and read-back."
+                    )
+                }
+            },
+            "workflow_discovery_result": {
+                "discovery_query_input": (
+                    "Success target: represent the three arXiv papers as "
+                    "durable Vontology scholarly-article concepts."
+                )
+            },
+        },
+    )
+
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.resolved_inputs["prompt"] == "Now represent all three papers"
+    assert resolution.resolved_inputs["arxiv_id"] == "2605.03042"
+    assert resolution.resolved_inputs["arxiv_ids"] == [
+        "2605.03042",
+        "2202.04044",
+        "2605.00347",
+    ]
+    assert resolution.diagnostics["status"] == "resolved"
+    assert any(
+        mapping.get("target_context_key") == "arxiv_ids"
+        and mapping.get("source_expression") == "inputs.augmented_context"
+        and mapping.get("resolution_reason") == "resolved"
+        for mapping in resolution.diagnostics.get("mappings") or []
     )
 
 

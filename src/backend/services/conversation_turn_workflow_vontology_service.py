@@ -26,7 +26,7 @@ from ..workflows.definitions import (
 )
 
 _MANAGED_BY = "conversation_turn_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-1770"
+_SOURCE_TAG = "JVNAUTOSCI-2333"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -280,6 +280,7 @@ def _ensure_conversation_turn_prompt_support(
                 "represented labels, categories, tags, role markers",
                 "#V#represented_artefact_creation_workflow",
                 "grounded `parent_id`",
+                "stable target handles",
             ),
         )
     ):

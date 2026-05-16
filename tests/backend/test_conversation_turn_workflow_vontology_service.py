@@ -135,6 +135,14 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "gmail_send_message" in expected_outcome_text
     assert "allow_send=true" in expected_outcome_text
     assert '"required_tools":["gmail_send_message"]' in expected_outcome_text
+    assert "deictic or count-based" in expected_outcome_text
+    assert "stable target handles" in expected_outcome_text
+    assert "Do not replace concrete handles such as `2605.03042`" in (
+        expected_outcome_text
+    )
+    assert "workflow launch, verification, read-back, or recovery" in (
+        expected_outcome_text
+    )
 
     missing_tool_retry_rows = get_texts_for_concept(
         MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
