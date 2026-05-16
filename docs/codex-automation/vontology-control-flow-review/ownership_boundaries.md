@@ -71,6 +71,9 @@ predicates, and KB assertions should own durable:
 - Benchmark/rubric authority, including benchmark suites/cases, expected
   outcomes, coverage tags, expected authority sources, execution modes, strategy
   labels, retention priorities, signal categories, and pass/fail rubric meaning.
+- Required-tool obligation semantics, including operation class, evidence role,
+  target-bearing input/output fields, target-closure requirements, and read-back
+  policy for required tools.
 
 ## Python Support
 
@@ -93,8 +96,9 @@ Python can remain the surface for:
 - generic knowledge-acquisition profile loading, validation, source telemetry,
   confidence arithmetic, and canonical relation mutation support;
 - generic required-tool ledger construction, invocation counting, read-back
-  evidence preservation, and telemetry when operation classes and policy values
-  come from represented tool/workflow metadata;
+  evidence preservation, target extraction from represented field specs, and
+  telemetry when operation classes and policy values come from represented
+  tool/workflow metadata;
 - generic tool metadata loading, validation, normalisation, merge telemetry, and
   fail-closed diagnostics when represented metadata is absent;
 - generic representation-profile executors that load represented talk/presentation
