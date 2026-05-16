@@ -80,3 +80,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2327` - selector/context benchmark labels, expected outcomes,
   coverage tags, expected sources, execution modes, and signal/rubric categories
   live in Python/repo seed bundles instead of represented benchmark authority.
+- `JVNAUTOSCI-2329` - required-tool operation classes, target-bearing fields,
+  and target-closure semantics live in Python prefix/key heuristics instead of
+  represented tool/workflow metadata.
