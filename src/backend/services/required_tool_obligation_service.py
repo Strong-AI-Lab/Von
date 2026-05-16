@@ -11,11 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .tool_metadata_service import (
-    is_tool_search_evidence,
-    is_tool_verification_read,
-    is_tool_write,
-)
+from .tool_metadata_service import get_tool_required_obligation_metadata
 
 REQUIRED_TOOL_OBLIGATION_LEDGER_SCHEMA_VERSION = "required_tool_obligation_ledger.v1"
 
@@ -44,6 +40,7 @@ BLOCKER_MUTATION_SUCCEEDED_READBACK_MISSING = "mutation_succeeded_readback_missi
 BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED = "readback_attempted_but_not_verified"
 BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED = "required_tool_attempt_failed"
 BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED = "target_required_tool_attempt_failed"
+BLOCKER_REQUIRED_TOOL_METADATA_MISSING = "required_tool_metadata_missing"
 
 
 def _safe_str(value: Any) -> str:
@@ -108,28 +105,13 @@ def classify_required_tool_operation(tool_name: str) -> str:
     """Classify a required tool into a generic execution obligation class."""
 
     cleaned = _safe_str(tool_name)
-    lowered = cleaned.lower()
-    if not lowered:
-        return OPERATION_EXTERNAL_SIDE_EFFECT
+    metadata = get_tool_required_obligation_metadata(cleaned)
+    return metadata.operation_class or OPERATION_EXTERNAL_SIDE_EFFECT
 
-    if lowered == "workflow_execute":
-        return OPERATION_WORKFLOW_EXECUTE
-    if is_tool_write(cleaned):
-        return OPERATION_MUTATION_WRITE
-    if lowered.startswith(("search_", "list_", "resolve_", "find_")):
-        return OPERATION_SEARCH_OR_RESOLUTION_READ
-    if is_tool_verification_read(cleaned):
-        return OPERATION_VERIFICATION_READ
-    if is_tool_search_evidence(cleaned):
-        return OPERATION_SEARCH_OR_RESOLUTION_READ
 
-    if lowered.startswith(("create_", "add_", "upsert_", "mark_", "materialise_")):
-        return OPERATION_MUTATION_WRITE
-    if lowered.startswith(("get_", "fetch_", "read_")):
-        return OPERATION_VERIFICATION_READ
-    if lowered.startswith("workflow_"):
-        return OPERATION_WORKFLOW_EXECUTE
-    return OPERATION_EXTERNAL_SIDE_EFFECT
+def _has_required_tool_operation_metadata(tool_name: str) -> bool:
+    metadata = get_tool_required_obligation_metadata(tool_name)
+    return bool(metadata.operation_class)
 
 
 def _method_lookup(method_catalogue: Mapping[str, Any] | None) -> set[str] | None:
@@ -227,57 +209,78 @@ def _normalise_target_tokens(values: Sequence[Any]) -> list[str]:
     return tokens
 
 
-def _target_tokens_from_mapping(source: Mapping[str, Any]) -> list[str]:
-    target_values: list[Any] = []
-    for raw_key, value in source.items():
-        if not isinstance(raw_key, str):
-            continue
-        key = raw_key.strip().lower()
+def _value_at_path(source: Mapping[str, Any], path: str) -> Any:
+    current: Any = source
+    for part in path.split("."):
+        key = part.strip()
         if not key:
+            return None
+        if not isinstance(current, Mapping) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def _target_tokens_from_mapping(
+    source: Mapping[str, Any],
+    *,
+    field_names: Sequence[str],
+) -> list[str]:
+    target_values: list[Any] = []
+    for raw_field_name in field_names:
+        if not isinstance(raw_field_name, str):
             continue
-        if (
-            key == "concept_id"
-            or key.endswith("_concept_id")
-            or key
-            in {
-                "source_id",
-                "target_id",
-                "subject_id",
-                "object_id",
-                "entity_id",
-                "anchor_id",
-            }
+        field_name = raw_field_name.strip()
+        if not field_name:
+            continue
+        value = _value_at_path(source, field_name)
+        if isinstance(value, str) and value.strip().startswith("#V#"):
+            target_values.append(value)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
         ):
-            if isinstance(value, str):
-                if value.strip().startswith("#V#") or "concept" in key:
-                    target_values.append(value)
-            elif isinstance(value, Sequence) and not isinstance(
-                value, (bytes, bytearray)
-            ):
-                target_values.append(
-                    [
-                        item
-                        for item in value
-                        if isinstance(item, str)
-                        and (item.strip().startswith("#V#") or "concept" in key)
-                    ]
-                )
+            target_values.append(
+                [
+                    item
+                    for item in value
+                    if isinstance(item, str) and item.startswith("#V#")
+                ]
+            )
     return _normalise_target_tokens(target_values)
 
 
-def _target_tokens_from_invocation(invocation: Mapping[str, Any]) -> list[str]:
+def _target_tokens_from_invocation(
+    tool_name: str,
+    invocation: Mapping[str, Any],
+) -> list[str]:
     explicit_targets = invocation.get("target_ids") or invocation.get("target_tokens")
     target_values: list[Any] = []
     if isinstance(explicit_targets, Sequence) and not isinstance(
         explicit_targets, (str, bytes, bytearray)
     ):
         target_values.extend(explicit_targets)
+
+    metadata = get_tool_required_obligation_metadata(tool_name)
     arguments = _arguments_from_invocation(invocation)
-    if arguments:
-        target_values.extend(_target_tokens_from_mapping(arguments))
+    if arguments and metadata.target_argument_names:
+        target_values.extend(
+            _target_tokens_from_mapping(
+                arguments,
+                field_names=metadata.target_argument_names,
+            )
+        )
     if not target_values:
         payload = _payload_from_invocation(invocation)
-        target_values.extend(_target_tokens_from_mapping(payload))
+        payload_field_names = (
+            metadata.target_payload_field_names or metadata.target_argument_names
+        )
+        if payload and payload_field_names:
+            target_values.extend(
+                _target_tokens_from_mapping(
+                    payload,
+                    field_names=payload_field_names,
+                )
+            )
     return _normalise_target_tokens(target_values)
 
 
@@ -344,7 +347,10 @@ def _attempt_failure_blocker(
     return BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
 
 
-def _operation_supports_target_closure(operation_class: str) -> bool:
+def _operation_supports_target_closure(tool_name: str, operation_class: str) -> bool:
+    metadata = get_tool_required_obligation_metadata(tool_name)
+    if metadata.target_closure_required is not None:
+        return metadata.target_closure_required
     return operation_class in {
         OPERATION_SEARCH_OR_RESOLUTION_READ,
         OPERATION_VERIFICATION_READ,
@@ -419,9 +425,7 @@ def _validation_failure_lookup(
     lookup: dict[str, dict[str, Any]] = {}
 
     if isinstance(tool_call_validation_failure_context, Mapping):
-        failures_by_tool = tool_call_validation_failure_context.get(
-            "failures_by_tool"
-        )
+        failures_by_tool = tool_call_validation_failure_context.get("failures_by_tool")
         if isinstance(failures_by_tool, Mapping):
             for raw_tool_key, raw_failure in failures_by_tool.items():
                 if not isinstance(raw_failure, Mapping):
@@ -478,9 +482,7 @@ def _validation_failure_status(failure: Mapping[str, Any] | None) -> str:
     if not isinstance(failure, Mapping):
         return ""
     errors = failure.get("errors")
-    if not isinstance(errors, Sequence) or isinstance(
-        errors, (str, bytes, bytearray)
-    ):
+    if not isinstance(errors, Sequence) or isinstance(errors, (str, bytes, bytearray)):
         return "tool_call_validation_failed"
     for error in errors:
         if not isinstance(error, Mapping):
@@ -495,9 +497,7 @@ def _validation_failure_message(failure: Mapping[str, Any] | None) -> str:
     if not isinstance(failure, Mapping):
         return ""
     errors = failure.get("errors")
-    if not isinstance(errors, Sequence) or isinstance(
-        errors, (str, bytes, bytearray)
-    ):
+    if not isinstance(errors, Sequence) or isinstance(errors, (str, bytes, bytearray)):
         return ""
     for error in errors:
         if not isinstance(error, Mapping):
@@ -623,8 +623,8 @@ def build_required_tool_obligation_ledger(
         attempted_operation_classes.append(operation_class)
         if status == "ok":
             successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
-        if _operation_supports_target_closure(operation_class):
-            for target in _target_tokens_from_invocation(invocation):
+        if _operation_supports_target_closure(tool_name, operation_class):
+            for target in _target_tokens_from_invocation(tool_name, invocation):
                 target_key = target.lower()
                 target_entry = target_status_by_tool.setdefault(lowered, {}).setdefault(
                     target_key,
@@ -683,6 +683,7 @@ def build_required_tool_obligation_ledger(
             continue
         lowered = cleaned_tool.lower()
         operation_class = classify_required_tool_operation(cleaned_tool)
+        operation_metadata_present = _has_required_tool_operation_metadata(cleaned_tool)
         existing = existing_lookup.get(lowered, {})
 
         if allowed is None:
@@ -715,6 +716,7 @@ def build_required_tool_obligation_ledger(
             successful_count > 0
             and bool(allowed_by_policy)
             and available_on_gateway is not False
+            and operation_metadata_present
             and unresolved_failed_target_count <= 0
         )
 
@@ -728,6 +730,9 @@ def build_required_tool_obligation_ledger(
         elif available_on_gateway is False:
             blocking_reason = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
             failure_class = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
+        elif not operation_metadata_present:
+            blocking_reason = BLOCKER_REQUIRED_TOOL_METADATA_MISSING
+            failure_class = BLOCKER_REQUIRED_TOOL_METADATA_MISSING
         elif not satisfied:
             if unresolved_failed_target_count > 0:
                 blocking_reason = BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
@@ -758,6 +763,7 @@ def build_required_tool_obligation_ledger(
             "source": sources[0] if sources else "required_tools",
             "sources": list(sources),
             "operation_class": operation_class,
+            "operation_metadata_present": operation_metadata_present,
             "allowed_by_workflow_policy": bool(allowed_by_policy),
             "available_on_gateway": available_on_gateway,
             "planned_count": planned_count,
@@ -788,9 +794,10 @@ def build_required_tool_obligation_ledger(
         raw_existing_cap = existing_ledger.get("max_tool_invocations")
         if isinstance(raw_existing_cap, int):
             max_tool_invocations = raw_existing_cap
-    observed_invocation_count = len(
-        [item for item in invocations or () if isinstance(item, Mapping)]
-    ) + observed_equivalent_invocation_count
+    observed_invocation_count = (
+        len([item for item in invocations or () if isinstance(item, Mapping)])
+        + observed_equivalent_invocation_count
+    )
     exhausted_budget = (
         isinstance(max_tool_invocations, int)
         and max_tool_invocations >= 0

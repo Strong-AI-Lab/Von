@@ -19,7 +19,7 @@ import threading
 import time
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,12 @@ class ToolMetadata:
     operation_category: str | None = None
     evidence_role: str | None = None
     evidence_kind: str | None = None
+    required_tool_operation_class: str | None = None
+    required_tool_target_closure: bool | None = None
+    required_tool_target_argument_names: tuple[str, ...] = field(default_factory=tuple)
+    required_tool_target_payload_field_names: tuple[str, ...] = field(
+        default_factory=tuple
+    )
     target_concept_argument_name: str | None = None
     target_concept_source: str | None = None
     target_concept_max_count: int | None = None
@@ -99,6 +105,27 @@ class ToolTargetConceptBindingMetadata:
     target_concept_source: str = "focal_concept"
     target_concept_max_count: int | None = None
     default_payload: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolRequiredObligationMetadata:
+    """Tool semantics needed by required-tool completion-gate accounting."""
+
+    operation_class: str | None = None
+    target_closure_required: bool | None = None
+    target_argument_names: tuple[str, ...] = field(default_factory=tuple)
+    target_payload_field_names: tuple[str, ...] = field(default_factory=tuple)
+
+
+_REQUIRED_TOOL_OPERATION_CLASSES = frozenset(
+    {
+        "search_or_resolution_read",
+        "verification_read",
+        "mutation_write",
+        "external_side_effect",
+        "workflow_execute",
+    }
+)
 
 
 _DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
@@ -169,6 +196,8 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
         "external_surface": False,
+        "operation_category": "read",
+        "evidence_role": "search",
     },
     "list_uncertain_relationship_assertions": {
         "salience": "medium",
@@ -1369,6 +1398,22 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 operation_category=attrs.get("operation_category"),
                 evidence_role=attrs.get("evidence_role"),
                 evidence_kind=attrs.get("evidence_kind"),
+                required_tool_operation_class=attrs.get(
+                    "required_tool_operation_class"
+                ),
+                required_tool_target_closure=_coerce_optional_bool(
+                    attrs.get("required_tool_target_closure")
+                    if attrs.get("required_tool_target_closure") is not None
+                    else attrs.get("target_closure_required")
+                ),
+                required_tool_target_argument_names=_coerce_string_tuple(
+                    attrs.get("required_tool_target_argument_names")
+                    or attrs.get("required_tool_target_argument_name")
+                ),
+                required_tool_target_payload_field_names=_coerce_string_tuple(
+                    attrs.get("required_tool_target_payload_field_names")
+                    or attrs.get("required_tool_target_payload_field_name")
+                ),
                 target_concept_argument_name=attrs.get("target_concept_argument_name"),
                 target_concept_source=attrs.get("target_concept_source"),
                 target_concept_max_count=_coerce_optional_positive_int(
@@ -1423,6 +1468,20 @@ def _refresh_cache_if_needed() -> None:
                 operation_category=defaults.get("operation_category"),
                 evidence_role=defaults.get("evidence_role"),
                 evidence_kind=defaults.get("evidence_kind"),
+                required_tool_operation_class=defaults.get(
+                    "required_tool_operation_class"
+                ),
+                required_tool_target_closure=_coerce_optional_bool(
+                    defaults.get("required_tool_target_closure")
+                ),
+                required_tool_target_argument_names=_coerce_string_tuple(
+                    defaults.get("required_tool_target_argument_names")
+                    or defaults.get("required_tool_target_argument_name")
+                ),
+                required_tool_target_payload_field_names=_coerce_string_tuple(
+                    defaults.get("required_tool_target_payload_field_names")
+                    or defaults.get("required_tool_target_payload_field_name")
+                ),
                 target_concept_argument_name=defaults.get(
                     "target_concept_argument_name"
                 ),
@@ -1477,6 +1536,23 @@ def _refresh_cache_if_needed() -> None:
                     or default_metadata.evidence_role,
                     evidence_kind=metadata.evidence_kind
                     or default_metadata.evidence_kind,
+                    required_tool_operation_class=(
+                        metadata.required_tool_operation_class
+                        or default_metadata.required_tool_operation_class
+                    ),
+                    required_tool_target_closure=(
+                        metadata.required_tool_target_closure
+                        if metadata.required_tool_target_closure is not None
+                        else default_metadata.required_tool_target_closure
+                    ),
+                    required_tool_target_argument_names=(
+                        metadata.required_tool_target_argument_names
+                        or default_metadata.required_tool_target_argument_names
+                    ),
+                    required_tool_target_payload_field_names=(
+                        metadata.required_tool_target_payload_field_names
+                        or default_metadata.required_tool_target_payload_field_names
+                    ),
                     target_concept_argument_name=(
                         metadata.target_concept_argument_name
                         or default_metadata.target_concept_argument_name
@@ -1607,6 +1683,29 @@ def _normalise_evidence_kind(value: Any) -> str | None:
     return None
 
 
+def _normalise_required_tool_operation_class(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower().replace("-", "_")
+    aliases = {
+        "search": "search_or_resolution_read",
+        "search_read": "search_or_resolution_read",
+        "resolution_read": "search_or_resolution_read",
+        "read_search": "search_or_resolution_read",
+        "verification": "verification_read",
+        "read_verification": "verification_read",
+        "write": "mutation_write",
+        "mutation": "mutation_write",
+        "workflow": "workflow_execute",
+        "workflow_execution": "workflow_execute",
+        "external": "external_side_effect",
+    }
+    canonical = aliases.get(lowered, lowered)
+    if canonical in _REQUIRED_TOOL_OPERATION_CLASSES:
+        return canonical
+    return None
+
+
 def get_tool_family(
     tool_name: str,
     *,
@@ -1674,6 +1773,46 @@ def _coerce_optional_positive_int(value: Any) -> int | None:
     return None
 
 
+def _coerce_string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    values: Sequence[Any]
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, Sequence) and not isinstance(
+                parsed, (str, bytes, bytearray)
+            ):
+                values = parsed
+            else:
+                values = [item.strip() for item in stripped.split(",")]
+        else:
+            values = [item.strip() for item in stripped.split(",")]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        values = value
+    else:
+        return ()
+
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for raw_item in values:
+        item = str(raw_item or "").strip()
+        if not item or any(character.isspace() for character in item):
+            continue
+        lowered = item.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalised.append(item)
+    return tuple(normalised)
+
+
 def _coerce_optional_mapping(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Mapping):
         return {str(key): item for key, item in value.items() if str(key)}
@@ -1721,6 +1860,54 @@ def get_tool_target_concept_binding_metadata(
         ),
         target_concept_max_count=metadata.target_concept_max_count,
         default_payload=_coerce_optional_mapping(metadata.default_payload) or {},
+    )
+
+
+def get_tool_required_obligation_metadata(
+    tool_name: str,
+    *,
+    allow_registry_fallback: bool = True,
+) -> ToolRequiredObligationMetadata:
+    """Resolve represented semantics used by required-tool closure checks."""
+
+    metadata = get_tool_metadata(tool_name)
+    operation_class = _normalise_required_tool_operation_class(
+        metadata.required_tool_operation_class
+    )
+    if operation_class is None:
+        operation_category = get_tool_operation_category(
+            tool_name,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+        evidence_role = get_tool_evidence_role(
+            tool_name,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+        if operation_category == "write":
+            operation_class = "mutation_write"
+        elif evidence_role == "search":
+            operation_class = "search_or_resolution_read"
+        elif evidence_role == "verification":
+            operation_class = "verification_read"
+        elif str(tool_name or "").strip().lower() == "workflow_execute":
+            operation_class = "workflow_execute"
+
+    target_argument_names = list(metadata.required_tool_target_argument_names)
+    binding = get_tool_target_concept_binding_metadata(tool_name)
+    if binding is not None:
+        binding_name = binding.target_concept_argument_name
+        if binding_name.lower() not in {item.lower() for item in target_argument_names}:
+            target_argument_names.append(binding_name)
+
+    return ToolRequiredObligationMetadata(
+        operation_class=operation_class,
+        target_closure_required=_coerce_optional_bool(
+            metadata.required_tool_target_closure
+        ),
+        target_argument_names=tuple(target_argument_names),
+        target_payload_field_names=tuple(
+            metadata.required_tool_target_payload_field_names
+        ),
     )
 
 

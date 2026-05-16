@@ -2,6 +2,7 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
     BLOCKER_MUTATION_SUCCEEDED_READBACK_MISSING,
     BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
+    BLOCKER_REQUIRED_TOOL_METADATA_MISSING,
     BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
     BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
@@ -32,9 +33,118 @@ def _obligation_for_tool(ledger: dict, tool_name: str) -> dict:
     raise AssertionError(f"missing obligation for {tool_name}")
 
 
-def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> (
-    None
-):
+def test_required_tool_operation_and_target_closure_use_represented_metadata(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "semantic_lookup": ToolMetadata(
+                tool_name="semantic_lookup",
+                operation_category="read",
+                evidence_role="verification",
+                target_concept_argument_name="focal_entity",
+            ),
+            "semantic_mutator": ToolMetadata(
+                tool_name="semantic_mutator",
+                operation_category="write",
+            ),
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "represented_contract": ["semantic_lookup", "semantic_mutator"]
+            },
+            invocations=[
+                {
+                    "tool": "semantic_lookup",
+                    "status": "error",
+                    "arguments": {"focal_entity": "#V#target_a"},
+                    "payload": {"success": False, "error": "not found"},
+                },
+                {
+                    "tool": "semantic_lookup",
+                    "status": "ok",
+                    "arguments": {"focal_entity": "#V#target_b"},
+                    "payload": {"success": True, "focal_entity": "#V#target_b"},
+                },
+            ],
+            planned_tool_calls=[
+                {
+                    "tool": "semantic_mutator",
+                    "payload": {"name": "Missing required payload"},
+                }
+            ],
+            tool_call_validation_errors=[
+                {
+                    "tool": "semantic_mutator",
+                    "error_code": "schema_validation_failed",
+                    "message": "semantic_mutator payload unresolved.",
+                }
+            ],
+            allowed_tools=["semantic_lookup", "semantic_mutator"],
+            method_catalogue=_catalogue(["semantic_lookup", "semantic_mutator"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    lookup_obligation = _obligation_for_tool(ledger, "semantic_lookup")
+    assert lookup_obligation["operation_class"] == "verification_read"
+    assert lookup_obligation["operation_metadata_present"] is True
+    assert lookup_obligation["target_closure"]["unresolved_failed_targets"] == [
+        "#V#target_a"
+    ]
+    assert lookup_obligation["blocking_reason"] == (
+        BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+    )
+
+    mutator_obligation = _obligation_for_tool(ledger, "semantic_mutator")
+    assert mutator_obligation["operation_class"] == "mutation_write"
+    assert mutator_obligation["blocking_reason"] == (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+    )
+
+
+def test_prefix_like_required_tool_without_metadata_fails_closed(monkeypatch) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+
+    monkeypatch.setattr(metadata_service, "_load_from_vontology", lambda: {})
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "represented_contract": ["search_unrepresented_probe"]
+            },
+            invocations=[
+                {
+                    "tool": "search_unrepresented_probe",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#target_a"},
+                    "payload": {"success": True, "concept_id": "#V#target_a"},
+                }
+            ],
+            allowed_tools=["search_unrepresented_probe"],
+            method_catalogue=_catalogue(["search_unrepresented_probe"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(ledger, "search_unrepresented_probe")
+    assert obligation["successful_count"] == 1
+    assert obligation["operation_class"] == "external_side_effect"
+    assert obligation["operation_metadata_present"] is False
+    assert obligation["satisfied"] is False
+    assert obligation["blocking_reason"] == BLOCKER_REQUIRED_TOOL_METADATA_MISSING
+    assert BLOCKER_REQUIRED_TOOL_METADATA_MISSING in ledger["blocking_failure_codes"]
+
+
+def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> None:
     message = "create_concepts: Missing required field 'parent_id'."
 
     ledger = build_required_tool_obligation_ledger(
@@ -78,15 +188,14 @@ def test_schema_validation_failure_marks_required_mutation_payload_unresolved() 
         BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
     )
     assert create_obligation["tool_call_validation_errors"][0]["message"] == message
-    assert (
-        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
-        in ledger["blocking_failure_codes"]
-    )
+    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in ledger["blocking_failure_codes"]
 
 
 def test_absent_required_mutation_still_reports_not_planned() -> None:
     ledger = build_required_tool_obligation_ledger(
-        required_tools_by_source={"turn_expected_outcome_contract": ["create_concepts"]},
+        required_tools_by_source={
+            "turn_expected_outcome_contract": ["create_concepts"]
+        },
         invocations=[],
         allowed_tools=["create_concepts"],
         method_catalogue=_catalogue(["create_concepts"]),
