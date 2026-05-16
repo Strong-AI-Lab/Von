@@ -261,3 +261,28 @@
   `WorkflowDefinition` builders as watch/non-issues for this run where there was
   no fresh evidence of active production Python authority.
 - No production code was changed by this review run.
+
+## 2026-05-17T02:06:21.4906983+12:00
+
+- Read required repo guidance, situation-specific workflow/memory docs,
+  repo-local drift-review memories, and the global automation memory. As in
+  earlier shells, `$CODEX_HOME` was unset, so the writable
+  `C:\Users\mwit860\.codex\automations` memory path was used.
+- Reviewed commits since `2026-05-15T14:01:05Z`: prompt replay observation
+  recording, required-tool target closure, Workflow Studio child materialisation
+  support, and backend type diagnostics.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  the gate still failed only on `repo_seed_authority_drift_path_count`: baseline
+  `1`, current `2`, delta `1`, with the known
+  `jira_task_incremental_import_workflow_vontology_service.py` and
+  `kr_materialisation_workflow_vontology_service.py` paths already covered by
+  `JVNAUTOSCI-2315` and `JVNAUTOSCI-2271`.
+- Created `JVNAUTOSCI-2329` for the residual required-tool obligation seam:
+  `required_tool_obligation_service.py` still infers operation classes from
+  tool-name prefixes and target identity/closure semantics from Python payload
+  key lists. Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-2328`,
+  `JVNAUTOSCI-1985`, and `JVNAUTOSCI-2284`.
+- Treated Workflow Studio child materialisation as support-only and the replay
+  observation path as `JVNAUTOSCI-2324` remediation because durable recording
+  now requires represented replay evaluation by default.
+- No production code was changed by this review run.
