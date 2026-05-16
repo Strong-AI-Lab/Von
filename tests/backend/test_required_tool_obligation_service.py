@@ -4,6 +4,7 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
     BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
+    BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
     BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
     build_required_tool_obligation_ledger,
     required_tool_obligation_effect,
@@ -193,3 +194,46 @@ def test_obligation_effect_is_absent_only_when_all_required_tools_satisfied() ->
 
     assert ledger["unsatisfied_count"] == 0
     assert required_tool_obligation_effect(ledger) is None
+
+
+def test_verification_read_success_on_other_target_does_not_close_failed_target() -> (
+    None
+):
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={"turn_expected_outcome_contract": ["fetch_concept"]},
+        invocations=[
+            {
+                "tool": "fetch_concept",
+                "status": "error",
+                "arguments": {"concept_id": "#V#target_a"},
+                "payload": {"success": False, "error": "not found"},
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#target_b"},
+                "payload": {"success": True, "concept_id": "#V#target_b"},
+            },
+        ],
+        allowed_tools=["fetch_concept"],
+        method_catalogue=_catalogue(["fetch_concept"]),
+    )
+
+    fetch_obligation = _obligation_for_tool(ledger, "fetch_concept")
+    assert fetch_obligation["attempted_count"] == 2
+    assert fetch_obligation["successful_count"] == 1
+    assert fetch_obligation["satisfied"] is False
+    assert (
+        fetch_obligation["blocking_reason"]
+        == BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+    )
+    assert fetch_obligation["target_closure"] == {
+        "attempted_target_count": 2,
+        "successful_target_count": 1,
+        "failed_target_count": 1,
+        "unresolved_failed_target_count": 1,
+        "unresolved_failed_targets": ["#V#target_a"],
+    }
+    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
+        ledger["blocking_failure_codes"]
+    )

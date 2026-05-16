@@ -3940,18 +3940,20 @@ def _summarise_tool_invocations(
             result_summary = _safe_str(
                 payload_value.get("result_summary")
             ) or _safe_str(payload_value.get("summary"))
+        target_ids = _extract_tool_invocation_target_ids(invocation)
 
-        serialised.append(
-            {
-                "tool": tool_name,
-                "status": status,
-                "started_at_utc": None,
-                "completed_at_utc": None,
-                "error": error_value,
-                "result_summary": result_summary,
-                "payload_fingerprint": _hash_payload(payload_value),
-            }
-        )
+        serialised_invocation = {
+            "tool": tool_name,
+            "status": status,
+            "started_at_utc": None,
+            "completed_at_utc": None,
+            "error": error_value,
+            "result_summary": result_summary,
+            "payload_fingerprint": _hash_payload(payload_value),
+        }
+        if target_ids:
+            serialised_invocation["target_ids"] = target_ids
+        serialised.append(serialised_invocation)
 
         lowered = tool_name.lower()
         if status == "ok":

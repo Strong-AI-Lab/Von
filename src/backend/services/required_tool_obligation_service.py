@@ -43,6 +43,7 @@ BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS = (
 BLOCKER_MUTATION_SUCCEEDED_READBACK_MISSING = "mutation_succeeded_readback_missing"
 BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED = "readback_attempted_but_not_verified"
 BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED = "required_tool_attempt_failed"
+BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED = "target_required_tool_attempt_failed"
 
 
 def _safe_str(value: Any) -> str:
@@ -172,6 +173,19 @@ def _payload_from_invocation(invocation: Mapping[str, Any]) -> Mapping[str, Any]
     return {}
 
 
+def _arguments_from_invocation(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+    arguments = invocation.get("effective_arguments")
+    if isinstance(arguments, Mapping):
+        return arguments
+    arguments = invocation.get("arguments")
+    if isinstance(arguments, Mapping):
+        return arguments
+    arguments = invocation.get("input")
+    if isinstance(arguments, Mapping):
+        return arguments
+    return {}
+
+
 def _invocation_status(invocation: Mapping[str, Any]) -> str:
     raw_status = _safe_str(invocation.get("status")).lower()
     payload = _payload_from_invocation(invocation)
@@ -186,7 +200,119 @@ def _invocation_status(invocation: Mapping[str, Any]) -> str:
         return "failed"
     if payload.get("success") is False:
         return "failed"
+    if payload.get("success") is True:
+        return "ok"
     return raw_status or "unknown"
+
+
+def _normalise_target_tokens(values: Sequence[Any]) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        if isinstance(raw_value, Sequence) and not isinstance(
+            raw_value, (str, bytes, bytearray)
+        ):
+            nested_values = raw_value
+        else:
+            nested_values = [raw_value]
+        for nested_value in nested_values:
+            token = _safe_str(nested_value)
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            tokens.append(token)
+    return tokens
+
+
+def _target_tokens_from_mapping(source: Mapping[str, Any]) -> list[str]:
+    target_values: list[Any] = []
+    for raw_key, value in source.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip().lower()
+        if not key:
+            continue
+        if (
+            key == "concept_id"
+            or key.endswith("_concept_id")
+            or key
+            in {
+                "source_id",
+                "target_id",
+                "subject_id",
+                "object_id",
+                "entity_id",
+                "anchor_id",
+            }
+        ):
+            if isinstance(value, str):
+                if value.strip().startswith("#V#") or "concept" in key:
+                    target_values.append(value)
+            elif isinstance(value, Sequence) and not isinstance(
+                value, (bytes, bytearray)
+            ):
+                target_values.append(
+                    [
+                        item
+                        for item in value
+                        if isinstance(item, str)
+                        and (item.strip().startswith("#V#") or "concept" in key)
+                    ]
+                )
+    return _normalise_target_tokens(target_values)
+
+
+def _target_tokens_from_invocation(invocation: Mapping[str, Any]) -> list[str]:
+    explicit_targets = invocation.get("target_ids") or invocation.get("target_tokens")
+    target_values: list[Any] = []
+    if isinstance(explicit_targets, Sequence) and not isinstance(
+        explicit_targets, (str, bytes, bytearray)
+    ):
+        target_values.extend(explicit_targets)
+    arguments = _arguments_from_invocation(invocation)
+    if arguments:
+        target_values.extend(_target_tokens_from_mapping(arguments))
+    if not target_values:
+        payload = _payload_from_invocation(invocation)
+        target_values.extend(_target_tokens_from_mapping(payload))
+    return _normalise_target_tokens(target_values)
+
+
+def _build_target_closure_payload(
+    target_status: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(target_status, Mapping) or not target_status:
+        return None
+
+    attempted_targets: list[str] = []
+    successful_targets: list[str] = []
+    failed_targets: list[str] = []
+    unresolved_failed_targets: list[str] = []
+    for entry in target_status.values():
+        target = _safe_str(entry.get("target"))
+        if not target:
+            continue
+        attempted_targets.append(target)
+        if int(entry.get("successful_count") or 0) > 0:
+            successful_targets.append(target)
+        if int(entry.get("failed_count") or 0) > 0:
+            failed_targets.append(target)
+        if (
+            int(entry.get("failed_count") or 0) > 0
+            and int(entry.get("successful_count") or 0) <= 0
+        ):
+            unresolved_failed_targets.append(target)
+
+    return {
+        "attempted_target_count": len(attempted_targets),
+        "successful_target_count": len(successful_targets),
+        "failed_target_count": len(failed_targets),
+        "unresolved_failed_target_count": len(unresolved_failed_targets),
+        "unresolved_failed_targets": unresolved_failed_targets[:10],
+    }
 
 
 def _invocation_text(invocation: Mapping[str, Any]) -> str:
@@ -216,6 +342,13 @@ def _attempt_failure_blocker(
         ):
             return BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
     return BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
+
+
+def _operation_supports_target_closure(operation_class: str) -> bool:
+    return operation_class in {
+        OPERATION_SEARCH_OR_RESOLUTION_READ,
+        OPERATION_VERIFICATION_READ,
+    }
 
 
 def _existing_obligation_lookup(
@@ -450,6 +583,7 @@ def build_required_tool_obligation_ledger(
     last_status_by_tool: dict[str, str] = {}
     last_invocation_by_tool: dict[str, Mapping[str, Any]] = {}
     attempted_operation_classes: list[str] = []
+    target_status_by_tool: dict[str, dict[str, dict[str, Any]]] = {}
     for lowered, failure in validation_failures_by_tool.items():
         tool_name = _safe_str(failure.get("tool"))
         if not tool_name:
@@ -485,9 +619,33 @@ def build_required_tool_obligation_ledger(
         status = _invocation_status(invocation)
         last_status_by_tool[lowered] = status
         last_invocation_by_tool[lowered] = invocation
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        operation_class = classify_required_tool_operation(tool_name)
+        attempted_operation_classes.append(operation_class)
         if status == "ok":
             successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
+        if _operation_supports_target_closure(operation_class):
+            for target in _target_tokens_from_invocation(invocation):
+                target_key = target.lower()
+                target_entry = target_status_by_tool.setdefault(lowered, {}).setdefault(
+                    target_key,
+                    {
+                        "target": target,
+                        "attempted_count": 0,
+                        "successful_count": 0,
+                        "failed_count": 0,
+                    },
+                )
+                target_entry["attempted_count"] = (
+                    int(target_entry.get("attempted_count") or 0) + 1
+                )
+                if status == "ok":
+                    target_entry["successful_count"] = (
+                        int(target_entry.get("successful_count") or 0) + 1
+                    )
+                elif status and status != "unknown":
+                    target_entry["failed_count"] = (
+                        int(target_entry.get("failed_count") or 0) + 1
+                    )
 
     observed_equivalent_invocation_count = 0
     for tool_name in normalise_required_tool_names(
@@ -545,10 +703,19 @@ def build_required_tool_obligation_ledger(
         attempted_count = attempted_counts.get(lowered, 0)
         successful_count = successful_counts.get(lowered, 0)
         validation_failure = validation_failures_by_tool.get(lowered)
+        target_closure = _build_target_closure_payload(
+            target_status_by_tool.get(lowered)
+        )
+        unresolved_failed_target_count = (
+            int(target_closure.get("unresolved_failed_target_count") or 0)
+            if isinstance(target_closure, Mapping)
+            else 0
+        )
         satisfied = (
             successful_count > 0
             and bool(allowed_by_policy)
             and available_on_gateway is not False
+            and unresolved_failed_target_count <= 0
         )
 
         blocking_reason = ""
@@ -562,7 +729,10 @@ def build_required_tool_obligation_ledger(
             blocking_reason = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
             failure_class = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
         elif not satisfied:
-            if validation_failure is not None:
+            if unresolved_failed_target_count > 0:
+                blocking_reason = BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+                failure_class = blocking_reason
+            elif validation_failure is not None:
                 if operation_class == OPERATION_MUTATION_WRITE:
                     blocking_reason = BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
                 else:
@@ -598,6 +768,8 @@ def build_required_tool_obligation_ledger(
             "failure_class": failure_class,
             "satisfied": satisfied,
         }
+        if isinstance(target_closure, Mapping):
+            obligation["target_closure"] = dict(target_closure)
         if validation_failure is not None:
             errors = validation_failure.get("errors")
             if isinstance(errors, Sequence) and not isinstance(
@@ -744,6 +916,7 @@ def required_tool_obligation_effect(
         BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
         BLOCKER_WRITE_POLICY_DENIED_OR_UNCONFIRMED,
         BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
+        BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
     }
     status = (
         "not_satisfied"

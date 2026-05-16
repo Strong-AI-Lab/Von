@@ -8,6 +8,7 @@ from src.backend.services.turn_execution_record_service import (
 )
 from src.backend.services.required_tool_obligation_service import (
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
+    BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
 )
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
@@ -488,3 +489,92 @@ def test_contract_required_gmail_profile_and_relation_tools_block_generic_chat()
         "gmail_list_profiles",
         "find_relations_with_argument",
     ]
+
+
+def test_target_failed_required_reads_are_not_closed_by_later_other_target_success() -> (
+    None
+):
+    required_tools = [
+        "fetch_concept",
+        "find_relations_with_argument",
+        "get_text_relations_summary",
+    ]
+    failed_targets = [
+        "#V#gmail_message_19e2b80d1bb1cf41",
+        "#V#gmail_message_19e0ae6e60af70e8",
+        "#V#gmail_message_19dfbb8ec1f7bdd8",
+    ]
+    tool_invocations: list[dict[str, Any]] = []
+    for target in failed_targets:
+        for tool_name in required_tools:
+            tool_invocations.append(
+                {
+                    "tool": tool_name,
+                    "status": "error",
+                    "arguments": {"concept_id": target},
+                    "payload": {
+                        "success": False,
+                        "concept_id": target,
+                        "error": (
+                            "User cannot view text for an inaccessible concept"
+                            if tool_name == "get_text_relations_summary"
+                            else "Concept not found or inaccessible"
+                        ),
+                    },
+                }
+            )
+    for tool_name in required_tools:
+        tool_invocations.append(
+            {
+                "tool": tool_name,
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "payload": {"success": True, "concept_id": "#V#michael_witbrock"},
+            }
+        )
+
+    record = build_turn_execution_record(
+        request_id="req-target-specific-required-readback",
+        session_id="session-target-specific-required-readback",
+        namespace="#V#user@org",
+        actor_concept_id="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Check that the recently represented items are now represented.",
+        response_text="The requested read-back is complete.",
+        interaction_timestamp_utc="2026-05-16T02:16:56Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=tool_invocations,
+        turn_expected_outcome_contract={
+            "summary": (
+                "Verify that recently found items are represented in Vontology."
+            ),
+            "required_tools": required_tools,
+        },
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is False
+    assert gate["requires_follow_up"] is True
+    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
+        gate["blocking_failure_codes"]
+    )
+
+    summary = record["execution"]["summary"]
+    ledger = summary["required_tool_obligations"]
+    assert ledger["unsatisfied_required_tools"] == required_tools
+    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
+        summary["required_tool_obligation_blocking_failure_codes"]
+    )
+    fetch_obligation = next(
+        item for item in ledger["obligations"] if item["tool_name"] == "fetch_concept"
+    )
+    assert fetch_obligation["target_closure"]["unresolved_failed_target_count"] == 3
+    assert fetch_obligation["target_closure"]["successful_target_count"] == 1
+    assert record["workflow_routing_diagnostics"]["dispatch"][
+        "required_tool_obligation_blocking_failure_codes"
+    ] == [BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED]
