@@ -324,6 +324,14 @@ def extract_signals_from_tool_result(
                 model=model,
             )
         else:
+            if llm_client is None:
+                return StructuredSignals(
+                    signals={},
+                    hint_body=hint_body,
+                    hint_resolved=True,
+                    raw_response="",
+                    warnings=("no_llm_client",),
+                )
             generation_result = llm_client.generate(
                 prompt=prompt,
                 context=None,

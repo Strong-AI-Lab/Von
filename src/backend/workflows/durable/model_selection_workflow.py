@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from ..action_registry import (
     ActionRegistry,
@@ -208,7 +208,7 @@ def _handle_select_stage_model(
     )
     user_concept_id, org_concept_id = _resolve_user_context_ids(request)
 
-    gateway = request.environment.gateway or _NoopGateway()
+    gateway = cast(Any, request.environment.gateway or _NoopGateway())
     orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
     policy_state, policy_telemetry = orchestrator._load_workflow_model_policy(None)
     registry_snapshot = get_model_registry_snapshot()

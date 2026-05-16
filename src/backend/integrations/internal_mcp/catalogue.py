@@ -26336,10 +26336,9 @@ def _resolve_chat_history_read_target(
                 details={"field_conflicts": conflicts},
             )
 
-        extracted_fields = (
-            normalised_conversation_ref.get("fields")
-            if isinstance(normalised_conversation_ref.get("fields"), Mapping)
-            else {}
+        raw_extracted_fields = normalised_conversation_ref.get("fields")
+        extracted_fields: Mapping[str, Any] = (
+            raw_extracted_fields if isinstance(raw_extracted_fields, Mapping) else {}
         )
         explicit_conflicts = _merge_public_conversation_ref_fields_into_payload(
             payload_for_resolution,

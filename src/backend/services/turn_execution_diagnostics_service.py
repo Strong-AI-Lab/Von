@@ -1107,11 +1107,13 @@ def get_turn_execution_diagnostics_payload(
         if isinstance(history_index, int) and payload.get("chat_session_id")
         else None
     )
-    response_surface_target_message = (
-        dict(history_context.get("target_message"))
+    raw_target_message = (
+        history_context.get("target_message")
         if isinstance(history_context, Mapping)
-        and isinstance(history_context.get("target_message"), Mapping)
         else None
+    )
+    response_surface_target_message: dict[str, Any] | None = (
+        dict(raw_target_message) if isinstance(raw_target_message, Mapping) else None
     )
     if isinstance(response_surface_target_message, dict) and not isinstance(
         response_surface_target_message.get("history_location"), Mapping

@@ -334,7 +334,6 @@ def _build_subworkflow_handler(
                     child_workflow_id,
                     registry=None,
                     use_current_shared_registry=True,
-                    promote_to_registry=registry,
                     register_authoritative_fallback=True,
                     actor_user_id=actor_user_id,
                     actor_org_id=actor_org_id,
