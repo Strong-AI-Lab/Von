@@ -1842,13 +1842,14 @@ def apply_workflow_authoring_spec(
     runtime_definition, _runtime_source, _registry = _load_runtime_definition(
         _clean_text(workflow_id)
     )
-    create_missing = not (
+    create_missing_workflow = not (
         runtime_definition is not None
         or _workflow_concept_exists(_clean_text(workflow_id))
     )
     publication = publish_workflow_definition_from_definition(
         definition=definition,
-        create_missing=create_missing,
+        create_missing=create_missing_workflow,
+        create_missing_child_concepts=True,
         purpose=purpose or None,
     )
     return {

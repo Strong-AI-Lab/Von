@@ -2618,6 +2618,7 @@ def publish_canonical_chat_workflow_graphs(
     *,
     registry: WorkflowRegistry | None = None,
     create_missing: bool = True,
+    create_missing_child_concepts: bool | None = None,
     upsert_publication_lifecycle_metadata: bool = False,
     target_workflow_ids: Sequence[str] | None = None,
     publication_specs: Mapping[str, _CanonicalWorkflowPublicationSpec] | None = None,
@@ -2635,6 +2636,9 @@ def publish_canonical_chat_workflow_graphs(
     ``workflow_text_relations`` allow explicit workflow families to publish
     authoritative graphs without temporarily registering built-in runtime
     workflows.
+    ``create_missing_child_concepts`` may be used by validated authoring paths
+    to permit new step concepts while still refusing to create a missing root
+    workflow concept.
     """
     explicit_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = {
         str(workflow_id).strip(): spec
@@ -2695,6 +2699,11 @@ def publish_canonical_chat_workflow_graphs(
 
     workflow_type_ids = list(resolve_available_workflow_type_ids())
     preferred_workflow_type = workflow_type_ids[0] if workflow_type_ids else None
+    allow_missing_child_concepts = (
+        create_missing
+        if create_missing_child_concepts is None
+        else bool(create_missing_child_concepts)
+    )
 
     if target_workflow_ids is None:
         target_workflow_ids = list(CANONICAL_CHAT_WORKFLOW_IDS)
@@ -2959,7 +2968,7 @@ def publish_canonical_chat_workflow_graphs(
                 step_update_failed = True
                 break
             if step_doc is None:
-                if not create_missing:
+                if not allow_missing_child_concepts:
                     errors_by_workflow_id[workflow_id] = (
                         f"step_missing:{step_concept_id}"
                     )
@@ -3524,6 +3533,7 @@ def publish_workflow_definition_from_definition(
     *,
     definition: WorkflowDefinition,
     create_missing: bool = True,
+    create_missing_child_concepts: bool | None = None,
     purpose: str | None = None,
 ) -> Dict[str, Any]:
     """Publish one arbitrary workflow definition through the canonical graph path."""
@@ -3540,6 +3550,7 @@ def publish_workflow_definition_from_definition(
     )
     return publish_canonical_chat_workflow_graphs(
         create_missing=create_missing,
+        create_missing_child_concepts=create_missing_child_concepts,
         upsert_publication_lifecycle_metadata=True,
         target_workflow_ids=[workflow_id],
         publication_specs={workflow_id: publication_spec},

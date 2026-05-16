@@ -1,6 +1,44 @@
-from src.backend.workflows import workflow_studio_service as mod
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from src.backend.workflows import workflow_studio_service as mod
+from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
+from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+
+
+@pytest.fixture
+def _reset_mock_workflow_studio_graph_db(monkeypatch):
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    from src.backend.db.mongo_client import get_db
+    from src.backend.services.workflow_discovery_service import (
+        invalidate_workflow_discovery_executability_caches,
+    )
+    from src.backend.workflows.durable.registry_factory import (
+        invalidate_shared_workflow_registry_read_only,
+    )
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+    invalidate_workflow_discovery_executability_caches()
+    invalidate_shared_workflow_registry_read_only()
+    yield
+    invalidate_workflow_discovery_executability_caches()
+    invalidate_shared_workflow_registry_read_only()
+    authority_service.clear_workflow_type_resolution_cache()
 
 
 def test_build_workflow_description_proposal_uses_scoped_llm_model(
@@ -202,7 +240,7 @@ def test_validate_workflow_candidate_contract_only_profile_keeps_contract_validi
     assert validation["generation_safe_validation"]["valid"] is False
 
 
-def test_apply_workflow_authoring_spec_updates_existing_workflow_without_create_missing(
+def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_creation(
     monkeypatch,
 ) -> None:
     publication_calls: list[dict[str, object]] = []
@@ -243,6 +281,7 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_create_
 
     assert result["publication"] == {"ok": True}
     assert publication_calls[0]["create_missing"] is False
+    assert publication_calls[0]["create_missing_child_concepts"] is True
     assert publication_calls[0]["purpose"] == "Updated description"
 
 
@@ -286,6 +325,7 @@ def test_apply_workflow_authoring_spec_creates_missing_workflow_when_absent(
     )
 
     assert publication_calls[0]["create_missing"] is True
+    assert publication_calls[0]["create_missing_child_concepts"] is True
 
 
 def test_apply_workflow_authoring_spec_uses_existing_concept_when_runtime_load_is_missing(
@@ -328,6 +368,153 @@ def test_apply_workflow_authoring_spec_uses_existing_concept_when_runtime_load_i
     )
 
     assert publication_calls[0]["create_missing"] is False
+    assert publication_calls[0]["create_missing_child_concepts"] is True
+
+
+def test_apply_workflow_authoring_spec_materialises_new_steps_for_existing_workflow(
+    _reset_mock_workflow_studio_graph_db,
+    monkeypatch,
+) -> None:
+    workflow_id = "#V#workflow_studio_existing_update_workflow"
+    start_step_id = authority_service._step_concept_id(
+        workflow_id=workflow_id,
+        state_id="start",
+    )
+    collect_step_id = authority_service._step_concept_id(
+        workflow_id=workflow_id,
+        state_id="collect",
+    )
+    finish_step_id = authority_service._step_concept_id(
+        workflow_id=workflow_id,
+        state_id="finish",
+    )
+
+    seed_definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_control.context_set",
+                        inputs={
+                            "assignments": [
+                                {"key": "seed_seen", "value": True},
+                            ],
+                        },
+                        execution_mode="control",
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+    seed_report = authority_service.publish_workflow_definition_from_definition(
+        definition=seed_definition,
+        create_missing=True,
+    )
+    assert seed_report["counts"]["errors"] == 0
+    assert seed_report["counts"]["workflows_published"] == 1
+
+    class _Registry:
+        def all_workflow_ids(self):
+            return [workflow_id]
+
+        def get(self, requested_workflow_id: str):
+            return load_workflow_definition_from_vontology(requested_workflow_id)
+
+        def get_registration_source(self, _workflow_id: str, **_kwargs):
+            return "vontology"
+
+    monkeypatch.setattr(
+        mod,
+        "get_shared_workflow_registry_read_only",
+        lambda **_kwargs: _Registry(),
+    )
+
+    authoring_spec = {
+        "workflow_id": workflow_id,
+        "description": "Updated workflow with a new child step.",
+        "steps": [
+            {
+                "state_id": "start",
+                "action_id": "workflow_control.context_set",
+                "execution_mode": "control",
+                "static_input_bindings": [
+                    {
+                        "tool_param": "assignments",
+                        "value": [{"key": "seed_seen", "value": True}],
+                    }
+                ],
+                "next_state_key": "collect",
+            },
+            {
+                "state_id": "collect",
+                "action_id": "workflow_control.context_set",
+                "execution_mode": "control",
+                "context_input_mappings": [
+                    {
+                        "tool_param": "assignments",
+                        "context_key": "new_assignments",
+                        "mapping_concept_id": (
+                            "#V#workflow_mapping_studio_existing_update_collect_"
+                            "assignments"
+                        ),
+                    }
+                ],
+                "next_state_key": "finish",
+            },
+            {
+                "state_id": "finish",
+                "terminal": True,
+            },
+        ],
+    }
+
+    apply_result = mod.apply_workflow_authoring_spec(
+        workflow_id,
+        authoring_spec=authoring_spec,
+    )
+
+    publication = apply_result["publication"]
+    assert publication["counts"]["errors"] == 0
+    assert publication["counts"]["workflows_published"] == 1
+    assert set(publication["created_step_concept_ids"]) == {
+        collect_step_id,
+        finish_step_id,
+    }
+    assert publication["counts"]["mapping_concepts_created"] == 1
+
+    loaded_definition = load_workflow_definition_from_vontology(workflow_id)
+    assert loaded_definition is not None
+    assert loaded_definition.initial_state == start_step_id
+    assert set(loaded_definition.states) == {
+        start_step_id,
+        collect_step_id,
+        finish_step_id,
+    }
+    collect_state = loaded_definition.states[collect_step_id]
+    assert collect_state.terminal is False
+    assert [action.action_id for action in collect_state.actions] == [
+        "workflow_control.context_set"
+    ]
+    assert collect_state.actions[0].inputs["assignments"]["$context_key"] == (
+        "new_assignments"
+    )
+    assert [transition.to_state for transition in collect_state.transitions] == [
+        finish_step_id
+    ]
+
+    repeat_result = mod.apply_workflow_authoring_spec(
+        workflow_id,
+        authoring_spec=authoring_spec,
+    )
+    repeat_publication = repeat_result["publication"]
+    assert repeat_publication["counts"]["errors"] == 0
+    assert repeat_publication["counts"]["step_concepts_created"] == 0
+    assert repeat_publication["counts"]["mapping_concepts_created"] == 0
 
 
 def test_build_workflow_catalogue_payload_uses_fast_listing_mode(monkeypatch) -> None:
