@@ -139,6 +139,12 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   registry loading reports Vontology as the active source and
   `built_in_registration_count=0`. File only where the Python builder or
   publisher remains the reproducible source for workflow graph/control policy.
+- 2026-05-17: `workflow_studio_service.py` child-concept materialisation and
+  `workflow_concept_authority_service.py` `create_missing_child_concepts`
+  handling looked like workflow-authoring support, not a new policy surface.
+  The replay observation changes look like remediation for `JVNAUTOSCI-2324`
+  while durable recording still requires represented replay evaluation by
+  default. No duplicates were filed for those areas.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
