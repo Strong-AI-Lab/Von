@@ -14,7 +14,6 @@ from typing import Dict, Iterable, Optional
 
 from ..models.text_value_models import RelationPredicate
 
-
 MENTIONED_IN_VON_CODE_ID = "#V#mentioned_in_von_code"
 MENTIONED_IN_VON_TEST_ID = "#V#mentioned_in_von_test"
 PREDICATE_TYPE_ID = "#V#predicate"
@@ -212,6 +211,11 @@ _WORKFLOW_DISCOVERY_EXEMPLARS_PREDICATE_IDS = [
     "#V#hasWorkflowDiscoveryExemplarsJson",
     "#V#has_workflow_discovery_exemplars_json",
 ]
+_REPRESENTATION_ROUTING_AUDIT_PREDICATE_IDS = [
+    "#V#hasRepresentationWorkflowRoutingCoverageAuditPrompt",
+    "#V#hasRepresentationWorkflowRoutingCoverageAuditProfile",
+    "#V#hasRepresentationWorkflowRoutingCoverageAuditProfileJson",
+]
 _WORKFLOW_TEMPLATE_PREDICATE_IDS = [
     "#V#hasWorkflowTemplateId",
     "#V#has_workflow_template_id",
@@ -297,6 +301,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_WORKFLOW_ROUTING_PROFILE_PREDICATE_IDS,
         *_WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_PREDICATE_IDS,
         *_WORKFLOW_DISCOVERY_EXEMPLARS_PREDICATE_IDS,
+        *_REPRESENTATION_ROUTING_AUDIT_PREDICATE_IDS,
         *_WORKFLOW_TEMPLATE_PREDICATE_IDS,
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,

@@ -1,0 +1,184 @@
+{
+  "schema_version": "representation_workflow_routing_coverage_audit_profile.v1",
+  "profile_id": "representation_workflow_routing_coverage_default",
+  "description": "Represented audit profile for checking whether general classes of representation requests discover and route to the workflows that should handle them. Python may execute the probes and collect evidence, but the audit workflow prompt judges design implications and authors any workflow improvement suggestions.",
+  "audit_policy": {
+    "max_cases": 16,
+    "max_discovery_results": 8,
+    "discovery_relevance_threshold": 0.05,
+    "discovery_timeout_seconds": 8.0,
+    "minimum_expected_presence_rate": 0.9,
+    "minimum_expected_top_rank_rate": 0.75
+  },
+  "inventory_policy": {
+    "mode": "expected_workflows",
+    "max_workflows": 100,
+    "workflow_ids": [
+      "#V#scholarly_article_metadata_representation_workflow",
+      "#V#scholarly_paper_representation_workflow",
+      "#V#arxiv_paper_representation_workflow",
+      "#V#entity_representation_workflow",
+      "#V#person_representation_workflow",
+      "#V#company_representation_workflow",
+      "#V#event_representation_workflow",
+      "#V#place_representation_workflow",
+      "#V#talk_representation_workflow",
+      "#V#technical_scientific_talk_representation_workflow",
+      "#V#academic_presentation_instance_workflow"
+    ]
+  },
+  "evaluation_dimensions": [
+    {
+      "dimension_id": "general_task_class_coverage",
+      "description": "Whether broad representation request classes have a discoverable, routing-eligible workflow path rather than depending on a one-off proper noun or source-specific path."
+    },
+    {
+      "dimension_id": "deictic_follow_up_coverage",
+      "description": "Whether follow-up wording such as 'this', 'that', and 'with this too' still routes to the relevant representation workflow using shared turn context."
+    },
+    {
+      "dimension_id": "workflow_authority_alignment",
+      "description": "Whether missing behaviour is best repaired in workflow, prompt, routing metadata, represented profile, or reusable support surface rather than hard-coded Python policy."
+    },
+    {
+      "dimension_id": "improvement_generality",
+      "description": "Whether proposed changes would improve a reusable class of tasks and avoid locking the system to a single incident."
+    }
+  ],
+  "suggestion_policy": {
+    "authoritative_suggestion_stage": "llm.workflow_prompt",
+    "python_generated_improvement_suggestions_allowed": false,
+    "allowed_target_surfaces": [
+      "workflow",
+      "prompt",
+      "tool_metadata",
+      "tool_contract",
+      "telemetry",
+      "support_surface"
+    ],
+    "preferred_target_surfaces": [
+      "workflow",
+      "prompt",
+      "tool_metadata"
+    ],
+    "avoid": [
+      "proper-noun-specific workflow patches",
+      "Python branch tables for user-facing routing or wording",
+      "single-query lexical hacks",
+      "suggestions that only make the observed example pass"
+    ]
+  },
+  "self_improvement_contract": {
+    "assessment_key": "critic_assessment",
+    "suggestions_key": "critic_assessment.improvement_suggestions",
+    "persistence_action_id": "episode_critic.persist_memory",
+    "proposal_path": "#V#episode_self_improvement_proposal_workflow"
+  },
+  "audit_cases": [
+    {
+      "case_id": "scholarly_article_metadata_from_pasted_source",
+      "task_class": "scholarly_article_representation",
+      "query": "Represent this scholarly article from pasted metadata: title, authors, DOI, venue, abstract, keywords, and source URL.",
+      "expected_workflow_ids": [
+        "#V#scholarly_article_metadata_representation_workflow",
+        "#V#scholarly_paper_representation_workflow"
+      ],
+      "acceptable_workflow_ids": [
+        "#V#tool_calling_workflow"
+      ],
+      "priority": "high"
+    },
+    {
+      "case_id": "scholarly_article_deictic_follow_up",
+      "task_class": "scholarly_article_representation",
+      "query": "How about with this too: a paper title, authors, conference, DOI, abstract, and source URL. Create the represented article.",
+      "expected_workflow_ids": [
+        "#V#scholarly_article_metadata_representation_workflow",
+        "#V#scholarly_paper_representation_workflow"
+      ],
+      "acceptable_workflow_ids": [
+        "#V#tool_calling_workflow"
+      ],
+      "priority": "high",
+      "notes": "Represents the generic deictic/follow-up failure class rather than one source page."
+    },
+    {
+      "case_id": "arxiv_or_preprint_paper_representation",
+      "task_class": "scholarly_article_representation",
+      "query": "Create a represented paper from an arXiv identifier or preprint metadata and link the article, authors, topics, and source identifier.",
+      "expected_workflow_ids": [
+        "#V#arxiv_paper_representation_workflow",
+        "#V#scholarly_paper_representation_workflow",
+        "#V#scholarly_article_metadata_representation_workflow"
+      ],
+      "priority": "medium"
+    },
+    {
+      "case_id": "person_representation_from_biographical_text",
+      "task_class": "entity_representation",
+      "query": "Create a represented person profile from biographical text, including affiliations, roles, identifiers, and source text when supplied.",
+      "expected_workflow_ids": [
+        "#V#person_representation_workflow",
+        "#V#entity_representation_workflow"
+      ],
+      "priority": "high"
+    },
+    {
+      "case_id": "organisation_representation_from_descriptive_text",
+      "task_class": "entity_representation",
+      "query": "Represent this organisation or company from a short description, website, sector, location, and known relationships.",
+      "expected_workflow_ids": [
+        "#V#company_representation_workflow",
+        "#V#entity_representation_workflow"
+      ],
+      "priority": "medium"
+    },
+    {
+      "case_id": "event_representation_from_meeting_or_talk_text",
+      "task_class": "event_representation",
+      "query": "Represent this event from supplied title, date, participants, location, source text, and observed outcomes.",
+      "expected_workflow_ids": [
+        "#V#event_representation_workflow",
+        "#V#entity_representation_workflow"
+      ],
+      "priority": "medium"
+    },
+    {
+      "case_id": "place_representation_from_contextual_text",
+      "task_class": "place_representation",
+      "query": "Create a represented place from descriptive text, aliases, location context, and related organisations.",
+      "expected_workflow_ids": [
+        "#V#place_representation_workflow",
+        "#V#entity_representation_workflow"
+      ],
+      "priority": "medium"
+    },
+    {
+      "case_id": "technical_talk_representation",
+      "task_class": "talk_representation",
+      "query": "Represent this technical scientific talk from title, speaker, abstract, venue, date, and source notes.",
+      "expected_workflow_ids": [
+        "#V#technical_scientific_talk_representation_workflow",
+        "#V#talk_representation_workflow"
+      ],
+      "acceptable_workflow_ids": [
+        "#V#academic_presentation_instance_workflow"
+      ],
+      "priority": "medium"
+    },
+    {
+      "case_id": "generic_artefact_creation_request_mentions_vontology",
+      "task_class": "representation_or_authoring_boundary",
+      "query": "I have a new kind of research artefact to represent in Vontology. Work out whether an existing representation workflow can handle it or a new reusable workflow is needed.",
+      "expected_workflow_ids": [
+        "#V#represented_artefact_creation_workflow",
+        "#V#entity_representation_workflow",
+        "#V#von_workflow_creation_workflow"
+      ],
+      "acceptable_workflow_ids": [
+        "#V#tool_calling_workflow"
+      ],
+      "priority": "medium"
+    }
+  ]
+}

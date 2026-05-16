@@ -80,6 +80,7 @@ _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#entity_identity_resolution_workflow",
     "#V#jira_task_incremental_import_workflow",
     "#V#multilingual_concept_enrichment_rumination_workflow",
+    "#V#representation_workflow_routing_coverage_audit_workflow",
 )
 
 
@@ -294,7 +295,9 @@ def register_workflow_from_vontology(
     return True, None
 
 
-def _known_workflow_ids_for_registry(registry: WorkflowRegistry | None) -> tuple[str, ...]:
+def _known_workflow_ids_for_registry(
+    registry: WorkflowRegistry | None,
+) -> tuple[str, ...]:
     if registry is None:
         return ()
     try:
@@ -451,7 +454,9 @@ def resolve_workflow_definition_from_authority(
             except Exception as exc:
                 diagnostics["vontology_registration_attempted"] = True
                 diagnostics["vontology_registration_success"] = False
-                diagnostics["vontology_registration_exception_type"] = type(exc).__name__
+                diagnostics["vontology_registration_exception_type"] = type(
+                    exc
+                ).__name__
                 error_code = f"vontology_registration_failed:{type(exc).__name__}"
                 logger.debug(
                     "workflow definition Vontology registration failed for %s",
@@ -559,9 +564,7 @@ def _build_expected_authoritative_workflow_report(
             definition = load_workflow_definition_from_vontology(workflow_id)
         except Exception as exc:
             definition = None
-            load_errors_by_workflow_id[workflow_id] = (
-                f"{type(exc).__name__}:{exc}"
-            )
+            load_errors_by_workflow_id[workflow_id] = f"{type(exc).__name__}:{exc}"
         if definition is None:
             missing_workflow_ids.append(workflow_id)
         else:
@@ -680,7 +683,9 @@ def _build_workflow_parity_inventory(
         try:
             graph, warnings = build_workflow_process_graph(workflow_id)
             steps = graph.get("steps") if isinstance(graph, dict) else None
-            initial_step = graph.get("initial_step") if isinstance(graph, dict) else None
+            initial_step = (
+                graph.get("initial_step") if isinstance(graph, dict) else None
+            )
             has_graph = (
                 isinstance(graph, dict)
                 and isinstance(initial_step, str)
@@ -705,7 +710,11 @@ def _build_workflow_parity_inventory(
         registration = None
         try:
             registration = registry.get_registration(workflow_id)
-            if registration and isinstance(registration.source, str) and registration.source:
+            if (
+                registration
+                and isinstance(registration.source, str)
+                and registration.source
+            ):
                 source = registration.source
         except Exception:
             source = "unknown"
@@ -886,9 +895,13 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
     if isinstance(diagnostics, dict):
         maybe_reason_codes = diagnostics.get("reason_codes")
         if isinstance(maybe_reason_codes, list):
-            reason_codes = [item for item in maybe_reason_codes if isinstance(item, str)]
+            reason_codes = [
+                item for item in maybe_reason_codes if isinstance(item, str)
+            ]
     reason_suffix = ",".join(reason_codes)
-    summary_text = inventory_snapshot.get("summary_text", "workflow parity snapshot generated")
+    summary_text = inventory_snapshot.get(
+        "summary_text", "workflow parity snapshot generated"
+    )
     message = f"{summary_text}; drift_reasons={reason_suffix or 'none'}"
 
     inventory_snapshot["parity_policy"] = {
@@ -917,7 +930,9 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
 
     logger.warning("[workflow_parity] %s", message)
     if mode in {"fail", "strict", "error"}:
-        raise RuntimeError(f"workflow_parity_drift_detected:{reason_suffix or 'unknown'}")
+        raise RuntimeError(
+            f"workflow_parity_drift_detected:{reason_suffix or 'unknown'}"
+        )
 
 
 def get_workflow_registry_inventory_snapshot() -> Dict[str, Any]:
@@ -971,16 +986,13 @@ def _build_pending_workflow_inventory_snapshot(
     """
 
     registry_ids = sorted(set(registry.all_workflow_ids()))
-    discovered_ids = (
-        sorted(
-            {
-                wid
-                for wid in (discovered_workflow_ids or [])
-                if isinstance(wid, str) and wid.strip()
-            }
-        )
-        or _infer_vontology_workflow_ids_from_registry(registry)
-    )
+    discovered_ids = sorted(
+        {
+            wid
+            for wid in (discovered_workflow_ids or [])
+            if isinstance(wid, str) and wid.strip()
+        }
+    ) or _infer_vontology_workflow_ids_from_registry(registry)
     summary_lines = [
         "Workflow parity inventory pending background build.",
         f"Registry workflows available now: {len(registry_ids)}.",
@@ -1280,7 +1292,7 @@ def _launch_deferred_registry_work(
                 "created_workflow_ids": [],
                 "updated_workflow_ids": [],
                 "unchanged_workflow_ids": [],
-                    "errors_by_workflow_id": {},
+                "errors_by_workflow_id": {},
             }
 
             expected_authoritative_file_copy_report = (
@@ -1451,6 +1463,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     )
     from .planning_workflow import register_planning_actions
     from .rag_sync_workflow import register_rag_sync_actions
+    from .representation_workflow_routing_coverage_audit_workflow import (
+        register_representation_workflow_routing_coverage_audit_actions,
+    )
     from .rumination_workflow import register_rumination_actions
     from .subworkflow_actions import register_subworkflow_actions
     from .synthesiser_context_prep_actions import (
@@ -1492,9 +1507,14 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_parent_specificity_rumination_actions(registry)
     register_paper_representation_actions(registry)
     register_talk_representation_actions(registry)
+    register_representation_workflow_routing_coverage_audit_actions(registry)
     register_workflow_gap_recovery_actions(registry)
-    register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
-    register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
+    register_control_flow_actions(
+        registry, definition_loader=_resolve_subworkflow_definition
+    )
+    register_subworkflow_actions(
+        registry, definition_loader=_resolve_subworkflow_definition
+    )
     register_workflow_creation_actions(registry)
     register_testing_workflow_actions(registry)
     register_skill_interop_actions(registry)

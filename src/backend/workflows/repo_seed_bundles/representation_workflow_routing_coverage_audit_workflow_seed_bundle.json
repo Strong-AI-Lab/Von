@@ -1,0 +1,326 @@
+{
+  "family_id": "representation_workflow_routing_coverage_audit_workflow_seed_bundle",
+  "managed_by": "representation_workflow_routing_coverage_audit_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2331",
+  "supported_action_ids": [
+    "representation_routing_audit.load_profile",
+    "representation_routing_audit.collect_evidence",
+    "llm.action",
+    "representation_routing_audit.build_episode_evidence",
+    "episode_critic.persist_memory",
+    "representation_routing_audit.finalise"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#representation_workflow_routing_coverage_audit_workflow",
+      "display_name": "Representation Workflow Routing Coverage Audit Workflow",
+      "description": "Maintenance workflow that audits broad representation-workflow routing coverage and stores workflow-authored improvement suggestions through the episode self-improvement pipeline.",
+      "content": "Load a represented audit profile, run generic workflow discovery and inventory probes for broad representation task classes, ask a represented LLM prompt to judge the evidence, and persist only that workflow-authored assessment through episode critique memory.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [],
+        "input_mappings": [
+          {
+            "target_context_key": "audit_run_id",
+            "source_expression": "inputs.audit_run_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional caller-provided audit run identifier."
+          },
+          {
+            "target_context_key": "profile_concept_id",
+            "source_expression": "inputs.profile_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional represented audit profile override."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false,\"routing_eligible\":false,\"notes\":\"Run by explicit maintenance, schedule, or operator request; not a normal user-turn execution route.\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"representation workflow routing coverage audit\",\"workflow self improvement suggestions\",\"audit represented workflow coverage\",\"workflow discovery coverage\"],\"examples\":[\"Audit representation workflow routing coverage.\",\"Check whether representation workflows cover generic article, entity, talk, event, and deictic follow-up requests.\",\"Run the workflow self-improvement coverage audit for representation routing.\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasRepresentationWorkflowRoutingCoverageAuditPrompt",
+          "text": "#V#prompt_representation_workflow_routing_coverage_audit",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasRepresentationWorkflowRoutingCoverageAuditProfile",
+          "text": "#V#representation_workflow_routing_coverage_audit_profile_default",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "load_profile",
+        "steps": [
+          {
+            "state_id": "load_profile",
+            "action_id": "representation_routing_audit.load_profile",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_representation_routing_audit_load_profile_profile_concept_id_to_profile_concept_id_parameter",
+                "context_key": "profile_concept_id",
+                "required": false,
+                "tool_param": "profile_concept_id"
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_load_profile_profile_to_profile",
+                "context_key": "representation_routing_audit_profile",
+                "tool_output_field": "representation_routing_audit_profile"
+              }
+            ],
+            "writes_context_keys": [
+              "representation_routing_audit_profile",
+              "representation_routing_audit_profile_diagnostics"
+            ],
+            "next_state": "collect_evidence",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "collect_evidence",
+            "action_id": "representation_routing_audit.collect_evidence",
+            "execution_mode": "deterministic",
+            "next_state": "evaluate_evidence",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_collect_evidence_report_to_report",
+                "context_key": "representation_routing_audit_report",
+                "tool_output_field": "representation_routing_audit_report"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_collect_evidence_metrics_to_metrics",
+                "context_key": "representation_routing_audit_metrics",
+                "tool_output_field": "representation_routing_audit_metrics"
+              }
+            ],
+            "writes_context_keys": [
+              "representation_routing_audit_report",
+              "representation_routing_audit_metrics"
+            ]
+          },
+          {
+            "state_id": "evaluate_evidence",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#prompt_representation_workflow_routing_coverage_audit"
+            ],
+            "llm_policy": {
+              "policy_stage": "representation_workflow_routing_coverage_audit",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON only with key critic_assessment. critic_assessment must include verdict, confidence, unresolved_check_count, summary, maintenance_follow_up_recommended, maintenance_follow_up_reason, recommendations, root_causes, implicated_workflow_ids, and improvement_suggestions. Improvement suggestions must be authored from the evidence by this workflow step, not by Python support code.",
+              "context_fields": [
+                {
+                  "context_key": "representation_routing_audit_profile",
+                  "label": "Audit profile"
+                },
+                {
+                  "context_key": "representation_routing_audit_report",
+                  "label": "Audit evidence report"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_evaluate_evidence_critic_assessment_to_critic_assessment",
+                "context_key": "critic_assessment",
+                "tool_output_field": "validated_json.critic_assessment"
+              }
+            ],
+            "writes_context_keys": [
+              "critic_assessment"
+            ],
+            "next_state": "build_episode_evidence",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "build_episode_evidence",
+            "action_id": "representation_routing_audit.build_episode_evidence",
+            "execution_mode": "deterministic",
+            "next_state": "persist_episode_memory",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_build_episode_evidence_bundle_to_bundle",
+                "context_key": "episode_evidence_bundle",
+                "tool_output_field": "episode_evidence_bundle"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_build_episode_evidence_assessment_to_critic_assessment",
+                "context_key": "critic_assessment",
+                "tool_output_field": "critic_assessment"
+              }
+            ],
+            "writes_context_keys": [
+              "episode_evidence_bundle",
+              "critic_assessment",
+              "episode_locator"
+            ]
+          },
+          {
+            "state_id": "persist_episode_memory",
+            "action_id": "episode_critic.persist_memory",
+            "execution_mode": "deterministic",
+            "next_state": "finalise",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_persist_episode_memory_memory_id_to_memory_id",
+                "context_key": "episode_critique_memory_id",
+                "tool_output_field": "episode_critique_memory_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_persist_episode_memory_suggestions_to_suggestions",
+                "context_key": "improvement_suggestions",
+                "tool_output_field": "improvement_suggestions"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_persist_episode_memory_self_improvement_to_self_improvement",
+                "context_key": "self_improvement",
+                "tool_output_field": "self_improvement"
+              }
+            ],
+            "writes_context_keys": [
+              "episode_critique_memory_id",
+              "improvement_suggestions",
+              "self_improvement"
+            ]
+          },
+          {
+            "state_id": "finalise",
+            "action_id": "representation_routing_audit.finalise",
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_representation_routing_audit_finalise_result_to_result",
+                "context_key": "representation_routing_audit_result",
+                "tool_output_field": "representation_routing_audit_result"
+              }
+            ],
+            "writes_context_keys": [
+              "representation_routing_audit_result",
+              "completed",
+              "terminal_status"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ],
+  "support_concepts": [
+    {
+      "concept_id": "#V#representation_workflow_routing_coverage_audit_profile",
+      "name": "Representation Workflow Routing Coverage Audit Profile",
+      "parent_concept_ids": [
+        "#V#thing"
+      ],
+      "create_as_instance": false,
+      "description": "Type for represented policies that define representation workflow routing coverage probes and evidence budgets.",
+      "system_tags": [
+        "workflow-support",
+        "representation-routing-audit"
+      ]
+    },
+    {
+      "concept_id": "#V#representation_workflow_routing_coverage_audit_profile_default",
+      "name": "Representation Workflow Routing Coverage Default Audit Profile",
+      "parent_concept_ids": [
+        "#V#representation_workflow_routing_coverage_audit_profile"
+      ],
+      "create_as_instance": true,
+      "description": "Default represented profile for auditing general representation workflow routing coverage.",
+      "system_tags": [
+        "workflow-support",
+        "representation-routing-audit"
+      ]
+    },
+    {
+      "concept_id": "#V#hasRepresentationWorkflowRoutingCoverageAuditProfileJson",
+      "name": "Has Representation Workflow Routing Coverage Audit Profile JSON",
+      "parent_concept_ids": [
+        "#V#predicate",
+        "#V#binary_predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate linking a representation routing audit profile concept to its structured JSON policy body.",
+      "system_tags": [
+        "workflow-support",
+        "predicate"
+      ]
+    },
+    {
+      "concept_id": "#V#hasRepresentationWorkflowRoutingCoverageAuditProfile",
+      "name": "Has Representation Workflow Routing Coverage Audit Profile",
+      "parent_concept_ids": [
+        "#V#predicate",
+        "#V#binary_predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate linking the audit workflow to the represented profile it uses.",
+      "system_tags": [
+        "workflow-support",
+        "predicate"
+      ]
+    },
+    {
+      "concept_id": "#V#hasRepresentationWorkflowRoutingCoverageAuditPrompt",
+      "name": "Has Representation Workflow Routing Coverage Audit Prompt",
+      "parent_concept_ids": [
+        "#V#predicate",
+        "#V#binary_predicate"
+      ],
+      "create_as_instance": true,
+      "description": "Predicate linking the audit workflow to the represented prompt that judges evidence.",
+      "system_tags": [
+        "workflow-support",
+        "predicate"
+      ]
+    }
+  ]
+}

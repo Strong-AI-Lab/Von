@@ -457,6 +457,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.jira_task_incremental_import_workflow_vontology_service import (
             bootstrap_canonical_jira_task_incremental_import_workflow,
         )
+        from ..services.representation_workflow_routing_coverage_audit_vontology_service import (
+            bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow,
+        )
         from ..services.paper_recommendation_workflow_vontology_service import (
             bootstrap_canonical_paper_recommendation_workflow,
         )
@@ -517,11 +520,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 bootstrap_fn=bootstrap_canonical_represented_artefact_creation_workflow,
             )
         )
-        multilingual_concept_enrichment_workflow_bootstrap_report = (
-            _run_workflow_family_bootstrap(
-                label="multilingual concept-enrichment workflow",
-                bootstrap_fn=bootstrap_canonical_multilingual_concept_enrichment_workflow,
-            )
+        multilingual_concept_enrichment_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="multilingual concept-enrichment workflow",
+            bootstrap_fn=bootstrap_canonical_multilingual_concept_enrichment_workflow,
         )
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="conversation-turn workflow",
@@ -535,15 +536,23 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="episode evaluation workflow",
             bootstrap_fn=bootstrap_canonical_episode_evaluation_workflow,
         )
-        entity_identity_resolution_workflow_bootstrap_report = _run_workflow_family_bootstrap(
-            label="entity identity-resolution workflow",
-            bootstrap_fn=bootstrap_canonical_entity_identity_resolution_workflow,
+        entity_identity_resolution_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="entity identity-resolution workflow",
+                bootstrap_fn=bootstrap_canonical_entity_identity_resolution_workflow,
+            )
         )
         jira_task_incremental_import_workflow_bootstrap_report = (
             _run_workflow_family_bootstrap(
                 label="Jira task incremental import workflow",
                 bootstrap_fn=bootstrap_canonical_jira_task_incremental_import_workflow,
             )
+        )
+        representation_routing_audit_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="representation routing coverage audit workflow",
+            bootstrap_fn=(
+                bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow
+            ),
         )
         paper_recommendation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper recommendation workflow",
@@ -629,6 +638,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         )
         result["jira_task_incremental_import_workflow_bootstrap"] = (
             jira_task_incremental_import_workflow_bootstrap_report
+        )
+        result["representation_routing_audit_workflow_bootstrap"] = (
+            representation_routing_audit_workflow_bootstrap_report
         )
         result["paper_recommendation_workflow_bootstrap"] = (
             paper_recommendation_workflow_bootstrap_report
@@ -730,6 +742,16 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] Jira task incremental import workflow bootstrap failed: %s",
                 jira_task_incremental_import_workflow_bootstrap_report,
+            )
+        if not bool(
+            representation_routing_audit_workflow_bootstrap_report.get(
+                "success",
+                False,
+            )
+        ):
+            app_logger.warning(
+                "[durable_workflows] representation routing coverage audit workflow bootstrap failed: %s",
+                representation_routing_audit_workflow_bootstrap_report,
             )
         if not bool(
             paper_recommendation_workflow_bootstrap_report.get("success", False)
@@ -2530,12 +2552,9 @@ def _build_health_check_response(app: Flask):
             public_ip = None
 
     version_info = get_runtime_code_version_info()
-    agent_test_instance = (
-        str(os.environ.get("VON_AGENT_TEST_INSTANCE") or "")
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
+    agent_test_instance = str(
+        os.environ.get("VON_AGENT_TEST_INSTANCE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
     return jsonify(
         status="healthy",
         version=version_info.get("version"),

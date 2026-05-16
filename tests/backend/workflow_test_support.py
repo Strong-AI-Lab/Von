@@ -56,6 +56,12 @@ from src.backend.workflows.durable.multilingual_concept_enrichment_workflow impo
     MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
     build_multilingual_concept_enrichment_workflow_test_registration,
 )
+from src.backend.services.representation_workflow_routing_coverage_audit_contracts import (
+    REPRESENTATION_WORKFLOW_ROUTING_COVERAGE_AUDIT_WORKFLOW_ID,
+)
+from src.backend.workflows.durable.representation_workflow_routing_coverage_audit_workflow import (
+    build_representation_workflow_routing_coverage_audit_test_registration,
+)
 from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
@@ -83,8 +89,9 @@ from src.backend.workflows.workflow_registry import (
     WorkflowRegistration,
     WorkflowRegistry,
 )
-from src.backend.workflows import workflow_concept_authority_service as authority_service
-
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
 
 TEST_WORKFLOW_PURPOSES: dict[str, str] = {
     MISSING_TOOL_CALL_WORKFLOW_ID: (
@@ -172,6 +179,10 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Add missing Chinese, Spanish, and French concept names and "
         "descriptions for well-described, non-trivially used concepts."
     ),
+    REPRESENTATION_WORKFLOW_ROUTING_COVERAGE_AUDIT_WORKFLOW_ID: (
+        "Audit broad representation-workflow routing coverage and persist "
+        "workflow-authored improvement suggestions for the self-improvement path."
+    ),
     PLANNING_WORKFLOW_ID: (
         "Forward inference workflow that proposes concrete, validated next "
         "actions including tool calls and workflow invocations."
@@ -213,6 +224,7 @@ AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
     MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
+    REPRESENTATION_WORKFLOW_ROUTING_COVERAGE_AUDIT_WORKFLOW_ID,
 )
 AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_TYPING_WORKFLOW_ID,
@@ -253,21 +265,21 @@ TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE = (
     "- If a specialised candidate is disqualified, name that evidence in the "
     "reasoning.\n\n"
     "Canonical valid output examples:\n"
-    "- {\"workflow_id\":\"#V#concept_search_instance_retrieval_workflow\","
-    "\"confidence\":0.96,\"reasoning\":\"The request asks for represented "
+    '- {"workflow_id":"#V#concept_search_instance_retrieval_workflow",'
+    '"confidence":0.96,"reasoning":"The request asks for represented '
     "information about a specific concept, so the specialised retrieval "
-    "workflow is the best eligible candidate.\"}\n"
-    "- {\"workflow_id\":\"#V#tool_calling_workflow\",\"confidence\":0.88,"
-    "\"reasoning\":\"The request requires tools or external actions, so the "
-    "general tool-calling workflow is the best eligible route.\"}\n"
-    "- {\"workflow_id\":\"#V#chat_assistant_workflow\",\"confidence\":0.84,"
-    "\"reasoning\":\"The turn is a plain conversational exchange that does "
-    "not require tools or a more specific specialised workflow.\"}\n\n"
+    'workflow is the best eligible candidate."}\n'
+    '- {"workflow_id":"#V#tool_calling_workflow","confidence":0.88,'
+    '"reasoning":"The request requires tools or external actions, so the '
+    'general tool-calling workflow is the best eligible route."}\n'
+    '- {"workflow_id":"#V#chat_assistant_workflow","confidence":0.84,'
+    '"reasoning":"The turn is a plain conversational exchange that does '
+    'not require tools or a more specific specialised workflow."}\n\n'
     "Invalid outputs. Never do any of these:\n"
-    "- \"I'm not sure which workflow you want. Please clarify.\"\n"
-    "- \"Here is the answer to your question.\"\n"
-    "- {\"tool_name\":\"vontology_concept_search\",\"arguments\":"
-    "{\"query\":\"current user\"}}\n\n"
+    '- "I\'m not sure which workflow you want. Please clarify."\n'
+    '- "Here is the answer to your question."\n'
+    '- {"tool_name":"vontology_concept_search","arguments":'
+    '{"query":"current user"}}\n\n'
     "Workflow continuation context:\n{continuation_routing_context}\n\n"
     "User request:\n{turn_text}\n\n"
     "Candidate workflows:\n{candidate_list}\n"
@@ -409,9 +421,15 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
     from src.backend.services.jira_task_incremental_import_workflow_vontology_service import (
         bootstrap_canonical_jira_task_incremental_import_workflow,
     )
+    from src.backend.services.representation_workflow_routing_coverage_audit_vontology_service import (
+        bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow,
+    )
 
     bootstrap_canonical_entity_identity_resolution_workflow()
     jira_bootstrap_report = bootstrap_canonical_jira_task_incremental_import_workflow()
+    representation_audit_bootstrap_report = (
+        bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow()
+    )
 
     registry = WorkflowRegistry()
     for registration in (
@@ -420,6 +438,7 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
         build_workflow_introspection_maintenance_workflow_test_registration(),
         build_entity_identity_resolution_workflow_test_registration(),
         build_multilingual_concept_enrichment_workflow_test_registration(),
+        build_representation_workflow_routing_coverage_audit_test_registration(),
     ):
         registry.register(registration)
 
@@ -428,6 +447,9 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
         target_workflow_ids=AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
     )
     report["jira_task_incremental_import_workflow_bootstrap"] = jira_bootstrap_report
+    report["representation_workflow_routing_coverage_audit_bootstrap"] = (
+        representation_audit_bootstrap_report
+    )
     return report
 
 

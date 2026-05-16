@@ -1489,6 +1489,10 @@
                 {
                   "context_key": "workflow_failure_avoidance_history",
                   "label": "Historical failure-avoidance guidance"
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance"
                 }
               ],
               "max_tool_invocations": 12,
@@ -1731,6 +1735,18 @@
                 {
                   "context_key": "prompt",
                   "label": "Original KR design request"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance"
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance"
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance"
                 }
               ],
               "max_tool_invocations": 12,
