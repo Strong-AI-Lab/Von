@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ...services.failure_case_intake_service import (
@@ -13,7 +13,11 @@ from ...services.failure_case_intake_service import (
 )
 from ...services.failure_case_prompt_replay_experiment_service import (
     FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID,
+    FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
     prepare_failure_case_prompt_replay_experiment,
+)
+from ...services.replay_experiment_observation_service import (
+    record_experiment_observations,
 )
 from ..action_registry import (
     ActionRegistry,
@@ -36,6 +40,27 @@ def _safe_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _safe_sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return list(value)
+    return []
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def _failure_case_intake_handler(
@@ -232,6 +257,82 @@ def _failure_case_prompt_replay_prepare_handler(
     )
 
 
+def _failure_case_prompt_replay_record_observations_handler(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = _safe_mapping(request.inputs)
+    context = _safe_mapping(request.data)
+    environment = request.environment
+    run_id = (
+        _safe_str(inputs.get("run_id"))
+        or _safe_str(inputs.get("experiment_run_id"))
+        or _safe_str(context.get("run_id"))
+        or _safe_str(context.get("experiment_run_id"))
+    )
+    if not run_id:
+        payload = {
+            "success": False,
+            "error": "experiment_run_id_required",
+            "policy_boundary": {
+                "prompt_body_generated": False,
+                "replay_scored": False,
+                "promotion_recommendation_generated": False,
+                "reason": (
+                    "Recording prompt-replay observations requires a represented "
+                    "experiment run id produced by the workflow."
+                ),
+            },
+        }
+        return WorkflowActionResult(
+            status="failed",
+            outputs=payload,
+            error="experiment_run_id_required",
+        )
+
+    arm_summaries = _safe_sequence(
+        inputs.get("arm_summaries")
+        or inputs.get("prompt_replay_arm_summaries")
+        or context.get("prompt_replay_arm_summaries")
+        or context.get("arm_summaries")
+    )
+    payload = record_experiment_observations(
+        run_id=run_id,
+        arm_summaries=arm_summaries,
+        default_replay_set_id=(
+            _safe_str(inputs.get("default_replay_set_id"))
+            or _safe_str(inputs.get("replay_set_id"))
+            or _safe_str(context.get("replay_set_id"))
+        ),
+        gateway=inputs.get("gateway") or getattr(environment, "gateway", None),
+        require_represented_evaluation=_coerce_bool(
+            inputs.get("require_represented_evaluation"),
+            default=True,
+        ),
+    )
+    success = bool(payload.get("success"))
+    outputs = {
+        **dict(payload),
+        "prompt_replay_observations_recorded": success,
+        "policy_boundary": {
+            "prompt_body_generated": False,
+            "replay_scored": False,
+            "promotion_recommendation_generated": False,
+            "experiment_observation_persisted": success,
+            "reason": (
+                "This action converts already-scored replay arm summaries into "
+                "experiment observations. Prompt hypotheses, represented replay "
+                "evaluation, and promotion decisions remain workflow/Vontology "
+                "authority."
+            ),
+        },
+    }
+    return WorkflowActionResult(
+        status="success" if success else "failed",
+        outputs=outputs,
+        error=None if success else _safe_str(payload.get("error")),
+    )
+
+
 def register_failure_case_prompt_improvement_actions(registry: ActionRegistry) -> None:
     """Register support actions used by represented prompt-improvement workflows."""
 
@@ -265,6 +366,17 @@ def register_failure_case_prompt_improvement_actions(registry: ActionRegistry) -
                 "Prepare replay experiment inputs and arm metadata from collected "
                 "failure-case evidence without classifying the failure, generating "
                 "prompt text, scoring variants, or recommending promotion."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
+            handler=_failure_case_prompt_replay_record_observations_handler,
+            description=(
+                "Record represented prompt-replay arm observations for an "
+                "experiment run without generating prompt text, scoring replay "
+                "results, or recommending production prompt promotion."
             ),
         )
     )

@@ -23,6 +23,9 @@ FAILURE_CASE_PROMPT_REPLAY_FIXTURE_SCHEMA_VERSION = (
 FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID = (
     "failure_case.prompt_replay.prepare_experiment"
 )
+FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID = (
+    "failure_case.prompt_replay.record_observations"
+)
 
 
 def _safe_str(value: Any) -> str | None:
@@ -405,5 +408,6 @@ __all__ = [
     "FAILURE_CASE_PROMPT_REPLAY_EXPERIMENT_SCHEMA_VERSION",
     "FAILURE_CASE_PROMPT_REPLAY_FIXTURE_SCHEMA_VERSION",
     "FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID",
+    "FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID",
     "prepare_failure_case_prompt_replay_experiment",
 ]

@@ -9,10 +9,14 @@ from src.backend.services.failure_case_intake_service import (
 from src.backend.services.failure_case_prompt_replay_experiment_service import (
     FAILURE_CASE_PROMPT_REPLAY_FIXTURE_SCHEMA_VERSION,
     FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID,
+    FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
     prepare_failure_case_prompt_replay_experiment,
 )
 from src.backend.services.testing_workflow_contracts import (
+    EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
     EXPERIMENT_CREATE_SPEC_ACTION_ID,
+    EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
+    EXPERIMENT_START_RUN_ACTION_ID,
 )
 from src.backend.workflows.action_registry import (
     ActionRegistry,
@@ -150,7 +154,68 @@ def test_prompt_replay_prepare_action_uses_accumulated_failure_context() -> None
     assert result.outputs["policy_boundary"]["prompt_body_generated"] is False
 
 
-def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
+def test_prompt_replay_record_observations_action_uses_represented_scores(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import failure_case_prompt_improvement_actions
+
+    captured: dict[str, Any] = {}
+
+    def fake_record_experiment_observations(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observation_count": 1,
+            "turn_execution_request_ids": ["req-arm-1"],
+        }
+
+    monkeypatch.setattr(
+        failure_case_prompt_improvement_actions,
+        "record_experiment_observations",
+        fake_record_experiment_observations,
+    )
+    registry = ActionRegistry()
+    register_failure_case_prompt_improvement_actions(registry)
+
+    result = registry.execute(
+        FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
+        inputs={"require_represented_evaluation": True},
+        context={
+            "run_id": "#V#run_1",
+            "replay_set_id": "#V#replay_set",
+            "prompt_replay_arm_summaries": [
+                {
+                    "arm": {"arm_id": "arm_1"},
+                    "represented_replay_evaluation": {"verdict": "pass"},
+                }
+            ],
+        },
+        env=WorkflowEnvironment(llm_client=None, gateway="fake-gateway"),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["prompt_replay_observations_recorded"] is True
+    assert result.outputs["policy_boundary"] == {
+        "prompt_body_generated": False,
+        "replay_scored": False,
+        "promotion_recommendation_generated": False,
+        "experiment_observation_persisted": True,
+        "reason": (
+            "This action converts already-scored replay arm summaries into "
+            "experiment observations. Prompt hypotheses, represented replay "
+            "evaluation, and promotion decisions remain workflow/Vontology "
+            "authority."
+        ),
+    }
+    assert captured["run_id"] == "#V#run_1"
+    assert captured["default_replay_set_id"] == "#V#replay_set"
+    assert captured["gateway"] == "fake-gateway"
+    assert captured["require_represented_evaluation"] is True
+    assert captured["arm_summaries"][0]["arm"]["arm_id"] == "arm_1"
+
+
+def test_failure_case_workflow_can_start_record_and_score_prompt_replay_spec(
     monkeypatch,
 ) -> None:
     from src.backend.workflows.durable import failure_case_prompt_improvement_actions
@@ -171,8 +236,9 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
         "workflow_name": "Failure case prompt improvement workflow",
         "workflow_description": (
             "Collects failure-case evidence, prepares replay-backed prompt "
-            "variant experiment inputs, and persists the represented experiment "
-            "spec through the canonical testing workflow surface."
+            "variant experiment inputs, persists the represented experiment "
+            "spec, records represented replay observations, and emits a "
+            "learning signal through canonical testing workflow surfaces."
         ),
         "parent_type_id": "#V#durable_workflow",
         "initial_state_key": "collect_failure_case_intake",
@@ -255,6 +321,98 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
                     },
                     {"tool_param": "metadata", "context_key": "experiment_metadata"},
                 ],
+                "next_state_key": "start_experiment_run",
+                "on_failure_state_key": "failed",
+            },
+            {
+                "state_id": "start_experiment_run",
+                "state_key": "start_experiment_run",
+                "action_id": EXPERIMENT_START_RUN_ACTION_ID,
+                "execution_mode": "deterministic",
+                "context_input_mappings": [
+                    {
+                        "tool_param": "experiment_spec_id",
+                        "context_key": "experiment_spec_id",
+                    },
+                    {
+                        "tool_param": "turn_execution_request_ids",
+                        "context_key": "experiment_turn_execution_request_ids",
+                    },
+                    {"tool_param": "metadata", "context_key": "experiment_metadata"},
+                ],
+                "writes_context_keys": ["run_id", "experiment_run"],
+                "conditional_transitions": [
+                    {
+                        "to_state_key": "record_prompt_replay_observations",
+                        "reason": "arm_summaries_available",
+                        "condition": {
+                            "kind": "context_exists",
+                            "key": "prompt_replay_arm_summaries",
+                            "expected": True,
+                        },
+                    },
+                    {
+                        "to_state_key": "completed",
+                        "reason": "arm_summaries_not_supplied_yet",
+                        "condition": {
+                            "kind": "context_exists",
+                            "key": "prompt_replay_arm_summaries",
+                            "expected": False,
+                        },
+                    },
+                ],
+                "on_failure_state_key": "failed",
+            },
+            {
+                "state_id": "record_prompt_replay_observations",
+                "state_key": "record_prompt_replay_observations",
+                "action_id": FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
+                "execution_mode": "deterministic",
+                "context_input_mappings": [
+                    {"tool_param": "run_id", "context_key": "run_id"},
+                    {
+                        "tool_param": "arm_summaries",
+                        "context_key": "prompt_replay_arm_summaries",
+                    },
+                    {"tool_param": "replay_set_id", "context_key": "replay_set_id"},
+                ],
+                "static_input_bindings": [
+                    {"tool_param": "require_represented_evaluation", "value": True}
+                ],
+                "writes_context_keys": [
+                    "prompt_replay_observations_recorded",
+                    "recorded_observation_count",
+                    "turn_execution_request_ids",
+                    "policy_boundary",
+                ],
+                "next_state_key": "compute_experiment_verdict",
+                "on_failure_state_key": "failed",
+            },
+            {
+                "state_id": "compute_experiment_verdict",
+                "state_key": "compute_experiment_verdict",
+                "action_id": EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
+                "execution_mode": "deterministic",
+                "context_input_mappings": [
+                    {"tool_param": "run_id", "context_key": "run_id"}
+                ],
+                "writes_context_keys": [
+                    "verdict",
+                    "verdict_summary",
+                    "promotion_recommendation",
+                ],
+                "next_state_key": "emit_learning_signal",
+                "on_failure_state_key": "failed",
+            },
+            {
+                "state_id": "emit_learning_signal",
+                "state_key": "emit_learning_signal",
+                "action_id": EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
+                "execution_mode": "deterministic",
+                "context_input_mappings": [
+                    {"tool_param": "run_id", "context_key": "run_id"}
+                ],
+                "writes_context_keys": ["learning_signal"],
                 "next_state_key": "completed",
                 "on_failure_state_key": "failed",
             },
@@ -270,12 +428,20 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
             FAILURE_CASE_INTAKE_COLLECT_ACTION_ID,
             FAILURE_CASE_PROMPT_REPLAY_PREPARE_ACTION_ID,
             EXPERIMENT_CREATE_SPEC_ACTION_ID,
+            EXPERIMENT_START_RUN_ACTION_ID,
+            FAILURE_CASE_PROMPT_REPLAY_RECORD_OBSERVATIONS_ACTION_ID,
+            EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
+            EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
         ),
         enforce_supported_actions=True,
     )
     assert validation["valid"] is True
 
     captured_create_inputs: dict[str, Any] = {}
+    captured_start_inputs: dict[str, Any] = {}
+    captured_record_inputs: dict[str, Any] = {}
+    captured_verdict_inputs: dict[str, Any] = {}
+    captured_signal_inputs: dict[str, Any] = {}
 
     def fake_create_spec(request: Any) -> WorkflowActionResult:
         captured_create_inputs.update(dict(request.inputs))
@@ -287,6 +453,65 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
             },
         )
 
+    def fake_start_run(request: Any) -> WorkflowActionResult:
+        captured_start_inputs.update(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "success": True,
+                "run_id": "#V#run_1",
+                "experiment_run": {
+                    "run_id": "#V#run_1",
+                    "experiment_spec_id": request.inputs["experiment_spec_id"],
+                },
+            },
+        )
+
+    def fake_record_experiment_observations(**kwargs: Any) -> dict[str, Any]:
+        captured_record_inputs.update(kwargs)
+        return {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observation_count": 1,
+            "turn_execution_request_ids": ["req-arm-1"],
+        }
+
+    monkeypatch.setattr(
+        failure_case_prompt_improvement_actions,
+        "record_experiment_observations",
+        fake_record_experiment_observations,
+    )
+
+    def fake_compute_verdict(request: Any) -> WorkflowActionResult:
+        captured_verdict_inputs.update(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "success": True,
+                "run_id": request.inputs["run_id"],
+                "verdict": "pass",
+                "verdict_summary": {"pass": 1, "fail": 0},
+                "promotion_recommendation": {
+                    "recommended": False,
+                    "requires_human_review": True,
+                },
+            },
+        )
+
+    def fake_emit_learning_signal(request: Any) -> WorkflowActionResult:
+        captured_signal_inputs.update(dict(request.inputs))
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "success": True,
+                "run_id": request.inputs["run_id"],
+                "learning_signal": {
+                    "schema_version": "experiment_learning_signal.v1",
+                    "selection_outcome": "accepted",
+                },
+            },
+        )
+
     registry = ActionRegistry()
     register_failure_case_prompt_improvement_actions(registry)
     registry.register(
@@ -295,11 +520,37 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
             handler=fake_create_spec,
         )
     )
+    registry.register(
+        ActionSpec(
+            action_id=EXPERIMENT_START_RUN_ACTION_ID,
+            handler=fake_start_run,
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id=EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
+            handler=fake_compute_verdict,
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id=EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
+            handler=fake_emit_learning_signal,
+        )
+    )
 
     result = WorkflowExecutor(registry=registry, max_transitions=8).run(
         definition,
         environment=WorkflowEnvironment(llm_client=None),
-        data={"request_id": "req-current"},
+        data={
+            "request_id": "req-current",
+            "prompt_replay_arm_summaries": [
+                {
+                    "arm": {"arm_id": "arm_1"},
+                    "represented_replay_evaluation": {"verdict": "pass"},
+                }
+            ],
+        },
     )
 
     assert result.completed is True
@@ -310,4 +561,17 @@ def test_failure_case_workflow_can_prepare_and_create_prompt_replay_spec(
     assert captured_create_inputs["promotion_policy"] == {
         "requires": "represented_replay_gate"
     }
-    assert result.data["policy_boundary"]["classification_performed"] is False
+    assert captured_start_inputs["experiment_spec_id"] == captured_create_inputs[
+        "experiment_spec_id"
+    ]
+    assert captured_record_inputs["run_id"] == "#V#run_1"
+    assert captured_record_inputs["require_represented_evaluation"] is True
+    assert captured_verdict_inputs["run_id"] == "#V#run_1"
+    assert captured_signal_inputs["run_id"] == "#V#run_1"
+    assert result.data["recorded_observation_count"] == 1
+    assert result.data["promotion_recommendation"] == {
+        "recommended": False,
+        "requires_human_review": True,
+    }
+    assert result.data["learning_signal"]["selection_outcome"] == "accepted"
+    assert result.data["policy_boundary"]["prompt_body_generated"] is False
