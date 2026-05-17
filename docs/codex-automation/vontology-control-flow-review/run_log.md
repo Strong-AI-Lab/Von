@@ -286,3 +286,36 @@
   observation path as `JVNAUTOSCI-2324` remediation because durable recording
   now requires represented replay evaluation by default.
 - No production code was changed by this review run.
+
+## 2026-05-18T02:08:08.5919602+12:00
+
+- Read required repo guidance, situation-specific workflow/prompt/memory docs,
+  operational authority-alignment docs, repo-local drift-review memories, and
+  checked the global automation memory path. No prior global memory file existed
+  in this shell.
+- Reviewed commits since `2026-05-16T14:00:53Z`: required-tool metadata
+  remediation, deictic arXiv launch-input fixes, representation-routing coverage
+  audit workflow, and email-source representation convergence workflow/schedule
+  work.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  the gate failed on `repo_seed_authority_drift_path_count`: baseline `1`,
+  current `4`, delta `3`. Known paths remained
+  `jira_task_incremental_import_workflow_vontology_service.py` and
+  `kr_materialisation_workflow_vontology_service.py`; new paths were
+  `email_source_representation_convergence_workflow_vontology_service.py` and
+  `representation_workflow_routing_coverage_audit_vontology_service.py`.
+- Created `JVNAUTOSCI-2340` under `JVNAUTOSCI-2335` for email convergence
+  authority drift: repo-seed workflow/hint publication plus Python/env schedule
+  defaults for user/org/namespace, Gmail profile, query, cadence, max results,
+  launch prompt, and workflow id. Linked it to `JVNAUTOSCI-1913` and
+  `JVNAUTOSCI-2080`.
+- Created `JVNAUTOSCI-2341` under `JVNAUTOSCI-2064` for representation-routing
+  audit authority drift: repo-seed prompt/profile/workflow assets, audit cases,
+  thresholds, evaluation dimensions, suggestion policy, and
+  `WorkflowRegistration(source="built_in")` test graph should be represented
+  authority or proven disposable fixtures. Linked it to `JVNAUTOSCI-2331`,
+  `JVNAUTOSCI-2327`, `JVNAUTOSCI-1913`, and `JVNAUTOSCI-2080`.
+- Treated `JVNAUTOSCI-2329` required-tool metadata changes as remediation, not
+  a fresh issue. The current residual signals are now about represented schedule,
+  repo-seed workflow/profile/prompt, and benchmark/rubric authority.
+- No production code was changed by this review run.
