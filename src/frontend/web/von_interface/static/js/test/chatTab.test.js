@@ -2382,6 +2382,101 @@ describe('thinking activity history normalisation', () => {
         );
     });
 
+    test('thinking card promotes selected workflow execution over auxiliary finalisation LLM input', () => {
+        const request = {
+            clientRequestId: 'req-workflow-evidence',
+            promptRaw: 'Run the represented workflow',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                status: 'follow_up_required',
+                stage: 'response_finalising',
+                progress_view_model: {
+                    schema_version: 'thinking_card_progress_view_model.v1',
+                    source_authority: 'derived_from_live_telemetry',
+                    objective_summary: 'Run the represented workflow',
+                    current_activity: 'The turn completed, but a follow-up step is still required.',
+                    llm_input_lifecycle: {
+                        state: 'completed',
+                        model: 'gpt-5.4-mini',
+                        prompt_preview: {
+                            text: 'You generate quick-reply button options for a chat UI.',
+                            char_count: 54
+                        },
+                        response_preview: {
+                            text: '[]',
+                            char_count: 2
+                        }
+                    }
+                }
+            },
+            workflowStagePath: {
+                workflow_id: '#V#chat_narration_workflow',
+                selected_workflow_id: null,
+                observed_workflow_ids: ['#V#chat_narration_workflow'],
+                path: [
+                    {
+                        stage_id: 'narration',
+                        stage_label: 'Narration rendering',
+                        workflow_id: '#V#chat_narration_workflow'
+                    },
+                    {
+                        stage_id: 'response_finalising',
+                        stage_label: 'Finalising response'
+                    }
+                ]
+            },
+            workflowRoutingDiagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#example_selected_workflow',
+                selector_source: 'selector',
+                dispatch: {
+                    selected_execution_mode: 'custom_workflow',
+                    dispatch_workflow_id: '#V#example_selected_workflow',
+                    dispatch_terminal_status: 'completed',
+                    custom_workflow_execution: {
+                        observed: true,
+                        workflow_id: '#V#example_selected_workflow',
+                        workflow_instance_id: 'instance-123',
+                        terminal_status: 'completed',
+                        final_state: '#V#workflow_done',
+                        action_completed_count: 11,
+                        action_success_count: 11,
+                        action_failure_count: 0,
+                        terminal_effect_count: 0,
+                        durable_side_effect_count: 0
+                    },
+                    required_tool_obligation_blocking_failure_codes: [
+                        'required_tool_not_planned',
+                        'mutation_succeeded_readback_missing'
+                    ],
+                    required_tool_obligations: {
+                        unsatisfied_required_tools: [
+                            'gmail_list_messages',
+                            'fetch_concept'
+                        ],
+                        blocking_failure_codes: [
+                            'required_tool_not_planned',
+                            'mutation_succeeded_readback_missing'
+                        ]
+                    }
+                }
+            }
+        };
+
+        const viewModel = __testOnly_buildThinkingCardProgressViewModel(request);
+        expect(viewModel.workflow_execution_summary.summary_text).toContain('terminal status completed');
+        expect(viewModel.workflow_verification_summary).toContain('unsatisfied required tools');
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Workflow execution');
+        expect(html).toContain('terminal status completed');
+        expect(html).toContain('Selected workflow execution');
+        expect(html).toContain('#V#example_selected_workflow');
+        expect(html).toContain('unsatisfied required tools');
+        expect(html).not.toContain('You generate quick-reply button options');
+        expect(html).not.toContain('Prepared input');
+    });
+
     test('surfaces live prepared and sent LLM request previews in stage diagnostics', () => {
         const request = {
             clientRequestId: 'req-live-llm',

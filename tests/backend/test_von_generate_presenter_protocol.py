@@ -150,20 +150,28 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
             "tool_call_end_count": 0,
             "workflow_discovery": None,
             "workflow_routing_diagnostics": None,
-            "workflow_stage_model": {"schema_version": "conversation_turn_stage_model.v1", "stages": []},
+            "workflow_stage_model": {
+                "schema_version": "conversation_turn_stage_model.v1",
+                "stages": [],
+            },
             "workflow_stage_path": None,
             "stage_diagnostics": [],
             "timing_breakdown": None,
         },
     )
-    def _finalise_llm_debug_info_stub(*, llm_debug_info, actor_concept_id=None, namespace=None, **_kwargs):
+
+    def _finalise_llm_debug_info_stub(
+        *, llm_debug_info, actor_concept_id=None, namespace=None, **_kwargs
+    ):
         payload = dict(llm_debug_info)
         resolved_actor = (
             actor_concept_id
             if isinstance(actor_concept_id, str) and actor_concept_id.strip()
-            else namespace
-            if isinstance(namespace, str) and namespace.strip()
-            else payload.get("actor_concept_id")
+            else (
+                namespace
+                if isinstance(namespace, str) and namespace.strip()
+                else payload.get("actor_concept_id")
+            )
         )
         if isinstance(resolved_actor, str) and resolved_actor.strip():
             payload["actor_concept_id"] = resolved_actor.strip()
@@ -401,7 +409,9 @@ def test_generate_buttonify_noops_when_vontology_prompt_unavailable(monkeypatch)
     assert len(llm.calls) == 1
 
 
-def test_generate_buttonify_route_fallback_honours_prompt_contract_variables(monkeypatch):
+def test_generate_buttonify_route_fallback_honours_prompt_contract_variables(
+    monkeypatch,
+):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
 
@@ -491,7 +501,9 @@ def test_generate_buttonify_non_json_llm_output_noops(monkeypatch):
     assert len(llm.calls) == 2
 
 
-def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monkeypatch):
+def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(
+    monkeypatch,
+):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
     llm = _StubLLMSequence(
@@ -527,7 +539,10 @@ def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monk
     llm_debug = body["llm_debug"]
 
     assert body["response_channels"]["spoken"] == "Proceed with the update."
-    assert body["response_channels"]["screen"] == 'Please reply with one of: "Proceed", "Hold".'
+    assert (
+        body["response_channels"]["screen"]
+        == 'Please reply with one of: "Proceed", "Hold".'
+    )
 
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
     assert buttonify_event["status"] == "success"
@@ -774,7 +789,10 @@ def test_history_debug_transformations_view_returns_lightweight_payload(monkeypa
     assert body["success"] is True
     assert "llm_debug_data" not in body
     assert body["transformations_count"] == 1
-    assert body["response_transformations"]["schema_version"] == "response_transformations_v1"
+    assert (
+        body["response_transformations"]["schema_version"]
+        == "response_transformations_v1"
+    )
 
 
 def test_extract_presenter_channels_ignores_tags_inside_fenced_blocks():
@@ -931,6 +949,93 @@ def test_presenter_mode_reconstructs_tool_messages_from_invocations_when_missing
     assert spoken_backfill_event["source_path"] == "llm_synthesis"
 
 
+def test_presenter_mode_uses_workflow_execution_evidence_for_follow_up_screen(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    aux_llm_calls = (
+        {
+            "type": "workflow_execution",
+            "workflow_id": "#V#example_workflow",
+            "execution_summary": {
+                "workflow_id": "#V#example_workflow",
+                "workflow_instance_id": "instance-123",
+                "completed": True,
+                "effective_completed": True,
+                "terminal_status": "completed",
+                "final_state": "#V#workflow_done",
+                "action_completed_count": 11,
+                "action_success_count": 11,
+                "action_failure_count": 0,
+                "terminal_effect_count": 0,
+                "durable_side_effect_count": 0,
+            },
+        },
+        {
+            "type": "turn_completion_gate",
+            "decision": "escalation_required",
+            "decision_reason": "Required mutation was not executed.",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "blocking_effect_ids": ["effect_required_tool_obligations_1"],
+            "blocking_failure_codes": [
+                "required_tool_not_planned",
+                "mutation_succeeded_readback_missing",
+            ],
+            "unresolved_preconditions": [
+                {
+                    "effect_type": "required_evidence",
+                    "status": "not_executed",
+                    "status_reason": "Required read-back evidence was missing.",
+                }
+            ],
+        },
+    )
+    tool_invocations = (
+        {"tool": "workflow_execute", "status": "ok", "duration_ms": 18},
+    )
+    orchestrator_result = OrchestratorResult(
+        response_text=(
+            "I do not yet have a complete workflow-backed answer.\n\n"
+            "Required mutation was not executed."
+        ),
+        extra_messages=[],
+        tool_invocations=tool_invocations,
+        aux_llm_calls=aux_llm_calls,
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Run the represented workflow", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert "Workflow-backed outcome:" in screen_text
+    assert "terminal status `completed`" in screen_text
+    assert "instance `instance-123`" in screen_text
+    assert "Verification still needs follow-up" in screen_text
+    assert "required_tool_not_planned" in screen_text
+    assert "I do not yet have a complete workflow-backed answer" not in screen_text
+    assert "Required mutation was not executed" not in screen_text
+
+    screen_backfill_event = _find_transformation_event(
+        body["llm_debug"],
+        "screen_backfill",
+    )
+    assert screen_backfill_event["source_path"] == "follow_up_summary"
+
+
 def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
     llm = _StubLLMSequence(
         [
@@ -1042,10 +1147,7 @@ def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkey
 
     assert len(llm.calls) == 3
     assert llm.calls[1]["prompt"] == "Generate <screen> display content"
-    assert (
-        "internal execution-status text"
-        in llm.calls[1]["context"][1]["content"]
-    )
+    assert "internal execution-status text" in llm.calls[1]["context"][1]["content"]
     assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
@@ -1252,7 +1354,10 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
         "This turn still needs follow-up before it should be treated as complete."
         in screen_text
     )
-    assert "The tool path did not complete the requested paper-status analysis." in screen_text
+    assert (
+        "The tool path did not complete the requested paper-status analysis."
+        in screen_text
+    )
     assert "Tool activity diagnostics:" in screen_text
     assert "search_concepts — ok" in screen_text
 
@@ -1264,7 +1369,9 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
 
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "fallback_success"
-    assert screen_backfill_event["source_path"] == "response_text_plus_follow_up_summary"
+    assert (
+        screen_backfill_event["source_path"] == "response_text_plus_follow_up_summary"
+    )
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
@@ -1314,9 +1421,7 @@ def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypa
     assert body["response_channels"]["spoken"] == "I couldn't complete that request."
 
     llm_debug = body["llm_debug"]
-    screen_backfill_event = _find_transformation_event(
-        llm_debug, "screen_backfill"
-    )
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "success"
     assert screen_backfill_event["source_path"] == "llm_synthesis"
 
@@ -1326,10 +1431,7 @@ def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypa
 
     assert len(llm.calls) == 3
     assert llm.calls[1]["prompt"] == "Generate <screen> display content"
-    assert (
-        "internal execution-status text"
-        in llm.calls[1]["context"][1]["content"]
-    )
+    assert "internal execution-status text" in llm.calls[1]["context"][1]["content"]
     assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
@@ -1430,6 +1532,71 @@ def test_follow_up_summary_suppresses_internal_status_reason_with_detector_event
     )
     assert detector_event["detector"] == "internal_status_diagnostic"
     assert detector_event["context"] == "follow_up_decision_reason"
+
+
+def test_follow_up_summary_reconciles_completed_workflow_execution_with_open_verification():
+    from src.backend.server.routes.von_routes import (
+        _build_presenter_follow_up_summary_from_tool_messages,
+    )
+
+    aux_llm_calls: list[dict] = [
+        {
+            "type": "workflow_execution",
+            "workflow_id": "#V#example_workflow",
+            "execution_summary": {
+                "workflow_id": "#V#example_workflow",
+                "workflow_instance_id": "instance-123",
+                "completed": True,
+                "effective_completed": True,
+                "terminal_status": "completed",
+                "final_state": "#V#workflow_done",
+                "action_completed_count": 11,
+                "action_success_count": 11,
+                "action_failure_count": 0,
+                "terminal_effect_count": 0,
+                "durable_side_effect_count": 0,
+            },
+        }
+    ]
+
+    summary = _build_presenter_follow_up_summary_from_tool_messages(
+        [],
+        completion_gate={
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "decision_reason": "Required mutation was not executed.",
+            "blocking_failure_codes": [
+                "required_tool_not_planned",
+                "mutation_succeeded_readback_missing",
+            ],
+            "unresolved_preconditions": [
+                {
+                    "effect_type": "required_evidence",
+                    "status": "not_executed",
+                    "status_reason": "Required read-back evidence was missing.",
+                }
+            ],
+        },
+        auxiliary_llm_calls=aux_llm_calls,
+    )
+
+    assert isinstance(summary, str)
+    assert "Workflow-backed outcome:" in summary
+    assert "terminal status `completed`" in summary
+    assert "instance `instance-123`" in summary
+    assert "11 completed" in summary
+    assert "Durable side effects observed: 0" in summary
+    assert "Verification still needs follow-up" in summary
+    assert "required_tool_not_planned" in summary
+    assert "Required mutation was not executed" not in summary
+    detector_event = next(
+        entry
+        for entry in aux_llm_calls
+        if entry.get("type") == "presenter_detector"
+        and entry.get("reason_code")
+        == "overbroad_mutation_status_replaced_by_workflow_evidence"
+    )
+    assert detector_event["detector"] == "workflow_execution_reconciled"
 
 
 def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeypatch):

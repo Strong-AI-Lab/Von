@@ -5197,6 +5197,29 @@ def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
                 effect_id = _progress_str(item)
                 if effect_id:
                     blocking_effect_ids.append(effect_id)
+        blocking_failure_codes_raw = entry.get("blocking_failure_codes")
+        blocking_failure_codes: list[str] = []
+        if isinstance(blocking_failure_codes_raw, list):
+            for item in blocking_failure_codes_raw:
+                failure_code = _progress_str(item)
+                if failure_code:
+                    blocking_failure_codes.append(failure_code)
+        unresolved_preconditions_raw = entry.get("unresolved_preconditions")
+        unresolved_preconditions = (
+            [
+                dict(item)
+                for item in unresolved_preconditions_raw
+                if isinstance(item, Mapping)
+            ]
+            if isinstance(unresolved_preconditions_raw, list)
+            else []
+        )
+        evidence_payload_raw = entry.get("evidence_payload")
+        evidence_payload = (
+            dict(evidence_payload_raw)
+            if isinstance(evidence_payload_raw, Mapping)
+            else None
+        )
 
         return {
             "decision": decision,
@@ -5204,6 +5227,9 @@ def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
             "requires_follow_up": requires_follow_up,
             "safe_to_claim_completion": safe_to_claim_completion,
             "blocking_effect_ids": blocking_effect_ids,
+            "blocking_failure_codes": blocking_failure_codes,
+            "unresolved_preconditions": unresolved_preconditions,
+            "evidence_payload": evidence_payload,
         }
 
     return None
@@ -6297,9 +6323,14 @@ def _looks_like_internal_status_diagnostic(value: str | None) -> bool:
         "blocking effect ids:",
         "unresolved preconditions:",
         "failure codes:",
+        "tool activity diagnostics:",
+        "operational summary:",
     )
     marker_count = sum(1 for marker in diagnostic_markers if marker in lowered)
     if lowered.startswith("execution status:") or marker_count >= 2:
+        return True
+
+    if lowered.startswith("i do not yet have a complete workflow-backed answer"):
         return True
 
     if lowered.startswith("workflow ") and " (state:" in lowered:
@@ -6531,33 +6562,250 @@ def _build_presenter_screen_summary_from_tool_messages(
     return "\n".join(lines).strip() or None
 
 
+def _latest_workflow_execution_summary_from_aux_calls(
+    aux_calls: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(aux_calls, (list, tuple)):
+        return None
+
+    for entry in reversed(aux_calls):
+        if not isinstance(entry, Mapping):
+            continue
+        call_type = entry.get("type")
+        if not isinstance(call_type, str) or call_type.strip() != "workflow_execution":
+            continue
+
+        summary_raw = entry.get("execution_summary")
+        summary = dict(summary_raw) if isinstance(summary_raw, Mapping) else {}
+        if not summary:
+            for key in (
+                "workflow_id",
+                "workflow_instance_id",
+                "completed",
+                "effective_completed",
+                "terminal_status",
+                "final_state",
+                "action_started_count",
+                "action_completed_count",
+                "action_success_count",
+                "action_failure_count",
+                "action_unknown_count",
+                "terminal_effect_count",
+                "durable_side_effect_count",
+            ):
+                if key in entry:
+                    summary[key] = entry.get(key)
+        workflow_id = _progress_str(summary.get("workflow_id")) or _progress_str(
+            entry.get("workflow_id")
+        )
+        if workflow_id:
+            summary["workflow_id"] = workflow_id
+        return summary or None
+
+    return None
+
+
+def _coerce_non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(0, parsed)
+
+
+def _workflow_execution_summary_has_progress(
+    execution_summary: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(execution_summary, Mapping):
+        return False
+    if any(
+        _coerce_non_negative_int(execution_summary.get(key)) > 0
+        for key in (
+            "action_started_count",
+            "action_completed_count",
+            "action_success_count",
+            "action_failure_count",
+            "terminal_effect_count",
+            "durable_side_effect_count",
+            "runtime_event_count",
+            "step_result_envelope_count",
+        )
+    ):
+        return True
+    return any(
+        bool(_progress_str(execution_summary.get(key)))
+        for key in (
+            "workflow_id",
+            "workflow_instance_id",
+            "terminal_status",
+            "final_state",
+            "workflow_instance_status",
+        )
+    )
+
+
+def _build_presenter_workflow_execution_follow_up_summary(
+    workflow_execution_summary: Mapping[str, Any] | None,
+    *,
+    completion_gate: Mapping[str, Any] | None = None,
+) -> str | None:
+    if not _workflow_execution_summary_has_progress(workflow_execution_summary):
+        return None
+
+    summary = workflow_execution_summary or {}
+    completion_gate_map = (
+        completion_gate if isinstance(completion_gate, Mapping) else {}
+    )
+    requires_follow_up = bool(completion_gate_map.get("requires_follow_up", False))
+    safe_to_claim_completion = bool(
+        completion_gate_map.get("safe_to_claim_completion", not requires_follow_up)
+    )
+
+    workflow_id = _progress_str(summary.get("workflow_id"))
+    workflow_instance_id = _progress_str(summary.get("workflow_instance_id"))
+    terminal_status = _progress_str(summary.get("terminal_status"))
+    final_state = _progress_str(summary.get("final_state"))
+    completed = summary.get("completed")
+    effective_completed = summary.get("effective_completed")
+    action_success_count = _coerce_non_negative_int(summary.get("action_success_count"))
+    action_failure_count = _coerce_non_negative_int(summary.get("action_failure_count"))
+    action_unknown_count = _coerce_non_negative_int(summary.get("action_unknown_count"))
+    action_completed_count = _coerce_non_negative_int(
+        summary.get("action_completed_count")
+    )
+    terminal_effect_count = _coerce_non_negative_int(
+        summary.get("terminal_effect_count")
+    )
+    durable_side_effect_count = _coerce_non_negative_int(
+        summary.get("durable_side_effect_count")
+    )
+
+    if terminal_status:
+        outcome = f"The selected workflow reached terminal status `{terminal_status}`."
+    elif isinstance(completed, bool):
+        outcome = (
+            "The selected workflow reported completion."
+            if completed
+            else "The selected workflow reported that it did not complete."
+        )
+    else:
+        outcome = "The selected workflow produced execution evidence."
+
+    lines = ["Workflow-backed outcome:", outcome]
+    detail_bits: list[str] = []
+    if workflow_id:
+        detail_bits.append(f"workflow `{workflow_id}`")
+    if workflow_instance_id:
+        detail_bits.append(f"instance `{workflow_instance_id}`")
+    if final_state:
+        detail_bits.append(f"final state `{final_state}`")
+    if isinstance(effective_completed, bool):
+        detail_bits.append(f"effective completed: {str(effective_completed).lower()}")
+    if detail_bits:
+        lines.append(f"- {'; '.join(detail_bits)}")
+
+    action_bits: list[str] = []
+    if action_completed_count > 0:
+        action_bits.append(f"{action_completed_count} completed")
+    if action_success_count > 0:
+        action_bits.append(f"{action_success_count} succeeded")
+    if action_failure_count > 0:
+        action_bits.append(f"{action_failure_count} failed")
+    if action_unknown_count > 0:
+        action_bits.append(f"{action_unknown_count} unknown")
+    if action_bits:
+        lines.append(f"- Actions: {', '.join(action_bits)}")
+    lines.append(f"- Terminal effects observed: {terminal_effect_count}")
+    lines.append(f"- Durable side effects observed: {durable_side_effect_count}")
+
+    if requires_follow_up or not safe_to_claim_completion:
+        lines.append("")
+        lines.append(
+            "Verification still needs follow-up before Von should claim the user task is complete."
+        )
+        blocking_failure_codes = [
+            _progress_str(item)
+            for item in completion_gate_map.get("blocking_failure_codes", [])
+            if _progress_str(item)
+        ]
+        if blocking_failure_codes:
+            lines.append(
+                "- Blocking failure codes: " + ", ".join(blocking_failure_codes)
+            )
+        unresolved_preconditions = completion_gate_map.get("unresolved_preconditions")
+        if isinstance(unresolved_preconditions, list):
+            unresolved_bits: list[str] = []
+            for item in unresolved_preconditions:
+                if not isinstance(item, Mapping):
+                    continue
+                effect_type = _progress_str(item.get("effect_type"))
+                status = _progress_str(item.get("status"))
+                status_reason = _progress_str(item.get("status_reason"))
+                bit = " ".join(value for value in (effect_type, status) if value)
+                if status_reason:
+                    bit = f"{bit}: {status_reason}" if bit else status_reason
+                if bit:
+                    unresolved_bits.append(bit)
+            if unresolved_bits:
+                lines.append("- Unresolved evidence: " + "; ".join(unresolved_bits[:4]))
+
+    return "\n".join(lines).strip()
+
+
 def _build_presenter_follow_up_summary_from_tool_messages(
     tool_messages: list[dict],
     *,
     completion_gate: Mapping[str, Any] | None = None,
     auxiliary_llm_calls: list[dict[str, Any]] | None = None,
+    workflow_execution_summary: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Build one shared presenter summary basis for incomplete tool turns."""
 
     tool_summary = _build_presenter_screen_summary_from_tool_messages(tool_messages)
+    if workflow_execution_summary is None:
+        workflow_execution_summary = _latest_workflow_execution_summary_from_aux_calls(
+            auxiliary_llm_calls
+        )
+    workflow_summary = _build_presenter_workflow_execution_follow_up_summary(
+        workflow_execution_summary,
+        completion_gate=completion_gate,
+    )
     if not isinstance(completion_gate, Mapping):
-        return tool_summary
+        return (
+            "\n\n".join(item for item in (workflow_summary, tool_summary) if item)
+            or None
+        )
 
     requires_follow_up = bool(completion_gate.get("requires_follow_up", False))
     safe_to_claim_completion = bool(
         completion_gate.get("safe_to_claim_completion", not requires_follow_up)
     )
     if not requires_follow_up and safe_to_claim_completion:
-        return tool_summary
+        return (
+            "\n\n".join(item for item in (workflow_summary, tool_summary) if item)
+            or None
+        )
 
-    lines: list[str] = [
-        "I ran tools for this request, but I do not have a reliable final answer yet.",
-        "This turn still needs follow-up before it should be treated as complete.",
-    ]
+    if workflow_summary:
+        lines = [workflow_summary]
+    else:
+        lines = [
+            "I ran tools for this request, but I do not have a reliable final answer yet.",
+            "This turn still needs follow-up before it should be treated as complete.",
+        ]
 
     decision_reason = _progress_str(completion_gate.get("decision_reason"))
     decision_reason_is_internal_status = _looks_like_internal_status_diagnostic(
         decision_reason
+    )
+    decision_reason_is_overbroad_mutation_status = bool(
+        workflow_summary
+        and decision_reason
+        and decision_reason.strip().lower()
+        in {
+            "required mutation was not executed.",
+            "mutation attempt failed or was blocked.",
+        }
     )
     if decision_reason and decision_reason_is_internal_status:
         _append_presenter_detector_event(
@@ -6568,7 +6816,20 @@ def _build_presenter_follow_up_summary_from_tool_messages(
             reason_code="follow_up_decision_reason_suppressed",
             preview=decision_reason,
         )
-    if decision_reason and not decision_reason_is_internal_status:
+    if decision_reason and decision_reason_is_overbroad_mutation_status:
+        _append_presenter_detector_event(
+            auxiliary_llm_calls,
+            function_name="_build_presenter_follow_up_summary_from_tool_messages",
+            detector="workflow_execution_reconciled",
+            context="follow_up_decision_reason",
+            reason_code="overbroad_mutation_status_replaced_by_workflow_evidence",
+            preview=decision_reason,
+        )
+    if (
+        decision_reason
+        and not decision_reason_is_internal_status
+        and not decision_reason_is_overbroad_mutation_status
+    ):
         lines.append(decision_reason)
 
     if tool_summary:
@@ -10125,11 +10386,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if not cleaned_summary:
                         return cleaned_base
                     if not cleaned_base:
-                        return (
-                            "I do not yet have a complete workflow-backed answer.\n\n"
-                            "Operational summary:\n"
-                            f"{cleaned_summary}"
-                        )
+                        return cleaned_summary
                     if cleaned_summary in cleaned_base:
                         return cleaned_base
                     return (

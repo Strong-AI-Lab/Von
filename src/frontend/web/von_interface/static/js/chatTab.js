@@ -3787,6 +3787,180 @@ function getExplicitThinkingCardProgressViewModel(request) {
     return null;
 }
 
+function toThinkingCardNonNegativeInteger(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return 0;
+    }
+    return Math.max(0, Math.trunc(parsed));
+}
+
+function deriveThinkingCardWorkflowExecutionSummary(request) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const routingDiagnostics = getWorkflowRoutingDiagnostics(
+        (request?.workflowRoutingDiagnostics && typeof request.workflowRoutingDiagnostics === 'object')
+            ? request.workflowRoutingDiagnostics
+            : latestProgress
+    );
+    const dispatch = (routingDiagnostics?.dispatch && typeof routingDiagnostics.dispatch === 'object')
+        ? routingDiagnostics.dispatch
+        : null;
+    const customExecution = (
+        dispatch?.custom_workflow_execution
+        && typeof dispatch.custom_workflow_execution === 'object'
+    )
+        ? dispatch.custom_workflow_execution
+        : null;
+    if (!customExecution) {
+        return null;
+    }
+    return {
+        ...customExecution,
+        selected_workflow_id: normaliseThinkingActivityString(routingDiagnostics?.selected_workflow_id)
+            || normaliseThinkingActivityString(dispatch?.dispatch_workflow_id)
+            || normaliseThinkingActivityString(customExecution.workflow_id)
+            || null,
+        dispatch_terminal_status: normaliseThinkingActivityString(dispatch?.dispatch_terminal_status) || null
+    };
+}
+
+function normaliseThinkingCardWorkflowExecutionSummary(rawSummary) {
+    if (!rawSummary || typeof rawSummary !== 'object') {
+        return null;
+    }
+    const workflowId = normaliseThinkingActivityString(
+        rawSummary.workflow_id || rawSummary.selected_workflow_id
+    );
+    const workflowInstanceId = normaliseThinkingActivityString(rawSummary.workflow_instance_id);
+    const terminalStatus = normaliseThinkingActivityString(
+        rawSummary.terminal_status || rawSummary.dispatch_terminal_status
+    );
+    const finalState = normaliseThinkingActivityString(rawSummary.final_state);
+    const actionCompletedCount = toThinkingCardNonNegativeInteger(rawSummary.action_completed_count);
+    const actionSuccessCount = toThinkingCardNonNegativeInteger(rawSummary.action_success_count);
+    const actionFailureCount = toThinkingCardNonNegativeInteger(rawSummary.action_failure_count);
+    const actionUnknownCount = toThinkingCardNonNegativeInteger(rawSummary.action_unknown_count);
+    const terminalEffectCount = toThinkingCardNonNegativeInteger(rawSummary.terminal_effect_count);
+    const durableSideEffectCount = toThinkingCardNonNegativeInteger(rawSummary.durable_side_effect_count);
+    const observed = rawSummary.observed === true || Boolean(
+        workflowId
+        || workflowInstanceId
+        || terminalStatus
+        || finalState
+        || actionCompletedCount
+        || actionSuccessCount
+        || actionFailureCount
+        || terminalEffectCount
+        || durableSideEffectCount
+    );
+    if (!observed) {
+        return null;
+    }
+
+    const statusText = terminalStatus
+        ? `terminal status ${terminalStatus}`
+        : (finalState ? `final state ${finalState}` : 'execution observed');
+    const actionParts = [];
+    if (actionCompletedCount > 0) {
+        actionParts.push(`${formatThinkingCountLabel(actionCompletedCount, 'action')} completed`);
+    }
+    if (actionSuccessCount > 0) {
+        actionParts.push(`${formatThinkingCountLabel(actionSuccessCount, 'action')} succeeded`);
+    }
+    if (actionFailureCount > 0) {
+        actionParts.push(`${formatThinkingCountLabel(actionFailureCount, 'action')} failed`);
+    }
+    if (actionUnknownCount > 0) {
+        actionParts.push(`${formatThinkingCountLabel(actionUnknownCount, 'action')} unknown`);
+    }
+    const effectText = [
+        formatThinkingCountLabel(terminalEffectCount, 'terminal effect'),
+        formatThinkingCountLabel(durableSideEffectCount, 'durable side effect')
+    ].join('; ');
+    const detailBits = [
+        statusText,
+        actionParts.join(', '),
+        effectText
+    ].filter(Boolean);
+    return {
+        workflow_id: workflowId || null,
+        workflow_instance_id: workflowInstanceId || null,
+        terminal_status: terminalStatus || null,
+        final_state: finalState || null,
+        action_completed_count: actionCompletedCount,
+        action_success_count: actionSuccessCount,
+        action_failure_count: actionFailureCount,
+        action_unknown_count: actionUnknownCount,
+        terminal_effect_count: terminalEffectCount,
+        durable_side_effect_count: durableSideEffectCount,
+        summary_text: detailBits.join(' · ')
+    };
+}
+
+function deriveThinkingCardWorkflowVerificationSummary(request) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const routingDiagnostics = getWorkflowRoutingDiagnostics(
+        (request?.workflowRoutingDiagnostics && typeof request.workflowRoutingDiagnostics === 'object')
+            ? request.workflowRoutingDiagnostics
+            : latestProgress
+    );
+    const dispatch = (routingDiagnostics?.dispatch && typeof routingDiagnostics.dispatch === 'object')
+        ? routingDiagnostics.dispatch
+        : null;
+    const ledger = (dispatch?.required_tool_obligations && typeof dispatch.required_tool_obligations === 'object')
+        ? dispatch.required_tool_obligations
+        : (dispatch?.tool_execution?.required_tool_obligations
+            && typeof dispatch.tool_execution.required_tool_obligations === 'object'
+                ? dispatch.tool_execution.required_tool_obligations
+                : null);
+    const unsatisfiedTools = Array.isArray(ledger?.unsatisfied_required_tools)
+        ? ledger.unsatisfied_required_tools
+            .map((value) => normaliseThinkingActivityString(value))
+            .filter(Boolean)
+        : [];
+    const rawBlockingCodes = dispatch?.required_tool_obligation_blocking_failure_codes
+        || ledger?.blocking_failure_codes;
+    const blockingCodes = Array.isArray(rawBlockingCodes)
+        ? rawBlockingCodes
+            .map((value) => normaliseThinkingActivityString(value))
+            .filter(Boolean)
+        : [];
+    const customExecution = (
+        dispatch?.custom_workflow_execution
+        && typeof dispatch.custom_workflow_execution === 'object'
+    )
+        ? dispatch.custom_workflow_execution
+        : null;
+    const durableSideEffectCount = toThinkingCardNonNegativeInteger(
+        customExecution?.durable_side_effect_count
+    );
+    const terminalEffectCount = toThinkingCardNonNegativeInteger(
+        customExecution?.terminal_effect_count
+    );
+    const bits = [];
+    if (unsatisfiedTools.length > 0) {
+        bits.push(`unsatisfied required tools: ${unsatisfiedTools.slice(0, 5).join(', ')}${unsatisfiedTools.length > 5 ? ` +${unsatisfiedTools.length - 5} more` : ''}`);
+    }
+    if (blockingCodes.length > 0) {
+        bits.push(`blocking codes: ${blockingCodes.slice(0, 4).join(', ')}${blockingCodes.length > 4 ? ` +${blockingCodes.length - 4} more` : ''}`);
+    }
+    if (customExecution) {
+        bits.push(`${formatThinkingCountLabel(terminalEffectCount, 'terminal effect')} and ${formatThinkingCountLabel(durableSideEffectCount, 'durable side effect')} observed`);
+    }
+    return bits.join(' · ');
+}
+
+function isAuxiliaryThinkingCardLlmLifecycle(llmLifecycle) {
+    const promptText = normaliseThinkingActivityString(
+        llmLifecycle?.prompt_preview?.text || llmLifecycle?.prompt_preview?.preview
+    ).toLowerCase();
+    return Boolean(promptText && promptText.includes('quick-reply button options for a chat ui'));
+}
+
 function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
     if (!rawViewModel || typeof rawViewModel !== 'object') {
         return null;
@@ -3815,6 +3989,16 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
     const missingTelemetry = normaliseThinkingCardSummaryList(
         rawViewModel.missing_telemetry || rawViewModel.telemetry_gaps
     );
+    const workflowExecutionSummary = normaliseThinkingCardWorkflowExecutionSummary(
+        rawViewModel.workflow_execution_summary
+            || rawViewModel.selected_workflow_execution
+            || deriveThinkingCardWorkflowExecutionSummary(request)
+    );
+    const workflowVerificationSummary = firstThinkingCardText(
+        rawViewModel.workflow_verification_summary,
+        rawViewModel.verification_summary,
+        deriveThinkingCardWorkflowVerificationSummary(request)
+    ) || null;
 
     const viewModel = {
         schema_version: THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA,
@@ -3847,6 +4031,8 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
             rawViewModel.activity_summary,
             rawViewModel.stage_summary
         ) || null,
+        workflow_execution_summary: workflowExecutionSummary,
+        workflow_verification_summary: workflowVerificationSummary,
         llm_input_lifecycle: llmLifecycle,
         wait_state: waitState,
         confirmation_requirement: firstThinkingCardText(
@@ -3868,6 +4054,8 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         viewModel.route_summary,
         viewModel.evidence_context_summary,
         viewModel.current_activity,
+        viewModel.workflow_execution_summary?.summary_text,
+        viewModel.workflow_verification_summary,
         viewModel.confirmation_requirement,
         viewModel.uncertainty_summary
     ].some(Boolean) || Boolean(viewModel.selected_workflow) || Boolean(viewModel.llm_input_lifecycle)
@@ -4219,16 +4407,22 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
     addItem('Route', viewModel.route_summary, viewModel.route_summary_html);
     addItem('Evidence and context', viewModel.evidence_context_summary);
     addItem('Current activity', viewModel.current_activity);
+    addItem('Workflow execution', viewModel.workflow_execution_summary?.summary_text);
+    addItem('Verification', viewModel.workflow_verification_summary);
 
     const llmLifecycleText = buildThinkingCardLlmLifecycleText(
         viewModel.llm_input_lifecycle,
         { includeProvider: renderMode === THINKING_CARD_MODE_DEBUG }
     );
-    addItem('LLM input', llmLifecycleText);
-    const promptPreview = buildThinkingCaptureSummaryText(viewModel.llm_input_lifecycle?.prompt_preview);
-    addItem('Prepared input', promptPreview);
-    const contextSummary = buildThinkingCardContextSummaryText(viewModel.llm_input_lifecycle);
-    addItem('Context', contextSummary);
+    const auxiliaryLlmLifecycle = isAuxiliaryThinkingCardLlmLifecycle(viewModel.llm_input_lifecycle);
+    const showLlmLifecycle = !auxiliaryLlmLifecycle || renderMode === THINKING_CARD_MODE_DEBUG;
+    if (showLlmLifecycle) {
+        addItem(auxiliaryLlmLifecycle ? 'Auxiliary LLM input' : 'LLM input', llmLifecycleText);
+        const promptPreview = buildThinkingCaptureSummaryText(viewModel.llm_input_lifecycle?.prompt_preview);
+        addItem(auxiliaryLlmLifecycle ? 'Auxiliary prepared input' : 'Prepared input', promptPreview);
+        const contextSummary = buildThinkingCardContextSummaryText(viewModel.llm_input_lifecycle);
+        addItem(auxiliaryLlmLifecycle ? 'Auxiliary context' : 'Context', contextSummary);
+    }
     addItem('Wait state', viewModel.wait_state?.label);
     addItem('Next action', viewModel.wait_state?.next_action);
     addItem('Confirmation', viewModel.confirmation_requirement);
@@ -7325,6 +7519,9 @@ function buildThinkingWorkflowStageRows(request) {
     if (!request || typeof request !== 'object') {
         return [];
     }
+    const selectedWorkflowExecutionSummary = normaliseThinkingCardWorkflowExecutionSummary(
+        deriveThinkingCardWorkflowExecutionSummary(request)
+    );
 
     const workflowStagePath = (request.workflowStagePath && typeof request.workflowStagePath === 'object')
         ? request.workflowStagePath
@@ -7365,7 +7562,7 @@ function buildThinkingWorkflowStageRows(request) {
                 buildCanonicalWorkflowRoutingProgress(request),
                 workflowDiscovery
             );
-            return [{
+            const discoveryRows = [{
                 stageId: 'workflow_discovery',
                 label: 'Workflow discovery',
                 detail: detailPresentation.text,
@@ -7376,8 +7573,14 @@ function buildThinkingWorkflowStageRows(request) {
                 diagnosticKey: buildThinkingDiagnosticKey('stage', 'workflow_discovery'),
                 diagnosticData
             }];
+            if (selectedWorkflowExecutionSummary) {
+                discoveryRows.unshift(buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary));
+            }
+            return discoveryRows;
         }
-        return [];
+        return selectedWorkflowExecutionSummary
+            ? [buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary)]
+            : [];
     }
 
     const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
@@ -7440,6 +7643,10 @@ function buildThinkingWorkflowStageRows(request) {
         };
     });
 
+    if (selectedWorkflowExecutionSummary) {
+        stageRows.unshift(buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary));
+    }
+
     if (preservedRows.length === 0) {
         return stageRows;
     }
@@ -7461,6 +7668,34 @@ function buildThinkingWorkflowStageRows(request) {
     }
 
     return mergedRows;
+}
+
+function buildSelectedWorkflowExecutionStageRow(summary) {
+    const workflowId = normaliseThinkingActivityString(summary?.workflow_id);
+    const instanceId = normaliseThinkingActivityString(summary?.workflow_instance_id);
+    const detailBits = [
+        workflowId ? `Workflow: ${workflowId}` : '',
+        instanceId ? `Instance: ${instanceId}` : '',
+        summary?.summary_text || ''
+    ].filter(Boolean);
+    const state = summary?.action_failure_count > 0
+        ? 'failure'
+        : (summary?.terminal_status === 'completed' ? 'success' : 'pending');
+    return {
+        stageId: 'selected_workflow_execution',
+        label: 'Selected workflow execution',
+        detail: detailBits.join(' · '),
+        detailHtml: detailBits.map((value) => escapeHtml(value)).join(' · '),
+        state,
+        diagnosticKey: buildThinkingDiagnosticKey('stage', 'selected_workflow_execution'),
+        diagnosticData: {
+            stage_id: 'selected_workflow_execution',
+            stage_label: 'Selected workflow execution',
+            selected_workflow_id: workflowId || null,
+            workflow_instance_id: instanceId || null,
+            custom_workflow_execution: { ...summary }
+        }
+    };
 }
 
 function renderThinkingWorkflowStageHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
