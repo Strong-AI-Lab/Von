@@ -1,5 +1,42 @@
 {
   "schema_version": "context_bundle_benchmark.seed_bundle.v1",
+  "definition_schema_version": "benchmark_suite_definition.v1",
+  "suite_id": "context_bundle",
+  "suite_concept_id": "#V#context_bundle_benchmark_suite",
+  "suite_title": "Context bundle benchmark suite",
+  "suite_description": "Represented benchmark suite for context-bundle, dossier-reconstruction, and report-revision strategy comparison.",
+  "rubric": {
+    "rubric_id": "context_bundle_rubric.v1",
+    "strategy_ids": [
+      "bundles_only",
+      "bundles_plus_dossier_reconstruction",
+      "bundles_plus_dossier_reconstruction_plus_report_revision"
+    ],
+    "default_expected_best_strategy": "bundles_plus_dossier_reconstruction_plus_report_revision",
+    "required_workflow_class_min_count": 4,
+    "required_retained_case_patterns": [
+      "contains_success_pattern",
+      "contains_failure_pattern"
+    ],
+    "capability_gap_definitions": [
+      {
+        "gap_id": "missing_required_workflow_classes",
+        "severity": "high"
+      },
+      {
+        "gap_id": "no_retained_cases",
+        "severity": "medium"
+      },
+      {
+        "gap_id": "missing_retained_success_patterns",
+        "severity": "medium"
+      },
+      {
+        "gap_id": "missing_retained_failure_patterns",
+        "severity": "medium"
+      }
+    ]
+  },
   "default_case_set": "phase2_seed",
   "case_sets": {
     "phase2_seed": [

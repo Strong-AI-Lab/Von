@@ -182,6 +182,10 @@ _MINIMAL_IMPOSITION_RUNTIME_PREDICATE_IDS = [
     "#V#has_minimal_imposition_runtime_profile_json",
 ]
 
+_BENCHMARK_SUITE_PREDICATE_IDS = [
+    "#V#has_benchmark_suite_definition_json",
+]
+
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [
     "#V#hasBackgroundLaunchPolicyJson",
     "#V#has_background_launch_policy_json",
@@ -297,6 +301,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_SKILL_INTEROP_PREDICATE_IDS,
         *_MINIMAL_IMPOSITION_BENCHMARK_PREDICATE_IDS,
         *_MINIMAL_IMPOSITION_RUNTIME_PREDICATE_IDS,
+        *_BENCHMARK_SUITE_PREDICATE_IDS,
         *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_WORKFLOW_ROUTING_PROFILE_PREDICATE_IDS,
         *_WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_PREDICATE_IDS,

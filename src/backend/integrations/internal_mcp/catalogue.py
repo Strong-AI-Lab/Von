@@ -12359,6 +12359,22 @@ def _turn_execution_build_benchmark(**kwargs):
     )
 
 
+def _benchmark_suite_source_system(
+    *,
+    source: str,
+    represented_source_system: str,
+    fixture_source_system: str,
+    inline_source_system: str,
+) -> str:
+    if source == "vontology":
+        return represented_source_system
+    if source == "seed_bundle_import_fixture":
+        return fixture_source_system
+    if source == "inline":
+        return inline_source_system
+    return "unknown.benchmark_suite"
+
+
 def _turn_execution_build_selector_benchmark(**kwargs):
     from ...services.workflow_selector_benchmark_service import (
         build_selector_routing_benchmark_report,
@@ -12371,6 +12387,7 @@ def _turn_execution_build_selector_benchmark(**kwargs):
             case_set=kwargs.get("case_set"),
             max_cases=kwargs.get("max_cases"),
             bundle_path=kwargs.get("bundle_path"),
+            suite_concept_id=kwargs.get("suite_concept_id"),
         )
     except ValueError as exc:
         return make_error_response(
@@ -12394,10 +12411,11 @@ def _turn_execution_build_selector_benchmark(**kwargs):
         if isinstance(corpus, Mapping) and isinstance(corpus.get("source"), str)
         else "unknown"
     )
-    source_system = (
-        "repo.selector_routing_benchmark_seed_bundle"
-        if source == "seed_bundle"
-        else "inline.selector_routing_benchmark_cases"
+    source_system = _benchmark_suite_source_system(
+        source=source,
+        represented_source_system="vontology.selector_routing_benchmark_suite",
+        fixture_source_system="repo.selector_routing_benchmark_seed_bundle_import_fixture",
+        inline_source_system="inline.selector_routing_benchmark_cases",
     )
     return _with_rag_provenance(
         payload=result,
@@ -12418,6 +12436,7 @@ def _turn_execution_build_context_answering_benchmark(**kwargs):
             case_set=kwargs.get("case_set"),
             max_cases=kwargs.get("max_cases"),
             bundle_path=kwargs.get("bundle_path"),
+            suite_concept_id=kwargs.get("suite_concept_id"),
         )
     except ValueError as exc:
         return make_error_response(
@@ -12441,10 +12460,13 @@ def _turn_execution_build_context_answering_benchmark(**kwargs):
         if isinstance(corpus, Mapping) and isinstance(corpus.get("source"), str)
         else "unknown"
     )
-    source_system = (
-        "repo.context_grounded_answering_benchmark_seed_bundle"
-        if source == "seed_bundle"
-        else "inline.context_grounded_answering_benchmark_cases"
+    source_system = _benchmark_suite_source_system(
+        source=source,
+        represented_source_system="vontology.context_grounded_answering_benchmark_suite",
+        fixture_source_system=(
+            "repo.context_grounded_answering_benchmark_seed_bundle_import_fixture"
+        ),
+        inline_source_system="inline.context_grounded_answering_benchmark_cases",
     )
     return _with_rag_provenance(
         payload=result,
@@ -12498,6 +12520,7 @@ def _turn_execution_build_dashboard(**kwargs):
         "case_set": kwargs.get("selector_case_set"),
         "max_cases": kwargs.get("selector_max_cases"),
         "bundle_path": kwargs.get("selector_bundle_path"),
+        "suite_concept_id": kwargs.get("selector_suite_concept_id"),
     }
     selector_report = _turn_execution_build_selector_benchmark(**selector_kwargs)
     if not isinstance(selector_report, dict):
@@ -13352,6 +13375,8 @@ def _context_bundle_build_benchmark(**kwargs):
     return build_context_bundle_benchmark_report(
         case_set=kwargs.get("case_set"),
         max_cases=kwargs.get("max_cases"),
+        bundle_path=kwargs.get("bundle_path"),
+        suite_concept_id=kwargs.get("suite_concept_id"),
     )
 
 
@@ -29666,12 +29691,14 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                 optional={
                     "case_set": (str, type(None)),
                     "max_cases": (int, type(None)),
+                    "bundle_path": (str, type(None)),
+                    "suite_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
                     "Build the deterministic context-bundle ablation report over the "
-                    "seed benchmark corpus."
+                    "represented Vontology benchmark suite."
                 ),
             ),
             output_schema=None,
@@ -30265,10 +30292,11 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "case_set": (str, type(None)),
                     "max_cases": (int,),
                     "bundle_path": (str, type(None)),
+                    "suite_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
-                    "Build selector-routing benchmark metrics and replay cases from explicit corpus cases or the repo seed bundle."
+                    "Build selector-routing benchmark metrics and replay cases from explicit cases or the represented Vontology suite."
                 ),
             ),
             output_schema=None,
@@ -30287,10 +30315,11 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "case_set": (str, type(None)),
                     "max_cases": (int,),
                     "bundle_path": (str, type(None)),
+                    "suite_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
-                    "Build context-grounded answering benchmark coverage and acceptance signals from explicit corpus cases or the repo seed bundle."
+                    "Build context-grounded answering benchmark coverage and acceptance signals from explicit cases or the represented Vontology suite."
                 ),
             ),
             output_schema=None,
@@ -30325,6 +30354,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "selector_case_set": (str, type(None)),
                     "selector_max_cases": (int,),
                     "selector_bundle_path": (str, type(None)),
+                    "selector_suite_concept_id": (str, type(None)),
                     "baseline_selector_accuracy_pct": (int, float),
                     "baseline_selector_misrouting_rate_pct": (int, float),
                     "baseline_pre_dispatch_avg_duration_ms": (int, float),

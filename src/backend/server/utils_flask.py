@@ -239,6 +239,7 @@ def _build_durable_workflow_bootstrap_summary(
         "turn_pipeline_monitoring_workflow_bootstrap",
         "workflow_authority_bootstrap",
         "workflow_authoring_prompt_bootstrap",
+        "benchmark_suite_bootstrap",
     ):
         report = components.get(key)
         if not isinstance(report, dict):
@@ -481,6 +482,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.workflow_capability_service import (
             run_workflow_capability_index_startup_check,
         )
+        from ..services.benchmark_suite_vontology_service import (
+            ensure_canonical_benchmark_suites_from_seed_fixtures,
+        )
 
         def _run_workflow_family_bootstrap(
             *,
@@ -583,6 +587,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="workflow model-selection workflow",
             bootstrap_fn=bootstrap_canonical_workflow_model_selection_workflow,
         )
+        benchmark_suite_bootstrap_report = _run_workflow_family_bootstrap(
+            label="benchmark suites",
+            bootstrap_fn=ensure_canonical_benchmark_suites_from_seed_fixtures,
+        )
 
         workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
             app_logger
@@ -663,6 +671,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["workflow_model_selection_bootstrap"] = (
             workflow_model_selection_bootstrap_report
         )
+        result["benchmark_suite_bootstrap"] = benchmark_suite_bootstrap_report
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
         result["workflow_capability_index_startup_check"] = (
             workflow_capability_index_startup_report
@@ -798,6 +807,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] workflow model-selection bootstrap failed: %s",
                 workflow_model_selection_bootstrap_report,
+            )
+        if not bool(benchmark_suite_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] benchmark suite bootstrap failed: %s",
+                benchmark_suite_bootstrap_report,
             )
         if not bool(workflow_authority_bootstrap_report.get("success", False)):
             app_logger.warning(

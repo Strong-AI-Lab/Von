@@ -3,6 +3,29 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pytest
+
+from src.backend.services import context_bundle_benchmark_service
+from src.backend.services import context_grounded_answering_benchmark_service
+from src.backend.services import workflow_selector_benchmark_service
+from tests.backend.benchmark_suite_test_helpers import (
+    represented_suite_case_set_loader,
+)
+
+
+@pytest.fixture(autouse=True)
+def _use_represented_benchmark_suites(monkeypatch: pytest.MonkeyPatch) -> None:
+    for module in (
+        context_bundle_benchmark_service,
+        context_grounded_answering_benchmark_service,
+        workflow_selector_benchmark_service,
+    ):
+        monkeypatch.setattr(
+            module,
+            "load_benchmark_suite_case_set",
+            represented_suite_case_set_loader,
+        )
+
 
 class _Cursor:
     def __init__(self, docs: list[dict[str, Any]]):
@@ -2587,7 +2610,7 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
-    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("source") == "vontology"
     assert corpus.get("case_set") == "phase1_seed"
 
     signals = payload.get("benchmark_signals")
@@ -2623,7 +2646,7 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
-    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("source") == "vontology"
     assert corpus.get("case_set") == "phase1_seed"
 
     replay_cases = payload.get("replay_cases")
@@ -2678,7 +2701,7 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
-    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("source") == "vontology"
     assert corpus.get("case_set") == "entity_representation_generalisation"
 
     replay_cases = payload.get("replay_cases")

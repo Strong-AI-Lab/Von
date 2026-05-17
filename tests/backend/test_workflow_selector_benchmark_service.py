@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
+from src.backend.services import workflow_selector_benchmark_service as selector_benchmark_service
+from src.backend.services.benchmark_suite_vontology_service import (
+    BenchmarkSuiteAuthorityMissingError,
+)
 from src.backend.services.workflow_selector_benchmark_service import (
     build_selector_routing_benchmark_report,
     load_selector_routing_benchmark_cases,
@@ -8,12 +14,24 @@ from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
 )
+from tests.backend.benchmark_suite_test_helpers import (
+    represented_suite_case_set_loader,
+)
 
 
-def test_load_selector_routing_benchmark_cases_reads_default_seed_bundle() -> None:
+@pytest.fixture(autouse=True)
+def _use_represented_selector_benchmark_suite(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        selector_benchmark_service,
+        "load_benchmark_suite_case_set",
+        represented_suite_case_set_loader,
+    )
+
+
+def test_load_selector_routing_benchmark_cases_reads_represented_suite() -> None:
     result = load_selector_routing_benchmark_cases()
 
-    assert result["source"] == "seed_bundle"
+    assert result["source"] == "vontology"
     assert result["case_set"] == "phase1_seed"
     assert result["seed_schema_version"] == "selector_routing_benchmark.seed_bundle.v1"
 
@@ -22,7 +40,7 @@ def test_load_selector_routing_benchmark_cases_reads_default_seed_bundle() -> No
     assert any(case.case_id == "known_plain_response_misroute" for case in cases)
 
 
-def test_build_selector_routing_benchmark_report_from_seed_bundle() -> None:
+def test_build_selector_routing_benchmark_report_from_represented_suite() -> None:
     result = build_selector_routing_benchmark_report()
 
     assert result["success"] is True
@@ -44,6 +62,28 @@ def test_build_selector_routing_benchmark_report_from_seed_bundle() -> None:
     misroute_case = next(case for case in replay_cases if case["case_id"] == "known_plain_response_misroute")
     assert misroute_case["overall_outcome"] == "tool_or_workflow_misrouting"
     assert misroute_case["selected_workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+
+
+def test_selector_benchmark_report_fails_closed_when_suite_authority_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing_suite(**_kwargs):
+        raise BenchmarkSuiteAuthorityMissingError(
+            "benchmark_suite_definition_missing",
+            diagnostics={"missing_suite_concept_ids": ["#V#selector_routing_benchmark_suite"]},
+        )
+
+    monkeypatch.setattr(
+        selector_benchmark_service,
+        "load_benchmark_suite_case_set",
+        _missing_suite,
+    )
+
+    result = build_selector_routing_benchmark_report()
+
+    assert result["success"] is False
+    assert result["error_code"] == "benchmark_suite_authority_missing"
+    assert result["corpus"]["source"] == "vontology"
 
 
 def test_build_selector_routing_benchmark_report_supports_prompt_failure_cases() -> None:
@@ -137,7 +177,7 @@ def test_load_selector_routing_benchmark_cases_supports_entity_representation_ca
         case_set="entity_representation_generalisation"
     )
 
-    assert result["source"] == "seed_bundle"
+    assert result["source"] == "vontology"
     assert result["case_set"] == "entity_representation_generalisation"
 
     cases = result["cases"]
@@ -219,7 +259,7 @@ def test_load_selector_routing_benchmark_cases_supports_corrective_evidence_fail
         case_set="corrective_evidence_failure_family"
     )
 
-    assert result["source"] == "seed_bundle"
+    assert result["source"] == "vontology"
     assert result["case_set"] == "corrective_evidence_failure_family"
 
     cases = result["cases"]

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 _SERVICE_EXPORT_MODULES = {
     "annotation_extraction_service": ".annotation_extraction_service",
+    "benchmark_suite_vontology_service": ".benchmark_suite_vontology_service",
     "concept_normalization": ".concept_normalization",
     "concept_service": ".concept_service",
     "episode_self_improvement_profile_vontology_service": ".episode_self_improvement_profile_vontology_service",
@@ -47,6 +48,9 @@ _SERVICE_EXPORT_MODULES = {
 
 if TYPE_CHECKING:
     from . import annotation_extraction_service as annotation_extraction_service
+    from . import (
+        benchmark_suite_vontology_service as benchmark_suite_vontology_service,
+    )
     from . import concept_normalization as concept_normalization
     from . import concept_service as concept_service
     from . import (
@@ -134,6 +138,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "annotation_extraction_service",
+    "benchmark_suite_vontology_service",
     "concept_normalization",
     "concept_service",
     "episode_self_improvement_profile_vontology_service",

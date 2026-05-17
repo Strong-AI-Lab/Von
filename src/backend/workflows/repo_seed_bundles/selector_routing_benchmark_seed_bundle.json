@@ -1,5 +1,57 @@
 {
   "schema_version": "selector_routing_benchmark.seed_bundle.v1",
+  "definition_schema_version": "benchmark_suite_definition.v1",
+  "suite_id": "selector_routing",
+  "suite_concept_id": "#V#selector_routing_benchmark_suite",
+  "suite_title": "Selector routing benchmark suite",
+  "suite_description": "Represented benchmark suite for workflow selector routing, safe abstention, baseline comparison, and execution-correctness outcome labels.",
+  "rubric": {
+    "rubric_id": "selector_routing_rubric.v1",
+    "outcome_labels": [
+      "successful_completion",
+      "false_success",
+      "unresolved_follow_up_needed",
+      "tool_or_workflow_misrouting",
+      "abstain_escalate_no_safe_route"
+    ],
+    "expected_routing_outcomes": [
+      "workflow_selected",
+      "abstain_escalate_no_safe_route"
+    ],
+    "default_expected_routing_outcome": "workflow_selected",
+    "abstain_expected_routing_outcomes": [
+      "abstain_escalate_no_safe_route"
+    ],
+    "workflow_selected_outcome_label": "successful_completion",
+    "abstain_outcome_label": "abstain_escalate_no_safe_route",
+    "misrouting_outcome_label": "tool_or_workflow_misrouting",
+    "expected_routing_outcome_labels": {
+      "workflow_selected": "successful_completion",
+      "abstain_escalate_no_safe_route": "abstain_escalate_no_safe_route"
+    },
+    "signal_definitions": [
+      {
+        "signal_id": "selector_benchmark_corpus_present",
+        "dimension": "selector_routing",
+        "title": "Selector benchmark corpus contains evaluable cases"
+      },
+      {
+        "signal_id": "selector_accuracy_not_worse_than_baseline",
+        "dimension": "selector_routing",
+        "title": "Selector routing is not worse than baseline case ordering"
+      },
+      {
+        "signal_id": "abstain_cases_routed_safely",
+        "dimension": "selector_routing",
+        "title": "Abstain or no-safe-route cases are represented and routed safely"
+      },
+      {
+        "signal_id": "selector_misrouting_examples_detected",
+        "dimension": "selector_routing",
+        "title": "Selector corpus includes misrouting or failure examples"
+      }
+    ]
+  },
   "default_case_set": "phase1_seed",
   "case_sets": {
     "phase1_seed": [

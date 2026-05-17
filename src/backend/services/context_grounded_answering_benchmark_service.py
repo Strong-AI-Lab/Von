@@ -1,8 +1,8 @@
 """Deterministic benchmark coverage for context-grounded answering reliability.
 
-The benchmark is intentionally reviewable rather than opaque. Cases live in a
-repo-side seed bundle while the broader KB-native benchmark substrate for
-context-grounded answering matures.
+The benchmark is intentionally reviewable rather than opaque. Suite, case, and
+rubric authority lives in Vontology; repo-side seed bundles are import fixtures
+for initially materialising canonical represented suites.
 """
 
 from __future__ import annotations
@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from .benchmark_suite_vontology_service import (
+    BenchmarkSuiteAuthorityMissingError,
+    CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID,
+    load_benchmark_suite_case_set,
+)
 
 CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SCHEMA_VERSION = (
     "context_grounded_answering_benchmark.v1"
@@ -27,26 +33,8 @@ DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_BUNDLE_PATH = (
     / "repo_seed_bundles"
     / "context_grounded_answering_benchmark_seed_bundle.json"
 )
-
-_REQUIRED_COVERAGE_TAGS: tuple[str, ...] = (
-    "authenticated_self_identity",
-    "organisation_self_context",
-    "continuation_referent_resolution",
-    "represented_context_factual_answering",
-    "mixed_direct_response_vs_workflow",
-    "answer_first_rendering",
-)
-_REQUIRED_AUTHORITATIVE_SOURCES: tuple[str, ...] = (
-    "authenticated_user_context",
-    "authenticated_org_context",
-    "workflow_continuation_context",
-    "represented_context",
-    "workflow_result",
-)
-_REQUIRED_EXECUTION_MODES: tuple[str, ...] = (
-    "direct_response",
-    "tool_pipeline",
-    "custom_workflow",
+DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID = (
+    CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID
 )
 
 
@@ -103,6 +91,72 @@ def _normalise_strings(values: Any) -> tuple[str, ...]:
         seen.add(lowered)
         output.append(text)
     return tuple(output)
+
+
+def _signal_definition_by_id(rubric: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    raw_definitions = rubric.get("signal_definitions")
+    if not isinstance(raw_definitions, Sequence) or isinstance(
+        raw_definitions,
+        (str, bytes, bytearray),
+    ):
+        return {}
+    definitions: dict[str, dict[str, str]] = {}
+    for raw in raw_definitions:
+        if not isinstance(raw, Mapping):
+            continue
+        signal_id = _safe_str(raw.get("signal_id"))
+        if not signal_id:
+            continue
+        definitions[signal_id] = {
+            "dimension": _safe_str(raw.get("dimension"))
+            or "context_grounded_answering",
+            "title": _safe_str(raw.get("title")) or signal_id,
+        }
+    return definitions
+
+
+def _required_context_grounded_answering_rubric_values(
+    rubric: Mapping[str, Any],
+) -> dict[str, Any]:
+    required_coverage_tags = _normalise_strings(
+        rubric.get("required_coverage_tags")
+    )
+    required_authoritative_sources = _normalise_strings(
+        rubric.get("required_authoritative_sources")
+    )
+    required_execution_modes = _normalise_strings(
+        rubric.get("required_execution_modes")
+    )
+    required_answer_property_ids = _normalise_strings(
+        rubric.get("required_answer_property_ids")
+    )
+    required_validation_surface_kind = _safe_str(
+        rubric.get("required_validation_surface_kind")
+    )
+    missing: list[str] = []
+    if not required_coverage_tags:
+        missing.append("required_coverage_tags")
+    if not required_authoritative_sources:
+        missing.append("required_authoritative_sources")
+    if not required_execution_modes:
+        missing.append("required_execution_modes")
+    if not required_answer_property_ids:
+        missing.append("required_answer_property_ids")
+    if not required_validation_surface_kind:
+        missing.append("required_validation_surface_kind")
+    if missing:
+        raise ValueError(
+            "context_grounded_answering_benchmark_rubric_invalid:"
+            + ",".join(sorted(missing))
+        )
+    return {
+        "required_coverage_tags": required_coverage_tags,
+        "required_authoritative_sources": required_authoritative_sources,
+        "required_execution_modes": required_execution_modes,
+        "required_answer_property_ids": required_answer_property_ids,
+        "required_validation_surface_kind": required_validation_surface_kind,
+        "signal_definitions": _signal_definition_by_id(rubric),
+    }
 
 
 def _normalise_named_mapping_sequence(
@@ -212,31 +266,21 @@ def load_context_grounded_answering_benchmark_cases(
     *,
     case_set: str | None = None,
     bundle_path: Path | str | None = None,
+    suite_concept_id: str | None = None,
 ) -> dict[str, Any]:
-    resolved_path = (
-        Path(bundle_path)
-        if bundle_path is not None
-        else DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_BUNDLE_PATH
+    source_info = load_benchmark_suite_case_set(
+        suite_concept_id=(
+            _safe_str(suite_concept_id)
+            or DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID
+        ),
+        case_set=case_set,
+        fixture_path=bundle_path,
     )
-    bundle_text = resolved_path.read_text(encoding="utf-8")
-    bundle_data = json.loads(bundle_text)
-    if not isinstance(bundle_data, Mapping):
-        raise ValueError("context_grounded_answering_benchmark_seed_bundle_invalid")
-
-    requested_case_set = (
-        _safe_str(case_set)
-        or _safe_str(bundle_data.get("default_case_set"))
-        or DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_CASE_SET
+    rubric_values = _required_context_grounded_answering_rubric_values(
+        source_info.get("rubric") or {}
     )
-    case_sets = bundle_data.get("case_sets")
-    raw_cases = case_sets.get(requested_case_set) if isinstance(case_sets, Mapping) else None
-    if raw_cases is None:
-        raise ValueError("context_grounded_answering_benchmark_case_set_not_found")
-    if not isinstance(raw_cases, Sequence) or isinstance(raw_cases, (str, bytes, bytearray)):
-        raise ValueError("context_grounded_answering_benchmark_case_set_invalid")
-
     cases: list[ContextGroundedAnsweringBenchmarkCase] = []
-    for index, raw_case in enumerate(raw_cases, start=1):
+    for index, raw_case in enumerate(source_info.get("cases") or (), start=1):
         if not isinstance(raw_case, Mapping):
             continue
         normalised = _normalise_case(raw_case, index=index)
@@ -245,12 +289,120 @@ def load_context_grounded_answering_benchmark_cases(
 
     return {
         "cases": cases,
-        "case_set": requested_case_set,
-        "bundle_path": str(resolved_path),
-        "bundle_sha256": hashlib.sha256(bundle_text.encode("utf-8")).hexdigest(),
-        "seed_schema_version": _safe_str(bundle_data.get("schema_version"))
+        "case_set": source_info.get("case_set"),
+        "bundle_path": source_info.get("source_path"),
+        "bundle_sha256": source_info.get("fixture_sha256"),
+        "definition_sha256": source_info.get("definition_sha256"),
+        "seed_schema_version": source_info.get("seed_schema_version")
         or CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SEED_SCHEMA_VERSION,
-        "source": "seed_bundle",
+        "suite_schema_version": source_info.get("suite_schema_version"),
+        "definition_schema_version": source_info.get("definition_schema_version"),
+        "suite_concept_id": source_info.get("suite_concept_id"),
+        "suite_id": source_info.get("suite_id"),
+        "source": source_info.get("source"),
+        "source_predicate": source_info.get("source_predicate"),
+        "authority_diagnostics": source_info.get("authority_diagnostics"),
+        "rubric": rubric_values,
+    }
+
+
+def _build_context_grounded_answering_missing_authority_report(
+    *,
+    case_set: str | None,
+    max_cases: int | None,
+    suite_concept_id: str,
+    diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    bounded_max_cases = (
+        max(1, min(int(max_cases), 500)) if max_cases is not None else None
+    )
+    filters_payload = {
+        "case_set": _safe_str(case_set) or None,
+        "max_cases": bounded_max_cases,
+        "case_source": "vontology",
+    }
+    return {
+        "collection": "context_grounded_answering_benchmark_cases",
+        "benchmark_generated_at_utc": _utc_now_iso(),
+        "filters": filters_payload,
+        "metrics": {
+            "scanned_count": 0,
+            "exact_path_case_count": 0,
+            "telemetry_check_count": 0,
+            "validation_surface_count": 0,
+            "coverage_tag_counts": {},
+            "authoritative_source_counts": {},
+            "execution_mode_counts": {},
+            "answer_property_counts": {},
+            "validation_surface_kind_counts": {},
+            "metric_schema": {
+                "benchmark_schema_version": (
+                    CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SCHEMA_VERSION
+                ),
+                "required_coverage_tags": [],
+                "required_authoritative_sources": [],
+                "required_execution_modes": [],
+            },
+        },
+        "benchmark_fingerprint": _hash_payload(
+            {
+                "filters": filters_payload,
+                "suite_concept_id": suite_concept_id,
+                "authority_diagnostics": dict(diagnostics),
+            }
+        ),
+        "seeded_cases": [],
+        "replay_cases": [],
+        "benchmark_signals": [
+            {
+                "signal_id": "context_grounded_benchmark_suite_authority_present",
+                "dimension": "context_grounded_answering",
+                "title": (
+                    "Context-grounded answering benchmark suite authority is "
+                    "represented in Vontology"
+                ),
+                "status": "fail",
+                "details": dict(diagnostics),
+            }
+        ],
+        "benchmark_signal_summary": {
+            "pass_count": 0,
+            "fail_count": 1,
+            "not_evaluated_count": 0,
+            "total_count": 1,
+        },
+        "capability_gaps": [
+            {
+                "gap_id": "benchmark_suite_authority_missing",
+                "title": (
+                    "Represented context-grounded answering benchmark suite "
+                    "authority is missing"
+                ),
+                "severity": "high",
+                "details": dict(diagnostics),
+            }
+        ],
+        "recommendations": [
+            {
+                "recommendation_id": (
+                    "materialise_context_grounded_answering_benchmark_suite"
+                ),
+                "priority": "high",
+                "summary": (
+                    "Materialise the context-grounded answering benchmark suite "
+                    "definition in Vontology before using this benchmark as a "
+                    "regression gate."
+                ),
+            }
+        ],
+        "corpus": {
+            "case_set": _safe_str(case_set) or None,
+            "source": "vontology",
+            "suite_concept_id": suite_concept_id,
+            "authority_diagnostics": dict(diagnostics),
+        },
+        "error_code": "benchmark_suite_authority_missing",
+        "success": False,
     }
 
 
@@ -260,14 +412,45 @@ def build_context_grounded_answering_benchmark_report(
     max_cases: int | None = None,
     bundle_path: Path | str | None = None,
     cases: Sequence[Mapping[str, Any]] | None = None,
+    suite_concept_id: str | None = None,
 ) -> dict[str, Any]:
     if cases is None:
-        source_info = load_context_grounded_answering_benchmark_cases(
-            case_set=case_set,
-            bundle_path=bundle_path,
-        )
+        try:
+            source_info = load_context_grounded_answering_benchmark_cases(
+                case_set=case_set,
+                bundle_path=bundle_path,
+                suite_concept_id=suite_concept_id,
+            )
+        except BenchmarkSuiteAuthorityMissingError as exc:
+            return _build_context_grounded_answering_missing_authority_report(
+                case_set=case_set,
+                max_cases=max_cases,
+                suite_concept_id=(
+                    suite_concept_id
+                    or DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID
+                ),
+                diagnostics=exc.diagnostics,
+            )
+        rubric_values = source_info["rubric"]
         normalised_cases = list(source_info.get("cases") or [])
     else:
+        try:
+            source_for_rubric = load_context_grounded_answering_benchmark_cases(
+                case_set=None,
+                bundle_path=bundle_path,
+                suite_concept_id=suite_concept_id,
+            )
+        except BenchmarkSuiteAuthorityMissingError as exc:
+            return _build_context_grounded_answering_missing_authority_report(
+                case_set=case_set,
+                max_cases=max_cases,
+                suite_concept_id=(
+                    suite_concept_id
+                    or DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID
+                ),
+                diagnostics=exc.diagnostics,
+            )
+        rubric_values = source_for_rubric["rubric"]
         normalised_cases = []
         for index, raw_case in enumerate(cases, start=1):
             if not isinstance(raw_case, Mapping):
@@ -280,14 +463,43 @@ def build_context_grounded_answering_benchmark_report(
             "bundle_path": None,
             "bundle_sha256": _hash_payload(cases),
             "seed_schema_version": None,
+            "suite_schema_version": None,
+            "definition_schema_version": None,
+            "suite_concept_id": suite_concept_id
+            or DEFAULT_CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID,
+            "suite_id": None,
+            "definition_sha256": source_for_rubric.get("definition_sha256"),
+            "source_predicate": source_for_rubric.get("source_predicate"),
+            "authority_diagnostics": source_for_rubric.get("authority_diagnostics"),
             "source": "inline",
+            "rubric": rubric_values,
         }
 
     bounded_max_cases = max(1, min(int(max_cases), 500)) if max_cases is not None else None
     if bounded_max_cases is not None:
         normalised_cases = normalised_cases[:bounded_max_cases]
 
-    coverage_tag_counts = {tag: 0 for tag in _REQUIRED_COVERAGE_TAGS}
+    required_coverage_tags = tuple(
+        str(item) for item in rubric_values.get("required_coverage_tags") or ()
+    )
+    required_authoritative_sources = tuple(
+        str(item)
+        for item in rubric_values.get("required_authoritative_sources") or ()
+    )
+    required_execution_modes = tuple(
+        str(item) for item in rubric_values.get("required_execution_modes") or ()
+    )
+    required_answer_property_ids = tuple(
+        str(item) for item in rubric_values.get("required_answer_property_ids") or ()
+    )
+    required_validation_surface_kind = str(
+        rubric_values.get("required_validation_surface_kind") or ""
+    )
+    signal_definitions_raw = rubric_values.get("signal_definitions")
+    signal_definitions = (
+        signal_definitions_raw if isinstance(signal_definitions_raw, Mapping) else {}
+    )
+    coverage_tag_counts = {tag: 0 for tag in required_coverage_tags}
     authoritative_source_counts: dict[str, int] = {}
     execution_mode_counts: dict[str, int] = {}
     answer_property_counts: dict[str, int] = {}
@@ -327,7 +539,7 @@ def build_context_grounded_answering_benchmark_report(
             validation_surface_kind_counts[surface_kind] = (
                 validation_surface_kind_counts.get(surface_kind, 0) + 1
             )
-            if surface_kind == "exact_path_test":
+            if surface_kind == required_validation_surface_kind:
                 case_has_exact_path_surface = True
             serialised_surfaces.append(
                 {
@@ -360,71 +572,83 @@ def build_context_grounded_answering_benchmark_report(
     ]
     missing_authoritative_sources = [
         source
-        for source in _REQUIRED_AUTHORITATIVE_SOURCES
+        for source in required_authoritative_sources
         if authoritative_source_counts.get(source, 0) <= 0
     ]
     missing_execution_modes = [
         mode
-        for mode in _REQUIRED_EXECUTION_MODES
+        for mode in required_execution_modes
         if execution_mode_counts.get(mode, 0) <= 0
     ]
-    answer_first_case_count = answer_property_counts.get("answer_first", 0)
+    required_answer_property_counts = {
+        property_id: answer_property_counts.get(property_id, 0)
+        for property_id in required_answer_property_ids
+    }
+
+    def _signal(
+        signal_id: str,
+        *,
+        status: str,
+        details: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        definition = signal_definitions.get(signal_id, {})
+        return {
+            "signal_id": signal_id,
+            "dimension": definition.get("dimension")
+            or "context_grounded_answering",
+            "title": definition.get("title") or signal_id,
+            "status": status,
+            "details": dict(details),
+        }
 
     benchmark_signals = [
-        {
-            "signal_id": "context_grounded_benchmark_corpus_present",
-            "dimension": "context_grounded_answering",
-            "title": "Context-grounded answering benchmark corpus contains evaluable cases",
-            "status": "pass" if case_count > 0 else "fail",
-            "details": {"case_count": case_count},
-        },
-        {
-            "signal_id": "required_context_grounding_classes_present",
-            "dimension": "context_grounded_answering",
-            "title": "Required context-grounded answering classes are represented",
-            "status": "pass" if not missing_coverage_tags else "fail",
-            "details": {"missing_coverage_tags": missing_coverage_tags},
-        },
-        {
-            "signal_id": "authoritative_sources_represented",
-            "dimension": "context_grounded_answering",
-            "title": "Required authoritative sources are represented in the corpus",
-            "status": "pass" if not missing_authoritative_sources else "fail",
-            "details": {"missing_authoritative_sources": missing_authoritative_sources},
-        },
-        {
-            "signal_id": "execution_modes_cover_direct_tool_and_workflow_paths",
-            "dimension": "context_grounded_answering",
-            "title": "The corpus covers direct-response, tool-pipeline, and custom-workflow execution modes",
-            "status": "pass" if not missing_execution_modes else "fail",
-            "details": {"missing_execution_modes": missing_execution_modes},
-        },
-        {
-            "signal_id": "answer_properties_and_telemetry_checks_declared",
-            "dimension": "context_grounded_answering",
-            "title": "Each case declares answer-semantics and telemetry expectations",
-            "status": (
+        _signal(
+            "context_grounded_benchmark_corpus_present",
+            status="pass" if case_count > 0 else "fail",
+            details={"case_count": case_count},
+        ),
+        _signal(
+            "required_context_grounding_classes_present",
+            status="pass" if not missing_coverage_tags else "fail",
+            details={"missing_coverage_tags": missing_coverage_tags},
+        ),
+        _signal(
+            "authoritative_sources_represented",
+            status="pass" if not missing_authoritative_sources else "fail",
+            details={"missing_authoritative_sources": missing_authoritative_sources},
+        ),
+        _signal(
+            "execution_modes_cover_direct_tool_and_workflow_paths",
+            status="pass" if not missing_execution_modes else "fail",
+            details={"missing_execution_modes": missing_execution_modes},
+        ),
+        _signal(
+            "answer_properties_and_telemetry_checks_declared",
+            status=(
                 "pass"
                 if case_count > 0
-                and answer_first_case_count > 0
+                and all(count > 0 for count in required_answer_property_counts.values())
                 and telemetry_check_count >= case_count
                 else "fail"
             ),
-            "details": {
-                "answer_first_case_count": answer_first_case_count,
+            details={
+                "required_answer_property_counts": required_answer_property_counts,
                 "telemetry_check_count": telemetry_check_count,
             },
-        },
-        {
-            "signal_id": "benchmark_backed_by_exact_path_validation",
-            "dimension": "context_grounded_answering",
-            "title": "The benchmark corpus is backed by exact-path validation references",
-            "status": "pass" if exact_path_case_count == case_count and case_count > 0 else "fail",
-            "details": {
-                "exact_path_case_count": exact_path_case_count,
+        ),
+        _signal(
+            "benchmark_backed_by_exact_path_validation",
+            status=(
+                "pass"
+                if exact_path_case_count == case_count and case_count > 0
+                else "fail"
+            ),
+            details={
+                "required_validation_surface_kind": required_validation_surface_kind,
+                "matching_validation_surface_case_count": exact_path_case_count,
                 "case_count": case_count,
             },
-        },
+        ),
     ]
     benchmark_signal_summary = {
         "pass_count": sum(1 for signal in benchmark_signals if signal["status"] == "pass"),
@@ -462,6 +686,7 @@ def build_context_grounded_answering_benchmark_report(
                 "severity": "high",
                 "details": {
                     "exact_path_case_count": exact_path_case_count,
+                    "required_validation_surface_kind": required_validation_surface_kind,
                     "case_count": case_count,
                 },
             }
@@ -502,9 +727,11 @@ def build_context_grounded_answering_benchmark_report(
         "validation_surface_kind_counts": validation_surface_kind_counts,
         "metric_schema": {
             "benchmark_schema_version": CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SCHEMA_VERSION,
-            "required_coverage_tags": list(_REQUIRED_COVERAGE_TAGS),
-            "required_authoritative_sources": list(_REQUIRED_AUTHORITATIVE_SOURCES),
-            "required_execution_modes": list(_REQUIRED_EXECUTION_MODES),
+            "required_coverage_tags": list(required_coverage_tags),
+            "required_authoritative_sources": list(required_authoritative_sources),
+            "required_execution_modes": list(required_execution_modes),
+            "required_answer_property_ids": list(required_answer_property_ids),
+            "required_validation_surface_kind": required_validation_surface_kind,
         },
     }
     return {
@@ -527,6 +754,13 @@ def build_context_grounded_answering_benchmark_report(
             "bundle_path": source_info.get("bundle_path"),
             "bundle_sha256": source_info.get("bundle_sha256"),
             "seed_schema_version": source_info.get("seed_schema_version"),
+            "suite_schema_version": source_info.get("suite_schema_version"),
+            "definition_schema_version": source_info.get("definition_schema_version"),
+            "suite_concept_id": source_info.get("suite_concept_id"),
+            "suite_id": source_info.get("suite_id"),
+            "definition_sha256": source_info.get("definition_sha256"),
+            "source_predicate": source_info.get("source_predicate"),
+            "authority_diagnostics": source_info.get("authority_diagnostics"),
         },
         "success": True,
     }

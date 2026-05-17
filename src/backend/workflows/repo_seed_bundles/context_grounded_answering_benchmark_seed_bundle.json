@@ -1,5 +1,69 @@
 {
   "schema_version": "context_grounded_answering_benchmark.seed_bundle.v1",
+  "definition_schema_version": "benchmark_suite_definition.v1",
+  "suite_id": "context_grounded_answering",
+  "suite_concept_id": "#V#context_grounded_answering_benchmark_suite",
+  "suite_title": "Context-grounded answering benchmark suite",
+  "suite_description": "Represented benchmark suite for answer-first context grounding across direct response, tool pipeline, continuation, and workflow-result paths.",
+  "rubric": {
+    "rubric_id": "context_grounded_answering_rubric.v1",
+    "required_coverage_tags": [
+      "authenticated_self_identity",
+      "organisation_self_context",
+      "continuation_referent_resolution",
+      "represented_context_factual_answering",
+      "mixed_direct_response_vs_workflow",
+      "answer_first_rendering"
+    ],
+    "required_authoritative_sources": [
+      "authenticated_user_context",
+      "authenticated_org_context",
+      "workflow_continuation_context",
+      "represented_context",
+      "workflow_result"
+    ],
+    "required_execution_modes": [
+      "direct_response",
+      "tool_pipeline",
+      "custom_workflow"
+    ],
+    "required_answer_property_ids": [
+      "answer_first"
+    ],
+    "required_validation_surface_kind": "exact_path_test",
+    "signal_definitions": [
+      {
+        "signal_id": "context_grounded_benchmark_corpus_present",
+        "dimension": "context_grounded_answering",
+        "title": "Context-grounded answering benchmark corpus contains evaluable cases"
+      },
+      {
+        "signal_id": "required_context_grounding_classes_present",
+        "dimension": "context_grounded_answering",
+        "title": "Required context-grounded answering classes are represented"
+      },
+      {
+        "signal_id": "authoritative_sources_represented",
+        "dimension": "context_grounded_answering",
+        "title": "Required authoritative sources are represented in the corpus"
+      },
+      {
+        "signal_id": "execution_modes_cover_direct_tool_and_workflow_paths",
+        "dimension": "context_grounded_answering",
+        "title": "The corpus covers direct-response, tool-pipeline, and custom-workflow execution modes"
+      },
+      {
+        "signal_id": "answer_properties_and_telemetry_checks_declared",
+        "dimension": "context_grounded_answering",
+        "title": "Each case declares answer-semantics and telemetry expectations"
+      },
+      {
+        "signal_id": "benchmark_backed_by_exact_path_validation",
+        "dimension": "context_grounded_answering",
+        "title": "The benchmark corpus is backed by exact-path validation references"
+      }
+    ]
+  },
   "default_case_set": "phase1_seed",
   "case_sets": {
     "phase1_seed": [

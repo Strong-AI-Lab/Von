@@ -1,15 +1,35 @@
 from __future__ import annotations
 
+import pytest
+
+from src.backend.services import context_bundle_benchmark_service
+from src.backend.services.benchmark_suite_vontology_service import (
+    BenchmarkSuiteAuthorityMissingError,
+)
 from src.backend.services.context_bundle_benchmark_service import (
     build_context_bundle_benchmark_report,
     load_context_bundle_benchmark_cases,
 )
+from tests.backend.benchmark_suite_test_helpers import (
+    represented_suite_case_set_loader,
+)
 
 
-def test_load_context_bundle_benchmark_cases_reads_default_seed_bundle() -> None:
+@pytest.fixture(autouse=True)
+def _use_represented_context_bundle_benchmark_suite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        context_bundle_benchmark_service,
+        "load_benchmark_suite_case_set",
+        represented_suite_case_set_loader,
+    )
+
+
+def test_load_context_bundle_benchmark_cases_reads_represented_suite() -> None:
     result = load_context_bundle_benchmark_cases()
 
-    assert result["source"] == "seed_bundle"
+    assert result["source"] == "vontology"
     assert result["case_set"] == "phase2_seed"
     assert result["seed_schema_version"] == "context_bundle_benchmark.seed_bundle.v1"
     assert len(result["cases"]) == 4
@@ -45,6 +65,28 @@ def test_build_context_bundle_benchmark_report_exposes_retained_pattern_counts()
         gap["gap_id"] == "missing_retained_failure_patterns"
         for gap in result["capability_gaps"]
     ) is False
+
+
+def test_context_bundle_benchmark_report_fails_closed_when_suite_authority_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing_suite(**_kwargs):
+        raise BenchmarkSuiteAuthorityMissingError(
+            "benchmark_suite_definition_missing",
+            diagnostics={"missing_suite_concept_ids": ["#V#context_bundle_benchmark_suite"]},
+        )
+
+    monkeypatch.setattr(
+        context_bundle_benchmark_service,
+        "load_benchmark_suite_case_set",
+        _missing_suite,
+    )
+
+    result = build_context_bundle_benchmark_report()
+
+    assert result["success"] is False
+    assert result["error_code"] == "benchmark_suite_authority_missing"
+    assert result["corpus"]["source"] == "vontology"
 
 
 def test_build_context_bundle_benchmark_report_supports_inline_cases() -> None:

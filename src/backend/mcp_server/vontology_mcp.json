@@ -437,6 +437,18 @@
                             "null"
                         ]
                     },
+                    "bundle_path": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "suite_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
                     "namespace": {
                         "type": [
                             "string",
@@ -446,7 +458,7 @@
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "Build the deterministic context-bundle ablation report over the seed benchmark corpus."
+                "description": "Build the deterministic context-bundle ablation report over the represented Vontology benchmark suite."
             }
         },
         {
@@ -5130,11 +5142,17 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "suite_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "Build context-grounded answering benchmark coverage and acceptance signals from explicit corpus cases or the repo seed bundle."
+                "description": "Build context-grounded answering benchmark coverage and acceptance signals from explicit cases or the represented Vontology suite."
             }
         },
         {
@@ -5243,6 +5261,12 @@
                             "null"
                         ]
                     },
+                    "selector_suite_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
                     "baseline_selector_accuracy_pct": {
                         "type": [
                             "integer",
@@ -5309,11 +5333,17 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "suite_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "Build selector-routing benchmark metrics and replay cases from explicit corpus cases or the repo seed bundle."
+                "description": "Build selector-routing benchmark metrics and replay cases from explicit cases or the represented Vontology suite."
             }
         },
         {

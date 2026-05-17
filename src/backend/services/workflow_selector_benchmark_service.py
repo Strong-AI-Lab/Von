@@ -9,9 +9,8 @@ surfaces:
 - it returns replay-style case rows that downstream dashboards and operating
   protocols can consume without inventing a separate benchmark vocabulary.
 
-The current corpus is stored as a repo-side seed bundle so the cases remain
-reviewable and deterministic while the KB-native benchmark representation is
-still being established.
+The default corpus and rubric are loaded from a represented Vontology benchmark
+suite. Repo-side seed bundles remain as explicit import fixtures only.
 """
 
 from __future__ import annotations
@@ -27,6 +26,11 @@ from ..workflows import WorkflowRegistry
 from ..workflows.workflow_selector import WorkflowSelectionPrompt, WorkflowSelector
 from .prompt_template_service import PromptTemplateService
 from .turn_execution_record_service import TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION
+from .benchmark_suite_vontology_service import (
+    BenchmarkSuiteAuthorityMissingError,
+    SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID,
+    load_benchmark_suite_case_set,
+)
 
 SELECTOR_ROUTING_BENCHMARK_SCHEMA_VERSION = "selector_routing_benchmark.v1"
 SELECTOR_ROUTING_BENCHMARK_SEED_SCHEMA_VERSION = (
@@ -40,17 +44,9 @@ DEFAULT_SELECTOR_ROUTING_BENCHMARK_BUNDLE_PATH = (
     / "selector_routing_benchmark_seed_bundle.json"
 )
 
-SELECTOR_BENCHMARK_OUTCOME_LABELS: tuple[str, ...] = (
-    "successful_completion",
-    "false_success",
-    "unresolved_follow_up_needed",
-    "tool_or_workflow_misrouting",
-    "abstain_escalate_no_safe_route",
+DEFAULT_SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID = (
+    SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
 )
-_EXPECTED_ROUTING_OUTCOMES = {
-    "workflow_selected",
-    "abstain_escalate_no_safe_route",
-}
 
 
 @dataclass(frozen=True)
@@ -142,6 +138,91 @@ def _normalise_string_sequence(raw_items: Any) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _signal_definition_by_id(rubric: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    raw_definitions = rubric.get("signal_definitions")
+    if not isinstance(raw_definitions, Sequence) or isinstance(
+        raw_definitions,
+        (str, bytes, bytearray),
+    ):
+        return {}
+    definitions: dict[str, dict[str, str]] = {}
+    for raw in raw_definitions:
+        if not isinstance(raw, Mapping):
+            continue
+        signal_id = _safe_str(raw.get("signal_id"))
+        if not signal_id:
+            continue
+        definitions[signal_id] = {
+            "dimension": _safe_str(raw.get("dimension")) or "selector_routing",
+            "title": _safe_str(raw.get("title")) or signal_id,
+        }
+    return definitions
+
+
+def _required_selector_rubric_values(rubric: Mapping[str, Any]) -> dict[str, Any]:
+    outcome_labels = _normalise_string_sequence(rubric.get("outcome_labels"))
+    expected_routing_outcomes = _normalise_string_sequence(
+        rubric.get("expected_routing_outcomes")
+    )
+    abstain_expected_routing_outcomes = _normalise_string_sequence(
+        rubric.get("abstain_expected_routing_outcomes")
+    )
+    raw_expected_outcome_labels = rubric.get("expected_routing_outcome_labels")
+    expected_outcome_labels: dict[str, str] = {}
+    if isinstance(raw_expected_outcome_labels, Mapping):
+        for raw_outcome, raw_label in raw_expected_outcome_labels.items():
+            outcome = _safe_str(raw_outcome).lower()
+            label = _safe_str(raw_label)
+            if outcome and label:
+                expected_outcome_labels[outcome] = label
+    required_keys = {
+        "default_expected_routing_outcome": _safe_str(
+            rubric.get("default_expected_routing_outcome")
+        ).lower(),
+        "misrouting_outcome_label": _safe_str(
+            rubric.get("misrouting_outcome_label")
+        ),
+    }
+    missing = [
+        key for key, value in required_keys.items() if not value
+    ]
+    if not outcome_labels:
+        missing.append("outcome_labels")
+    if not expected_routing_outcomes:
+        missing.append("expected_routing_outcomes")
+    if required_keys["default_expected_routing_outcome"] and (
+        required_keys["default_expected_routing_outcome"]
+        not in expected_routing_outcomes
+    ):
+        missing.append("default_expected_routing_outcome_not_in_expected_outcomes")
+    if not expected_outcome_labels:
+        missing.append("expected_routing_outcome_labels")
+    for outcome in expected_routing_outcomes:
+        label = expected_outcome_labels.get(outcome)
+        if not label:
+            missing.append(f"missing_label_for_expected_outcome:{outcome}")
+        elif label not in outcome_labels:
+            missing.append(f"expected_outcome_label_not_in_outcome_labels:{outcome}")
+    for outcome in abstain_expected_routing_outcomes:
+        if outcome not in expected_routing_outcomes:
+            missing.append(f"abstain_outcome_not_in_expected_outcomes:{outcome}")
+    misrouting_label = required_keys["misrouting_outcome_label"]
+    if misrouting_label and misrouting_label not in outcome_labels:
+        missing.append("misrouting_outcome_label_not_in_outcome_labels")
+    if missing:
+        raise ValueError(
+            "selector_benchmark_rubric_invalid:" + ",".join(sorted(missing))
+        )
+    return {
+        **required_keys,
+        "outcome_labels": outcome_labels,
+        "expected_routing_outcomes": expected_routing_outcomes,
+        "abstain_expected_routing_outcomes": abstain_expected_routing_outcomes,
+        "expected_routing_outcome_labels": expected_outcome_labels,
+        "signal_definitions": _signal_definition_by_id(rubric),
+    }
+
+
 def _serialise_selector_response(value: Any) -> str:
     if value is None:
         return ""
@@ -157,6 +238,7 @@ def _normalise_benchmark_case(
     raw_case: Mapping[str, Any],
     *,
     index: int,
+    rubric_values: Mapping[str, Any],
 ) -> SelectorBenchmarkCase | None:
     candidate_workflows = _normalise_candidate_workflows(raw_case.get("candidate_workflows"))
     if not candidate_workflows:
@@ -170,11 +252,20 @@ def _normalise_benchmark_case(
     if not allowed_workflow_ids:
         return None
 
-    expected_routing_outcome = _safe_str(
-        raw_case.get("expected_routing_outcome")
-    ).lower() or "workflow_selected"
-    if expected_routing_outcome not in _EXPECTED_ROUTING_OUTCOMES:
-        expected_routing_outcome = "workflow_selected"
+    expected_routing_outcomes = tuple(
+        str(item) for item in rubric_values.get("expected_routing_outcomes") or ()
+    )
+    expected_routing_outcome = _safe_str(raw_case.get("expected_routing_outcome")).lower()
+    if not expected_routing_outcome:
+        expected_routing_outcome = str(
+            rubric_values.get("default_expected_routing_outcome")
+            or expected_routing_outcomes[0]
+        )
+    if expected_routing_outcome not in expected_routing_outcomes:
+        expected_routing_outcome = str(
+            rubric_values.get("default_expected_routing_outcome")
+            or expected_routing_outcomes[0]
+        )
 
     baseline_workflow_id = _safe_str(raw_case.get("baseline_workflow_id"))
     if not baseline_workflow_id:
@@ -214,7 +305,11 @@ def _normalise_benchmark_case(
     )
 
 
-def _normalise_cases(raw_cases: Any) -> list[SelectorBenchmarkCase]:
+def _normalise_cases(
+    raw_cases: Any,
+    *,
+    rubric_values: Mapping[str, Any],
+) -> list[SelectorBenchmarkCase]:
     if not isinstance(raw_cases, Sequence) or isinstance(raw_cases, (str, bytes)):
         return []
 
@@ -222,7 +317,11 @@ def _normalise_cases(raw_cases: Any) -> list[SelectorBenchmarkCase]:
     for index, raw_case in enumerate(raw_cases, start=1):
         if not isinstance(raw_case, Mapping):
             continue
-        case = _normalise_benchmark_case(raw_case, index=index)
+        case = _normalise_benchmark_case(
+            raw_case,
+            index=index,
+            rubric_values=rubric_values,
+        )
         if case is not None:
             normalised.append(case)
     return normalised
@@ -232,33 +331,36 @@ def load_selector_routing_benchmark_cases(
     *,
     case_set: str | None = None,
     bundle_path: Path | str | None = None,
+    suite_concept_id: str | None = None,
 ) -> dict[str, Any]:
-    resolved_path = Path(bundle_path) if bundle_path is not None else DEFAULT_SELECTOR_ROUTING_BENCHMARK_BUNDLE_PATH
-    bundle_text = resolved_path.read_text(encoding="utf-8")
-    bundle_data = json.loads(bundle_text)
-    if not isinstance(bundle_data, Mapping):
-        raise ValueError("selector_routing_benchmark_seed_bundle_invalid")
-
-    requested_case_set = _safe_str(case_set) or _safe_str(
-        bundle_data.get("default_case_set")
-    ) or DEFAULT_SELECTOR_ROUTING_CASE_SET
-    case_sets = bundle_data.get("case_sets")
-    if isinstance(case_sets, Mapping):
-        raw_cases = case_sets.get(requested_case_set)
-        if raw_cases is None:
-            raise ValueError("selector_routing_benchmark_case_set_not_found")
-    else:
-        raw_cases = bundle_data.get("cases")
-
-    cases = _normalise_cases(raw_cases)
+    source_info = load_benchmark_suite_case_set(
+        suite_concept_id=(
+            _safe_str(suite_concept_id)
+            or DEFAULT_SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
+        ),
+        case_set=case_set,
+        fixture_path=bundle_path,
+    )
+    rubric_values = _required_selector_rubric_values(source_info.get("rubric") or {})
+    cases = _normalise_cases(
+        source_info.get("cases"),
+        rubric_values=rubric_values,
+    )
     return {
         "cases": cases,
-        "case_set": requested_case_set,
-        "bundle_path": str(resolved_path),
-        "bundle_sha256": hashlib.sha256(bundle_text.encode("utf-8")).hexdigest(),
-        "seed_schema_version": _safe_str(bundle_data.get("schema_version"))
-        or SELECTOR_ROUTING_BENCHMARK_SEED_SCHEMA_VERSION,
-        "source": "seed_bundle",
+        "case_set": source_info.get("case_set"),
+        "bundle_path": source_info.get("source_path"),
+        "bundle_sha256": source_info.get("fixture_sha256"),
+        "definition_sha256": source_info.get("definition_sha256"),
+        "seed_schema_version": source_info.get("seed_schema_version"),
+        "suite_schema_version": source_info.get("suite_schema_version"),
+        "definition_schema_version": source_info.get("definition_schema_version"),
+        "suite_concept_id": source_info.get("suite_concept_id"),
+        "suite_id": source_info.get("suite_id"),
+        "source": source_info.get("source"),
+        "source_predicate": source_info.get("source_predicate"),
+        "authority_diagnostics": source_info.get("authority_diagnostics"),
+        "rubric": rubric_values,
     }
 
 
@@ -273,6 +375,7 @@ def _evaluate_selector_case(
     *,
     selector: WorkflowSelector,
     case: SelectorBenchmarkCase,
+    rubric_values: Mapping[str, Any],
 ) -> dict[str, Any]:
     candidate_ids = tuple(
         _safe_str(item.get("concept_id"))
@@ -306,17 +409,23 @@ def _evaluate_selector_case(
     baseline_hit = case.baseline_workflow_id in case.allowed_workflow_ids
 
     if matched_expected_route:
+        expected_outcome_labels = rubric_values.get("expected_routing_outcome_labels")
+        expected_outcome_label_map = (
+            expected_outcome_labels
+            if isinstance(expected_outcome_labels, Mapping)
+            else {}
+        )
         overall_outcome = (
-            "abstain_escalate_no_safe_route"
-            if case.expected_routing_outcome == "abstain_escalate_no_safe_route"
-            else "successful_completion"
+            _safe_str(expected_outcome_label_map.get(case.expected_routing_outcome))
+            or case.expected_routing_outcome
         )
     else:
-        overall_outcome = "tool_or_workflow_misrouting"
+        overall_outcome = str(rubric_values.get("misrouting_outcome_label"))
 
+    outcome_labels = tuple(str(item) for item in rubric_values.get("outcome_labels") or ())
     metric_labels = {
         label_name: label_name == overall_outcome
-        for label_name in SELECTOR_BENCHMARK_OUTCOME_LABELS
+        for label_name in outcome_labels
     }
     primary_expected_workflow_id = (
         case.allowed_workflow_ids[0] if case.allowed_workflow_ids else None
@@ -372,21 +481,22 @@ def _build_selector_benchmark_signals(
     abstain_case_count: int,
     abstain_matched_count: int,
     misrouting_count: int,
+    signal_definitions: Mapping[str, Mapping[str, str]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     signals: list[dict[str, Any]] = []
 
     def _add_signal(
         *,
         signal_id: str,
-        title: str,
         status: str,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        definition = signal_definitions.get(signal_id, {})
         signals.append(
             {
                 "signal_id": signal_id,
-                "dimension": "selector_routing",
-                "title": title,
+                "dimension": definition.get("dimension") or "selector_routing",
+                "title": definition.get("title") or signal_id,
                 "status": status,
                 "details": dict(details or {}),
             }
@@ -395,14 +505,12 @@ def _build_selector_benchmark_signals(
     if case_count <= 0:
         _add_signal(
             signal_id="selector_benchmark_corpus_present",
-            title="Selector benchmark corpus contains evaluable cases",
             status="fail",
             details={"case_count": case_count},
         )
     else:
         _add_signal(
             signal_id="selector_benchmark_corpus_present",
-            title="Selector benchmark corpus contains evaluable cases",
             status="pass",
             details={"case_count": case_count},
         )
@@ -411,7 +519,6 @@ def _build_selector_benchmark_signals(
     baseline_accuracy = _format_rate(baseline_hit_count, case_count)
     _add_signal(
         signal_id="selector_accuracy_not_worse_than_baseline",
-        title="Selector routing is not worse than baseline case ordering",
         status="pass" if selector_accuracy >= baseline_accuracy else "fail",
         details={
             "selector_accuracy_pct": selector_accuracy,
@@ -422,14 +529,12 @@ def _build_selector_benchmark_signals(
     if abstain_case_count <= 0:
         _add_signal(
             signal_id="abstain_cases_routed_safely",
-            title="Abstain or no-safe-route cases are represented and routed safely",
             status="not_evaluated",
             details={"abstain_case_count": 0},
         )
     else:
         _add_signal(
             signal_id="abstain_cases_routed_safely",
-            title="Abstain or no-safe-route cases are represented and routed safely",
             status="pass" if abstain_matched_count == abstain_case_count else "fail",
             details={
                 "abstain_case_count": abstain_case_count,
@@ -439,7 +544,6 @@ def _build_selector_benchmark_signals(
 
     _add_signal(
         signal_id="selector_misrouting_examples_detected",
-        title="Selector corpus includes misrouting or failure examples",
         status="pass" if misrouting_count > 0 else "not_evaluated",
         details={"misrouting_count": misrouting_count},
     )
@@ -455,27 +559,155 @@ def _build_selector_benchmark_signals(
     return signals, summary
 
 
+def _build_selector_benchmark_missing_authority_report(
+    *,
+    case_set: str | None,
+    max_cases: int | None,
+    suite_concept_id: str,
+    diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    filters_payload = {
+        "case_set": _safe_str(case_set) or None,
+        "max_cases": _coerce_max_cases(max_cases),
+        "case_source": "vontology",
+    }
+    return {
+        "collection": "selector_routing_benchmark_cases",
+        "benchmark_generated_at_utc": _utc_now_iso(),
+        "filters": filters_payload,
+        "metrics": {
+            "scanned_count": 0,
+            "matched_case_count": 0,
+            "selector_accuracy_pct": 0.0,
+            "baseline_accuracy_pct": 0.0,
+            "accuracy_improvement_pct": 0.0,
+            "outcome_label_counts": {},
+            "metric_schema": {
+                "benchmark_schema_version": SELECTOR_ROUTING_BENCHMARK_SCHEMA_VERSION,
+                "summary_schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+                "outcome_labels": [],
+            },
+        },
+        "benchmark_fingerprint": _hash_payload(
+            {
+                "filters": filters_payload,
+                "suite_concept_id": suite_concept_id,
+                "authority_diagnostics": dict(diagnostics),
+            }
+        ),
+        "seeded_cases": [],
+        "replay_cases": [],
+        "benchmark_signals": [
+            {
+                "signal_id": "selector_benchmark_suite_authority_present",
+                "dimension": "selector_routing",
+                "title": "Selector benchmark suite authority is represented in Vontology",
+                "status": "fail",
+                "details": dict(diagnostics),
+            }
+        ],
+        "benchmark_signal_summary": {
+            "pass_count": 0,
+            "fail_count": 1,
+            "not_evaluated_count": 0,
+            "total_count": 1,
+        },
+        "capability_gaps": [
+            {
+                "gap_id": "benchmark_suite_authority_missing",
+                "title": "Represented selector benchmark suite authority is missing",
+                "severity": "high",
+                "details": dict(diagnostics),
+            }
+        ],
+        "recommendations": [
+            {
+                "recommendation_id": "materialise_selector_benchmark_suite",
+                "priority": "high",
+                "summary": (
+                    "Materialise the selector benchmark suite definition in "
+                    "Vontology before using this benchmark as a regression gate."
+                ),
+            }
+        ],
+        "corpus": {
+            "case_set": _safe_str(case_set) or None,
+            "source": "vontology",
+            "suite_concept_id": suite_concept_id,
+            "authority_diagnostics": dict(diagnostics),
+        },
+        "error_code": "benchmark_suite_authority_missing",
+        "success": False,
+    }
+
+
 def build_selector_routing_benchmark_report(
     *,
     cases: Sequence[Mapping[str, Any]] | None = None,
     case_set: str | None = None,
     max_cases: int | None = None,
     bundle_path: Path | str | None = None,
+    suite_concept_id: str | None = None,
 ) -> dict[str, Any]:
     if cases is not None:
-        normalised_cases = _normalise_cases(cases)
+        try:
+            if bundle_path is not None:
+                fixture_source = load_selector_routing_benchmark_cases(
+                    case_set=case_set,
+                    bundle_path=bundle_path,
+                    suite_concept_id=suite_concept_id,
+                )
+                rubric_values = fixture_source["rubric"]
+            else:
+                source_for_rubric = load_selector_routing_benchmark_cases(
+                    case_set=None,
+                    suite_concept_id=suite_concept_id,
+                )
+                rubric_values = source_for_rubric["rubric"]
+        except BenchmarkSuiteAuthorityMissingError as exc:
+            return _build_selector_benchmark_missing_authority_report(
+                case_set=case_set,
+                max_cases=max_cases,
+                suite_concept_id=(
+                    suite_concept_id
+                    or DEFAULT_SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
+                ),
+                diagnostics=exc.diagnostics,
+            )
+        normalised_cases = _normalise_cases(cases, rubric_values=rubric_values)
         source_info = {
             "case_set": _safe_str(case_set) or "inline",
             "bundle_path": None,
             "bundle_sha256": _hash_payload(cases),
             "seed_schema_version": None,
+            "suite_schema_version": None,
+            "definition_schema_version": None,
+            "suite_concept_id": suite_concept_id
+            or DEFAULT_SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID,
+            "suite_id": None,
             "source": "inline",
+            "source_predicate": None,
+            "authority_diagnostics": None,
+            "rubric": rubric_values,
         }
     else:
-        source_info = load_selector_routing_benchmark_cases(
-            case_set=case_set,
-            bundle_path=bundle_path,
-        )
+        try:
+            source_info = load_selector_routing_benchmark_cases(
+                case_set=case_set,
+                bundle_path=bundle_path,
+                suite_concept_id=suite_concept_id,
+            )
+        except BenchmarkSuiteAuthorityMissingError as exc:
+            return _build_selector_benchmark_missing_authority_report(
+                case_set=case_set,
+                max_cases=max_cases,
+                suite_concept_id=(
+                    suite_concept_id
+                    or DEFAULT_SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
+                ),
+                diagnostics=exc.diagnostics,
+            )
+        rubric_values = source_info["rubric"]
         normalised_cases = list(source_info.get("cases") or [])
 
     bounded_max_cases = _coerce_max_cases(max_cases)
@@ -499,12 +731,13 @@ def build_selector_routing_benchmark_report(
                 "baseline_accuracy_pct": 0.0,
                 "accuracy_improvement_pct": 0.0,
                 "outcome_label_counts": {
-                    label_name: 0 for label_name in SELECTOR_BENCHMARK_OUTCOME_LABELS
+                    label_name: 0
+                    for label_name in rubric_values.get("outcome_labels", ())
                 },
                 "metric_schema": {
                     "benchmark_schema_version": SELECTOR_ROUTING_BENCHMARK_SCHEMA_VERSION,
                     "summary_schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
-                    "outcome_labels": list(SELECTOR_BENCHMARK_OUTCOME_LABELS),
+                    "outcome_labels": list(rubric_values.get("outcome_labels", ())),
                 },
             },
             "benchmark_fingerprint": _hash_payload(filters_payload),
@@ -549,13 +782,24 @@ def build_selector_routing_benchmark_report(
                 "bundle_path": source_info.get("bundle_path"),
                 "bundle_sha256": source_info.get("bundle_sha256"),
                 "seed_schema_version": source_info.get("seed_schema_version"),
+                "suite_schema_version": source_info.get("suite_schema_version"),
+                "definition_schema_version": source_info.get("definition_schema_version"),
+                "suite_concept_id": source_info.get("suite_concept_id"),
+                "suite_id": source_info.get("suite_id"),
+                "definition_sha256": source_info.get("definition_sha256"),
+                "source_predicate": source_info.get("source_predicate"),
+                "authority_diagnostics": source_info.get("authority_diagnostics"),
             },
             "success": True,
         }
 
     selector = _build_selector_instance()
     replay_cases = [
-        _evaluate_selector_case(selector=selector, case=case)
+        _evaluate_selector_case(
+            selector=selector,
+            case=case,
+            rubric_values=rubric_values,
+        )
         for case in normalised_cases
     ]
 
@@ -564,20 +808,22 @@ def build_selector_routing_benchmark_report(
         1 for case in replay_cases if bool(case.get("matched_expected_route"))
     )
     baseline_hit_count = sum(1 for case in replay_cases if bool(case.get("baseline_hit")))
+    abstain_expected_outcomes = set(
+        str(item) for item in rubric_values.get("abstain_expected_routing_outcomes") or ()
+    )
     abstain_case_count = sum(
         1
         for case in replay_cases
-        if case.get("expected_routing_outcome") == "abstain_escalate_no_safe_route"
+        if str(case.get("expected_routing_outcome")) in abstain_expected_outcomes
     )
     abstain_matched_count = sum(
         1
         for case in replay_cases
-        if case.get("expected_routing_outcome") == "abstain_escalate_no_safe_route"
+        if str(case.get("expected_routing_outcome")) in abstain_expected_outcomes
         and bool(case.get("matched_expected_route"))
     )
-    outcome_label_counts = {
-        label_name: 0 for label_name in SELECTOR_BENCHMARK_OUTCOME_LABELS
-    }
+    outcome_labels = tuple(str(item) for item in rubric_values.get("outcome_labels") or ())
+    outcome_label_counts = {label_name: 0 for label_name in outcome_labels}
     verdict_counts: dict[str, int] = {}
     selection_source_counts: dict[str, int] = {}
     overall_outcome_counts: dict[str, int] = {}
@@ -600,7 +846,8 @@ def build_selector_routing_benchmark_report(
             overall_outcome_counts.get(overall_outcome, 0) + 1
         )
 
-    misrouting_count = outcome_label_counts["tool_or_workflow_misrouting"]
+    misrouting_label = str(rubric_values.get("misrouting_outcome_label"))
+    misrouting_count = outcome_label_counts.get(misrouting_label, 0)
     benchmark_signals, benchmark_signal_summary = _build_selector_benchmark_signals(
         case_count=case_count,
         matched_case_count=matched_case_count,
@@ -608,6 +855,7 @@ def build_selector_routing_benchmark_report(
         abstain_case_count=abstain_case_count,
         abstain_matched_count=abstain_matched_count,
         misrouting_count=misrouting_count,
+        signal_definitions=rubric_values.get("signal_definitions") or {},
     )
 
     metrics_payload = {
@@ -634,7 +882,7 @@ def build_selector_routing_benchmark_report(
         "metric_schema": {
             "benchmark_schema_version": SELECTOR_ROUTING_BENCHMARK_SCHEMA_VERSION,
             "summary_schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
-            "outcome_labels": list(SELECTOR_BENCHMARK_OUTCOME_LABELS),
+            "outcome_labels": list(outcome_labels),
         },
     }
     filters_payload = {
@@ -679,6 +927,13 @@ def build_selector_routing_benchmark_report(
             "bundle_path": source_info.get("bundle_path"),
             "bundle_sha256": source_info.get("bundle_sha256"),
             "seed_schema_version": source_info.get("seed_schema_version"),
+            "suite_schema_version": source_info.get("suite_schema_version"),
+            "definition_schema_version": source_info.get("definition_schema_version"),
+            "suite_concept_id": source_info.get("suite_concept_id"),
+            "suite_id": source_info.get("suite_id"),
+            "definition_sha256": source_info.get("definition_sha256"),
+            "source_predicate": source_info.get("source_predicate"),
+            "authority_diagnostics": source_info.get("authority_diagnostics"),
         },
         "success": True,
     }
@@ -688,7 +943,6 @@ __all__ = [
     "DEFAULT_SELECTOR_ROUTING_BENCHMARK_BUNDLE_PATH",
     "DEFAULT_SELECTOR_ROUTING_CASE_SET",
     "SELECTOR_ROUTING_BENCHMARK_SCHEMA_VERSION",
-    "SELECTOR_BENCHMARK_OUTCOME_LABELS",
     "build_selector_routing_benchmark_report",
     "load_selector_routing_benchmark_cases",
 ]
