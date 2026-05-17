@@ -74,6 +74,12 @@ predicates, and KB assertions should own durable:
 - Required-tool obligation semantics, including operation class, evidence role,
   target-bearing input/output fields, target-closure requirements, and read-back
   policy for required tools.
+- Source-to-representation convergence schedule/profile authority, including
+  source account/profile, actor namespace, source query, cadence, item budgets,
+  launch prompt, convergence gates, and target workflow selection.
+- Maintenance audit authority, including audited task classes, expected
+  workflows, case prompts, thresholds, evaluation dimensions, suggestion policy,
+  and self-improvement handoff criteria.
 
 ## Python Support
 
@@ -132,6 +138,12 @@ Python can remain the surface for:
   profile/type/predicate authority comes from Vontology;
 - generic benchmark loaders/reporters, telemetry joins, arithmetic, validation,
   and serialisation when benchmark suites, cases, labels, and rubrics come from
+  represented authority;
+- generic schedule/profile loaders and schedule persistence support when actor,
+  source, cadence, budgets, and launch defaults come from represented authority;
+- generic maintenance-audit evidence collection, workflow discovery probes,
+  inventory reads, metric arithmetic, payload validation, and episode-memory
+  persistence when audit cases, thresholds, and suggestion policy come from
   represented authority;
 - generic HTTP/request plumbing that passes represented decisions through.
 
