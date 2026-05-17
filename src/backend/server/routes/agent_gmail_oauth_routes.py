@@ -14,7 +14,7 @@ from ...services.agent_gmail_token_store import (
     get_agent_gmail_token_status,
     revoke_agent_gmail_tokens,
 )
-from ...integrations.google.gmail_service import list_profile_ids_from_env
+from ...integrations.google import gmail_service
 
 agent_gmail_oauth_bp = Blueprint("agent_gmail_oauth_bp", __name__)
 
@@ -34,7 +34,7 @@ def _get_service() -> AgentGmailOAuthService:
 
 
 def _validate_profile_id(profile_id: str):
-    available_profiles = list_profile_ids_from_env()
+    available_profiles = gmail_service.list_profile_ids_from_env()
     if not available_profiles:
         return (
             jsonify(
@@ -57,6 +57,90 @@ def _validate_profile_id(profile_id: str):
             400,
         )
     return None
+
+
+def _gmail_access_error_payload(profile_id: str, exc: Exception) -> dict[str, object]:
+    error_text = str(exc)
+    error_lower = error_text.lower()
+    if "invalid_grant" in error_lower or "expired or revoked" in error_lower:
+        return {
+            "success": False,
+            "profile_id": profile_id,
+            "status": "reauthorisation_required",
+            "error": "invalid_grant",
+            "detail": (
+                "Stored Gmail refresh credentials are expired or revoked. "
+                "Use Authorise Agent Gmail to complete a new OAuth grant."
+            ),
+            "action": "authorise_agent_gmail",
+        }
+    if "insufficient" in error_lower and "scope" in error_lower:
+        return {
+            "success": False,
+            "profile_id": profile_id,
+            "status": "reauthorisation_required",
+            "error": "insufficient_scopes",
+            "detail": (
+                "Stored Gmail credentials do not have the scopes needed for agent Gmail access. "
+                "Use Authorise Agent Gmail to complete a new OAuth grant."
+            ),
+            "action": "authorise_agent_gmail",
+        }
+    return {
+        "success": False,
+        "profile_id": profile_id,
+        "status": "access_failed",
+        "error": "gmail_access_test_failed",
+        "detail": error_text,
+        "action": "retry_or_reauthorise",
+    }
+
+
+@agent_gmail_oauth_bp.route("/api/agent/gmail/oauth/test_access", methods=["POST"])
+def agent_gmail_oauth_test_access():
+    profile_id = (request.args.get("profile_id") or "").strip()
+    if not profile_id:
+        data = request.get_json(silent=True) or {}
+        raw = data.get("profile_id")
+        profile_id = raw.strip() if isinstance(raw, str) else ""
+
+    if not profile_id:
+        return jsonify({"error": "missing_profile_id"}), 400
+
+    validation_error = _validate_profile_id(profile_id)
+    if validation_error:
+        return validation_error
+
+    try:
+        result = gmail_service.list_messages(
+            profile_id=profile_id,
+            max_results=1,
+            query=None,
+            audit_context={
+                "source": "agent_gmail_oauth_test_access",
+                "operation": "minimal_gmail_list",
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "[agent_gmail_oauth] Gmail access test failed (profile_id=%s, error_type=%s)",
+            profile_id,
+            type(exc).__name__,
+        )
+        return jsonify(_gmail_access_error_payload(profile_id, exc)), 200
+
+    messages = []
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        messages = result["messages"]
+    return jsonify(
+        {
+            "success": True,
+            "profile_id": profile_id,
+            "status": "access_ok",
+            "detail": "Gmail list access succeeded for this profile.",
+            "message_count": len(messages),
+        }
+    )
 
 
 @agent_gmail_oauth_bp.route("/api/agent/gmail/oauth/start")

@@ -1544,6 +1544,15 @@ function getProfilesFromSelect() {
     .filter((value) => value);
 }
 
+function formatGmailOAuthStoredStatus(data) {
+  if (!data?.has_tokens) {
+    return 'not authorised';
+  }
+  const email = data.authorised_email || '(unknown email)';
+  const expiry = data.expires_at ? ` (expires ${data.expires_at})` : '';
+  return `stored tokens for ${email}${expiry}; live access untested`;
+}
+
 function renderGmailProfileOptions(profiles, defaultProfile) {
   const select = document.getElementById('gmailProfileSelect');
   if (!select) return;
@@ -1605,12 +1614,7 @@ async function refreshGmailProfileStatusList() {
           if (!response.ok) {
             return { profileId, status: `error (${data?.error || response.status})` };
           }
-          if (data?.has_tokens) {
-            const email = data.authorised_email || '(unknown email)';
-            const expiry = data.expires_at ? ` (expires ${data.expires_at})` : '';
-            return { profileId, status: `authorised as ${email}${expiry}` };
-          }
-          return { profileId, status: 'not authorised' };
+          return { profileId, status: formatGmailOAuthStoredStatus(data) };
         } catch (_) {
           return { profileId, status: 'error (failed to fetch)' };
         }
@@ -2513,6 +2517,10 @@ export function __testOnly_applyStoredSelection(selectId, stored, fallbackSelect
 // Export for testing
 export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
   await syncInitialScopedSelections(overrides);
+}
+
+export function __testOnly_formatGmailOAuthStoredStatus(data) {
+  return formatGmailOAuthStoredStatus(data);
 }
 
 export function __testOnly_getSettingsConcernForSectionTarget(sectionId) {

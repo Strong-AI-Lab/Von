@@ -2,6 +2,7 @@ import {
     __testOnly_applyStoredSelection,
     __testOnly_buildServerDefaultLlmPayload,
     __testOnly_buildStoredUserContextFromOption,
+    __testOnly_formatGmailOAuthStoredStatus,
     __testOnly_formatServerDefaultSummary,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
@@ -118,6 +119,17 @@ describe('settingsPage RAG status summary', () => {
 
         expect(result.currentOpenAIModel).toBe('gpt-5.4-nano');
         expect(result.currentOllamaModel).toBe('llama3.1:8b');
+    });
+
+    test('formats Gmail OAuth status as stored-token state, not live access success', () => {
+        expect(__testOnly_formatGmailOAuthStoredStatus({
+            has_tokens: true,
+            authorised_email: 'agent@example.test',
+            expires_at: '2026-05-17T21:00:00+00:00',
+        })).toBe(
+            'stored tokens for agent@example.test (expires 2026-05-17T21:00:00+00:00); live access untested',
+        );
+        expect(__testOnly_formatGmailOAuthStoredStatus({ has_tokens: false })).toBe('not authorised');
     });
 
     test('prefers an explicit provider switch over the previously resolved model', () => {
@@ -468,4 +480,3 @@ describe('settingsPage RAG status summary', () => {
         );
     });
 });
-

@@ -573,11 +573,16 @@
                 <button type="button" class="btn-primary" onclick="authoriseAgentGmail()">Authorise Agent Gmail</button>
                 <button type="button" class="btn-danger ml-2" onclick="revokeAgentGmail()">Revoke</button>
                 <button type="button" class="btn-secondary ml-2"
-                    onclick="refreshAgentGmailOauthStatus()">Refresh</button>
+                    onclick="refreshAgentGmailOauthStatus()">Refresh status</button>
+                <button type="button" class="btn-secondary ml-2" onclick="testAgentGmailAccess()">Test Gmail
+                    access</button>
                 <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
             </div>
             <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
+            <div id="agentGmailAccessStatus" class="settings-note">Gmail access test: not run</div>
             <div id="agentGmailOauthLastRefreshed" class="settings-note">Last refreshed: —</div>
+            <small class="settings-note">Refresh status rereads stored OAuth metadata; Test Gmail access verifies the
+                profile can make a live Gmail API call.</small>
             <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
             <div id="gmailProfilesStatus" class="settings-note">Gmail profiles: unknown</div>
 
@@ -796,7 +801,7 @@
                 if (data?.has_tokens) {
                     const email = data.authorised_email || '(unknown email)';
                     const expiry = data.expires_at ? ` (expires ${data.expires_at})` : '';
-                    el.textContent = `Agent Gmail OAuth: authorised as ${email}${expiry}`;
+                    el.textContent = `Agent Gmail OAuth: stored tokens for ${email}${expiry}; live access untested`;
                 } else {
                     el.textContent = 'Agent Gmail OAuth: not authorised';
                 }
@@ -813,12 +818,46 @@
             }
         }
 
+        async function testAgentGmailAccess() {
+            const el = document.getElementById('agentGmailAccessStatus');
+            if (!el) return;
+
+            const profileId = getSelectedGmailProfileId();
+            if (!profileId) {
+                el.textContent = 'Gmail access test: disabled (no profile selected)';
+                return;
+            }
+
+            el.textContent = 'Gmail access test: checking…';
+            try {
+                const response = await fetch(
+                    `/von/api/agent/gmail/oauth/test_access?profile_id=${encodeURIComponent(profileId)}`,
+                    { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+                );
+                const data = await response.json().catch(() => ({}));
+                if (data?.status === 'access_ok' && data?.success) {
+                    el.textContent = 'Gmail access test: Access OK';
+                } else if (data?.status === 'reauthorisation_required') {
+                    el.textContent = 'Gmail access test: Re-authorisation required. Use Authorise Agent Gmail.';
+                } else if (!response.ok) {
+                    el.textContent = `Gmail access test: error (${data?.error || response.status})`;
+                } else {
+                    el.textContent = `Gmail access test: error (${data?.error || 'access_failed'})`;
+                }
+            } catch (error) {
+                console.warn('Failed to test agent Gmail access', error);
+                el.textContent = 'Gmail access test: error (failed to fetch)';
+            }
+        }
+
         function updateGmailProfileStatus() {
             try {
                 const el = document.getElementById('gmailProfileStatus');
                 if (!el) return;
                 const profileId = getSelectedGmailProfileId();
                 el.textContent = profileId ? `Gmail profile target: ${profileId}` : 'Gmail profile target: none (disabled)';
+                const accessEl = document.getElementById('agentGmailAccessStatus');
+                if (accessEl) accessEl.textContent = 'Gmail access test: not run';
                 refreshAgentGmailOauthStatus();
                 if (typeof window.refreshGmailProfileStatusList === 'function') {
                     window.refreshGmailProfileStatusList();
