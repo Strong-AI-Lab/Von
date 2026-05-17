@@ -145,6 +145,16 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   The replay observation changes look like remediation for `JVNAUTOSCI-2324`
   while durable recording still requires represented replay evaluation by
   default. No duplicates were filed for those areas.
+- 2026-05-18: required-tool obligation changes from `c6289c1d` look like
+  remediation for `JVNAUTOSCI-2329`: operation/evidence/target semantics are
+  moved toward metadata rather than inferred from tool-name prefixes. Do not
+  file a duplicate without fresh evidence that Python fallback semantics still
+  decide operation class or target closure.
+- 2026-05-18: `JVNAUTOSCI-2335` and `JVNAUTOSCI-2331` were existing feature
+  tasks, not duplicate drift tickets. Fresh residual authority issues were filed
+  as `JVNAUTOSCI-2340` and `JVNAUTOSCI-2341`; update those instead of reopening
+  broad duplicates for the same email convergence or representation-routing
+  audit surfaces.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
