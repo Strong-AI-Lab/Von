@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+from typing import Any
+
+
+def _reset_mock_vontology_db(monkeypatch: Any) -> None:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    if db is None:
+        return
+    for collection_name in ("concepts", "text_relations", "text_values"):
+        try:
+            db.drop_collection(collection_name)
+        except Exception:
+            pass
+
 
 def test_gmail_send_metadata_marks_external_surface_and_planner_hint(monkeypatch):
     from src.backend.services import tool_metadata_service as service
@@ -59,10 +76,17 @@ def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
         service.invalidate_cache()
 
 
-def test_gmail_read_tools_are_prompt_required_evidence(monkeypatch):
+def test_gmail_read_tools_are_prompt_required_evidence_from_vontology(monkeypatch):
+    _reset_mock_vontology_db(monkeypatch)
+
+    from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
+        bootstrap_gmail_tool_evidence_contract,
+    )
     from src.backend.services import tool_metadata_service as service
 
-    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    bootstrap_report = bootstrap_gmail_tool_evidence_contract()
+    assert bootstrap_report["success"] is True
+
     service.invalidate_cache()
     try:
         list_metadata = service.get_tool_metadata("gmail_list_messages")
@@ -75,6 +99,30 @@ def test_gmail_read_tools_are_prompt_required_evidence(monkeypatch):
         assert message_metadata.operation_category == "read"
         assert message_metadata.evidence_role == "verification"
         assert service.is_tool_prompt_required_evidence("gmail_get_message") is True
+    finally:
+        service.invalidate_cache()
+
+
+def test_gmail_read_tools_without_represented_roles_are_not_prompt_required(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        list_metadata = service.get_tool_metadata("gmail_list_messages")
+        message_metadata = service.get_tool_metadata("gmail_get_message")
+
+        assert list_metadata.category == "gmail"
+        assert list_metadata.operation_category is None
+        assert list_metadata.evidence_role is None
+        assert service.is_tool_prompt_required_evidence("gmail_list_messages") is False
+
+        assert message_metadata.category == "gmail"
+        assert message_metadata.operation_category is None
+        assert message_metadata.evidence_role is None
+        assert service.is_tool_prompt_required_evidence("gmail_get_message") is False
     finally:
         service.invalidate_cache()
 

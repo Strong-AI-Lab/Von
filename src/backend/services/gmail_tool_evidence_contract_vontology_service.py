@@ -178,7 +178,15 @@ _CORE_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         description="Built-in internal MCP tool that lists Gmail messages for a profile.",
         parent_concept_ids=("#V#mcp_tool",),
         category="tool",
-        attributes={"mcp_tool_name": "gmail_list_messages"},
+        attributes={
+            "mcp_tool_name": "gmail_list_messages",
+            "category": "gmail",
+            "dispatch_surface_family": "gmail",
+            "evidence_surface_family": "gmail",
+            "external_surface": True,
+            "operation_category": "read",
+            "evidence_role": "search",
+        },
     ),
     _concept(
         concept_id=GMAIL_GET_MESSAGE_TOOL_ID,
@@ -186,7 +194,15 @@ _CORE_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         description="Built-in internal MCP tool that fetches details for one Gmail message.",
         parent_concept_ids=("#V#mcp_tool",),
         category="tool",
-        attributes={"mcp_tool_name": "gmail_get_message"},
+        attributes={
+            "mcp_tool_name": "gmail_get_message",
+            "category": "gmail",
+            "dispatch_surface_family": "gmail",
+            "evidence_surface_family": "gmail",
+            "external_surface": True,
+            "operation_category": "read",
+            "evidence_role": "verification",
+        },
     ),
     _concept(
         concept_id=GMAIL_MESSAGE_ENTITY_TYPE_ID,

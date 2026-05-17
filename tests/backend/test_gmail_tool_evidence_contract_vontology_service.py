@@ -37,6 +37,12 @@ def _targets(concept_id: str, predicate: str) -> set[str]:
     return {str(value) for value in values}
 
 
+def _attributes(concept_id: str) -> dict[str, Any]:
+    concept_doc = concept_service.get_concept_by_concept_id(concept_id)
+    assert concept_doc is not None
+    return dict(concept_doc.get("attributes") or {})
+
+
 def test_bootstrap_materialises_gmail_tool_contract_graph_kr(
     _reset_mock_db: Any,
 ) -> None:
@@ -83,6 +89,24 @@ def test_bootstrap_materialises_gmail_tool_contract_graph_kr(
         "#V#detail_tool_accepts_identifier_field",
         [],
     )
+
+    list_tool_attributes = _attributes(service.GMAIL_LIST_MESSAGES_TOOL_ID)
+    assert list_tool_attributes["mcp_tool_name"] == "gmail_list_messages"
+    assert list_tool_attributes["category"] == "gmail"
+    assert list_tool_attributes["dispatch_surface_family"] == "gmail"
+    assert list_tool_attributes["evidence_surface_family"] == "gmail"
+    assert list_tool_attributes["external_surface"] is True
+    assert list_tool_attributes["operation_category"] == "read"
+    assert list_tool_attributes["evidence_role"] == "search"
+
+    detail_tool_attributes = _attributes(service.GMAIL_GET_MESSAGE_TOOL_ID)
+    assert detail_tool_attributes["mcp_tool_name"] == "gmail_get_message"
+    assert detail_tool_attributes["category"] == "gmail"
+    assert detail_tool_attributes["dispatch_surface_family"] == "gmail"
+    assert detail_tool_attributes["evidence_surface_family"] == "gmail"
+    assert detail_tool_attributes["external_surface"] is True
+    assert detail_tool_attributes["operation_category"] == "read"
+    assert detail_tool_attributes["evidence_role"] == "verification"
 
     validation = service.validate_gmail_tool_evidence_contract()
     assert validation["success"] is True

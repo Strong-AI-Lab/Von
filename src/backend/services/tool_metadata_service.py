@@ -504,8 +504,6 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "dispatch_surface_family": "gmail",
         "evidence_surface_family": "gmail",
         "external_surface": True,
-        "operation_category": "read",
-        "evidence_role": "search",
     },
     "gmail_list_profiles": {
         "salience": "medium",
@@ -525,8 +523,6 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "dispatch_surface_family": "gmail",
         "evidence_surface_family": "gmail",
         "external_surface": True,
-        "operation_category": "read",
-        "evidence_role": "verification",
     },
     "gmail_send_message": {
         "salience": "medium",

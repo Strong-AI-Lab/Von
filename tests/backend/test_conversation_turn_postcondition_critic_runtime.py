@@ -8,6 +8,21 @@ from src.backend.workflows.durable.turn_execution_runtime_support import (
 )
 
 
+def _reset_mock_vontology_db(monkeypatch) -> None:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    if db is None:
+        return
+    for collection_name in ("concepts", "text_relations", "text_values"):
+        try:
+            db.drop_collection(collection_name)
+        except Exception:
+            pass
+
+
 def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict(
     monkeypatch,
 ) -> None:
@@ -76,6 +91,17 @@ def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict
 def test_turn_execution_critic_materialises_gmail_read_tools_as_required_evidence(
     monkeypatch,
 ) -> None:
+    _reset_mock_vontology_db(monkeypatch)
+
+    from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
+        bootstrap_gmail_tool_evidence_contract,
+    )
+    from src.backend.services import tool_metadata_service
+
+    bootstrap_report = bootstrap_gmail_tool_evidence_contract()
+    assert bootstrap_report["success"] is True
+    tool_metadata_service.invalidate_cache()
+
     request = WorkflowActionRequest(
         action_id="turn_execution.critic",
         inputs={
@@ -158,3 +184,5 @@ def test_turn_execution_critic_materialises_gmail_read_tools_as_required_evidenc
         ["gmail_get_message"],
     ]
     assert all(effect.get("status") == "satisfied" for effect in required_effects)
+
+    tool_metadata_service.invalidate_cache()
