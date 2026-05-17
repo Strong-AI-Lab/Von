@@ -391,7 +391,9 @@ _PAYLOAD_PATH_SPECS: tuple[GmailConceptSpec, ...] = (
     _payload_path("#V#gmail_payload_path_label_ids", "labelIds"),
     _payload_path("#V#gmail_payload_path_payload", "payload"),
     _payload_path("#V#gmail_payload_path_header_from", "payload.headers[name=From]"),
-    _payload_path("#V#gmail_payload_path_header_subject", "payload.headers[name=Subject]"),
+    _payload_path(
+        "#V#gmail_payload_path_header_subject", "payload.headers[name=Subject]"
+    ),
     _payload_path("#V#gmail_payload_path_header_date", "payload.headers[name=Date]"),
 )
 
@@ -408,7 +410,9 @@ def _relationship(
     predicate: str,
     target_id: str,
 ) -> GmailRelationshipSpec:
-    return GmailRelationshipSpec(source_id=source_id, predicate=predicate, target_id=target_id)
+    return GmailRelationshipSpec(
+        source_id=source_id, predicate=predicate, target_id=target_id
+    )
 
 
 def _wire_key_id(key: str) -> str:
@@ -486,7 +490,9 @@ def _field_payload_path_relationships() -> tuple[GmailRelationshipSpec, ...]:
 
 def _field_role_relationships() -> tuple[GmailRelationshipSpec, ...]:
     role_map = {
-        GMAIL_MESSAGES_COLLECTION_FIELD_ID: ("#V#tool_field_role_collection_membership",),
+        GMAIL_MESSAGES_COLLECTION_FIELD_ID: (
+            "#V#tool_field_role_collection_membership",
+        ),
         GMAIL_PROFILE_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
         GMAIL_QUERY_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
         GMAIL_LABEL_IDS_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
@@ -637,6 +643,8 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_PROFILE_ARGUMENT_FIELD_ID,
         GMAIL_MESSAGE_ID_FIELD_ID,
         GMAIL_THREAD_ID_FIELD_ID,
+        GMAIL_EFFECTIVE_QUERY_FIELD_ID,
+        GMAIL_NOTES_FIELD_ID,
     )
 
     relationships: list[GmailRelationshipSpec] = [
@@ -687,23 +695,33 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
         ),
     ]
     relationships.extend(
-        _relationship(GMAIL_FINAL_ANSWER_VIEW_ID, "#V#evidence_view_requires_field", field_id)
+        _relationship(
+            GMAIL_FINAL_ANSWER_VIEW_ID, "#V#evidence_view_requires_field", field_id
+        )
         for field_id in GMAIL_REQUIRED_FINAL_ANSWER_FIELD_IDS
     )
     relationships.extend(
-        _relationship(GMAIL_FINAL_ANSWER_VIEW_ID, "#V#evidence_view_includes_field", field_id)
+        _relationship(
+            GMAIL_FINAL_ANSWER_VIEW_ID, "#V#evidence_view_includes_field", field_id
+        )
         for field_id in final_included_fields
     )
     relationships.extend(
-        _relationship(GMAIL_FOLLOW_UP_VIEW_ID, "#V#evidence_view_requires_field", field_id)
+        _relationship(
+            GMAIL_FOLLOW_UP_VIEW_ID, "#V#evidence_view_requires_field", field_id
+        )
         for field_id in (GMAIL_PROFILE_ARGUMENT_FIELD_ID, GMAIL_MESSAGE_ID_FIELD_ID)
     )
     relationships.extend(
-        _relationship(GMAIL_FOLLOW_UP_VIEW_ID, "#V#evidence_view_includes_field", field_id)
+        _relationship(
+            GMAIL_FOLLOW_UP_VIEW_ID, "#V#evidence_view_includes_field", field_id
+        )
         for field_id in follow_up_fields
     )
     relationships.extend(
-        _relationship(GMAIL_USER_DISPLAY_VIEW_ID, "#V#evidence_view_includes_field", field_id)
+        _relationship(
+            GMAIL_USER_DISPLAY_VIEW_ID, "#V#evidence_view_includes_field", field_id
+        )
         for field_id in user_display_fields
     )
     relationships.append(
@@ -728,7 +746,9 @@ def _entity_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_PAYLOAD_FIELD_ID,
     )
     return tuple(
-        _relationship(GMAIL_MESSAGE_ENTITY_TYPE_ID, "#V#entity_type_has_tool_field", field_id)
+        _relationship(
+            GMAIL_MESSAGE_ENTITY_TYPE_ID, "#V#entity_type_has_tool_field", field_id
+        )
         for field_id in fields
     )
 
@@ -822,7 +842,9 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
         ),
     ]
     relationships.extend(
-        _relationship(GMAIL_GET_MESSAGE_TOOL_ID, "#V#detail_tool_completes_field", field_id)
+        _relationship(
+            GMAIL_GET_MESSAGE_TOOL_ID, "#V#detail_tool_completes_field", field_id
+        )
         for field_id in (
             GMAIL_SENDER_FIELD_ID,
             GMAIL_SUBJECT_FIELD_ID,
@@ -833,15 +855,21 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
         )
     )
     relationships.extend(
-        _relationship(GMAIL_LIST_MESSAGES_TOOL_ID, "#V#tool_result_preserves_field", field_id)
+        _relationship(
+            GMAIL_LIST_MESSAGES_TOOL_ID, "#V#tool_result_preserves_field", field_id
+        )
         for field_id in (
             GMAIL_PROFILE_ARGUMENT_FIELD_ID,
             GMAIL_MESSAGE_ID_FIELD_ID,
             GMAIL_THREAD_ID_FIELD_ID,
+            GMAIL_EFFECTIVE_QUERY_FIELD_ID,
+            GMAIL_NOTES_FIELD_ID,
         )
     )
     relationships.extend(
-        _relationship(GMAIL_GET_MESSAGE_TOOL_ID, "#V#tool_result_preserves_field", field_id)
+        _relationship(
+            GMAIL_GET_MESSAGE_TOOL_ID, "#V#tool_result_preserves_field", field_id
+        )
         for field_id in (
             GMAIL_MESSAGE_ID_FIELD_ID,
             GMAIL_SENDER_FIELD_ID,
@@ -873,9 +901,9 @@ def canonical_gmail_tool_evidence_contract_concept_ids() -> tuple[str, ...]:
     return tuple(spec.concept_id for spec in GMAIL_TOOL_EVIDENCE_CONTRACT_CONCEPT_SPECS)
 
 
-def canonical_gmail_tool_evidence_contract_relationships() -> tuple[
-    GmailRelationshipSpec, ...
-]:
+def canonical_gmail_tool_evidence_contract_relationships() -> (
+    tuple[GmailRelationshipSpec, ...]
+):
     """Return the canonical Gmail contract relationship graph."""
 
     return _gmail_relationship_specs()
@@ -913,6 +941,33 @@ def _ensure_structural_targets(
     return True
 
 
+def _ensure_concept_attributes(spec: GmailConceptSpec) -> bool:
+    """Repair seed-managed attributes on an existing Gmail contract concept."""
+
+    expected_attributes = dict(spec.attributes or {})
+    if not expected_attributes:
+        return False
+
+    concept_doc = load_concept(spec.concept_id)
+    if not isinstance(concept_doc, Mapping):
+        return False
+
+    existing_attributes = concept_doc.get("attributes")
+    existing_mapping: Mapping[str, Any] = (
+        existing_attributes if isinstance(existing_attributes, Mapping) else {}
+    )
+    updates: dict[str, Any] = {}
+    for key, expected_value in expected_attributes.items():
+        if existing_mapping.get(key) != expected_value:
+            updates[f"attributes.{key}"] = expected_value
+
+    if not updates:
+        return False
+
+    concept_service.update_concept(spec.concept_id, updates)
+    return True
+
+
 def _ensure_concept(spec: GmailConceptSpec) -> str:
     concept_doc = load_concept(spec.concept_id)
     if not isinstance(concept_doc, Mapping):
@@ -931,12 +986,15 @@ def _ensure_concept(spec: GmailConceptSpec) -> str:
         )
         return "created"
 
-    relationship_key = "is_an_instance_of" if spec.create_as_instance else "is_a_type_of"
+    relationship_key = (
+        "is_an_instance_of" if spec.create_as_instance else "is_a_type_of"
+    )
     repaired = _ensure_structural_targets(
         concept_id=spec.concept_id,
         relationship_key=relationship_key,
         target_ids=spec.parent_concept_ids,
     )
+    repaired = _ensure_concept_attributes(spec) or repaired
     return "repaired" if repaired else "existing"
 
 
@@ -1002,7 +1060,9 @@ def bootstrap_gmail_tool_evidence_contract() -> dict[str, Any]:
                     {
                         "section": "relationships",
                         "relationship": _relationship_identity(relationship_spec),
-                        "reason_code": str(result.get("error") or "relationship_failed"),
+                        "reason_code": str(
+                            result.get("error") or "relationship_failed"
+                        ),
                         "details": result,
                     }
                 )

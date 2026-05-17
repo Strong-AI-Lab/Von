@@ -103,6 +103,8 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     from src.backend.services import (
         concept_search_instance_retrieval_workflow_vontology_service as concept_search_instance_retrieval_workflow_bootstrap,
         conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
+        email_source_representation_convergence_schedule_bootstrap_service as email_source_convergence_schedule_bootstrap,
+        email_source_representation_convergence_workflow_vontology_service as email_source_convergence_workflow_bootstrap,
         entity_information_retrieval_workflow_vontology_service as entity_information_retrieval_workflow_bootstrap,
         entity_identity_resolution_workflow_vontology_service as entity_identity_resolution_workflow_bootstrap,
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
@@ -302,9 +304,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         "bootstrap_canonical_multilingual_concept_enrichment_workflow",
         lambda: {
             "success": True,
-            "workflow_ids": [
-                "#V#multilingual_concept_enrichment_rumination_workflow"
-            ],
+            "workflow_ids": ["#V#multilingual_concept_enrichment_rumination_workflow"],
             "publication": {"skipped": True},
         },
     )
@@ -320,6 +320,19 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
                 "#V#conversation_turn_execution_workflow",
             ],
             "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        email_source_convergence_workflow_bootstrap,
+        "bootstrap_canonical_email_source_representation_convergence_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": [
+                "#V#zhan_gmail_arxiv_ingestion_workflow",
+                "#V#email_arxiv_ingestion_from_message_workflow",
+            ],
+            "publication": {"skipped": True},
+            "gmail_completion_hint": {"success": True, "entry_count": 1},
         },
     )
     monkeypatch.setattr(
@@ -378,6 +391,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         turn_pipeline_monitoring_schedule_bootstrap,
         "ensure_turn_pipeline_monitoring_schedules",
         lambda: {"success": True, "ensured": True, "created_count": 2},
+    )
+    monkeypatch.setattr(
+        email_source_convergence_schedule_bootstrap,
+        "ensure_email_arxiv_representation_convergence_schedule",
+        lambda: {"success": True, "ensured": True, "created_count": 1},
     )
     monkeypatch.setattr(
         multilingual_schedule_bootstrap,
@@ -457,6 +475,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
     assert isinstance(conversation_turn_workflow_bootstrap_report, dict)
     assert conversation_turn_workflow_bootstrap_report.get("success") is True
+    email_source_convergence_workflow_bootstrap_report = result.get(
+        "email_source_convergence_workflow_bootstrap"
+    )
+    assert isinstance(email_source_convergence_workflow_bootstrap_report, dict)
+    assert email_source_convergence_workflow_bootstrap_report.get("success") is True
     paper_workflow_bootstrap_report = result.get("paper_workflow_bootstrap")
     assert isinstance(paper_workflow_bootstrap_report, dict)
     assert paper_workflow_bootstrap_report.get("success") is True
@@ -490,6 +513,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
     assert isinstance(turn_pipeline_monitoring_schedule_report, dict)
     assert turn_pipeline_monitoring_schedule_report.get("success") is True
+    email_source_convergence_schedule_report = result.get(
+        "email_arxiv_convergence_schedule_bootstrap"
+    )
+    assert isinstance(email_source_convergence_schedule_report, dict)
+    assert email_source_convergence_schedule_report.get("success") is True
     parent_schedule_report = result.get("parent_specificity_schedule_bootstrap")
     assert isinstance(parent_schedule_report, dict)
     assert parent_schedule_report.get("success") is True

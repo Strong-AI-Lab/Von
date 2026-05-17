@@ -20241,7 +20241,9 @@ def _gmail_get_message(**kwargs):
 def _gmail_send_message(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     to = kwargs.get("to")
     subject = kwargs.get("subject")
     body_text = kwargs.get("body_text") or kwargs.get("body")
@@ -20315,7 +20317,9 @@ def _gmail_send_message(**kwargs):
 def _gmail_get_attachment(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     message_id = kwargs.get("message_id")
     attachment_id = kwargs.get("attachment_id")
     if not profile or not message_id or not attachment_id:
@@ -20349,7 +20353,9 @@ def _gmail_get_attachment(**kwargs):
 def _gmail_list_labels(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     if not profile:
         return make_error_response(
             "missing_parameter",
@@ -20379,7 +20385,9 @@ def _gmail_list_labels(**kwargs):
 def _gmail_create_label(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     name = kwargs.get("name") or kwargs.get("label_name")
     allow_mutation = kwargs.get("allow_mutation") is True
     profile_text = profile if isinstance(profile, str) and profile.strip() else None
@@ -20469,7 +20477,9 @@ def _gmail_create_label(**kwargs):
 def _gmail_modify_labels(**kwargs):
     from ...integrations.google import gmail_service as gs
 
-    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    profile = _resolve_gmail_profile_argument(
+        kwargs.get("profile") or kwargs.get("profile_id")
+    )
     message_id = kwargs.get("message_id")
     allow_mutation = bool(kwargs.get("allow_mutation"))
     if not profile or not message_id:
@@ -26178,9 +26188,7 @@ def _normalise_chat_history_conversation_ref_argument(value: Any) -> dict[str, A
 
     ref_payload = nested_ref or raw
     input_shape = (
-        "conversation_ref.conversation_ref"
-        if nested_ref
-        else "conversation_ref"
+        "conversation_ref.conversation_ref" if nested_ref else "conversation_ref"
     )
     normalised = _normalise_public_conversation_ref_fields(
         ref_payload,

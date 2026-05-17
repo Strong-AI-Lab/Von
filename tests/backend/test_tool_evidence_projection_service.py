@@ -5,9 +5,12 @@ from typing import Any, cast
 
 import pytest
 
-from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+from src.backend.integrations.internal_mcp.orchestrator import (
+    InternalMCPChatOrchestrator,
+)
 from src.backend.services import concept_service
 from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
+    GMAIL_EFFECTIVE_QUERY_FIELD_ID,
     bootstrap_gmail_tool_evidence_contract,
 )
 from src.backend.services.relationship_write_service import add_relationship
@@ -53,7 +56,9 @@ def _create_concept(
 
 
 def _rel(source_id: str, predicate: str, target_id: str) -> None:
-    result = add_relationship(source_id=source_id, predicate=predicate, target=target_id)
+    result = add_relationship(
+        source_id=source_id, predicate=predicate, target=target_id
+    )
     assert result.get("success") is True
 
 
@@ -295,6 +300,11 @@ def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(
                 {"id": "msg-1", "threadId": "thread-1"},
                 {"message_id": "msg-2", "threadId": "thread-2"},
             ],
+            "effective_query": {
+                "effective_query_string": "arxiv.org newer_than:365d",
+                "bypass_profile_query_prefix": True,
+            },
+            "notes": ["Results restricted by the requested query."],
             "_tool_follow_up": {"legacy": "temporary"},
         },
     )
@@ -306,6 +316,10 @@ def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(
         {"message_id": "msg-1", "threadId": "thread-1"},
         {"message_id": "msg-2", "threadId": "thread-2"},
     ]
+    assert projected["effective_query"]["effective_query_string"] == (
+        "arxiv.org newer_than:365d"
+    )
+    assert projected["notes"] == ["Results restricted by the requested query."]
     assert "_tool_follow_up" not in projected
 
     telemetry = projected["_tool_evidence_projection"]
@@ -315,6 +329,26 @@ def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(
     assert "#V#gmail_messages_collection_field" in preserved_ids
     assert "#V#gmail_message_id_field" in preserved_ids
     assert "#V#gmail_thread_id_field" in preserved_ids
+    assert GMAIL_EFFECTIVE_QUERY_FIELD_ID in preserved_ids
+
+
+def test_gmail_contract_bootstrap_repairs_existing_field_attributes(
+    _reset_mock_db: Any,
+) -> None:
+    _create_concept(
+        GMAIL_EFFECTIVE_QUERY_FIELD_ID,
+        "Gmail effective query field",
+        ["#V#tool_result_field"],
+        attributes={"field_key": "#V#gmail_effective_query_field"},
+    )
+
+    report = bootstrap_gmail_tool_evidence_contract()
+
+    assert report["success"] is True
+    concept_doc = concept_service.get_concept_by_concept_id(
+        GMAIL_EFFECTIVE_QUERY_FIELD_ID
+    )
+    assert concept_doc["attributes"]["field_key"] == "effective_query"
 
 
 def test_follow_up_stage_uses_represented_projection_for_unlisted_tool(

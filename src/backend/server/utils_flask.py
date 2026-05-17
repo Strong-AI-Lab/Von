@@ -433,6 +433,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.conversation_turn_workflow_vontology_service import (
             bootstrap_canonical_conversation_turn_workflows,
         )
+        from ..services.email_source_representation_convergence_workflow_vontology_service import (
+            bootstrap_canonical_email_source_representation_convergence_workflows,
+        )
         from ..services.entity_representation_workflow_vontology_service import (
             bootstrap_canonical_entity_representation_workflows,
         )
@@ -527,6 +530,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="conversation-turn workflow",
             bootstrap_fn=bootstrap_canonical_conversation_turn_workflows,
+        )
+        email_source_convergence_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="email-source representation convergence workflow",
+            bootstrap_fn=bootstrap_canonical_email_source_representation_convergence_workflows,
         )
         paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper workflow",
@@ -629,6 +636,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["conversation_turn_workflow_bootstrap"] = (
             conversation_turn_workflow_bootstrap_report
         )
+        result["email_source_convergence_workflow_bootstrap"] = (
+            email_source_convergence_workflow_bootstrap_report
+        )
         result["paper_workflow_bootstrap"] = paper_workflow_bootstrap_report
         result["episode_evaluation_workflow_bootstrap"] = (
             episode_evaluation_workflow_bootstrap_report
@@ -703,6 +713,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] conversation-turn workflow bootstrap failed: %s",
                 conversation_turn_workflow_bootstrap_report,
+            )
+        if not bool(
+            email_source_convergence_workflow_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] email-source convergence workflow bootstrap failed: %s",
+                email_source_convergence_workflow_bootstrap_report,
             )
         if not bool(paper_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
@@ -930,6 +947,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         except Exception as schedule_exc:
             app_logger.warning(
                 "[durable_workflows] paper recommendation schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
+        try:
+            from ..services.email_source_representation_convergence_schedule_bootstrap_service import (
+                ensure_email_arxiv_representation_convergence_schedule,
+            )
+
+            email_arxiv_convergence_schedule_report = (
+                ensure_email_arxiv_representation_convergence_schedule()
+            )
+            result["email_arxiv_convergence_schedule_bootstrap"] = (
+                email_arxiv_convergence_schedule_report
+            )
+            if not bool(email_arxiv_convergence_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] email arXiv convergence schedule bootstrap failed: %s",
+                    email_arxiv_convergence_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] email arXiv convergence schedule bootstrap error: %s",
                 schedule_exc,
             )
 

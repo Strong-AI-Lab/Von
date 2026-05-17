@@ -1,0 +1,43 @@
+{
+  "schema_version": "tool_output_followup_hint.v1",
+  "entries": [
+    {
+      "action_kind": "terminal_completion",
+      "description": "After a message's arXiv resources have been successfully ingested, mark the source Gmail message as processed by adding the represented completion label.",
+      "action": {
+        "type": "workflow_mcp.invoke_tool",
+        "tool_name": "gmail_modify_labels",
+        "tool_concept_id": "#V#gmail_modify_labels_tool"
+      },
+      "tool_arguments": {
+        "profile_context_key": "gmail_profile",
+        "message_id_context_key": "message_id",
+        "add_labels": [
+          "Label_7"
+        ],
+        "add_label_concept_ids": [
+          "#V#zhan_gmail_label_vontology_ingested"
+        ],
+        "allow_mutation": true
+      },
+      "represented_effects": [
+        {
+          "effect_kind": "add_gmail_label",
+          "label_concept_id": "#V#zhan_gmail_label_vontology_ingested",
+          "label_role_concept_id": "#V#paper_email_workflow_ingested_completion_gmail_label_role",
+          "gmail_label_id": "Label_7",
+          "gmail_label_name": "vontology/ingested",
+          "query_atom": "label:vontology/ingested",
+          "exclusion_query_fragment": "-label:vontology/ingested"
+        }
+      ],
+      "upstream_filter": {
+        "label_concept_id": "#V#zhan_gmail_label_vontology_ingested",
+        "label_role_concept_id": "#V#paper_email_workflow_ingested_completion_gmail_label_role",
+        "gmail_label_id": "Label_7",
+        "query_fragment": "-label:vontology/ingested",
+        "rationale": "Avoid reprocessing messages that this represented workflow has already completed."
+      }
+    }
+  ]
+}

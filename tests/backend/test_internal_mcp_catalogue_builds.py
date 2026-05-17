@@ -442,6 +442,46 @@ def test_gmail_list_messages_resolves_represented_profile_resource_alias(monkeyp
     assert payload["profile"] == "zhan-gmail"
 
 
+def test_gmail_modify_labels_resolves_represented_profile_resource_alias(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.services import concept_service
+
+    captured_kwargs: dict = {}
+
+    def fake_modify_labels(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "message_id": kwargs["message_id"],
+            "profile": kwargs["profile_id"],
+            "added": kwargs["add_labels"],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.modify_labels",
+        fake_modify_labels,
+    )
+    monkeypatch.setattr(
+        concept_service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "attributes": {"runtime_profile_alias": "zhan-gmail"},
+        },
+    )
+
+    payload = catalogue_module._gmail_modify_labels(
+        profile="#V#gmail_profile_zhan_gmail",
+        message_id="msg-1",
+        add_labels=["Label_7"],
+        allow_mutation=True,
+    )
+
+    assert payload["profile"] == "zhan-gmail"
+    assert captured_kwargs["profile_id"] == "zhan-gmail"
+    assert captured_kwargs["message_id"] == "msg-1"
+    assert captured_kwargs["add_labels"] == ["Label_7"]
+
+
 def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,
