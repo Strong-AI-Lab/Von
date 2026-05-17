@@ -21915,13 +21915,42 @@ function ensureScrollToEndButton(scrollableField = null) {
         button.innerHTML = '<span aria-hidden="true">↓</span><span class="sr-only">Scroll to latest message</span>';
         button.setAttribute('aria-hidden', 'true');
         button.tabIndex = -1;
-        button.addEventListener('click', () => {
+        button.addEventListener('click', (event) => {
+            if (event?.shiftKey && scrollConversationToSessionList({ smooth: true })) {
+                event.preventDefault();
+                return;
+            }
             void scrollConversationToEnd(targetField, { smooth: true });
         });
         shell.appendChild(button);
     }
 
     return button;
+}
+
+function scrollConversationToSessionList(options = {}) {
+    const tabs = document.getElementById('chatSessionTabs');
+    const target = tabs?.closest?.('.chat-session-tabs-row') || tabs || document.getElementById('chatTab');
+    if (!(target instanceof HTMLElement)) {
+        return false;
+    }
+
+    const smooth = options?.smooth !== false;
+    if (typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({
+            behavior: smooth ? 'smooth' : 'auto',
+            block: 'start',
+            inline: 'nearest'
+        });
+        return true;
+    }
+
+    if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+        window.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
+        return true;
+    }
+
+    return false;
 }
 
 function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_BOTTOM_THRESHOLD_PX) {
@@ -29087,6 +29116,9 @@ export function __testOnly_updateScrollToEndButtonVisibility(scrollableField = n
 export function __testOnly_scrollConversationToEnd(scrollableField, options = {}) {
     return scrollConversationToEnd(scrollableField, options);
 }
+export function __testOnly_scrollConversationToSessionList(options = {}) {
+    return scrollConversationToSessionList(options);
+}
 export function __testOnly_appendMessage(...args) {
     return appendMessage(...args);
 }
@@ -29161,4 +29193,3 @@ export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
-

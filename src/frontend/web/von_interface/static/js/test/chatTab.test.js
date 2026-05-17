@@ -41,6 +41,7 @@ import {
     __testOnly_renderDisplayElementsIntoContainer,
     __testOnly_ensureScrollToEndButton,
     __testOnly_scrollConversationToEnd,
+    __testOnly_scrollConversationToSessionList,
     __testOnly_setLatestUnreadBoundary,
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_appendMessage,
@@ -7193,6 +7194,9 @@ describe('scroll to latest message affordance', () => {
         document.body.innerHTML = `
             <div id="chatTab">
                 <div class="content-wrapper">
+                    <div class="chat-session-tabs-row">
+                        <div id="chatSessionTabs"></div>
+                    </div>
                     <div id="scrollableField"></div>
                 </div>
             </div>
@@ -7243,6 +7247,29 @@ describe('scroll to latest message affordance', () => {
         expect(__testOnly_scrollConversationToEnd(scrollableField, { smooth: false })).toBe(true);
 
         jest.useRealTimers();
+    });
+
+    test('shift-clicking floating control scrolls to the conversation list', () => {
+        const scrollableField = document.getElementById('scrollableField');
+        Object.defineProperty(scrollableField, 'clientHeight', { value: 180, configurable: true });
+        Object.defineProperty(scrollableField, 'scrollHeight', { value: 500, configurable: true });
+        scrollableField.scrollTop = 0;
+        scrollableField.scrollTo = jest.fn();
+
+        const sessionTabsRow = document.querySelector('.chat-session-tabs-row');
+        sessionTabsRow.scrollIntoView = jest.fn();
+
+        const button = __testOnly_ensureScrollToEndButton(scrollableField);
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(sessionTabsRow.scrollIntoView).toHaveBeenCalledWith({
+            behavior: 'smooth',
+            block: 'start',
+            inline: 'nearest'
+        });
+        expect(scrollableField.scrollTo).not.toHaveBeenCalled();
+        expect(__testOnly_scrollConversationToSessionList({ smooth: false })).toBe(true);
     });
 });
 
