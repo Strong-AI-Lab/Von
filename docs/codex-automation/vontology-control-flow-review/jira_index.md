@@ -83,3 +83,9 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2329` - required-tool operation classes, target-bearing fields,
   and target-closure semantics live in Python prefix/key heuristics instead of
   represented tool/workflow metadata.
+- `JVNAUTOSCI-2340` - email convergence workflow/schedule authority still lives
+  in repo seed and Python/env defaults for the Zhan Gmail/arXiv path instead of
+  represented schedule/profile authority.
+- `JVNAUTOSCI-2341` - representation-routing audit profile, cases, thresholds,
+  suggestion policy, prompt seed, workflow seed, and test graph still rely on
+  repo/Python surfaces instead of represented audit/benchmark authority.
