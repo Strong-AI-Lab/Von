@@ -103,6 +103,16 @@ represented authority before filing Jira work.
   target identity, or target-closure requirements are drift candidates. Keep the
   counting/telemetry in Python and move semantic bindings to represented tool or
   workflow metadata.
+- Source-to-representation convergence schedule bootstraps are authority
+  surfaces when Python/env defaults set actor namespace, source profile, query,
+  cadence, max results, launch prompt, or workflow id. Those values determine
+  what organisational evidence is processed and should come from represented
+  schedule/profile authority.
+- Maintenance/audit workflows remain drift candidates when repo seed profiles
+  define benchmark-like cases, expected workflows, thresholds, evaluation
+  dimensions, or suggestion policy, especially if the completed task promised
+  that repo fixtures are non-authoritative. Python can run probes and compute
+  metrics, but the case/rubric/profile authority should be represented.
 
 ## Recent Examples
 
@@ -140,3 +150,8 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2329` - required-tool operation classes and target-closure
   semantics inferred from Python tool-name/payload-key heuristics rather than
   represented tool/workflow metadata.
+- `JVNAUTOSCI-2340` - email-source representation convergence workflow/schedule
+  authority still seeded from repo/Python, including Zhan Gmail/arXiv defaults.
+- `JVNAUTOSCI-2341` - representation-routing audit profile/prompt/workflow
+  authority, cases, thresholds, and test workflow graph still in repo/Python
+  surfaces.
