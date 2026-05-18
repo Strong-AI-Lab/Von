@@ -100,6 +100,7 @@ const CONVERSATION_INFO_EXPORT_SCHEMA_VERSION = 'conversation_info_export.v1';
 const CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION = 'conversation_telemetry_access.v1';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
+const CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS = 4000;
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
 const TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION = 'turn_live_progress_locator.v1';
 const WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION = 'workflow_use_episodes_locator.v1';
@@ -17366,6 +17367,101 @@ function recordTranscriptTurn(sender, message, options = {}) {
     });
 }
 
+function normaliseConversationTranscriptTurn(turn, index = 0, source = 'transcript') {
+    if (!turn || typeof turn !== 'object') {
+        return null;
+    }
+
+    const sender = typeof turn.sender === 'string' && turn.sender.trim()
+        ? turn.sender.trim()
+        : (typeof turn.role === 'string' && turn.role.trim() ? turn.role.trim() : 'Message');
+    const rawMessage = turn.message ?? turn.content ?? '';
+    const message = typeof rawMessage === 'string' ? rawMessage : String(rawMessage ?? '');
+    if (!sender && !message.trim()) {
+        return null;
+    }
+
+    return {
+        sender,
+        message,
+        turnId: turn.turnId || turn.turn_id || `visible-${index + 1}`,
+        isHistory: !!turn.isHistory,
+        timestamp: turn.timestamp || turn.timestamp_utc || null,
+        source
+    };
+}
+
+function collectVisibleConversationTranscriptTurns() {
+    if (typeof document === 'undefined' || !document.querySelectorAll) {
+        return [];
+    }
+
+    const containers = Array.from(document.querySelectorAll('#scrollableField .message-container'));
+    return containers
+        .map((container, index) => {
+            if (typeof HTMLElement !== 'undefined' && !(container instanceof HTMLElement)) {
+                return null;
+            }
+
+            let sender = 'Message';
+            if (container.classList.contains('assistant-turn')) {
+                sender = 'Von';
+            } else if (container.classList.contains('user-turn')) {
+                sender = 'User';
+            } else if (container.classList.contains('error-turn')) {
+                sender = 'Error';
+            } else {
+                const headerText = container.querySelector('.message-header span')?.textContent || '';
+                const headerSender = headerText.split('•')[0]?.trim();
+                if (headerSender) {
+                    sender = headerSender;
+                }
+            }
+
+            const messageElement = container.querySelector('.chat-message-text');
+            const message = messageElement
+                ? (messageElement.innerText || messageElement.textContent || '')
+                : '';
+            return normaliseConversationTranscriptTurn({
+                sender,
+                message,
+                turnId: container.dataset?.turnId || null,
+                isHistory: container.textContent?.includes('(history)') || false
+            }, index, 'visible_dom');
+        })
+        .filter(Boolean);
+}
+
+function getConversationTranscriptTurnsSnapshot() {
+    const storedTurns = Array.isArray(transcriptTurns)
+        ? transcriptTurns
+            .map((turn, index) => normaliseConversationTranscriptTurn(turn, index, 'transcript'))
+            .filter(Boolean)
+        : [];
+    if (storedTurns.length > 0) {
+        return storedTurns;
+    }
+    return collectVisibleConversationTranscriptTurns();
+}
+
+function countAssistantConversationTranscriptTurns(turns = getConversationTranscriptTurnsSnapshot()) {
+    if (!Array.isArray(turns) || turns.length === 0) {
+        return 0;
+    }
+
+    return turns.filter((turn) => {
+        if (!turn || typeof turn !== 'object') {
+            return false;
+        }
+
+        const rawRole = typeof turn.role === 'string'
+            ? turn.role
+            : (typeof turn.sender === 'string' ? turn.sender : '');
+        const normalisedRole = rawRole.trim().toLowerCase();
+        return normalisedRole === 'assistant' || normalisedRole === 'von';
+    }).length;
+}
+
 function updateHistoryBanner() {
     const banner = document.getElementById('historyBanner');
     const bannerText = document.getElementById('historyBannerText');
@@ -28540,21 +28636,7 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
 }
 
 function countAssistantTranscriptTurns() {
-    if (!Array.isArray(transcriptTurns) || transcriptTurns.length === 0) {
-        return 0;
-    }
-
-    return transcriptTurns.filter((turn) => {
-        if (!turn || typeof turn !== 'object') {
-            return false;
-        }
-
-        const rawRole = typeof turn.role === 'string'
-            ? turn.role
-            : (typeof turn.sender === 'string' ? turn.sender : '');
-        const normalisedRole = rawRole.trim().toLowerCase();
-        return normalisedRole === 'assistant' || normalisedRole === 'von';
-    }).length;
+    return countAssistantConversationTranscriptTurns();
 }
 
 function hasConversationInfoContext() {
@@ -28567,7 +28649,7 @@ function hasConversationInfoContext() {
     if (llmDebugData.size > 0) {
         return true;
     }
-    return Array.isArray(transcriptTurns) && transcriptTurns.length > 0;
+    return getConversationTranscriptTurnsSnapshot().length > 0;
 }
 
 async function fetchConversationTelemetryLocatorPayload(sessionId) {
@@ -28591,10 +28673,11 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
         if (namespaceContext.org_id) {
             params.set('organisation_concept_id', namespaceContext.org_id);
         }
-        const response = await fetch(
+        const response = await fetchWithTimeout(
             `/von/history/telemetry_locator?${params.toString()}`,
             {
-                headers: buildChatFetchHeaders()
+                headers: buildChatFetchHeaders(),
+                timeoutMs: CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS
             }
         );
         const body = await response.json();
@@ -28606,7 +28689,14 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
         }
         return body;
     } catch (error) {
-        console.warn('[chatTab] Failed to fetch server conversation telemetry locator:', error);
+        if (error?.vonTimeout) {
+            console.warn('[chatTab] Server conversation telemetry locator timed out; using local fallback.', {
+                sessionId: cleanSessionId,
+                timeoutMs: CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS
+            });
+        } else {
+            console.warn('[chatTab] Failed to fetch server conversation telemetry locator:', error);
+        }
         return null;
     }
 }
@@ -28692,8 +28782,9 @@ function buildConversationLlmTelemetryLocatorPayload() {
     }
 
     const sortedEntries = buildSortedConversationLlmDebugEntries({ allowTurnIdTimestampFallback: false });
-    const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
-    const assistantTranscriptTurnCount = countAssistantTranscriptTurns();
+    const transcriptSnapshot = getConversationTranscriptTurnsSnapshot();
+    const transcriptTurnCount = transcriptSnapshot.length;
+    const assistantTranscriptTurnCount = countAssistantConversationTranscriptTurns(transcriptSnapshot);
     const missingAssistantTurnTelemetryCount = Math.max(0, assistantTranscriptTurnCount - sortedEntries.length);
     const sessionId = typeof activeChatSessionId === 'string' && activeChatSessionId.trim()
         ? activeChatSessionId.trim()
@@ -28839,7 +28930,7 @@ function buildConversationTelemetryAccessPayload({ locatorPayload = null } = {})
                 : llmDebugData.size,
             transcript_turn_count: Number.isFinite(Number(baseMetadata.transcript_turn_count))
                 ? Math.max(0, Math.round(Number(baseMetadata.transcript_turn_count)))
-                : (Array.isArray(transcriptTurns) ? transcriptTurns.length : 0),
+                : getConversationTranscriptTurnsSnapshot().length,
             assistant_transcript_turn_count: Number.isFinite(Number(baseMetadata.assistant_transcript_turn_count))
                 ? Math.max(0, Math.round(Number(baseMetadata.assistant_transcript_turn_count)))
                 : countAssistantTranscriptTurns(),
@@ -28888,7 +28979,7 @@ function buildConversationLlmTelemetryPayload() {
     }
 
     const sortedEntries = buildSortedConversationLlmDebugEntries();
-    const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
+    const transcriptTurnCount = getConversationTranscriptTurnsSnapshot().length;
     const missingTurnTelemetryCount = Math.max(0, transcriptTurnCount - sortedEntries.length);
 
     return {
@@ -28926,15 +29017,19 @@ function buildConversationTranscriptFallbackPayload() {
         turns: []
     };
 
-    if (!Array.isArray(transcriptTurns) || transcriptTurns.length === 0) {
+    const transcriptSnapshot = getConversationTranscriptTurnsSnapshot();
+    if (transcriptSnapshot.length === 0) {
         return payload;
     }
 
-    payload.metadata.total_turns = transcriptTurns.length;
-    transcriptTurns.forEach((turn, index) => {
+    payload.metadata.total_turns = transcriptSnapshot.length;
+    payload.metadata.source = transcriptSnapshot.some((turn) => turn?.source === 'visible_dom')
+        ? 'visible_dom'
+        : 'transcript';
+    transcriptSnapshot.forEach((turn, index) => {
         const turnTimestampMs = parseTurnTimestampMs(turn?.timestamp);
         payload.turns.push({
-            turn_id: `t-${index + 1}`,
+            turn_id: turn?.turnId || `t-${index + 1}`,
             timestamp: Number.isFinite(turnTimestampMs)
                 ? new Date(turnTimestampMs).toISOString()
                 : null,
@@ -29023,7 +29118,9 @@ async function copyConversationInfoToClipboard(button = null) {
         return false;
     }
 
-    if (payload.metadata?.has_partial_telemetry) {
+    if (payload.metadata?.authoritative_locator_available === false) {
+        showToast('Copied conversation info JSON (server locator unavailable; local summary only).', 'info');
+    } else if (payload.metadata?.has_partial_telemetry) {
         showToast('Copied conversation info JSON (partial telemetry coverage).', 'info');
     } else {
         showToast('Copied conversation info JSON.', 'success');
@@ -29082,7 +29179,8 @@ function handleExportConversationMarkdown() {
 
     const originalContent = button.innerHTML;
 
-    if (transcriptTurns.length === 0) {
+    const transcriptSnapshot = getConversationTranscriptTurnsSnapshot();
+    if (transcriptSnapshot.length === 0) {
         console.warn('[chatTab] No conversation turns available for Markdown export');
         indicateClipboardResult(button, originalContent, false);
         return;
@@ -29094,7 +29192,7 @@ function handleExportConversationMarkdown() {
     markdownLines.push(`_Exported at ${new Date().toISOString()}_`);
     markdownLines.push('');
 
-    transcriptTurns.forEach((turn, index) => {
+    transcriptSnapshot.forEach((turn, index) => {
         const label = turn.sender || 'Message';
         const timestampSuffix = turn.timestamp ? ` _(at ${new Date(turn.timestamp).toLocaleString()})_` : '';
         const content = typeof turn.message === 'string'
@@ -29104,7 +29202,7 @@ function handleExportConversationMarkdown() {
         markdownLines.push(`**${label}:**${timestampSuffix}`);
         markdownLines.push('');
         markdownLines.push(content);
-        if (index < transcriptTurns.length - 1) {
+        if (index < transcriptSnapshot.length - 1) {
             markdownLines.push('');
         }
     });
@@ -29112,7 +29210,7 @@ function handleExportConversationMarkdown() {
     const markdownString = markdownLines.join('\n');
 
     const markSuccess = (message) => {
-        console.log(message, transcriptTurns.length, 'turns');
+        console.log(message, transcriptSnapshot.length, 'turns');
         indicateClipboardResult(button, originalContent, true);
     };
 
@@ -29401,6 +29499,9 @@ export function __testOnly_buildConversationTelemetryAccessPayload(options = {})
 }
 export function __testOnly_buildConversationTelemetryExportPayload() {
     return buildConversationTelemetryExportPayload();
+}
+export function __testOnly_getConversationTranscriptTurnsSnapshot() {
+    return getConversationTranscriptTurnsSnapshot();
 }
 export function __testOnly_refreshConversationInfoCopyButtonState() {
     refreshConversationInfoCopyButtonState();

@@ -68,6 +68,7 @@ import {
     __testOnly_buildConversationTelemetryAccessPayload,
     __testOnly_buildConversationLlmTelemetryPayload,
     __testOnly_buildConversationTelemetryExportPayload,
+    __testOnly_getConversationTranscriptTurnsSnapshot,
     __testOnly_copyConversationInfoToClipboard,
     __testOnly_clearLlmDebugData,
     __testOnly_resetChatRequestState,
@@ -75,6 +76,7 @@ import {
     __testOnly_setTranscriptTurns,
     setLlmDebugDataForTurn,
     formatChatTimestamp,
+    exportConversationMarkdown,
     sendMessage,
     switchToChatSession
 } from '../chatTab.js';
@@ -7624,6 +7626,103 @@ describe('conversation LLM telemetry clipboard export', () => {
             access_payload_source: 'local_context_summary'
         });
         expect(copiedPayload.turns).toBeUndefined();
+    });
+
+    test('copies a local access envelope when the server locator fetch times out', async () => {
+        jest.useFakeTimers();
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+        global.fetch = jest.fn((url, options = {}) => {
+            const parsed = new URL(url, 'http://localhost');
+            if (parsed.pathname !== '/von/history/telemetry_locator') {
+                throw new Error(`Unexpected fetch: ${parsed.pathname}`);
+            }
+            return new Promise((resolve, reject) => {
+                if (options.signal && typeof options.signal.addEventListener === 'function') {
+                    options.signal.addEventListener('abort', () => {
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    }, { once: true });
+                }
+            });
+        });
+
+        __testOnly_setTranscriptTurns([
+            { sender: 'assistant', message: 'Visible fallback copy' }
+        ]);
+        __testOnly_setActiveChatSession('session-1684', 'Session 1684');
+
+        try {
+            const copiedPromise = __testOnly_copyConversationInfoToClipboard();
+            await Promise.resolve();
+            jest.advanceTimersByTime(4000);
+            const copied = await copiedPromise;
+            const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+
+            expect(copied).toBe(true);
+            expect(global.fetch).toHaveBeenCalledTimes(1);
+            expect(writeText).toHaveBeenCalledTimes(1);
+            expect(copiedPayload.metadata).toMatchObject({
+                transcript_turn_count: 1,
+                assistant_transcript_turn_count: 1,
+                authoritative_locator_available: false,
+                access_payload_source: 'local_context_summary'
+            });
+            expect(warnSpy).toHaveBeenCalledWith(
+                '[chatTab] Server conversation telemetry locator timed out; using local fallback.',
+                expect.objectContaining({
+                    sessionId: 'session-1684',
+                    timeoutMs: 4000
+                })
+            );
+        } finally {
+            warnSpy.mockRestore();
+            jest.useRealTimers();
+        }
+    });
+
+    test('exports rendered historical transcript when the in-memory transcript array is empty', async () => {
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+        document.body.innerHTML = `
+            <div id="scrollableField">
+                <div class="message-container user-turn" data-turn-id="user-history-1">
+                    <div class="message-header"><span>User • 10:00 (history)</span></div>
+                    <div class="chat-message-text">Loaded user request</div>
+                </div>
+                <div class="message-container assistant-turn" data-turn-id="assistant-history-1">
+                    <div class="message-header"><span>Von • 10:01 (history)</span></div>
+                    <div class="chat-message-text">Loaded assistant answer</div>
+                </div>
+            </div>
+            <button id="exportConversationMarkdownBtn">MD</button>
+        `;
+        __testOnly_setTranscriptTurns([]);
+
+        const snapshot = __testOnly_getConversationTranscriptTurnsSnapshot();
+        const exportPayload = __testOnly_buildConversationTelemetryExportPayload();
+        exportConversationMarkdown();
+        await Promise.resolve();
+
+        expect(snapshot).toHaveLength(2);
+        expect(snapshot.map((turn) => turn.source)).toEqual(['visible_dom', 'visible_dom']);
+        expect(exportPayload.transcript_snapshot.metadata).toMatchObject({
+            total_turns: 2,
+            source: 'visible_dom'
+        });
+        expect(exportPayload.transcript_snapshot.turns.map((turn) => turn.content)).toEqual([
+            'Loaded user request',
+            'Loaded assistant answer'
+        ]);
+        expect(writeText).toHaveBeenCalledTimes(1);
+        expect(writeText.mock.calls[0][0]).toContain('Loaded user request');
+        expect(writeText.mock.calls[0][0]).toContain('Loaded assistant answer');
     });
 
     test('copies a conversation telemetry access envelope to the clipboard instead of the full telemetry blob', async () => {
