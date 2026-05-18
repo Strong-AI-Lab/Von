@@ -7,7 +7,7 @@ from src.backend.services.concept_service import (
     update_concept,
     InvalidConceptDataError,
 )
-from utilities.migrate_guids import migrate_guids
+from src.utilities.migrate_guids import migrate_guids
 
 
 class TestGuidMigration(unittest.TestCase):
@@ -71,8 +71,8 @@ class TestGuidMigration(unittest.TestCase):
         with self.assertRaises(InvalidConceptDataError):
             update_concept("some_id", {"guid": "new_guid"})
 
-    @patch("utilities.migrate_guids.get_concepts_collection")
-    @patch("utilities.migrate_guids.upsert_text_for_concept")
+    @patch("src.utilities.migrate_guids.get_concepts_collection")
+    @patch("src.utilities.migrate_guids.upsert_text_for_concept")
     def test_migration_script(self, mock_upsert, mock_get_coll):
         print("Testing migration_script...")
         mock_collection = MagicMock()
