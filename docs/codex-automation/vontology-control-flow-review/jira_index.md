@@ -71,7 +71,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   managed schedule defaults are owned by Python/env defaults rather than
   represented workflow/profile authority.
 - `JVNAUTOSCI-2324` - replay sampler/evaluation prompt bank, response-marker
-  rubric, user-happiness scoring, promotion blockers, pass/partial
+  rubric, user-happiness scoring, promotion blockers, pass/partial/fail
   verdicts, and experiment observation policy in Python rather than represented
   Vontology/VWL replay-evaluation authority.
 - `JVNAUTOSCI-2326` - AI coding-session ingestion source profiles, document and
