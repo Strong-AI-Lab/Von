@@ -143,6 +143,31 @@ def _install_fake_psutil(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
 
+def test_build_process_index_does_not_request_cmdline_from_broad_scan(
+    monkeypatch,
+) -> None:
+    proc = _DummyProcess(
+        pid=101,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    requested_attrs: list[list[str]] = []
+
+    def _process_iter(attrs):
+        requested_attrs.append(list(attrs))
+        if "cmdline" in attrs:
+            raise AssertionError("broad process index must not request cmdline")
+        return [proc]
+
+    fake_psutil = types.SimpleNamespace(process_iter=_process_iter)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    index = process_guard._build_process_index()
+
+    assert requested_attrs == [["pid"]]
+    assert index == {101: proc}
+
+
 def test_cmdline_matches_script_by_full_path() -> None:
     script_path = "C:/repo/src/backend/mcp_server/mcp_stdio_server.py"
     cmdline = ["python", "C:/repo/src/backend/mcp_server/mcp_stdio_server.py"]
@@ -200,6 +225,35 @@ def test_terminate_duplicate_sibling_servers_targets_only_siblings(
     assert timeout_then_kill.killed is True
     assert different_parent.terminated is False
     assert different_script.terminated is False
+
+
+def test_terminate_duplicate_sibling_servers_skips_broad_fallback_scan(
+    monkeypatch,
+) -> None:
+    requested_attrs: list[list[str]] = []
+
+    def _process_iter(attrs):
+        requested_attrs.append(list(attrs))
+        raise AssertionError("sibling recovery must not broad-scan processes")
+
+    fake_psutil = types.SimpleNamespace(
+        process_iter=_process_iter,
+        Process=lambda _pid: (_ for _ in ()).throw(_DummyPsutilError("parent")),
+        TimeoutExpired=_DummyTimeout,
+        NoSuchProcess=_DummyPsutilError,
+        AccessDenied=_DummyPsutilError,
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(process_guard.os, "getpid", lambda: 200)
+    monkeypatch.setattr(process_guard.os, "getppid", lambda: 50)
+    monkeypatch.setenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "1")
+
+    result = process_guard.terminate_duplicate_sibling_servers(
+        "src/backend/mcp_server/mcp_stdio_server.py"
+    )
+
+    assert requested_attrs == []
+    assert result == {"matched": 0, "terminated": 0, "killed": 0, "failed": 0}
 
 
 def test_terminate_duplicate_sibling_servers_handles_real_child_process_objects(
@@ -440,4 +494,3 @@ def test_rag_mcp_stdio_server_activates_helper_lifecycle_on_import(monkeypatch) 
     importlib.reload(rag_mcp_stdio_server)
 
     assert any(path.endswith("rag_mcp_stdio_server.py") for path in calls)
-

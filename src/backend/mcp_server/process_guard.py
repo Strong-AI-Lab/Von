@@ -101,7 +101,7 @@ def _build_process_index() -> dict[int, Any]:
 
     index: dict[int, Any] = {}
     try:
-        proc_iter = psutil.process_iter(["pid", "ppid", "cmdline"])
+        proc_iter = psutil.process_iter(["pid"])
     except Exception:
         return index
 
@@ -505,24 +505,7 @@ def terminate_duplicate_sibling_servers(
             parent_proc = psutil.Process(parent_pid)
             return list(parent_proc.children(recursive=False))
         except Exception:
-            siblings: list[Any] = []
-            try:
-                proc_iter = psutil.process_iter(["pid", "ppid", "cmdline"])
-            except Exception:
-                return siblings
-
-            for proc in proc_iter:
-                try:
-                    pid_value = int(getattr(proc, "info", {}).get("pid") or 0)
-                    if pid_value <= 0 or pid_value == current_pid:
-                        continue
-                    ppid_value = getattr(proc, "info", {}).get("ppid")
-                    if int(ppid_value or 0) != parent_pid:
-                        continue
-                    siblings.append(proc)
-                except Exception:
-                    continue
-            return siblings
+            return []
 
     try:
         sibling_processes = _collect_sibling_processes()
