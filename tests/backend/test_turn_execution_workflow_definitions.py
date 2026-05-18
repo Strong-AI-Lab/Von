@@ -123,8 +123,16 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     assert execute.actions[0].action_id == "tool_calling.execute"
     assert execute.actions[0].execution_mode == "deterministic"
     assert any(
-        t.to_state == "backfill" and t.reason == "tool_execution_completed"
+        t.to_state == "synthesiser_context_prep"
+        and t.reason == "tool_execution_completed"
         for t in execute.transitions
+    )
+
+    synthesiser_context_prep = workflow.states["synthesiser_context_prep"]
+    assert synthesiser_context_prep.actions[0].action_id == "synthesiser_context_prep"
+    assert any(
+        t.to_state == "backfill" and t.reason == "synthesiser_context_prepared"
+        for t in synthesiser_context_prep.transitions
     )
 
     backfill = workflow.states["backfill"]

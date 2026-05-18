@@ -265,6 +265,9 @@ def build_db_independent_orchestrator(
     from src.backend.workflows.durable.subworkflow_actions import (
         register_subworkflow_actions,
     )
+    from src.backend.workflows.durable.synthesiser_context_prep_actions import (
+        register_synthesiser_context_prep_actions,
+    )
     from src.backend.workflows.durable.turn_execution_actions import (
         register_turn_execution_actions,
     )
@@ -397,6 +400,7 @@ def build_db_independent_orchestrator(
             definition_loader=_load_seed_workflow_definition,
         )
         register_turn_execution_actions(registry)
+        register_synthesiser_context_prep_actions(registry)
         registry.set_fallback_handler(_gateway_fallback_action)
         return registry
 

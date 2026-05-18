@@ -12,6 +12,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _ModelCandidate,
     _WorkflowModelPolicyState,
 )
+from src.backend.workflows.action_registry import WorkflowActionResult
 
 
 class _StubGateway:
@@ -842,10 +843,13 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
     assert compacted[1]["content"] == "system-two"
     assert compacted[2]["role"] == "system"
     assert [msg["content"] for msg in compacted[3:]] == [
+        "old-tool-1",
         "old-user-2",
         "old-assistant-2",
+        "old-tool-2",
         "new-user",
         "new-assistant",
+        "recent-tool-0",
         "recent-tool-1",
         "recent-tool-2",
         "recent-tool-3",
@@ -853,6 +857,222 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         "recent-tool-5",
         "recent-tool-6",
     ]
+
+
+def test_tool_calling_backfill_injects_synthesiser_context_prep_messages(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    orchestrator._follow_up_context_chars = 260
+
+    captured: dict[str, Any] = {}
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str, Mapping[str, Any]]:
+        captured["context"] = kwargs.get("context")
+        captured["context_telemetry"] = kwargs.get("context_telemetry")
+        return "Final answer", "gpt-test", {}
+
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_interpret_model_turn",
+        lambda _text: SimpleNamespace(tool_calls=[], tool_call_parse_error=None),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: SimpleNamespace(
+            required_tools=[],
+            required_fetch_concept_ids=[],
+            required_read_file_copy_ids=[],
+            required_scholarly_representation_file_copy_ids=[],
+            required_create_type_name=None,
+            missing_tools=[],
+            missing_fetch_concept_ids=[],
+            missing_read_file_copy_ids=[],
+            missing_scholarly_representation_file_copy_ids=[],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_augment_prompt_requirements_with_turn_contract",
+        lambda **_kwargs: _kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 20
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_missing_tool_call",
+        lambda **_kwargs: SimpleNamespace(retry_reason=None),
+    )
+
+    augmented_context = [
+        {"role": "system", "content": "system-one"},
+        {
+            "role": "user",
+            "content": (
+                "Get the message ID for the single most recent email message "
+                "received by zhanvonwitbrock@gmail.com"
+            ),
+        },
+        {
+            "role": "user",
+            "content": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
+        },
+        {"role": "tool", "content": "gmail_list_messages returned 10 message IDs"},
+        {"role": "tool", "content": "gmail_get_message returned details for all 10"},
+    ]
+
+    request = SimpleNamespace(
+        data={
+            "augmented_context": augmented_context,
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": None,
+            "org_concept_id": None,
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 11,
+            "remaining_tool_calls": [],
+            "invocations": [],
+            "method_catalogue": {},
+            "prompt": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
+            "prompt_for_requirements": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
+            "synthesiser_system_messages": [
+                "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com",
+                "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com",
+                "Synthesis hints for tool gmail_list_messages:\nCollection presentation hint: Enumerate every retrieved email item.",
+            ],
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["final_response"] == "Final answer"
+    context = cast(list[Mapping[str, Any]], captured["context"])
+    system_contents = [
+        str(message.get("content"))
+        for message in context
+        if message.get("role") == "system"
+    ]
+    assert (
+        system_contents.count(
+            "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com"
+        )
+        == 1
+    )
+    assert any(
+        "Enumerate every retrieved email item." in content
+        for content in system_contents
+    )
+    assert any(
+        "Get the message ID for the single most recent email message"
+        in str(message.get("content"))
+        for message in context
+        if message.get("role") == "user"
+    )
+    telemetry = cast(Mapping[str, Any], captured["context_telemetry"])
+    assert telemetry["stage_added_message_count"] >= 2
+    stage_added_messages = cast(
+        list[Mapping[str, Any]], telemetry["stage_added_messages"]
+    )
+    assert [message.get("role") for message in stage_added_messages[:2]] == [
+        "system",
+        "system",
+    ]
+    assert all(
+        isinstance(message.get("content_char_count"), int)
+        and message["content_char_count"] > 0
+        for message in stage_added_messages[:2]
+    )
+
+
+def test_tool_calling_respond_runs_synthesiser_context_prep_before_backfill(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    data: dict[str, Any] = {
+        "prompt": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
+        "augmented_context": [],
+        "invocations": [],
+    }
+    request = SimpleNamespace(
+        data=data,
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+    )
+    backfill_seen_messages: list[str] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_action_tool_calling_plan",
+        lambda _request: WorkflowActionResult(
+            outputs={
+                "tool_calls_present": True,
+                "direct_response": False,
+                "result": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_action_tool_calling_validate",
+        lambda _request: WorkflowActionResult(
+            outputs={
+                "tool_call_repair_required": False,
+                "tool_calls_validated": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_action_tool_calling_execute",
+        lambda _request: WorkflowActionResult(outputs={"result": True}),
+    )
+
+    def _backfill(_request: Any) -> WorkflowActionResult:
+        raw_messages = data.get("synthesiser_system_messages")
+        if isinstance(raw_messages, list):
+            backfill_seen_messages.extend(str(message) for message in raw_messages)
+        return WorkflowActionResult(
+            outputs={
+                "more_tool_calls": False,
+                "tool_calls_present": False,
+                "direct_response": False,
+                "result": True,
+                "final_response": "Final answer",
+            }
+        )
+
+    monkeypatch.setattr(orchestrator, "_action_tool_calling_backfill", _backfill)
+
+    result = orchestrator._action_tool_calling_respond(request)
+
+    assert result.ok
+    assert any(
+        message
+        == "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com"
+        for message in backfill_seen_messages
+    )
 
 
 def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(monkeypatch) -> None:

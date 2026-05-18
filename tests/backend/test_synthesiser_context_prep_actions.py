@@ -80,6 +80,7 @@ def test_handler_stages_active_user_message(
     assert result.outputs["tool_concept_ids_seen"] == []
     assert result.outputs["hints_resolved_count"] == 0
     assert result.outputs["active_user_message_present"] is True
+    assert result.outputs["synthesiser_system_messages"] == messages
     # Staged into shared turn data.
     assert data["synthesiser_system_messages"] == messages
 
@@ -172,7 +173,9 @@ def test_handler_handles_no_user_message_and_no_tools(
     result = spec.handler(req)
     assert result.status == "success"
     assert result.outputs["system_messages"] == []
+    assert result.outputs["synthesiser_system_messages"] == []
     assert result.outputs["active_user_message_present"] is False
+    assert req.data["synthesiser_system_messages"] == []
 
 
 def test_handler_inputs_override_data(
@@ -209,12 +212,13 @@ def test_handler_appends_to_existing_synth_messages(
     spec = registry.get(SYNTHESISER_CONTEXT_PREP_ACTION_ID)
     assert spec is not None
 
-    spec.handler(req)
+    result = spec.handler(req)
 
     assert "pre-existing entry" in data["synthesiser_system_messages"]
+    assert "Active request for this turn: hello" in data["synthesiser_system_messages"]
     assert (
-        "Active request for this turn: hello"
-        in data["synthesiser_system_messages"]
+        result.outputs["synthesiser_system_messages"]
+        == data["synthesiser_system_messages"]
     )
 
 
@@ -225,9 +229,7 @@ def test_handler_dedupes_repeated_invocations(
 
     data: dict[str, Any] = {
         "user_message_text": "repeat",
-        "synthesiser_system_messages": [
-            "Active request for this turn: repeat"
-        ],
+        "synthesiser_system_messages": ["Active request for this turn: repeat"],
     }
     req = _make_request(data=data)
     spec = registry.get(SYNTHESISER_CONTEXT_PREP_ACTION_ID)

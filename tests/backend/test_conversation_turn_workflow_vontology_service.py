@@ -294,6 +294,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert tool_calling_repair_action.action_id == "tool_calling.repair"
     assert tool_calling_repair_action.execution_mode == "deterministic"
     assert tool_calling_repair_action.prompt_contract is None
+    tool_calling_synth_prep_step_id = authority_service._step_concept_id(
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        state_id="synthesiser_context_prep",
+    )
+    tool_calling_synth_prep_action = tool_calling_definition.states[
+        tool_calling_synth_prep_step_id
+    ].actions[0]
+    assert tool_calling_synth_prep_action.action_id == "synthesiser_context_prep"
     required_effects_contract = tool_calling_definition.metadata.get(
         "required_effects_contract"
     )

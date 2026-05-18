@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "19",
+  "seed_version": "20",
   "workflows": [
     {
       "publication_spec": {
@@ -1222,7 +1222,7 @@
                   "kind": "always"
                 },
                 "reason": "tool_execution_completed",
-                "to_state": "backfill"
+                "to_state": "synthesiser_context_prep"
               }
             ],
             "context_input_mapping_specs": [],
@@ -1250,6 +1250,44 @@
             "tool_output_mapping_specs": [],
             "validation_policy": null,
             "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "synthesiser_context_prep",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "synthesiser_context_prepared",
+                "to_state": "backfill"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "synthesiser_context_prep",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "synthesiser_system_messages"
+            ]
           },
           {
             "action_concept_id": null,

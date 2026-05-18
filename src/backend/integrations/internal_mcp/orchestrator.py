@@ -146,6 +146,9 @@ from ...workflows.durable.registry_factory import (
     get_shared_workflow_registry_read_only,
     resolve_workflow_definition_from_authority,
 )
+from ...workflows.durable.synthesiser_context_prep_actions import (
+    SYNTHESISER_CONTEXT_PREP_ACTION_ID,
+)
 from ...workflows.durable.subworkflow_actions import register_subworkflow_actions
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
@@ -7433,6 +7436,12 @@ class InternalMCPChatOrchestrator:
             if not execute_result.ok:
                 return execute_result
 
+            synthesiser_context_result = self._run_synthesiser_context_prep_stage(
+                request
+            )
+            if not synthesiser_context_result.ok:
+                return synthesiser_context_result
+
             backfill_result = self._action_tool_calling_backfill(request)
             self._merge_action_outputs_into_workflow_data(data, backfill_result.outputs)
             if not backfill_result.ok:
@@ -7447,6 +7456,35 @@ class InternalMCPChatOrchestrator:
                     result=data.get("result"),
                 )
             )
+
+    def _run_synthesiser_context_prep_stage(
+        self,
+        request: Any,
+    ) -> WorkflowActionResult:
+        """Run the registered synthesiser prep action for composite callers."""
+
+        data = request.data
+        if not isinstance(data, dict):
+            return WorkflowActionResult(
+                status="failed",
+                error="synthesiser_context_prep_requires_mutable_workflow_data",
+                outputs={"result": False},
+            )
+
+        registry = getattr(self, "_action_registry", None)
+        if not isinstance(registry, ActionRegistry) or not registry.has(
+            SYNTHESISER_CONTEXT_PREP_ACTION_ID
+        ):
+            registry = get_shared_durable_action_registry()
+
+        return registry.execute(
+            SYNTHESISER_CONTEXT_PREP_ACTION_ID,
+            inputs={},
+            context=data,
+            env=request.environment,
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            workflow_state_id="synthesiser_context_prep",
+        )
 
     def _action_tool_calling_plan(self, request: Any) -> WorkflowActionResult:
         """Phase 1 of tool calling: initial LLM call + missing-tool-call recovery.
@@ -9606,6 +9644,7 @@ class InternalMCPChatOrchestrator:
             max_chars=self._follow_up_context_chars,
         )
         follow_up_stage_messages = [
+            *self._build_synthesiser_context_prep_stage_messages(data),
             *self._build_turn_expected_outcome_stage_messages(
                 data=data,
                 stage="summariser",
@@ -12516,6 +12555,27 @@ class InternalMCPChatOrchestrator:
             for key, value in context_lineage.items()
             if value not in (None, [], {})
         }
+
+    @staticmethod
+    def _build_synthesiser_context_prep_stage_messages(
+        data: Mapping[str, Any],
+    ) -> list[Mapping[str, str]]:
+        raw_messages = data.get("synthesiser_system_messages")
+        if not isinstance(raw_messages, Sequence) or isinstance(
+            raw_messages, (str, bytes, bytearray)
+        ):
+            return []
+
+        messages: list[Mapping[str, str]] = []
+        seen_content: set[str] = set()
+        for raw_message in raw_messages:
+            content = raw_message if isinstance(raw_message, str) else str(raw_message)
+            content = content.strip()
+            if not content or content in seen_content:
+                continue
+            seen_content.add(content)
+            messages.append({"role": "system", "content": content})
+        return messages
 
     def _inject_turn_memory_context_messages(
         self,

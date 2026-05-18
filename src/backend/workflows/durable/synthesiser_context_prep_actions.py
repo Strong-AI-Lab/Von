@@ -11,9 +11,9 @@ injects a system message into the shared turn context that:
 * surfaces collection-presentation and per-item summary hints authored against
   each tool concept that produced results in this turn.
 
-This task only registers the action. Phase 4 cutover -- replacing the existing
-heuristic call site in the orchestrator -- is tracked separately as
-JVNAUTOSCI-2110.
+JVNAUTOSCI-2110 wires the action into the tool-calling workflow before the
+backfill/synthesiser stage, with the orchestrator consuming the staged system
+messages as stage-local LLM context.
 
 Anti-drift: this module references no specific external service or domain. All
 tool-specific behaviour comes from hint bodies authored in Vontology against
@@ -59,7 +59,14 @@ def _safe_str(value: Any) -> str:
 
 
 def _extract_active_user_message(data: Mapping[str, Any]) -> str:
-    for key in ("user_message_text", "prompt", "active_user_message"):
+    for key in (
+        "user_message_text",
+        "prompt",
+        "prompt_for_requirements",
+        "active_user_message",
+        "current_user_message",
+        "turn_prompt",
+    ):
         text = _safe_str(data.get(key))
         if text:
             return text
@@ -145,9 +152,8 @@ def _handle_synthesiser_context_prep(
 
     The handler does not directly mutate ``augmented_context``: that injection
     is the responsibility of the orchestrator stage that consumes
-    ``synthesiser_system_messages`` (the Phase 4 cutover handled by
-    JVNAUTOSCI-2110). Staging via ``data`` keeps this action pure and easy to
-    test.
+    ``synthesiser_system_messages``. Staging via ``data`` keeps this action pure
+    and easy to test.
     """
 
     inputs = dict(request.inputs or {})
@@ -175,6 +181,8 @@ def _handle_synthesiser_context_prep(
             system_messages.append(message)
             hints_resolved += 1
 
+    final_messages = list(system_messages)
+
     # Persist back onto the shared turn data so downstream stages can consume
     # it without redoing the resolution. Append rather than replace so multiple
     # invocations within a turn accumulate cleanly (each call only adds new
@@ -183,12 +191,15 @@ def _handle_synthesiser_context_prep(
         existing = request.data.get(_SYNTHESISER_PREP_MESSAGES_KEY)
         if isinstance(existing, list):
             existing.extend(m for m in system_messages if m not in existing)
+            final_messages = list(existing)
         else:
             request.data[_SYNTHESISER_PREP_MESSAGES_KEY] = list(system_messages)
+            final_messages = list(system_messages)
 
     return WorkflowActionResult(
         status="success",
         outputs={
+            _SYNTHESISER_PREP_MESSAGES_KEY: list(final_messages),
             "system_messages": list(system_messages),
             "tool_concept_ids_seen": list(tool_concept_ids),
             "hints_resolved_count": hints_resolved,
