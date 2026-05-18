@@ -11,6 +11,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 _SERVICE_EXPORT_MODULES = {
+    "ai_chat_session_source_profile_vontology_service": ".ai_chat_session_source_profile_vontology_service",
     "annotation_extraction_service": ".annotation_extraction_service",
     "benchmark_suite_vontology_service": ".benchmark_suite_vontology_service",
     "concept_normalization": ".concept_normalization",
@@ -47,6 +48,9 @@ _SERVICE_EXPORT_MODULES = {
 }
 
 if TYPE_CHECKING:
+    from . import (
+        ai_chat_session_source_profile_vontology_service as ai_chat_session_source_profile_vontology_service,
+    )
     from . import annotation_extraction_service as annotation_extraction_service
     from . import (
         benchmark_suite_vontology_service as benchmark_suite_vontology_service,
@@ -114,7 +118,9 @@ if TYPE_CHECKING:
     )
     from . import settings_service as settings_service
     from . import skill_catalogue_service as skill_catalogue_service
-    from . import testing_workflow_vontology_service as testing_workflow_vontology_service
+    from . import (
+        testing_workflow_vontology_service as testing_workflow_vontology_service,
+    )
     from . import text_value_service as text_value_service
     from . import vontology_service as vontology_service
     from . import workflow_continuation_service as workflow_continuation_service
@@ -136,7 +142,9 @@ def __getattr__(name: str):
 def __dir__() -> list[str]:
     return sorted(list(globals().keys()) + list(_SERVICE_EXPORT_MODULES.keys()))
 
+
 __all__ = [
+    "ai_chat_session_source_profile_vontology_service",
     "annotation_extraction_service",
     "benchmark_suite_vontology_service",
     "concept_normalization",

@@ -485,6 +485,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.benchmark_suite_vontology_service import (
             ensure_canonical_benchmark_suites_from_seed_fixtures,
         )
+        from ..services.ai_chat_session_source_profile_vontology_service import (
+            ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
+        )
 
         def _run_workflow_family_bootstrap(
             *,
@@ -591,6 +594,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="benchmark suites",
             bootstrap_fn=ensure_canonical_benchmark_suites_from_seed_fixtures,
         )
+        ai_chat_session_source_profile_bootstrap_report = _run_workflow_family_bootstrap(
+            label="AI chat-session source profiles",
+            bootstrap_fn=ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
+        )
 
         workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
             app_logger
@@ -672,6 +679,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             workflow_model_selection_bootstrap_report
         )
         result["benchmark_suite_bootstrap"] = benchmark_suite_bootstrap_report
+        result["ai_chat_session_source_profile_bootstrap"] = (
+            ai_chat_session_source_profile_bootstrap_report
+        )
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
         result["workflow_capability_index_startup_check"] = (
             workflow_capability_index_startup_report
@@ -812,6 +822,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] benchmark suite bootstrap failed: %s",
                 benchmark_suite_bootstrap_report,
+            )
+        if not bool(
+            ai_chat_session_source_profile_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] AI chat-session source profile bootstrap failed: %s",
+                ai_chat_session_source_profile_bootstrap_report,
             )
         if not bool(workflow_authority_bootstrap_report.get("success", False)):
             app_logger.warning(

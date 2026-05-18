@@ -186,6 +186,14 @@ _BENCHMARK_SUITE_PREDICATE_IDS = [
     "#V#has_benchmark_suite_definition_json",
 ]
 
+_AI_CHAT_SESSION_SOURCE_PROFILE_PREDICATE_IDS = [
+    "#V#has_ai_chat_session_source_profile_catalogue_definition_json",
+    "#V#has_ai_chat_session_source_profile_definition_json",
+    "#V#has_ai_chat_session_source_profile",
+    "#V#has_ai_chat_session_document_type",
+    "#V#has_ai_chat_session_file_copy_type",
+]
+
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [
     "#V#hasBackgroundLaunchPolicyJson",
     "#V#has_background_launch_policy_json",
@@ -302,6 +310,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_MINIMAL_IMPOSITION_BENCHMARK_PREDICATE_IDS,
         *_MINIMAL_IMPOSITION_RUNTIME_PREDICATE_IDS,
         *_BENCHMARK_SUITE_PREDICATE_IDS,
+        *_AI_CHAT_SESSION_SOURCE_PROFILE_PREDICATE_IDS,
         *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_WORKFLOW_ROUTING_PROFILE_PREDICATE_IDS,
         *_WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_PREDICATE_IDS,

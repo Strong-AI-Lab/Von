@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
 from . import concept_service
+from .ai_chat_session_source_profile_vontology_service import (
+    AIChatSessionSourceProfile,
+    AIChatSessionSourceProfileAuthority,
+    AIChatSessionSourceProfileAuthorityMissingError,
+    ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
+    load_ai_chat_session_source_profile_authority,
+)
 from .computer_file_copy_service import import_local_file_copy
 from .context_bundle_contracts import (
     HAS_CONTEXT_BUNDLE_PREDICATE_ID,
@@ -23,73 +30,6 @@ from .relationship_write_service import add_relationship
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-
-PRED_DOC_HAS_FILE = "#V#propositional_information_thing_has_computer_file"
-LEGACY_PRED_DOC_HAS_FILE_COPY = (
-    "#V#propositional_information_thing_has_computer_file_copy"
-)
-PRED_FILE_FOR_DOC = "#V#computer_file_for_propositional_information_thing"
-PRED_INSTANCE_OF = "#V#is_an_instance_of"
-
-BASE_DOCUMENT_TYPE_ID = "#V#ai_assisted_programming_chat_session_document"
-BASE_FILE_COPY_TYPE_ID = "#V#ai_assisted_programming_chat_session_file_copy"
-
-COPILOT_DEFAULT_ROOT = Path(r"W:\Microsoft Copilot Chat Files")
-GEMINI_DEFAULT_ROOT = Path.home() / ".gemini" / "antigravity" / "conversations"
-
-
-@dataclass(frozen=True)
-class EnvironmentOntologyConfig:
-    environment: str
-    source_system: str
-    document_type_id: str
-    document_type_name: str
-    file_copy_type_id: str
-    file_copy_type_name: str
-
-
-ENVIRONMENT_CONFIGS: dict[str, EnvironmentOntologyConfig] = {
-    "codex": EnvironmentOntologyConfig(
-        environment="codex",
-        source_system="codex_chat_session",
-        document_type_id="#V#codex_chat_session_document",
-        document_type_name="Codex Chat Session Document",
-        file_copy_type_id="#V#codex_chat_session_file_copy",
-        file_copy_type_name="Codex Chat Session File Copy",
-    ),
-    "copilot": EnvironmentOntologyConfig(
-        environment="copilot",
-        source_system="copilot_chat_session",
-        document_type_id="#V#copilot_chat_session_document",
-        document_type_name="Copilot Chat Session Document",
-        file_copy_type_id="#V#copilot_chat_session_file_copy",
-        file_copy_type_name="Copilot Chat Session File Copy",
-    ),
-    "gemini": EnvironmentOntologyConfig(
-        environment="gemini",
-        source_system="gemini_chat_session",
-        document_type_id="#V#gemini_chat_session_document",
-        document_type_name="Gemini Chat Session Document",
-        file_copy_type_id="#V#gemini_chat_session_file_copy",
-        file_copy_type_name="Gemini Chat Session File Copy",
-    ),
-    "claude_code": EnvironmentOntologyConfig(
-        environment="claude_code",
-        source_system="claude_code_chat_session",
-        document_type_id="#V#claude_code_chat_session_document",
-        document_type_name="Claude Code Chat Session Document",
-        file_copy_type_id="#V#claude_code_chat_session_file_copy",
-        file_copy_type_name="Claude Code Chat Session File Copy",
-    ),
-    "antigravity": EnvironmentOntologyConfig(
-        environment="antigravity",
-        source_system="antigravity_chat_session",
-        document_type_id="#V#antigravity_chat_session_document",
-        document_type_name="Antigravity Chat Session Document",
-        file_copy_type_id="#V#antigravity_chat_session_file_copy",
-        file_copy_type_name="Antigravity Chat Session File Copy",
-    ),
-}
 
 
 def _utc_now_iso() -> str:
@@ -197,8 +137,7 @@ class SyncCounters:
 class SessionSourceAdapter(Protocol):
     environment: str
 
-    def discover(self) -> tuple[list[SessionRecord], list[str]]:
-        ...
+    def discover(self) -> tuple[list[SessionRecord], list[str]]: ...
 
 
 class _FileAdapterBase:
@@ -278,7 +217,7 @@ class CodexSessionAdapter(_FileAdapterBase):
     )
 
     def __init__(self, root: Path | None = None) -> None:
-        self.roots = (root or (Path.home() / ".codex" / "sessions"),)
+        self.roots = (root,) if isinstance(root, Path) else ()
 
     def _build_session_id(self, path: Path) -> str:
         match = self._session_file_id.search(path.name)
@@ -293,7 +232,7 @@ class CopilotSessionAdapter(_FileAdapterBase):
     required = True
 
     def __init__(self, roots: Sequence[Path] | None = None) -> None:
-        self.roots = tuple(roots or (COPILOT_DEFAULT_ROOT,))
+        self.roots = tuple(roots or ())
 
     def _record_from_file(self, path: Path) -> SessionRecord:
         if path.name.endswith("~"):
@@ -331,7 +270,7 @@ class GeminiSessionAdapter(_FileAdapterBase):
     )
 
     def __init__(self, roots: Sequence[Path] | None = None) -> None:
-        self.roots = tuple(roots or (GEMINI_DEFAULT_ROOT,))
+        self.roots = tuple(roots or ())
 
     def _build_session_id(self, path: Path) -> str:
         match = self._session_file_id.search(path.name)
@@ -356,8 +295,6 @@ class GeminiSessionAdapter(_FileAdapterBase):
 
 
 class GenericSessionAdapter(_FileAdapterBase):
-    required = False
-
     def __init__(
         self,
         *,
@@ -365,11 +302,13 @@ class GenericSessionAdapter(_FileAdapterBase):
         roots: Sequence[Path],
         patterns: Sequence[str],
         name_tokens: Sequence[str],
+        required_roots: bool = False,
     ) -> None:
         self.environment = environment
         self.roots = tuple(roots)
         self.patterns = tuple(patterns)
         self._name_tokens = tuple(token.lower() for token in name_tokens)
+        self.required = bool(required_roots)
 
     def _is_session_like(self, path: Path) -> bool:
         lower_path = str(path).lower()
@@ -443,8 +382,11 @@ class AIChatSessionIngestionService:
         if not isinstance(user_concept_id, str) or not user_concept_id.strip():
             raise ValueError("user_concept_id is required")
         self.user_concept_id = user_concept_id.strip()
-        self.adapters = (
-            list(adapters) if adapters is not None else self._default_adapters()
+        self._uses_default_adapters = adapters is None
+        self.adapters = list(adapters) if adapters is not None else []
+        self._default_adapter_warnings: list[str] = []
+        self._source_profile_authority: AIChatSessionSourceProfileAuthority | None = (
+            None
         )
         self.context_bundle_ids = self._normalise_concept_ids(context_bundle_ids)
         self.context_dossier_ids = self._normalise_concept_ids(context_dossier_ids)
@@ -454,36 +396,74 @@ class AIChatSessionIngestionService:
             else None
         )
 
+    def _load_source_profile_authority(self) -> AIChatSessionSourceProfileAuthority:
+        if self._source_profile_authority is not None:
+            return self._source_profile_authority
+        authority, _diagnostics = load_ai_chat_session_source_profile_authority()
+        self._source_profile_authority = authority
+        return authority
+
     @staticmethod
-    def _default_adapters() -> list[SessionSourceAdapter]:
-        return [
-            CodexSessionAdapter(),
-            CopilotSessionAdapter(),
-            GeminiSessionAdapter(),
-            GenericSessionAdapter(
-                environment="claude_code",
-                roots=(
-                    Path.home() / ".claude" / "projects",
-                    Path.home() / ".claude" / "sessions",
-                    Path.home() / ".claude" / "conversations",
-                    Path.home() / ".claude" / "chats",
-                    Path.home() / ".claude" / "history",
-                ),
-                patterns=("*.jsonl", "*.json", "*.md", "*.txt"),
-                name_tokens=("chat", "session", "conversation", "transcript"),
-            ),
-            GenericSessionAdapter(
-                environment="antigravity",
-                roots=(
-                    Path.home() / ".antigravity" / "User" / "workspaceStorage",
-                    Path.home() / ".antigravity" / "User" / "globalStorage",
-                    Path.home() / ".antigravity" / "history",
-                    Path.home() / ".antigravity" / "chat",
-                ),
-                patterns=("*.jsonl", "*.json", "*.md", "*.txt"),
-                name_tokens=("chat", "session", "conversation", "history"),
-            ),
+    def _paths_from_templates(templates: Sequence[str]) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for template in templates:
+            if not isinstance(template, str) or not template.strip():
+                continue
+            path = Path(template.strip()).expanduser()
+            key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+        return tuple(paths)
+
+    @staticmethod
+    def _adapters_for_profile(
+        profile: AIChatSessionSourceProfile,
+    ) -> tuple[list[SessionSourceAdapter], list[str]]:
+        roots = AIChatSessionIngestionService._paths_from_templates(
+            profile.default_root_templates
+        )
+        adapter_kind = profile.adapter_kind.strip().lower()
+        if adapter_kind == "codex_sessions":
+            return [CodexSessionAdapter(root=root) for root in roots], []
+        if adapter_kind == "copilot_files":
+            return [CopilotSessionAdapter(roots=roots)], []
+        if adapter_kind == "gemini_files":
+            return [GeminiSessionAdapter(roots=roots)], []
+        if adapter_kind == "generic_file_glob":
+            return [
+                GenericSessionAdapter(
+                    environment=profile.environment,
+                    roots=roots,
+                    patterns=profile.file_patterns,
+                    name_tokens=profile.name_tokens,
+                    required_roots=profile.required_roots,
+                )
+            ], []
+        return [], [
+            f"{profile.environment}: unsupported represented adapter kind: {profile.adapter_kind}"
         ]
+
+    def _ensure_default_adapters(self) -> None:
+        if not self._uses_default_adapters or self.adapters:
+            return
+        try:
+            authority = self._load_source_profile_authority()
+        except AIChatSessionSourceProfileAuthorityMissingError as exc:
+            self._default_adapter_warnings.append(
+                f"source_profile_authority_missing:{exc}"
+            )
+            return
+        adapters: list[SessionSourceAdapter] = []
+        warnings: list[str] = []
+        for profile in authority.profiles:
+            profile_adapters, profile_warnings = self._adapters_for_profile(profile)
+            adapters.extend(profile_adapters)
+            warnings.extend(profile_warnings)
+        self.adapters = adapters
+        self._default_adapter_warnings.extend(warnings)
 
     @staticmethod
     def _normalise_concept_ids(values: Sequence[str]) -> tuple[str, ...]:
@@ -502,85 +482,47 @@ class AIChatSessionIngestionService:
     def ensure_ontology_types(self) -> list[str]:
         warnings: list[str] = []
         try:
-            self._ensure_type_concept(
-                concept_id=BASE_DOCUMENT_TYPE_ID,
-                name="AI-Assisted Programming Chat Session Document",
-                parent_concept_id="#V#propositional_information_thing",
-                description=(
-                    "An abstract document representing the propositional content of "
-                    "an AI-assisted programming chat session."
-                ),
-                notes=(
-                    "This concept models abstract session content. Concrete files that "
-                    "embody the session are represented separately as file-copy concepts "
-                    f"and linked via {PRED_DOC_HAS_FILE}."
-                ),
+            report = (
+                ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture()
             )
-            self._ensure_type_concept(
-                concept_id=BASE_FILE_COPY_TYPE_ID,
-                name="AI-Assisted Programming Chat Session File Copy",
-                parent_concept_id="#V#computer_file_copy",
-                description=(
-                    "A concrete computer file copy that embodies an AI-assisted "
-                    "programming chat session document."
-                ),
-                notes=(
-                    "This represents bytes in storage, not the abstract document itself. "
-                    f"Link to the document using {PRED_FILE_FOR_DOC}."
-                ),
-            )
-            for cfg in ENVIRONMENT_CONFIGS.values():
-                self._ensure_type_concept(
-                    concept_id=cfg.document_type_id,
-                    name=cfg.document_type_name,
-                    parent_concept_id=BASE_DOCUMENT_TYPE_ID,
-                    description=f"An abstract chat-session document for {cfg.environment}.",
+            if not report.get("success"):
+                warnings.append(
+                    "source_profile_authority_bootstrap_failed:"
+                    + json.dumps(report, ensure_ascii=True, sort_keys=True, default=str)
                 )
-                self._ensure_type_concept(
-                    concept_id=cfg.file_copy_type_id,
-                    name=cfg.file_copy_type_name,
-                    parent_concept_id=BASE_FILE_COPY_TYPE_ID,
-                    description=(
-                        f"A concrete file-copy artefact for {cfg.environment} "
-                        "chat-session exports."
-                    ),
+            authority, _diagnostics = load_ai_chat_session_source_profile_authority()
+            self._source_profile_authority = authority
+        except AIChatSessionSourceProfileAuthorityMissingError as exc:
+            warnings.append(
+                "source_profile_authority_missing:"
+                + json.dumps(
+                    exc.diagnostics,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
                 )
-
-            self._ensure_predicate_concept(
-                concept_id=PRED_DOC_HAS_FILE,
-                name="propositional_information_thing_has_computer_file",
-                description=(
-                    "Relates an abstract propositional-information document to one "
-                    "of its concrete computer file copies."
-                ),
-            )
-            self._ensure_predicate_concept(
-                concept_id=PRED_FILE_FOR_DOC,
-                name="computer_file_for_propositional_information_thing",
-                description=(
-                    "Inverse relation from a computer file copy to the abstract "
-                    "document it embodies."
-                ),
             )
         except Exception as exc:
-            warnings.append(f"ontology_bootstrap_failed: {exc}")
+            warnings.append(f"source_profile_authority_bootstrap_failed:{exc}")
         return warnings
 
     def validate_ontology_types(self) -> list[str]:
-        warnings: list[str] = []
-        required_concepts: list[str] = [
-            BASE_DOCUMENT_TYPE_ID,
-            BASE_FILE_COPY_TYPE_ID,
-            PRED_DOC_HAS_FILE,
-            PRED_FILE_FOR_DOC,
-        ]
-        for cfg in ENVIRONMENT_CONFIGS.values():
-            required_concepts.append(cfg.document_type_id)
-            required_concepts.append(cfg.file_copy_type_id)
-        for concept_id in required_concepts:
-            if not self._get_concept(concept_id):
-                warnings.append(f"missing_required_ontology_concept:{concept_id}")
-        return warnings
+        try:
+            authority, _diagnostics = load_ai_chat_session_source_profile_authority()
+            self._source_profile_authority = authority
+            return []
+        except AIChatSessionSourceProfileAuthorityMissingError as exc:
+            return [
+                "source_profile_authority_missing:"
+                + json.dumps(
+                    exc.diagnostics,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                )
+            ]
+        except Exception as exc:
+            return [f"source_profile_authority_validation_failed:{exc}"]
 
     def _planned_backup_path(self, record: SessionRecord) -> Path | None:
         if self.backup_root is None:
@@ -671,11 +613,16 @@ class AIChatSessionIngestionService:
             linked_bundle_ids = set(
                 self._relationship_targets(concept_doc, HAS_CONTEXT_BUNDLE_PREDICATE_ID)
             )
-            if any(bundle_id not in linked_bundle_ids for bundle_id in self.context_bundle_ids):
+            if any(
+                bundle_id not in linked_bundle_ids
+                for bundle_id in self.context_bundle_ids
+            ):
                 return False
         if self.context_dossier_ids:
             linked_dossier_ids = set(
-                self._relationship_targets(concept_doc, HAS_CONTEXT_DOSSIER_PREDICATE_ID)
+                self._relationship_targets(
+                    concept_doc, HAS_CONTEXT_DOSSIER_PREDICATE_ID
+                )
             )
             if any(
                 dossier_id not in linked_dossier_ids
@@ -746,6 +693,35 @@ class AIChatSessionIngestionService:
         decisions: list[SessionDecision] = []
         record_results: list[dict[str, Any]] = []
 
+        if self._source_profile_authority_blocked(warnings):
+            finished_at = _utc_now_iso()
+            self._emit_progress(
+                progress_callback,
+                {
+                    "event": "sync_completed",
+                    "at_utc": finished_at,
+                    "dry_run": dry_run,
+                    "status": "escalation_required",
+                    "success": False,
+                    "error_code": "source_profile_authority_missing",
+                    "requires_follow_up": True,
+                    "counters": self._counters_to_dict(counters),
+                },
+            )
+            return SyncResult(
+                success=False,
+                status="escalation_required",
+                dry_run=dry_run,
+                started_at_utc=started_at,
+                finished_at_utc=finished_at,
+                user_concept_id=self.user_concept_id,
+                counters=counters,
+                warnings=warnings,
+                records=[],
+                error_code="source_profile_authority_missing",
+                requires_follow_up=True,
+            )
+
         records, discovery_warnings = self.discover_records()
         warnings.extend(discovery_warnings)
 
@@ -812,9 +788,11 @@ class AIChatSessionIngestionService:
                     "context_links_aligned": True,
                     "attached_context_bundle_ids": list(self.context_bundle_ids),
                     "attached_context_dossier_ids": list(self.context_dossier_ids),
-                    "planned_backup_path": str(self._planned_backup_path(decision.record))
-                    if dry_run and self._planned_backup_path(decision.record)
-                    else None,
+                    "planned_backup_path": (
+                        str(self._planned_backup_path(decision.record))
+                        if dry_run and self._planned_backup_path(decision.record)
+                        else None
+                    ),
                 }
                 result_entry.update(backup_info)
                 record_results.append(result_entry)
@@ -843,9 +821,11 @@ class AIChatSessionIngestionService:
                     "context_links_aligned": None,
                     "attached_context_bundle_ids": list(self.context_bundle_ids),
                     "attached_context_dossier_ids": list(self.context_dossier_ids),
-                    "planned_backup_path": str(self._planned_backup_path(decision.record))
-                    if self._planned_backup_path(decision.record)
-                    else None,
+                    "planned_backup_path": (
+                        str(self._planned_backup_path(decision.record))
+                        if self._planned_backup_path(decision.record)
+                        else None
+                    ),
                 }
                 record_results.append(result_entry)
                 self._emit_record_processed_progress(
@@ -957,6 +937,20 @@ class AIChatSessionIngestionService:
             logger.warning("chat_session_ingestion progress callback failed: %s", exc)
 
     @staticmethod
+    def _source_profile_authority_blocked(warnings: Sequence[str]) -> bool:
+        return any(
+            isinstance(warning, str)
+            and warning.startswith(
+                (
+                    "source_profile_authority_missing:",
+                    "source_profile_authority_bootstrap_failed:",
+                    "source_profile_authority_validation_failed:",
+                )
+            )
+            for warning in warnings
+        )
+
+    @staticmethod
     def _counters_to_dict(counters: SyncCounters) -> dict[str, int]:
         return {
             "discovered": counters.discovered,
@@ -1013,9 +1007,7 @@ class AIChatSessionIngestionService:
                     "attached_context_dossier_ids"
                 ),
                 "backup_written": result_entry.get("backup_written"),
-                "backup_reused_existing": result_entry.get(
-                    "backup_reused_existing"
-                ),
+                "backup_reused_existing": result_entry.get("backup_reused_existing"),
                 "backup_path": result_entry.get("backup_path")
                 or result_entry.get("planned_backup_path"),
                 "counters": self._counters_to_dict(counters),
@@ -1026,6 +1018,10 @@ class AIChatSessionIngestionService:
         warnings: list[str] = []
         records: list[SessionRecord] = []
         seen: set[tuple[str, str, str]] = set()
+        self._ensure_default_adapters()
+        if self._default_adapter_warnings:
+            warnings.extend(self._default_adapter_warnings)
+            self._default_adapter_warnings = []
 
         for adapter in self.adapters:
             try:
@@ -1090,7 +1086,7 @@ class AIChatSessionIngestionService:
     ) -> dict[str, str | None] | None:
         linked_ids = self._linked_file_copy_ids(concept_doc)
         canonical_linked_ids = self._linked_file_copy_ids_for_predicate(
-            concept_doc, PRED_DOC_HAS_FILE
+            concept_doc, self._document_has_file_predicate_id()
         )
         current_file_copy = self._read_attribute(
             concept_doc, "current_file_copy_concept_id"
@@ -1143,15 +1139,21 @@ class AIChatSessionIngestionService:
 
         return None
 
-    def _apply_new(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
-        cfg = self._config_for(record.environment)
+    def _apply_new(
+        self, record: SessionRecord, document_concept_id: str
+    ) -> dict[str, Any]:
+        profile = self._config_for(record.environment)
         file_import = self._import_record_file(
             record,
-            cfg.file_copy_type_id,
-            cfg.source_system,
+            profile.file_copy_type.concept_id,
+            profile.source_system,
         )
         if not file_import.get("success"):
-            return {"success": False, "error": "file_import_failed", "details": file_import}
+            return {
+                "success": False,
+                "error": "file_import_failed",
+                "details": file_import,
+            }
 
         file_copy_concept_id = str(file_import.get("concept_id") or "").strip()
         if not file_copy_concept_id:
@@ -1167,18 +1169,20 @@ class AIChatSessionIngestionService:
             self._create_document_concept(
                 concept_id=document_concept_id,
                 name=title,
-                document_type_id=cfg.document_type_id,
+                document_type_id=profile.document_type.concept_id,
             )
             document_concept_created = True
 
-        self._ensure_document_type(document_concept_id, cfg.document_type_id)
+        self._ensure_document_type(
+            document_concept_id, profile.document_type.concept_id
+        )
         self._ensure_link_pair(document_concept_id, file_copy_concept_id)
         self._update_document_metadata(
             document_concept_id=document_concept_id,
             record=record,
             current_file_copy_concept_id=file_copy_concept_id,
             previous_file_copy_concept_ids=[],
-            source_system=cfg.source_system,
+            source_system=profile.source_system,
         )
         context_alignment = self._ensure_requested_context_links(document_concept_id)
         return {
@@ -1193,13 +1197,15 @@ class AIChatSessionIngestionService:
                 document_concept_id, file_copy_concept_id
             ),
             "ontology_type_aligned": self._is_document_type_aligned(
-                document_concept_id, cfg.document_type_id
+                document_concept_id, profile.document_type.concept_id
             ),
             **context_alignment,
         }
 
-    def _apply_update(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
-        cfg = self._config_for(record.environment)
+    def _apply_update(
+        self, record: SessionRecord, document_concept_id: str
+    ) -> dict[str, Any]:
+        profile = self._config_for(record.environment)
         existing = self._get_concept(document_concept_id)
         if not existing:
             return {"success": False, "error": "document_missing_for_update"}
@@ -1207,11 +1213,15 @@ class AIChatSessionIngestionService:
         old_file_copy_ids = self._linked_file_copy_ids(existing)
         file_import = self._import_record_file(
             record,
-            cfg.file_copy_type_id,
-            cfg.source_system,
+            profile.file_copy_type.concept_id,
+            profile.source_system,
         )
         if not file_import.get("success"):
-            return {"success": False, "error": "file_import_failed", "details": file_import}
+            return {
+                "success": False,
+                "error": "file_import_failed",
+                "details": file_import,
+            }
 
         new_file_copy_concept_id = str(file_import.get("concept_id") or "").strip()
         if not new_file_copy_concept_id:
@@ -1220,7 +1230,9 @@ class AIChatSessionIngestionService:
         if not isinstance(storage, dict):
             storage = {}
 
-        self._ensure_document_type(document_concept_id, cfg.document_type_id)
+        self._ensure_document_type(
+            document_concept_id, profile.document_type.concept_id
+        )
         for old_id in old_file_copy_ids:
             if old_id == new_file_copy_concept_id:
                 continue
@@ -1232,7 +1244,7 @@ class AIChatSessionIngestionService:
             record=record,
             current_file_copy_concept_id=new_file_copy_concept_id,
             previous_file_copy_concept_ids=old_file_copy_ids,
-            source_system=cfg.source_system,
+            source_system=profile.source_system,
         )
         context_alignment = self._ensure_requested_context_links(document_concept_id)
 
@@ -1248,7 +1260,7 @@ class AIChatSessionIngestionService:
                 document_concept_id, new_file_copy_concept_id
             ),
             "ontology_type_aligned": self._is_document_type_aligned(
-                document_concept_id, cfg.document_type_id
+                document_concept_id, profile.document_type.concept_id
             ),
             **context_alignment,
         }
@@ -1259,7 +1271,7 @@ class AIChatSessionIngestionService:
         document_concept_id: str,
         preferred_file_copy_concept_id: str | None,
     ) -> dict[str, Any]:
-        cfg = self._config_for(record.environment)
+        profile = self._config_for(record.environment)
         existing = self._get_concept(document_concept_id)
         if not existing:
             return {"success": False, "error": "document_missing_for_repair"}
@@ -1272,7 +1284,9 @@ class AIChatSessionIngestionService:
             else None
         )
         if preferred is None:
-            attr_current = self._read_attribute(existing, "current_file_copy_concept_id")
+            attr_current = self._read_attribute(
+                existing, "current_file_copy_concept_id"
+            )
             if isinstance(attr_current, str) and attr_current.strip():
                 preferred = attr_current.strip()
         if preferred is None and linked_ids:
@@ -1280,7 +1294,9 @@ class AIChatSessionIngestionService:
         if preferred is None:
             return {"success": False, "error": "missing_file_copy_reference_for_repair"}
 
-        self._ensure_document_type(document_concept_id, cfg.document_type_id)
+        self._ensure_document_type(
+            document_concept_id, profile.document_type.concept_id
+        )
         self._ensure_link_pair(document_concept_id, preferred)
 
         previous_ids = [file_id for file_id in linked_ids if file_id != preferred]
@@ -1289,7 +1305,7 @@ class AIChatSessionIngestionService:
             record=record,
             current_file_copy_concept_id=preferred,
             previous_file_copy_concept_ids=previous_ids,
-            source_system=cfg.source_system,
+            source_system=profile.source_system,
         )
         context_alignment = self._ensure_requested_context_links(document_concept_id)
 
@@ -1305,7 +1321,7 @@ class AIChatSessionIngestionService:
                 document_concept_id, preferred
             ),
             "ontology_type_aligned": self._is_document_type_aligned(
-                document_concept_id, cfg.document_type_id
+                document_concept_id, profile.document_type.concept_id
             ),
             **context_alignment,
         }
@@ -1345,10 +1361,12 @@ class AIChatSessionIngestionService:
             {"relationships.specific_to_user": [self.user_concept_id]},
         )
 
-    def _ensure_document_type(self, document_concept_id: str, document_type_id: str) -> None:
+    def _ensure_document_type(
+        self, document_concept_id: str, document_type_id: str
+    ) -> None:
         result = add_relationship(
             document_concept_id,
-            PRED_INSTANCE_OF,
+            self._instance_of_predicate_id(),
             document_type_id,
         )
         if not result.get("success"):
@@ -1356,10 +1374,12 @@ class AIChatSessionIngestionService:
                 f"failed_to_set_document_type:{document_concept_id}:{document_type_id}:{result}"
             )
 
-    def _ensure_link_pair(self, document_concept_id: str, file_copy_concept_id: str) -> None:
+    def _ensure_link_pair(
+        self, document_concept_id: str, file_copy_concept_id: str
+    ) -> None:
         doc_to_file = add_relationship(
             document_concept_id,
-            PRED_DOC_HAS_FILE,
+            self._document_has_file_predicate_id(),
             file_copy_concept_id,
         )
         if not doc_to_file.get("success"):
@@ -1369,7 +1389,7 @@ class AIChatSessionIngestionService:
 
         file_to_doc = add_relationship(
             file_copy_concept_id,
-            PRED_FILE_FOR_DOC,
+            self._file_for_document_predicate_id(),
             document_concept_id,
         )
         if not file_to_doc.get("success"):
@@ -1377,8 +1397,13 @@ class AIChatSessionIngestionService:
                 f"failed_link_file_to_document:{file_copy_concept_id}:{document_concept_id}:{file_to_doc}"
             )
 
-    def _remove_link_pair(self, document_concept_id: str, file_copy_concept_id: str) -> None:
-        for predicate in (PRED_DOC_HAS_FILE, LEGACY_PRED_DOC_HAS_FILE_COPY):
+    def _remove_link_pair(
+        self, document_concept_id: str, file_copy_concept_id: str
+    ) -> None:
+        for predicate in (
+            self._document_has_file_predicate_id(),
+            self._legacy_document_has_file_copy_predicate_id(),
+        ):
             remove_relationship(
                 source_id=document_concept_id,
                 predicate=predicate,
@@ -1387,7 +1412,7 @@ class AIChatSessionIngestionService:
             )
         remove_relationship(
             source_id=file_copy_concept_id,
-            predicate=PRED_FILE_FOR_DOC,
+            predicate=self._file_for_document_predicate_id(),
             target=document_concept_id,
             confirmed=True,
         )
@@ -1431,10 +1456,12 @@ class AIChatSessionIngestionService:
             return None
         return attrs.get(key)
 
-    @staticmethod
-    def _linked_file_copy_ids(concept_doc: dict[str, Any]) -> list[str]:
+    def _linked_file_copy_ids(self, concept_doc: dict[str, Any]) -> list[str]:
         linked_ids: list[str] = []
-        for predicate in (PRED_DOC_HAS_FILE, LEGACY_PRED_DOC_HAS_FILE_COPY):
+        for predicate in (
+            self._document_has_file_predicate_id(),
+            self._legacy_document_has_file_copy_predicate_id(),
+        ):
             linked_ids.extend(
                 AIChatSessionIngestionService._linked_file_copy_ids_for_predicate(
                     concept_doc, predicate
@@ -1462,7 +1489,10 @@ class AIChatSessionIngestionService:
         document = self._get_concept(document_concept_id)
         if not isinstance(document, dict):
             return False
-        linked_ids = self._linked_file_copy_ids_for_predicate(document, PRED_DOC_HAS_FILE)
+        linked_ids = self._linked_file_copy_ids_for_predicate(
+            document,
+            self._document_has_file_predicate_id(),
+        )
         if file_copy_concept_id not in linked_ids:
             return False
         file_copy = self._get_concept(file_copy_concept_id)
@@ -1471,7 +1501,7 @@ class AIChatSessionIngestionService:
         relationships = file_copy.get("relationships")
         if not isinstance(relationships, dict):
             return False
-        inverse = relationships.get(PRED_FILE_FOR_DOC)
+        inverse = relationships.get(self._file_for_document_predicate_id())
         if isinstance(inverse, str):
             return inverse == document_concept_id
         if isinstance(inverse, list):
@@ -1487,7 +1517,9 @@ class AIChatSessionIngestionService:
         relationships = document.get("relationships")
         if not isinstance(relationships, dict):
             return False
-        raw = relationships.get("is_an_instance_of")
+        raw = relationships.get(self._instance_of_predicate_id())
+        if raw is None:
+            raw = relationships.get("is_an_instance_of")
         if isinstance(raw, str):
             return raw == document_type_id
         if isinstance(raw, list):
@@ -1502,53 +1534,33 @@ class AIChatSessionIngestionService:
         except concept_service.ConceptNotFoundError:
             return None
 
-    @staticmethod
-    def _config_for(environment: str) -> EnvironmentOntologyConfig:
-        cfg = ENVIRONMENT_CONFIGS.get(environment)
-        if cfg is None:
-            raise ValueError(f"unsupported environment: {environment}")
-        return cfg
+    def _config_for(self, environment: str) -> AIChatSessionSourceProfile:
+        try:
+            return self._load_source_profile_authority().profile_for_environment(
+                environment
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported represented environment: {environment}"
+            ) from exc
 
-    def _ensure_type_concept(
-        self,
-        *,
-        concept_id: str,
-        name: str,
-        parent_concept_id: str,
-        description: str,
-        notes: str | None = None,
-    ) -> None:
-        if self._get_concept(concept_id):
-            return
-        concept_service.create_concept(
-            name=name,
-            concept_id=concept_id,
-            parent_concept_ids=[parent_concept_id],
-            create_as_instance=False,
-            description=description,
-            notes=notes,
-            system_tags=["ontology", "ai_assisted_programming", "chat_session"],
-            visibility_scope_mode="global_general",
+    def _document_has_file_predicate_id(self) -> str:
+        return (
+            self._load_source_profile_authority().document_has_file_predicate.concept_id
         )
 
-    def _ensure_predicate_concept(
-        self,
-        *,
-        concept_id: str,
-        name: str,
-        description: str,
-    ) -> None:
-        if self._get_concept(concept_id):
-            return
-        concept_service.create_concept(
-            name=name,
-            concept_id=concept_id,
-            parent_concept_ids=["#V#predicate"],
-            create_as_instance=True,
-            description=description,
-            system_tags=["ontology", "predicate", "chat_session"],
-            visibility_scope_mode="global_general",
+    def _legacy_document_has_file_copy_predicate_id(self) -> str:
+        return (
+            self._load_source_profile_authority().legacy_document_has_file_copy_predicate.concept_id
         )
+
+    def _file_for_document_predicate_id(self) -> str:
+        return (
+            self._load_source_profile_authority().file_for_document_predicate.concept_id
+        )
+
+    def _instance_of_predicate_id(self) -> str:
+        return self._load_source_profile_authority().instance_of_predicate_id
 
 
 def run_ingestion(
@@ -1581,8 +1593,6 @@ def run_ingestion(
 
 __all__ = [
     "AIChatSessionIngestionService",
-    "COPILOT_DEFAULT_ROOT",
-    "GEMINI_DEFAULT_ROOT",
     "SessionRecord",
     "SyncResult",
     "GeminiSessionAdapter",

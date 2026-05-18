@@ -1,0 +1,225 @@
+{
+  "seed_schema_version": "ai_chat_session_source_profiles_seed_bundle.v1",
+  "catalogue": {
+    "definition_schema_version": "ai_chat_session_source_profile_catalogue.v1",
+    "catalogue_concept_id": "#V#ai_assisted_programming_chat_session_source_profile_catalogue",
+    "catalogue_title": "AI coding-session source profile catalogue",
+    "catalogue_description": "Represented authority for AI-assisted programming chat-session source profiles, ontology type vocabulary, relationship predicates, and adapter bindings.",
+    "source_profile_type_id": "#V#ai_assisted_programming_chat_session_source_profile",
+    "base_document_type": {
+      "concept_id": "#V#ai_assisted_programming_chat_session_document",
+      "name": "AI-Assisted Programming Chat Session Document",
+      "parent_concept_id": "#V#propositional_information_thing",
+      "description": "An abstract document representing the propositional content of an AI-assisted programming chat session.",
+      "notes": "This concept models abstract session content. Concrete files that embody the session are represented separately as file-copy concepts and linked through the represented document/file predicates."
+    },
+    "base_file_copy_type": {
+      "concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+      "name": "AI-Assisted Programming Chat Session File Copy",
+      "parent_concept_id": "#V#computer_file_copy",
+      "description": "A concrete computer file copy that embodies an AI-assisted programming chat session document.",
+      "notes": "This represents bytes in storage, not the abstract document itself."
+    },
+    "predicates": {
+      "document_has_file": {
+        "concept_id": "#V#propositional_information_thing_has_computer_file",
+        "name": "propositional_information_thing_has_computer_file",
+        "parent_concept_id": "#V#predicate",
+        "description": "Relates an abstract propositional-information document to one of its concrete computer file copies."
+      },
+      "legacy_document_has_file_copy": {
+        "concept_id": "#V#propositional_information_thing_has_computer_file_copy",
+        "name": "propositional_information_thing_has_computer_file_copy",
+        "parent_concept_id": "#V#predicate",
+        "description": "Legacy document-to-file-copy predicate retained for repair and migration of earlier AI chat-session imports."
+      },
+      "file_for_document": {
+        "concept_id": "#V#computer_file_for_propositional_information_thing",
+        "name": "computer_file_for_propositional_information_thing",
+        "parent_concept_id": "#V#predicate",
+        "description": "Inverse relation from a computer file copy to the abstract document it embodies."
+      },
+      "instance_of_predicate_id": "#V#is_an_instance_of"
+    },
+    "profile_concept_ids": [
+      "#V#codex_chat_session_source_profile",
+      "#V#copilot_chat_session_source_profile",
+      "#V#gemini_chat_session_source_profile",
+      "#V#claude_code_chat_session_source_profile",
+      "#V#antigravity_chat_session_source_profile"
+    ]
+  },
+  "profiles": [
+    {
+      "definition_schema_version": "ai_chat_session_source_profile.v1",
+      "profile_concept_id": "#V#codex_chat_session_source_profile",
+      "environment": "codex",
+      "display_name": "Codex chat-session source profile",
+      "source_system": "codex_chat_session",
+      "adapter_kind": "codex_sessions",
+      "document_type": {
+        "concept_id": "#V#codex_chat_session_document",
+        "name": "Codex Chat Session Document",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_document",
+        "description": "An abstract chat-session document for Codex."
+      },
+      "file_copy_type": {
+        "concept_id": "#V#codex_chat_session_file_copy",
+        "name": "Codex Chat Session File Copy",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+        "description": "A concrete file-copy artefact for Codex chat-session exports."
+      },
+      "default_root_templates": [
+        "~/.codex/sessions"
+      ],
+      "file_patterns": [
+        "*.jsonl"
+      ],
+      "name_tokens": [],
+      "required_roots": false
+    },
+    {
+      "definition_schema_version": "ai_chat_session_source_profile.v1",
+      "profile_concept_id": "#V#copilot_chat_session_source_profile",
+      "environment": "copilot",
+      "display_name": "Copilot chat-session source profile",
+      "source_system": "copilot_chat_session",
+      "adapter_kind": "copilot_files",
+      "document_type": {
+        "concept_id": "#V#copilot_chat_session_document",
+        "name": "Copilot Chat Session Document",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_document",
+        "description": "An abstract chat-session document for Copilot."
+      },
+      "file_copy_type": {
+        "concept_id": "#V#copilot_chat_session_file_copy",
+        "name": "Copilot Chat Session File Copy",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+        "description": "A concrete file-copy artefact for Copilot chat-session exports."
+      },
+      "default_root_templates": [
+        "W:\\Microsoft Copilot Chat Files"
+      ],
+      "file_patterns": [
+        "*.md",
+        "*.markdown",
+        "*.txt",
+        "*.json",
+        "*.jsonl"
+      ],
+      "name_tokens": [],
+      "required_roots": true
+    },
+    {
+      "definition_schema_version": "ai_chat_session_source_profile.v1",
+      "profile_concept_id": "#V#gemini_chat_session_source_profile",
+      "environment": "gemini",
+      "display_name": "Gemini chat-session source profile",
+      "source_system": "gemini_chat_session",
+      "adapter_kind": "gemini_files",
+      "document_type": {
+        "concept_id": "#V#gemini_chat_session_document",
+        "name": "Gemini Chat Session Document",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_document",
+        "description": "An abstract chat-session document for Gemini."
+      },
+      "file_copy_type": {
+        "concept_id": "#V#gemini_chat_session_file_copy",
+        "name": "Gemini Chat Session File Copy",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+        "description": "A concrete file-copy artefact for Gemini chat-session exports."
+      },
+      "default_root_templates": [
+        "~/.gemini/antigravity/conversations"
+      ],
+      "file_patterns": [
+        "*.pb",
+        "*.json",
+        "*.jsonl",
+        "*.md",
+        "*.txt"
+      ],
+      "name_tokens": [],
+      "required_roots": false
+    },
+    {
+      "definition_schema_version": "ai_chat_session_source_profile.v1",
+      "profile_concept_id": "#V#claude_code_chat_session_source_profile",
+      "environment": "claude_code",
+      "display_name": "Claude Code chat-session source profile",
+      "source_system": "claude_code_chat_session",
+      "adapter_kind": "generic_file_glob",
+      "document_type": {
+        "concept_id": "#V#claude_code_chat_session_document",
+        "name": "Claude Code Chat Session Document",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_document",
+        "description": "An abstract chat-session document for Claude Code."
+      },
+      "file_copy_type": {
+        "concept_id": "#V#claude_code_chat_session_file_copy",
+        "name": "Claude Code Chat Session File Copy",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+        "description": "A concrete file-copy artefact for Claude Code chat-session exports."
+      },
+      "default_root_templates": [
+        "~/.claude/projects",
+        "~/.claude/sessions",
+        "~/.claude/conversations",
+        "~/.claude/chats",
+        "~/.claude/history"
+      ],
+      "file_patterns": [
+        "*.jsonl",
+        "*.json",
+        "*.md",
+        "*.txt"
+      ],
+      "name_tokens": [
+        "chat",
+        "session",
+        "conversation",
+        "transcript"
+      ],
+      "required_roots": false
+    },
+    {
+      "definition_schema_version": "ai_chat_session_source_profile.v1",
+      "profile_concept_id": "#V#antigravity_chat_session_source_profile",
+      "environment": "antigravity",
+      "display_name": "Antigravity chat-session source profile",
+      "source_system": "antigravity_chat_session",
+      "adapter_kind": "generic_file_glob",
+      "document_type": {
+        "concept_id": "#V#antigravity_chat_session_document",
+        "name": "Antigravity Chat Session Document",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_document",
+        "description": "An abstract chat-session document for Antigravity."
+      },
+      "file_copy_type": {
+        "concept_id": "#V#antigravity_chat_session_file_copy",
+        "name": "Antigravity Chat Session File Copy",
+        "parent_concept_id": "#V#ai_assisted_programming_chat_session_file_copy",
+        "description": "A concrete file-copy artefact for Antigravity chat-session exports."
+      },
+      "default_root_templates": [
+        "~/.antigravity/User/workspaceStorage",
+        "~/.antigravity/User/globalStorage",
+        "~/.antigravity/history",
+        "~/.antigravity/chat"
+      ],
+      "file_patterns": [
+        "*.jsonl",
+        "*.json",
+        "*.md",
+        "*.txt"
+      ],
+      "name_tokens": [
+        "chat",
+        "session",
+        "conversation",
+        "history"
+      ],
+      "required_roots": false
+    }
+  ]
+}

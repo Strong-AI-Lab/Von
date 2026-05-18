@@ -23,6 +23,80 @@ def _record(*, tmp_path: Path, environment: str = "codex"):
     )
 
 
+def _install_source_profile_authority(
+    service,
+    *,
+    environment: str = "codex",
+    source_system: str | None = None,
+    document_type_id: str | None = None,
+    file_copy_type_id: str | None = None,
+) -> None:
+    from src.backend.services.ai_chat_session_source_profile_vontology_service import (
+        AIChatSessionSourceProfile,
+        AIChatSessionSourceProfileAuthority,
+        ConceptSpec,
+    )
+
+    env = environment.strip().lower()
+    authority = AIChatSessionSourceProfileAuthority(
+        catalogue_concept_id="#V#test_ai_chat_session_source_profile_catalogue",
+        source_profile_type_id="#V#ai_assisted_programming_chat_session_source_profile",
+        base_document_type=ConceptSpec(
+            concept_id="#V#ai_assisted_programming_chat_session_document",
+            name="AI-Assisted Programming Chat Session Document",
+            parent_concept_id="#V#propositional_information_thing",
+            description="Test base document type.",
+        ),
+        base_file_copy_type=ConceptSpec(
+            concept_id="#V#ai_assisted_programming_chat_session_file_copy",
+            name="AI-Assisted Programming Chat Session File Copy",
+            parent_concept_id="#V#computer_file_copy",
+            description="Test base file-copy type.",
+        ),
+        document_has_file_predicate=ConceptSpec(
+            concept_id="#V#propositional_information_thing_has_computer_file",
+            name="propositional_information_thing_has_computer_file",
+            parent_concept_id="#V#predicate",
+            description="Test document-to-file predicate.",
+        ),
+        legacy_document_has_file_copy_predicate=ConceptSpec(
+            concept_id="#V#propositional_information_thing_has_computer_file_copy",
+            name="propositional_information_thing_has_computer_file_copy",
+            parent_concept_id="#V#predicate",
+            description="Test legacy document-to-file predicate.",
+        ),
+        file_for_document_predicate=ConceptSpec(
+            concept_id="#V#computer_file_for_propositional_information_thing",
+            name="computer_file_for_propositional_information_thing",
+            parent_concept_id="#V#predicate",
+            description="Test file-to-document predicate.",
+        ),
+        instance_of_predicate_id="#V#is_an_instance_of",
+        profiles=(
+            AIChatSessionSourceProfile(
+                profile_concept_id=f"#V#{env}_chat_session_source_profile",
+                environment=env,
+                display_name=f"{env} test source profile",
+                source_system=source_system or f"{env}_chat_session",
+                adapter_kind="generic_file_glob",
+                document_type=ConceptSpec(
+                    concept_id=document_type_id or f"#V#{env}_chat_session_document",
+                    name=f"{env} Chat Session Document",
+                    parent_concept_id="#V#ai_assisted_programming_chat_session_document",
+                    description="Test environment document type.",
+                ),
+                file_copy_type=ConceptSpec(
+                    concept_id=file_copy_type_id or f"#V#{env}_chat_session_file_copy",
+                    name=f"{env} Chat Session File Copy",
+                    parent_concept_id="#V#ai_assisted_programming_chat_session_file_copy",
+                    description="Test environment file-copy type.",
+                ),
+            ),
+        ),
+    )
+    service._source_profile_authority = authority
+
+
 def test_stable_document_concept_id_is_deterministic():
     from src.backend.services.ai_chat_session_ingestion_service import (
         stable_document_concept_id,
@@ -50,7 +124,9 @@ def test_stable_document_concept_id_is_deterministic():
 
 
 def test_copilot_adapter_warns_when_required_root_missing(tmp_path):
-    from src.backend.services.ai_chat_session_ingestion_service import CopilotSessionAdapter
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        CopilotSessionAdapter,
+    )
 
     missing_root = tmp_path / "missing"
     adapter = CopilotSessionAdapter(roots=[missing_root])
@@ -61,7 +137,9 @@ def test_copilot_adapter_warns_when_required_root_missing(tmp_path):
 
 
 def test_gemini_adapter_discovers_pb_sessions(tmp_path):
-    from src.backend.services.ai_chat_session_ingestion_service import GeminiSessionAdapter
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        GeminiSessionAdapter,
+    )
 
     session_file = tmp_path / "6b32763d-1789-47cb-8c42-bfe8493c192f.pb"
     session_file.write_bytes(b"gemini-session")
@@ -248,6 +326,40 @@ def test_run_flags_mutation_not_executed(monkeypatch, tmp_path):
     assert result.counters.executed_mutations == 0
 
 
+def test_run_fails_closed_when_source_profile_authority_missing(monkeypatch, tmp_path):
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        AIChatSessionIngestionService,
+    )
+
+    record = _record(tmp_path=tmp_path)
+
+    class _Adapter:
+        environment = "codex"
+
+        def discover(self):
+            raise AssertionError("discovery should not run without profile authority")
+
+    service = AIChatSessionIngestionService(
+        user_concept_id="#V#user_test",
+        adapters=[_Adapter()],
+    )
+
+    monkeypatch.setattr(
+        service,
+        "ensure_ontology_types",
+        lambda: ['source_profile_authority_missing:{"missing_concept_ids":[]}'],
+    )
+
+    result = service.run(dry_run=False)
+
+    assert record.document_concept_id.startswith("#V#ai_programming_chat_session_")
+    assert result.success is False
+    assert result.status == "escalation_required"
+    assert result.error_code == "source_profile_authority_missing"
+    assert result.requires_follow_up is True
+    assert result.counters.discovered == 0
+
+
 def test_apply_update_relinks_document_to_new_file_copy(monkeypatch, tmp_path):
     from src.backend.services.ai_chat_session_ingestion_service import (
         AIChatSessionIngestionService,
@@ -258,13 +370,12 @@ def test_apply_update_relinks_document_to_new_file_copy(monkeypatch, tmp_path):
         user_concept_id="#V#user_test",
         adapters=[],
     )
+    _install_source_profile_authority(service)
 
     existing_doc = {
         "concept_id": record.document_concept_id,
         "relationships": {
-            "#V#propositional_information_thing_has_computer_file_copy": [
-                "#V#file_old"
-            ]
+            "#V#propositional_information_thing_has_computer_file_copy": ["#V#file_old"]
         },
         "attributes": {"source_content_sha256": "old-hash"},
     }
@@ -277,7 +388,9 @@ def test_apply_update_relinks_document_to_new_file_copy(monkeypatch, tmp_path):
             "concept_id": "#V#file_new",
         },
     )
-    monkeypatch.setattr(service, "_ensure_document_type", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service, "_ensure_document_type", lambda *_args, **_kwargs: None
+    )
 
     removed_pairs: list[tuple[str, str]] = []
     added_pairs: list[tuple[str, str]] = []
@@ -320,13 +433,12 @@ def test_classify_record_requires_repair_for_legacy_links(monkeypatch, tmp_path)
         user_concept_id="#V#user_test",
         adapters=[],
     )
+    _install_source_profile_authority(service)
 
     existing_doc = {
         "concept_id": record.document_concept_id,
         "relationships": {
-            "#V#propositional_information_thing_has_computer_file_copy": [
-                "#V#file_old"
-            ]
+            "#V#propositional_information_thing_has_computer_file_copy": ["#V#file_old"]
         },
         "attributes": {
             "source_content_sha256": record.content_sha256,
@@ -352,13 +464,12 @@ def test_apply_repair_updates_links_without_reimport(monkeypatch, tmp_path):
         user_concept_id="#V#user_test",
         adapters=[],
     )
+    _install_source_profile_authority(service)
 
     existing_doc = {
         "concept_id": record.document_concept_id,
         "relationships": {
-            "#V#propositional_information_thing_has_computer_file_copy": [
-                "#V#file_old"
-            ]
+            "#V#propositional_information_thing_has_computer_file_copy": ["#V#file_old"]
         },
         "attributes": {
             "source_content_sha256": record.content_sha256,
@@ -366,7 +477,9 @@ def test_apply_repair_updates_links_without_reimport(monkeypatch, tmp_path):
         },
     }
     monkeypatch.setattr(service, "_get_concept", lambda _concept_id: existing_doc)
-    monkeypatch.setattr(service, "_ensure_document_type", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service, "_ensure_document_type", lambda *_args, **_kwargs: None
+    )
 
     added_pairs: list[tuple[str, str]] = []
     metadata_updates: list[dict[str, object]] = []
@@ -519,6 +632,7 @@ def test_apply_new_returns_storage_and_alignment_telemetry(monkeypatch, tmp_path
         user_concept_id="#V#user_test",
         adapters=[],
     )
+    _install_source_profile_authority(service)
 
     monkeypatch.setattr(service, "_get_concept", lambda _concept_id: None)
     monkeypatch.setattr(
@@ -535,7 +649,9 @@ def test_apply_new_returns_storage_and_alignment_telemetry(monkeypatch, tmp_path
         },
     )
     monkeypatch.setattr(service, "_create_document_concept", lambda **_kwargs: None)
-    monkeypatch.setattr(service, "_ensure_document_type", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service, "_ensure_document_type", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(service, "_ensure_link_pair", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_update_document_metadata", lambda **_kwargs: None)
     monkeypatch.setattr(service, "_is_document_file_link_aligned", lambda *_args: True)
@@ -563,6 +679,69 @@ def test_apply_new_returns_storage_and_alignment_telemetry(monkeypatch, tmp_path
     assert result["attached_context_dossier_ids"] == ["#V#dossier_test"]
 
 
+def test_apply_new_uses_represented_synthetic_profile_without_environment_table(
+    monkeypatch,
+    tmp_path,
+):
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        AIChatSessionIngestionService,
+    )
+
+    record = _record(tmp_path=tmp_path, environment="synthetic")
+    service = AIChatSessionIngestionService(
+        user_concept_id="#V#user_test",
+        adapters=[],
+    )
+    _install_source_profile_authority(
+        service,
+        environment="synthetic",
+        source_system="synthetic_chat_session",
+        document_type_id="#V#synthetic_chat_session_document",
+        file_copy_type_id="#V#synthetic_chat_session_file_copy",
+    )
+
+    import_calls: list[tuple[str, str]] = []
+    created_documents: list[dict[str, str]] = []
+
+    monkeypatch.setattr(service, "_get_concept", lambda _concept_id: None)
+
+    def _import_record_file(_record, type_id, source_system):
+        import_calls.append((type_id, source_system))
+        return {"success": True, "concept_id": "#V#file_new"}
+
+    def _create_document_concept(**kwargs):
+        created_documents.append(dict(kwargs))
+
+    monkeypatch.setattr(service, "_import_record_file", _import_record_file)
+    monkeypatch.setattr(service, "_create_document_concept", _create_document_concept)
+    monkeypatch.setattr(
+        service, "_ensure_document_type", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(service, "_ensure_link_pair", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_update_document_metadata", lambda **_kwargs: None)
+    monkeypatch.setattr(service, "_is_document_file_link_aligned", lambda *_args: True)
+    monkeypatch.setattr(service, "_is_document_type_aligned", lambda *_args: True)
+    monkeypatch.setattr(
+        service,
+        "_ensure_requested_context_links",
+        lambda _document_concept_id: {
+            "context_links_aligned": True,
+            "attached_context_bundle_ids": [],
+            "attached_context_dossier_ids": [],
+        },
+    )
+
+    result = service._apply_new(record, record.document_concept_id)
+
+    assert result["success"] is True
+    assert import_calls == [
+        ("#V#synthetic_chat_session_file_copy", "synthetic_chat_session")
+    ]
+    assert created_documents[0]["document_type_id"] == (
+        "#V#synthetic_chat_session_document"
+    )
+
+
 def test_classify_record_requires_repair_when_requested_context_missing(
     monkeypatch, tmp_path
 ):
@@ -576,6 +755,7 @@ def test_classify_record_requires_repair_when_requested_context_missing(
         adapters=[],
         context_bundle_ids=["#V#bundle_test"],
     )
+    _install_source_profile_authority(service)
 
     existing_doc = {
         "concept_id": record.document_concept_id,
