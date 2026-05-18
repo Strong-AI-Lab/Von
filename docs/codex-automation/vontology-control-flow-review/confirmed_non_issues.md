@@ -155,6 +155,18 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   as `JVNAUTOSCI-2340` and `JVNAUTOSCI-2341`; update those instead of reopening
   broad duplicates for the same email convergence or representation-routing
   audit surfaces.
+- 2026-05-19: `f2988eed` (`JVNAUTOSCI-2283`), `46ddd799`
+  (`JVNAUTOSCI-2326`), and `8e0ab8a4` (`JVNAUTOSCI-2327`) looked like
+  remediation rather than new drift. Gmail evidence roles now come from
+  Vontology metadata; AI chat-session source profiles and benchmark suites load
+  represented definitions and fail closed unless an explicit fixture path/import
+  helper is used. Do not file duplicates without fresh runtime fallback
+  evidence.
+- 2026-05-19: source-specific adapter classes for Codex/Copilot/Gemini chat
+  transcript file discovery are support-only while source roots, file patterns,
+  profile concepts, and ontology type/predicate definitions are loaded from
+  represented source profiles. File only if adapter code starts authoring source
+  profile policy or silently falls back when Vontology authority is missing.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

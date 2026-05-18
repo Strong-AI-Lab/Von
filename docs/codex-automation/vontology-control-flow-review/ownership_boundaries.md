@@ -80,6 +80,10 @@ predicates, and KB assertions should own durable:
 - Maintenance audit authority, including audited task classes, expected
   workflows, case prompts, thresholds, evaluation dimensions, suggestion policy,
   and self-improvement handoff criteria.
+- Model-visible context-framing templates for synthesiser or stage-local LLM
+  context, including active-request labels, section headings, and hint-wrapper
+  wording. Python may bind values into represented templates but should not own
+  the durable wording the model sees.
 
 ## Python Support
 
@@ -145,6 +149,10 @@ Python can remain the surface for:
   inventory reads, metric arithmetic, payload validation, and episode-memory
   persistence when audit cases, thresholds, and suggestion policy come from
   represented authority;
+- generic synthesiser/context-prep plumbing that resolves represented tool
+  hints, extracts active-turn values from shared context, binds those values
+  into represented templates, validates the resulting messages, and records
+  context-lineage telemetry;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,

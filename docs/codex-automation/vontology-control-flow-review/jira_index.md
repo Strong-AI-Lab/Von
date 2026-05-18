@@ -71,7 +71,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   managed schedule defaults are owned by Python/env defaults rather than
   represented workflow/profile authority.
 - `JVNAUTOSCI-2324` - replay sampler/evaluation prompt bank, response-marker
-  rubric, user-happiness scoring, promotion blockers, pass/partial/fail
+  rubric, user-happiness scoring, promotion blockers, pass/partial
   verdicts, and experiment observation policy in Python rather than represented
   Vontology/VWL replay-evaluation authority.
 - `JVNAUTOSCI-2326` - AI coding-session ingestion source profiles, document and
@@ -89,3 +89,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2341` - representation-routing audit profile, cases, thresholds,
   suggestion policy, prompt seed, workflow seed, and test graph still rely on
   repo/Python surfaces instead of represented audit/benchmark authority.
+- `JVNAUTOSCI-2350` - synthesiser context active-request and tool-hint wrapper
+  wording is built and pinned in Python instead of represented prompt/template
+  authority.

@@ -113,6 +113,10 @@ represented authority before filing Jira work.
   dimensions, or suggestion policy, especially if the completed task promised
   that repo fixtures are non-authoritative. Python can run probes and compute
   metrics, but the case/rubric/profile authority should be represented.
+- Generic synthesiser/context-prep actions are still drift candidates when they
+  assemble LLM-visible system-message framing from Python string literals.
+  Resolving Vontology-authored hint bodies is not enough if the wrapper labels,
+  active-request framing, or tests pin the model-visible template in code.
 
 ## Recent Examples
 
@@ -155,3 +159,6 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2341` - representation-routing audit profile/prompt/workflow
   authority, cases, thresholds, and test workflow graph still in repo/Python
   surfaces.
+- `JVNAUTOSCI-2350` - synthesiser-context-prep active-request/tool-hint framing
+  strings and exact-message tests live in Python rather than represented
+  prompt/context-template authority.
