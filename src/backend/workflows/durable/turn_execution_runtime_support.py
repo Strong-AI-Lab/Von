@@ -2097,6 +2097,16 @@ def build_turn_execution_selected_workflow_outputs(
         value = child_outputs_map.get(key)
         if isinstance(value, list):
             outputs[key] = list(value)
+    required_tool_obligation_ledger = child_outputs_map.get(
+        "required_tool_obligation_ledger"
+    )
+    if isinstance(required_tool_obligation_ledger, Mapping):
+        outputs["required_tool_obligation_ledger"] = dict(
+            required_tool_obligation_ledger
+        )
+        blockers = required_tool_obligation_ledger.get("blocking_failure_codes")
+        if isinstance(blockers, list):
+            outputs["required_tool_obligation_blockers"] = list(blockers)
     if contract_required_tools or workflow_required_tools:
         existing_required_prompt_tools = outputs.get("required_prompt_tools")
         existing_missing_prompt_tools = outputs.get("missing_prompt_tools")
@@ -2426,6 +2436,16 @@ def run_turn_execution_critic(
     workflow_routing_payload = (
         dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
     )
+    method_catalogue = None
+    gateway = getattr(env, "gateway", None)
+    describe_methods = getattr(gateway, "describe_methods", None)
+    if callable(describe_methods):
+        try:
+            described_methods = describe_methods()
+            if isinstance(described_methods, Mapping):
+                method_catalogue = described_methods
+        except Exception:
+            method_catalogue = None
 
     turn_execution_record = build_turn_execution_record(
         request_id=data.get("turn_id"),
@@ -2472,6 +2492,7 @@ def run_turn_execution_critic(
             if isinstance(data.get("required_tool_obligation_ledger"), Mapping)
             else None
         ),
+        method_catalogue=method_catalogue,
     )
 
     completion_gate = turn_execution_record.get("completion_gate")

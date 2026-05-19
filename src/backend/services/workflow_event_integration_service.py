@@ -62,6 +62,11 @@ EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
 
+FILE_COPY_UPLOAD_EVENT_BINDING_ENABLE_ENV = "VON_FILE_COPY_UPLOAD_EVENT_BINDING_ENABLE"
+FILE_COPY_UPLOAD_EVENT_BINDING_MANAGED_BY = "workflow_event_integration:file_copy_upload"
+
+_DEFAULT_BINDINGS_ENSURED = False
+
 
 def _clean_text(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -76,6 +81,66 @@ def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, parsed)
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def ensure_file_copy_upload_event_binding() -> dict[str, Any]:
+    """Ensure the canonical persisted binding for file-copy upload events."""
+
+    if not _env_flag(FILE_COPY_UPLOAD_EVENT_BINDING_ENABLE_ENV, default=True):
+        return {
+            "success": True,
+            "ensured": False,
+            "reason": "event_binding_bootstrap_disabled",
+            "created_count": 0,
+            "updated_count": 0,
+            "binding_count": 0,
+            "bindings": [],
+        }
+
+    from ..workflows.durable.file_copy_upload_handler_workflow import (
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    )
+
+    manager = get_instance_manager()
+    binding, created, updated = manager.upsert_event_binding(
+        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
+        workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        input_mapping={},
+        enabled=True,
+        actor=FILE_COPY_UPLOAD_EVENT_BINDING_MANAGED_BY,
+        replace_existing=True,
+    )
+    return {
+        "success": True,
+        "ensured": True,
+        "created_count": 1 if created else 0,
+        "updated_count": 1 if updated else 0,
+        "binding_count": 1,
+        "bindings": [binding.to_status_dict()],
+        "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
+        "workflow_id": FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    }
+
+
+def _ensure_default_event_workflow_bindings() -> dict[str, Any]:
+    global _DEFAULT_BINDINGS_ENSURED
+    if _DEFAULT_BINDINGS_ENSURED:
+        return {"success": True, "ensured": False, "reason": "already_ensured"}
+    report = ensure_file_copy_upload_event_binding()
+    _DEFAULT_BINDINGS_ENSURED = True
+    return report
 
 
 def episode_evaluation_autotrigger_enabled() -> bool:
@@ -419,6 +484,8 @@ def list_event_workflow_bindings(
 
 
 def _resolve_bindings_for_event(event_type: str) -> list[dict[str, Any]]:
+    if event_type == EVENT_TYPE_FILE_COPY_UPLOADED:
+        _ensure_default_event_workflow_bindings()
     all_bindings = list_event_workflow_bindings(
         event_type=event_type,
         enabled_only=True,

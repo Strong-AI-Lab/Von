@@ -510,6 +510,37 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 )
                 return report
 
+        # Start the queue-draining worker before slower canonical bootstrap and
+        # schedule maintenance. User-facing workflow submissions should not sit
+        # pending just because startup maintenance is still catching up.
+        if _durable_workflow_registry is None:
+            _durable_workflow_registry = _build_durable_workflow_registry()
+        if _durable_action_registry is None:
+            _durable_action_registry = _build_durable_action_registry()
+
+        recovered = recover_orphaned_instances()
+        if recovered > 0:
+            app_logger.info(
+                "[durable_workflows] Recovered %d orphaned instances.", recovered
+            )
+
+        result = start_worker_and_scheduler(
+            registry=_durable_action_registry,
+            definition_loader=_get_durable_definition_loader(),
+            enable_worker=True,
+            enable_scheduler=True,
+            worker_poll_interval=float(
+                os.getenv("VON_DURABLE_WORKER_POLL_INTERVAL", "5.0")
+            ),
+            scheduler_check_interval=float(
+                os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
+            ),
+        )
+        result["startup_queue_ready"] = {
+            "stage": "before_canonical_bootstraps",
+            "recovered_orphaned_instances": recovered,
+        }
+
         entity_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="entity workflow",
             bootstrap_fn=bootstrap_canonical_entity_representation_workflows,
@@ -603,37 +634,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger
         )
 
-        # Build registries if not already done
-        if _durable_workflow_registry is None:
-            _durable_workflow_registry = _build_durable_workflow_registry()
-        if _durable_action_registry is None:
-            _durable_action_registry = _build_durable_action_registry()
-
         workflow_capability_index_startup_report = (
             run_workflow_capability_index_startup_check(
                 workflow_registry=_durable_workflow_registry
             )
-        )
-
-        # Recover any orphaned instances from previous crashes
-        recovered = recover_orphaned_instances()
-        if recovered > 0:
-            app_logger.info(
-                "[durable_workflows] Recovered %d orphaned instances.", recovered
-            )
-
-        # Start worker and scheduler
-        result = start_worker_and_scheduler(
-            registry=_durable_action_registry,
-            definition_loader=_get_durable_definition_loader(),
-            enable_worker=True,
-            enable_scheduler=True,
-            worker_poll_interval=float(
-                os.getenv("VON_DURABLE_WORKER_POLL_INTERVAL", "5.0")
-            ),
-            scheduler_check_interval=float(
-                os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
-            ),
         )
         result["entity_workflow_bootstrap"] = entity_workflow_bootstrap_report
         result["entity_information_retrieval_workflow_bootstrap"] = (

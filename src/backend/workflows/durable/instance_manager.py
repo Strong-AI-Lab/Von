@@ -7,6 +7,7 @@ durable workflow instances.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -859,6 +860,7 @@ class WorkflowInstanceManager:
         worker_id: str,
         *,
         workflow_ids: list[str] | None = None,
+        priority_only: bool = False,
     ) -> WorkflowInstance | None:
         """Atomically find and claim a pending/resumable instance.
 
@@ -868,6 +870,7 @@ class WorkflowInstanceManager:
         Args:
             worker_id: Identifier for the claiming worker.
             workflow_ids: Optional list of workflow IDs to filter by.
+            priority_only: When true, only claim fresh user-turn priority work.
 
         Returns:
             The claimed instance, or None if none available.
@@ -893,36 +896,105 @@ class WorkflowInstanceManager:
         if workflow_ids:
             query["workflow_id"] = {"$in": workflow_ids}
 
-        # Use $setOnInsert for started_at only if not already set
-        doc = coll.find_one_and_update(
-            {**query, "started_at": None},
-            {
-                "$set": {
-                    "status": WorkflowInstanceStatus.RUNNING.value,
-                    "locked_by": worker_id,
-                    "lock_expires_at": lock_expires,
-                    "started_at": now,
-                    "progress_message": "running",
-                    "progress_updated_at": now,
-                }
-            },
-            return_document=True,
+        priority_workflow_ids = [
+            "#V#conversation_turn_execution_workflow",
+            "#V#chat_assistant_workflow",
+            "#V#tool_calling_workflow",
+        ]
+        try:
+            conversation_turn_max_age_seconds = max(
+                0.0,
+                float(
+                    os.getenv(
+                        "VON_DURABLE_CONVERSATION_TURN_AUTO_CLAIM_MAX_AGE_SECONDS",
+                        "86400",
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            conversation_turn_max_age_seconds = 86400.0
+        recent_conversation_cutoff = now - timedelta(
+            seconds=conversation_turn_max_age_seconds
         )
+        conversation_turn_filter: dict[str, Any] = {
+            "$or": [
+                {"source_event_type": "conversation_turn"},
+                {"workflow_id": {"$in": priority_workflow_ids}},
+            ]
+        }
+        stale_conversation_turn_filter: dict[str, Any] = {
+            "$and": [
+                conversation_turn_filter,
+                {"created_at": {"$lt": recent_conversation_cutoff}},
+            ]
+        }
 
-        # If no doc found with started_at=None, try without that constraint
-        if doc is None:
-            doc = coll.find_one_and_update(
-                query,
+        def _claim_matching_instance(
+            claim_query: dict[str, Any],
+            *,
+            claim_sort: list[tuple[str, int]],
+        ) -> dict[str, Any] | None:
+            # Use $setOnInsert for started_at only if not already set
+            claimed_doc = coll.find_one_and_update(
+                {**claim_query, "started_at": None},
                 {
                     "$set": {
                         "status": WorkflowInstanceStatus.RUNNING.value,
                         "locked_by": worker_id,
                         "lock_expires_at": lock_expires,
+                        "started_at": now,
                         "progress_message": "running",
                         "progress_updated_at": now,
                     }
                 },
+                sort=claim_sort,
                 return_document=True,
+            )
+
+            # If no doc found with started_at=None, try without that constraint
+            if claimed_doc is None:
+                claimed_doc = coll.find_one_and_update(
+                    claim_query,
+                    {
+                        "$set": {
+                            "status": WorkflowInstanceStatus.RUNNING.value,
+                            "locked_by": worker_id,
+                            "lock_expires_at": lock_expires,
+                            "progress_message": "running",
+                            "progress_updated_at": now,
+                        }
+                    },
+                    sort=claim_sort,
+                    return_document=True,
+                )
+            return claimed_doc
+
+        doc: dict[str, Any] | None = None
+        if not workflow_ids:
+            priority_query = {
+                "$and": [
+                    query,
+                    conversation_turn_filter,
+                    {"created_at": {"$gte": recent_conversation_cutoff}},
+                ]
+            }
+            doc = _claim_matching_instance(
+                priority_query,
+                claim_sort=[("created_at", -1), ("instance_id", 1)],
+            )
+
+        if priority_only and not workflow_ids and doc is None:
+            return None
+
+        if doc is None:
+            general_query = query
+            if not workflow_ids:
+                general_query = {
+                    "$and": [query, {"$nor": [stale_conversation_turn_filter]}]
+                }
+            doc = _claim_matching_instance(
+                general_query,
+                claim_sort=[("created_at", 1), ("instance_id", 1)],
             )
 
         if doc:

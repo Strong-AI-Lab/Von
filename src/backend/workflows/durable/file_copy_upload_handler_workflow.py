@@ -43,6 +43,18 @@ FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
 FILE_COPY_UPLOAD_ROUTE_OUTCOME_PREDICATE = "#V#has_file_copy_upload_route_outcome_json"
 FILE_COPY_UPLOAD_HANDLER_VERSION = "file_copy_upload_handler.v1"
 
+_OPTIONAL_CLASSIFY_CONTEXT_KEYS = (
+    "minimum_route_score",
+    "minimum_mutation_confidence",
+    "force_route_key",
+    "allow_interpret_fallback",
+    "available_workflow_ids",
+    "scholarly_workflow_id",
+    "cv_workflow_id",
+    "business_card_workflow_id",
+    "meeting_workflow_id",
+)
+
 _FILE_COPY_CONTEXT_INPUTS = {
     "concept_id": {
         "$context_key": "concept_id",
@@ -104,6 +116,10 @@ def _subworkflow_output_mappings_from_context_mappings(
             mapping["mapping_concept_id"] = mapping_concept_id
         result.append(mapping)
     return result
+
+
+def _optional_context_input(context_key: str) -> dict[str, Any]:
+    return {"$context_key": context_key, "$required": False}
 
 
 def _utc_now_iso() -> str:
@@ -373,6 +389,8 @@ def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinit
         {"tool_output_field": "result.route_hint", "context_key": "typing_route_hint"},
         {"tool_output_field": "result.route_confidence", "context_key": "typing_route_confidence"},
         {"tool_output_field": "result.route_scores", "context_key": "typing_route_scores"},
+        {"tool_output_field": "result.arxiv_id", "context_key": "arxiv_id"},
+        {"tool_output_field": "result.arxiv_ids", "context_key": "arxiv_ids"},
         {"tool_output_field": "result.typing_persisted", "context_key": "typing_persisted"},
         {"tool_output_field": "result.typing_relation_id", "context_key": "typing_relation_id"},
         {"tool_output_field": "result.typing_relation_errors", "context_key": "typing_relation_errors"},
@@ -415,14 +433,21 @@ def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinit
         **dict(_FILE_COPY_CONTEXT_INPUTS),
         "workflow_id": FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
         "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-        "minimum_route_score": {"$context_key": "minimum_route_score"},
-        "minimum_mutation_confidence": {"$context_key": "minimum_mutation_confidence"},
-        "force_route_key": {"$context_key": "force_route_key"},
-        "allow_interpret_fallback": {"$context_key": "allow_interpret_fallback"},
-        "scholarly_workflow_id": {"$context_key": "scholarly_workflow_id"},
-        "cv_workflow_id": {"$context_key": "cv_workflow_id"},
-        "business_card_workflow_id": {"$context_key": "business_card_workflow_id"},
-        "meeting_workflow_id": {"$context_key": "meeting_workflow_id"},
+        "minimum_route_score": _optional_context_input("minimum_route_score"),
+        "minimum_mutation_confidence": _optional_context_input(
+            "minimum_mutation_confidence"
+        ),
+        "force_route_key": _optional_context_input("force_route_key"),
+        "allow_interpret_fallback": _optional_context_input(
+            "allow_interpret_fallback"
+        ),
+        "available_workflow_ids": _optional_context_input("available_workflow_ids"),
+        "scholarly_workflow_id": _optional_context_input("scholarly_workflow_id"),
+        "cv_workflow_id": _optional_context_input("cv_workflow_id"),
+        "business_card_workflow_id": _optional_context_input(
+            "business_card_workflow_id"
+        ),
+        "meeting_workflow_id": _optional_context_input("meeting_workflow_id"),
         "typing_result": {"$context_key": "typing_result"},
         "typing_schema_version": {"$context_key": "typing_schema_version"},
         "route_hint": {"$context_key": "typing_route_hint"},
@@ -538,6 +563,8 @@ def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinit
         **dict(_FILE_COPY_CONTEXT_INPUTS),
         "workflow_id": {"$context_key": "upload_target_workflow_id"},
         "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+        "arxiv_id": _optional_context_input("arxiv_id"),
+        "arxiv_ids": _optional_context_input("arxiv_ids"),
     }
     specialised_output_mappings = [
         {"tool_output_field": "child_workflow_failed", "context_key": "upload_specialised_child_failed"},
@@ -730,6 +757,12 @@ def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinit
             "failed": WorkflowStateSpec(state_id="failed", terminal=True),
         },
         termination_states=("complete", "failed"),
+        metadata={
+            "variable_declarations": [
+                {"name": key, "default_value": None}
+                for key in _OPTIONAL_CLASSIFY_CONTEXT_KEYS
+            ],
+        },
         purpose=(
             "Workflow-first file upload handler with authoritative typing, "
             "classification subworkflow, specialised routing, fail-closed "

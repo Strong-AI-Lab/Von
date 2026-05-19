@@ -7641,6 +7641,7 @@ def build_turn_execution_record(
     completion_report: Mapping[str, Any] | None = None,
     required_prompt_tools: Sequence[Any] | None = None,
     required_tool_obligation_ledger: Mapping[str, Any] | None = None,
+    method_catalogue: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -7857,6 +7858,7 @@ def build_turn_execution_record(
         observed_equivalent_failed_tools=execution_surface_failed_equivalent_tools,
         tool_call_validation_failure_context=tool_call_validation_failure_context,
         existing_ledger=existing_required_tool_obligation_ledger,
+        method_catalogue=method_catalogue,
     )
     effective_successful_write_tools = _dedupe_string_sequence(
         [

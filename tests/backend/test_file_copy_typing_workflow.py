@@ -53,7 +53,9 @@ def test_infer_action_emits_authoritative_typing_outputs() -> None:
     assert result.status == "success"
     assert result.outputs["typing_schema_version"] == FILE_COPY_TYPING_SCHEMA_VERSION
     assert result.outputs["typing_determinable"] is True
-    assert result.outputs["route_hint"] == "scholarly"
+    assert result.outputs["route_hint"] == "arxiv"
+    assert result.outputs["arxiv_id"] == "2502.14996"
+    assert result.outputs["arxiv_ids"] == ["2502.14996"]
     assert result.outputs["primary_type_concept_id"] == "#V#scholarly_paper_file_copy"
     assert result.outputs["semantic_type_concept_id"] == "#V#scholarly_paper_file_copy"
     assert result.outputs["format_type_concept_id"] == "#V#pdf_computer_file_copy"

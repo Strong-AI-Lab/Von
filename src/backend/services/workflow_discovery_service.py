@@ -1522,7 +1522,15 @@ def discover_workflows(
                         reason="capability_index_unavailable",
                     )
                 else:
-                    return _finalise_result(ranked_matches=[], routing_matches=[])
+                    _record_discovery_stage_timing(
+                        stage_timings,
+                        stage="contract_direct_workflow_resolution",
+                        started_at=direct_resolution_started_at,
+                        status="completed",
+                        match_count=0,
+                        sufficient=False,
+                        reason="capability_index_unavailable",
+                    )
     except Exception as e:
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")

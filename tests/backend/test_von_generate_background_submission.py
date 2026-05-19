@@ -222,3 +222,11 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
 
     assert payload["requested_model"] == "gemma4:26b"
     assert payload["requested_client_type"] == "ollama"
+    assert payload["prompt"] == "What do you know about my current research interests?"
+    assert payload["user_prompt"] == (
+        "What do you know about my current research interests?"
+    )
+    assert payload["workflow_discovery"] == {
+        "selected_workflow_id": "#V#concept_search"
+    }
+    assert payload["continuation_context"] == {"applied": False}

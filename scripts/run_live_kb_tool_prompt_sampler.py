@@ -1400,6 +1400,7 @@ def _run_generate_background(
     base_url: str,
     prompt: str,
     model: str | None,
+    presenter_mode: bool,
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> tuple[str, dict[str, Any]]:
@@ -1412,6 +1413,8 @@ def _run_generate_background(
     cleaned_model = _safe_text(model)
     if cleaned_model:
         request_payload["model"] = cleaned_model
+    if presenter_mode:
+        request_payload["presenter_mode"] = True
     submission = _request_json(
         session,
         "POST",
@@ -2658,6 +2661,7 @@ def _run_prompt_replay_arm(
     requested_complexity_classes: Sequence[str],
     seed: int | None,
     arm_metadata: Mapping[str, Any] | None,
+    presenter_mode: bool,
 ) -> dict[str, Any]:
     session = requests.Session()
     session_name = _build_arm_session_name(
@@ -2682,6 +2686,7 @@ def _run_prompt_replay_arm(
         base_url=base_url,
         prompt=_safe_text(prompt_entry.get("prompt")),
         model=requested_model,
+        presenter_mode=presenter_mode,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
@@ -2998,6 +3003,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--output-json", default="")
+    parser.add_argument(
+        "--presenter-mode",
+        action="store_true",
+        help="Send presenter_mode=true to /von/generate to match the browser chat path.",
+    )
     parser.add_argument("--list-prompts", action="store_true")
     parser.add_argument("--list-complexity-classes", action="store_true")
     args = parser.parse_args(argv)
@@ -3190,6 +3200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_complexity_classes=requested_complexity_classes,
             seed=args.seed,
             arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
+            presenter_mode=bool(args.presenter_mode),
         )
         should_user_be_happy = bool(
             _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
@@ -3210,6 +3221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 requested_complexity_classes=requested_complexity_classes,
                 seed=args.seed,
                 arm_metadata=arm,
+                presenter_mode=bool(args.presenter_mode),
             )
             for arm in replay_arms
         ]

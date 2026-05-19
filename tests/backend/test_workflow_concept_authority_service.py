@@ -1029,6 +1029,8 @@ def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contra
         "index_in_rag",
         "workflow_id",
         "file_copy_concept_id",
+        "arxiv_id",
+        "arxiv_ids",
     }
 
     interpret_state_id = authority_service._step_concept_id(
@@ -1068,6 +1070,9 @@ def test_bootstrap_publishes_file_copy_upload_classification_route_map_metadata(
     route_by_key = {
         item["route_key"]: item for item in route_map.get("routes") or []
     }
+    assert route_by_key["arxiv"]["candidate_workflow_ids"] == [
+        "#V#arxiv_paper_representation_workflow"
+    ]
     assert route_by_key["scholarly"]["candidate_workflow_ids"] == [
         "#V#scholarly_paper_representation_workflow"
     ]

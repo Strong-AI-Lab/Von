@@ -124,6 +124,50 @@ def _method_lookup(method_catalogue: Mapping[str, Any] | None) -> set[str] | Non
     }
 
 
+def _method_definition_for_tool(
+    method_catalogue: Mapping[str, Any] | None,
+    tool_name: str,
+) -> Any | None:
+    if not isinstance(method_catalogue, Mapping):
+        return None
+    lowered = tool_name.lower()
+    for name, definition in method_catalogue.items():
+        if str(name).strip().lower() == lowered:
+            return definition
+    return None
+
+
+def _catalogue_operation_class(method_definition: Any | None) -> str | None:
+    if method_definition is None:
+        return None
+    if isinstance(method_definition, Mapping):
+        explicit = _safe_str(
+            method_definition.get("operation_class")
+            or method_definition.get("required_tool_operation_class")
+            or method_definition.get("obligation_operation_class")
+        )
+        category = _safe_str(method_definition.get("category")).lower()
+    else:
+        explicit = _safe_str(
+            getattr(method_definition, "operation_class", None)
+            or getattr(method_definition, "required_tool_operation_class", None)
+            or getattr(method_definition, "obligation_operation_class", None)
+        )
+        category = _safe_str(getattr(method_definition, "category", None)).lower()
+
+    if explicit:
+        return explicit
+    if category == "read":
+        return OPERATION_SEARCH_OR_RESOLUTION_READ
+    if category == "write":
+        return OPERATION_MUTATION_WRITE
+    if category in {"workflow", "workflow_execute"}:
+        return OPERATION_WORKFLOW_EXECUTE
+    if category in {"external", "side_effect", "external_side_effect"}:
+        return OPERATION_EXTERNAL_SIDE_EFFECT
+    return None
+
+
 def _allowed_lookup(allowed_tools: Sequence[Any] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
@@ -682,9 +726,24 @@ def build_required_tool_obligation_ledger(
         if not cleaned_tool:
             continue
         lowered = cleaned_tool.lower()
-        operation_class = classify_required_tool_operation(cleaned_tool)
-        operation_metadata_present = _has_required_tool_operation_metadata(cleaned_tool)
         existing = existing_lookup.get(lowered, {})
+        catalogue_operation_class = _catalogue_operation_class(
+            _method_definition_for_tool(method_catalogue, cleaned_tool)
+        )
+        existing_operation_class = _safe_str(existing.get("operation_class"))
+        existing_metadata_present = existing.get("operation_metadata_present") is True
+        operation_class = (
+            classify_required_tool_operation(cleaned_tool)
+            if _has_required_tool_operation_metadata(cleaned_tool)
+            else catalogue_operation_class
+            or (existing_operation_class if existing_metadata_present else "")
+            or OPERATION_EXTERNAL_SIDE_EFFECT
+        )
+        operation_metadata_present = bool(
+            _has_required_tool_operation_metadata(cleaned_tool)
+            or catalogue_operation_class
+            or existing_metadata_present
+        )
 
         if allowed is None:
             allowed_by_policy = existing.get("allowed_by_workflow_policy")

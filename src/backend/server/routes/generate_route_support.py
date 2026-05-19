@@ -79,13 +79,25 @@ def _build_generate_conversation_turn_instance_inputs(
         "preferred_language": request_language,
         "requested_model": requested_model,
         "requested_client_type": requested_client_type,
+        "prompt": prompt_text if isinstance(prompt_text, str) else "",
+        "user_prompt": prompt_text if isinstance(prompt_text, str) else "",
         "prompt_preview": prompt_text[:1000] if isinstance(prompt_text, str) else None,
         "workflow_discovery_result": (
             dict(workflow_discovery_result)
             if isinstance(workflow_discovery_result, Mapping)
             else None
         ),
+        "workflow_discovery": (
+            dict(workflow_discovery_result)
+            if isinstance(workflow_discovery_result, Mapping)
+            else None
+        ),
         "workflow_continuation_context": (
+            dict(workflow_continuation_context)
+            if isinstance(workflow_continuation_context, Mapping)
+            else None
+        ),
+        "continuation_context": (
             dict(workflow_continuation_context)
             if isinstance(workflow_continuation_context, Mapping)
             else None
@@ -117,6 +129,7 @@ def _build_generate_conversation_turn_instance_outputs(
 
     response_value = debug_payload.get("response")
     if isinstance(response_value, str) and response_value.strip():
+        outputs["response"] = response_value
         outputs["response_preview"] = response_value[:1000]
 
     tool_invocation_payload = debug_payload.get("tool_invocations")

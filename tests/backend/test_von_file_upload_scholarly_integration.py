@@ -292,6 +292,12 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
 
     monkeypatch.setenv("VON_DB_NAME", _CLONE_DB_NAME)
     mongo_client_module.invalidate_connection()
+    from src.backend.services.paper_representation_workflow_vontology_service import (
+        bootstrap_canonical_paper_representation_workflows,
+    )
+
+    paper_bootstrap_report = bootstrap_canonical_paper_representation_workflows()
+    assert paper_bootstrap_report.get("success") is True
     bootstrap_report = bootstrap_authoritative_file_copy_workflows()
     graph_errors = (bootstrap_report.get("graph_publication") or {}).get(
         "errors_by_workflow_id"

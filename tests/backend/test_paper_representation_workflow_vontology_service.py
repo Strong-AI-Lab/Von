@@ -405,6 +405,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     source_uri_predicate = concept_service.get_concept_by_concept_id(
         "#V#has_source_uri"
     )
+    assert source_uri_predicate is not None
     assert "#V#predicate" in (
         (source_uri_predicate.get("relationships") or {}).get("is_an_instance_of") or []
     )
@@ -494,6 +495,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         )
     )
     assert metadata_exemplars_source.startswith("text_relation:")
+    assert metadata_exemplars is not None
     assert "represent doi article" in metadata_exemplars.get("keywords", [])
     metadata_exemplar_text = json.dumps(metadata_exemplars, sort_keys=True).lower()
     assert "dl.acm.org/doi/full" in metadata_exemplar_text
@@ -524,6 +526,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     ].actions[0]
     assert extract_metadata_action.action_id == "llm.action"
     assert extract_metadata_action.execution_mode == "llm"
+    assert extract_metadata_action.prompt_contract is not None
     assert extract_metadata_action.prompt_contract["requested_prompt_concept_ids"] == [
         "#V#prompt_scholarly_article_metadata_extraction"
     ]
@@ -696,6 +699,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     summary_action = metadata_definition.states[summary_state_id].actions[0]
     assert summary_action.action_id == "llm.action"
     assert summary_action.execution_mode == "llm"
+    assert summary_action.prompt_contract is not None
     assert summary_action.prompt_contract["requested_prompt_concept_ids"] == [
         "#V#prompt_scholarly_article_representation_evidence_summary"
     ]
@@ -897,7 +901,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert normalise_action.inputs.get("prompt") == {
         "$context_key": "prompt",
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_prompt_to_prompt_parameter",
-        "$required": True,
+        "$required": False,
     }
     fetch_metadata_action = arxiv_definition.states[fetch_metadata_state_id].actions[0]
     assert fetch_metadata_action.action_id == "get_paper_metadata"

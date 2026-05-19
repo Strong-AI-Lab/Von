@@ -19,6 +19,7 @@ from .computer_file_copy_service import (
     build_file_copy_artifact_record,
     ensure_specific_computer_file_copy_type_exists,
 )
+from .arxiv_paper_link_service import extract_arxiv_id_candidates
 from .relationship_write_service import add_relationship
 from .text_value_service import upsert_singleton_text_relation
 
@@ -275,6 +276,7 @@ _FORMAT_RULES: tuple[dict[str, Any], ...] = (
 )
 
 _ROUTE_HINT_TO_TYPE_ID: dict[str, str] = {
+    "arxiv": "#V#scholarly_paper_file_copy",
     "scholarly": "#V#scholarly_paper_file_copy",
     "cv": "#V#curriculum_vitae_file_copy",
     "business_card": "#V#business_card_file_copy",
@@ -540,6 +542,12 @@ def _score_route_hints(
     is_image = format_type_concept_id == "#V#image_computer_file_copy"
     is_docx = format_type_concept_id == "#V#msword_docx_computer_file_copy"
 
+    arxiv_score = 0.0
+    if _ARXIV_FILENAME_RE.search(filename):
+        arxiv_score += 0.95
+    if arxiv_score and is_pdf:
+        arxiv_score += 0.04
+
     scholarly_score = 0.0
     if is_pdf:
         scholarly_score += 0.2
@@ -573,6 +581,7 @@ def _score_route_hints(
         meeting_score += 0.08
 
     return {
+        "arxiv": round(min(0.99, arxiv_score), 4),
         "scholarly": round(min(0.99, scholarly_score), 4),
         "cv": round(min(0.99, cv_score), 4),
         "business_card": round(min(0.99, business_card_score), 4),
@@ -620,6 +629,8 @@ def infer_file_copy_typing(
     semantic_type_concept_id = (
         _ROUTE_HINT_TO_TYPE_ID.get(route_hint) if isinstance(route_hint, str) else None
     )
+    arxiv_ids = extract_arxiv_id_candidates(original_filename, filename)
+    arxiv_id = arxiv_ids[0] if arxiv_ids else None
 
     asserted_type_concept_ids = _dedupe_strings(
         [
@@ -643,6 +654,8 @@ def infer_file_copy_typing(
         "route_hint": route_hint,
         "route_confidence": route_confidence,
         "route_scores": dict(route_scores),
+        "arxiv_id": arxiv_id,
+        "arxiv_ids": list(arxiv_ids),
         "matched_signals": list(matched_signals),
         "matched_rule_ids": list(
             _dedupe_strings([*(matched_rule_ids or ()), route_hint or ""])

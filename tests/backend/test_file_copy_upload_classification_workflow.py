@@ -22,6 +22,15 @@ def _seed_route_map() -> dict[str, object]:
         "allow_interpret_fallback": True,
         "routes": [
             {
+                "route_key": "arxiv",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": ["#V#arxiv_paper_representation_workflow"],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
                 "route_key": "scholarly",
                 "selected_route_mode": "specialised",
                 "mutation_route": True,
@@ -116,7 +125,7 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
     _patch_route_map(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
-        lambda _payload: ("#V#scholarly_paper_representation_workflow",),
+        lambda _payload: ("#V#arxiv_paper_representation_workflow",),
     )
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)
@@ -135,11 +144,11 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
     )
 
     assert result.status == "success"
-    assert result.outputs["route_key"] == "scholarly"
+    assert result.outputs["route_key"] == "arxiv"
     assert result.outputs["route_mode"] == "specialised"
     assert result.outputs["mutation_route"] is True
     assert result.outputs["target_workflow_available"] is True
-    assert result.outputs["target_workflow_id"] == "#V#scholarly_paper_representation_workflow"
+    assert result.outputs["target_workflow_id"] == "#V#arxiv_paper_representation_workflow"
     assert (
         result.outputs["typing_primary_type_concept_id"]
         == "#V#scholarly_paper_file_copy"
@@ -156,7 +165,7 @@ def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -
     _patch_route_map(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
-        lambda _payload: ("#V#scholarly_paper_representation_workflow",),
+        lambda _payload: ("#V#arxiv_paper_representation_workflow",),
     )
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)
@@ -166,6 +175,19 @@ def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -
         "original_filename": "2502.14996.pdf",
         "content_type": "application/pdf",
         "minimum_mutation_confidence": 0.95,
+        "typing_result": {
+            "schema_version": "file_copy_typing.v1",
+            "route_hint": "arxiv",
+            "route_confidence": 0.9,
+            "route_scores": {"arxiv": 0.9},
+            "primary_type_concept_id": "#V#scholarly_paper_file_copy",
+            "semantic_type_concept_id": "#V#scholarly_paper_file_copy",
+            "format_type_concept_id": "#V#pdf_computer_file_copy",
+            "asserted_type_concept_ids": [
+                "#V#scholarly_paper_file_copy",
+                "#V#pdf_computer_file_copy",
+            ],
+        },
     }
     result = registry.execute(
         "file_copy_upload.classify",
@@ -175,7 +197,7 @@ def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -
     )
 
     assert result.status == "success"
-    assert result.outputs["route_key"] == "scholarly"
+    assert result.outputs["route_key"] == "arxiv"
     assert result.outputs["route_mode"] == "fail_closed"
     assert result.outputs["fail_closed"] is True
     assert "mutation_route_confidence_below_threshold" in result.outputs["route_reasons"]

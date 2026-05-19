@@ -7,6 +7,8 @@ from threading import Thread
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from src.backend.workflows.action_registry import ActionRegistry
 from src.backend.workflows.durable.durable_executor import DurableWorkflowResult
 from src.backend.workflows.durable.models import (
@@ -48,6 +50,31 @@ class _WorkerManagerStub:
         return True
 
 
+class _PollManagerStub:
+    def __init__(self, general_instances: list[WorkflowInstance]) -> None:
+        self.general_instances = general_instances
+        self.calls: list[dict[str, Any]] = []
+
+    def find_and_claim_instance(
+        self,
+        worker_id: str,
+        *,
+        workflow_ids: list[str] | None = None,
+        priority_only: bool = False,
+    ) -> WorkflowInstance | None:
+        self.calls.append(
+            {
+                "worker_id": worker_id,
+                "workflow_ids": workflow_ids,
+                "priority_only": priority_only,
+            }
+        )
+        if priority_only:
+            return None
+        if not self.general_instances:
+            return None
+        return self.general_instances.pop(0)
+
 def _build_instance() -> WorkflowInstance:
     instance = WorkflowInstance.create(
         "#V#workflow_introspection_maintenance_workflow",
@@ -57,6 +84,50 @@ def _build_instance() -> WorkflowInstance:
     )
     instance.status = WorkflowInstanceStatus.RUNNING
     return instance
+
+
+def _build_pending_instance(workflow_id: str, instance_id: str) -> WorkflowInstance:
+    instance = WorkflowInstance.create(
+        workflow_id,
+        user_id="#V#user",
+        org_id="#V#org",
+        namespace="#V#user@org",
+    )
+    instance.instance_id = instance_id
+    instance.status = WorkflowInstanceStatus.RUNNING
+    return instance
+
+
+def test_worker_reserves_capacity_for_priority_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_DURABLE_WORKER_PRIORITY_RESERVED_SLOTS", "1")
+    general_instances = [
+        _build_pending_instance("#V#episode_evaluation_workflow", f"background-{index}")
+        for index in range(5)
+    ]
+    manager = _PollManagerStub(general_instances)
+    worker = DurableWorkflowWorker(
+        worker_id="worker-1548",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id: None,
+        batch_size=5,
+    )
+    worker._running = True
+    worker._process_instance = cast(Any, lambda _instance: None)
+
+    worker._poll_once()
+
+    assert [call["priority_only"] for call in manager.calls] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert len(worker._current_instances) == 4
+    assert len(manager.general_instances) == 1
 
 
 def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:

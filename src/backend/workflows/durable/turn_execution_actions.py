@@ -51,7 +51,6 @@ _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_IDS: frozenset[str] = frozenset(
     {"workflow_invoke_subworkflow", "llm.action"}
 )
 
-
 def _normalise_tool_batch_cap(
     raw_value: Any,
     *,
@@ -223,46 +222,188 @@ def _build_recovery_retry_launch_inputs(target_token: str | None) -> dict[str, A
     return launch_inputs
 
 
+def _normalise_turn_prompt(data: Mapping[str, Any]) -> str:
+    prompt = data.get("user_prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        prompt = data.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        prompt = data.get("prompt_preview")
+    return prompt.strip() if isinstance(prompt, str) else ""
+
+
+def _build_turn_discovery_query_text(data: Mapping[str, Any]) -> str:
+    parts = [_normalise_turn_prompt(data)]
+    for key in (
+        "turn_expected_outcome_summary",
+        "turn_expected_grounding_requirement",
+        "turn_selector_guidance",
+        "turn_answering_guidance",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    required_tools = data.get("turn_expected_required_tools")
+    if isinstance(required_tools, Sequence) and not isinstance(
+        required_tools, (str, bytes, bytearray)
+    ):
+        parts.extend(str(item) for item in required_tools if item)
+    return "\n".join(part for part in parts if part)
+
+
+def _build_turn_primary_discovery_query_text(data: Mapping[str, Any]) -> str:
+    return _normalise_turn_prompt(data)
+
+
+def _discovery_candidate_entries(discovery: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_candidates = discovery.get("matches")
+    if not isinstance(raw_candidates, Sequence) or isinstance(
+        raw_candidates, (str, bytes, bytearray)
+    ):
+        raw_candidates = discovery.get("routing_matches")
+    if not isinstance(raw_candidates, Sequence) or isinstance(
+        raw_candidates, (str, bytes, bytearray)
+    ):
+        raw_candidates = discovery.get("candidates")
+    if not isinstance(raw_candidates, Sequence) or isinstance(
+        raw_candidates, (str, bytes, bytearray)
+    ):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for item in raw_candidates:
+        if not isinstance(item, Mapping):
+            continue
+        entry = {str(key): value for key, value in item.items() if isinstance(key, str)}
+        entry.setdefault("candidate_source", "workflow_discovery")
+        entries.append(entry)
+    return entries
+
+
+def _discover_turn_workflows_for_durable_action(
+    request: WorkflowActionRequest,
+) -> dict[str, Any]:
+    discovery = request.data.get("workflow_discovery_result")
+    if not isinstance(discovery, Mapping) or not discovery:
+        discovery = request.data.get("workflow_discovery")
+    if isinstance(discovery, Mapping) and discovery:
+        return dict(discovery)
+
+    from ...services.workflow_discovery_service import discover_workflows_for_turn
+
+    raw_discovery_timeout_seconds = request.data.get(
+        "workflow_discovery_timeout_seconds"
+    )
+    discovery_timeout_seconds = (
+        raw_discovery_timeout_seconds
+        if isinstance(raw_discovery_timeout_seconds, (int, float, str))
+        else None
+    )
+    primary_query_text = _build_turn_primary_discovery_query_text(request.data)
+    enriched_query_text = _build_turn_discovery_query_text(request.data)
+    query_text = primary_query_text or enriched_query_text
+
+    def _run_discovery(query: str, *, query_source: str) -> dict[str, Any]:
+        if not query.strip():
+            return {}
+        result = discover_workflows_for_turn(
+            query,
+            namespace=request.environment.user_namespace,
+            timeout_seconds=discovery_timeout_seconds,
+        )
+        discovery_result = dict(result) if isinstance(result, Mapping) else {}
+        if discovery_result:
+            discovery_result.setdefault("query", query)
+            discovery_result.setdefault("requested_query", query)
+            discovery_result["query_source"] = query_source
+        return discovery_result
+
+    discovery_result = _run_discovery(
+        query_text,
+        query_source="user_prompt" if primary_query_text else "turn_enriched_context",
+    )
+    if _discovery_candidate_entries(discovery_result):
+        if enriched_query_text and enriched_query_text != query_text:
+            discovery_result["fallback_query"] = enriched_query_text
+        return discovery_result
+    if enriched_query_text and enriched_query_text != query_text:
+        enriched_discovery_result = _run_discovery(
+            enriched_query_text,
+            query_source="turn_enriched_context",
+        )
+        enriched_discovery_result["primary_query"] = query_text
+        enriched_discovery_result["primary_match_absence_reason"] = (
+            discovery_result.get("match_absence_reason")
+        )
+        if _discovery_candidate_entries(enriched_discovery_result):
+            return enriched_discovery_result
+        discovery_result = enriched_discovery_result
+    return {
+        "matches": [],
+        "candidates": [],
+        "routing_matches": [],
+        "query": query_text,
+        "requested_query": query_text,
+        "match_count": 0,
+        "candidate_count": 0,
+        "search_sources": discovery_result.get("search_sources")
+        if isinstance(discovery_result.get("search_sources"), list)
+        else ["workflow_discovery_service"],
+        "match_absence_reason": discovery_result.get("match_absence_reason")
+        or "durable_workflow_discovery_no_match",
+        "errors": discovery_result.get("errors"),
+    }
+
+
+def _select_workflow_from_discovery(discovery: Mapping[str, Any]) -> str | None:
+    explicit = _coerce_non_empty_text(discovery.get("selected_workflow_id"))
+    if explicit:
+        return explicit
+    for entry in _discovery_candidate_entries(discovery):
+        concept_id = _coerce_non_empty_text(
+            entry.get("concept_id") or entry.get("workflow_id") or entry.get("id")
+        )
+        if concept_id:
+            return concept_id
+    return None
+
+
 def _build_turn_execution_route_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         """Resolve the workflow routing for the current turn."""
-        from ...services.workflow_discovery_service import (
-            discover_workflows_for_turn,
-        )
-
-        # 1. Use existing discovery results if provided, else perform discovery
-        discovery = request.data.get("workflow_discovery")
-        prompt = request.data.get("user_prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            prompt = request.data.get("prompt")
-        prompt = prompt.strip() if isinstance(prompt, str) else ""
-        raw_discovery_timeout_seconds = request.data.get(
-            "workflow_discovery_timeout_seconds"
-        )
-        discovery_timeout_seconds = (
-            raw_discovery_timeout_seconds
-            if isinstance(raw_discovery_timeout_seconds, (int, float, str))
-            else None
-        )
-
-        if not discovery or not discovery.get("selected_workflow_id"):
-            discovery_result = discover_workflows_for_turn(
-                prompt,
-                namespace=request.environment.user_namespace,
-                timeout_seconds=discovery_timeout_seconds,
+        discovery = _discover_turn_workflows_for_durable_action(request)
+        selected_workflow_id = _select_workflow_from_discovery(discovery)
+        candidate_entries = _discovery_candidate_entries(discovery)
+        candidate_ids = [
+            concept_id
+            for concept_id in (
+                _coerce_non_empty_text(
+                    entry.get("concept_id")
+                    or entry.get("workflow_id")
+                    or entry.get("id")
+                )
+                for entry in candidate_entries
             )
-            discovery = discovery_result or {}
-
-        selected_workflow_id = discovery.get("selected_workflow_id")
-
-        # If still no workflow, we might want to default to a generic one
-        # but for now we follow the existing logic.
+            if concept_id
+        ]
 
         return WorkflowActionResult(
             status="success",
             outputs={
                 "selected_workflow_id": selected_workflow_id,
+                "workflow_id": selected_workflow_id,
                 "workflow_discovery": discovery,
+                "workflow_discovery_result": discovery,
+                "workflow_routing": {
+                    "schema_version": "durable_turn_execution_routing.v1",
+                    "selected_workflow_id": selected_workflow_id,
+                    "candidate_workflow_ids": candidate_ids,
+                    "selector_source": "durable_discovery_fallback",
+                    "selection_rationale": (
+                        "first_routing_match"
+                        if selected_workflow_id
+                        else "no_routing_match"
+                    ),
+                },
             },
         )
 
@@ -277,6 +418,21 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
         action. This registry-level fallback keeps the action ID executable on
         pure workflow-engine paths without inventing a second policy surface.
         """
+
+        discovery = _discover_turn_workflows_for_durable_action(request)
+        candidate_entries = _discovery_candidate_entries(discovery)
+        candidate_ids = [
+            concept_id
+            for concept_id in (
+                _coerce_non_empty_text(
+                    entry.get("concept_id")
+                    or entry.get("workflow_id")
+                    or entry.get("id")
+                )
+                for entry in candidate_entries
+            )
+            if concept_id
+        ]
 
         passthrough_keys = (
             "workflow_discovery_result",
@@ -329,7 +485,33 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             outputs["workflow_discovery"] = dict(
                 request.data["workflow_discovery_result"]
             )
+        outputs["workflow_discovery_result"] = discovery
+        outputs["workflow_discovery"] = discovery
         outputs.setdefault("selector_prompt_available", False)
+        outputs.setdefault("selector_prompt_id", "durable_selector_prompt_unavailable")
+        outputs.setdefault(
+            "selector_prompt_text",
+            "Durable selector prompt unavailable; routing uses workflow discovery directly.",
+        )
+        outputs.setdefault("selector_call_prompt_text", "Select workflow")
+        outputs.setdefault("selector_requested_prompt_ids", [])
+        outputs.setdefault("selector_prompt_provenance", {})
+        outputs.setdefault(
+            "selector_prompt_failure_reason",
+            "durable_selector_prompt_unavailable",
+        )
+        outputs.setdefault("selector_prompt_failure_detail", None)
+        outputs.setdefault("selector_candidate_entries", candidate_entries)
+        outputs.setdefault("selector_candidate_ids", candidate_ids)
+        outputs.setdefault("selector_excluded_candidate_entries", [])
+        outputs.setdefault("selector_excluded_candidate_ids", [])
+        outputs.setdefault("selector_discovered_workflow_ids", candidate_ids)
+        outputs.setdefault("selector_context_messages", [])
+        outputs.setdefault("selector_context_lineage", {})
+        outputs.setdefault("selector_candidate_count", len(candidate_entries))
+        outputs.setdefault("selector_excluded_candidate_count", 0)
+        outputs.setdefault("selector_policy_recommendation", {})
+        outputs.setdefault("selector_continuation_routing_context_text", "")
         return WorkflowActionResult(outputs=outputs)
 
     return _handle

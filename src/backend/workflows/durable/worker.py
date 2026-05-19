@@ -74,6 +74,9 @@ class DurableWorkflowWorker:
         self._poll_interval = poll_interval_seconds
         self._batch_size = batch_size
         self._heartbeat_interval = heartbeat_interval_seconds
+        self._priority_reserved_slots = self._load_priority_reserved_slots(
+            batch_size=batch_size
+        )
 
         self._executor = DurableWorkflowExecutor(
             registry=registry,
@@ -99,6 +102,17 @@ class DurableWorkflowWorker:
         hostname = socket.gethostname()[:16]
         pid = os.getpid()
         return f"worker_{hostname}_{pid}"
+
+    @staticmethod
+    def _load_priority_reserved_slots(*, batch_size: int) -> int:
+        """Return worker slots reserved for fresh user-turn workflows."""
+        try:
+            configured = int(os.getenv("VON_DURABLE_WORKER_PRIORITY_RESERVED_SLOTS", "1"))
+        except (TypeError, ValueError):
+            configured = 1
+        if batch_size <= 1:
+            return 0
+        return min(max(configured, 0), batch_size - 1)
 
     @property
     def worker_id(self) -> str:
@@ -207,24 +221,16 @@ class DurableWorkflowWorker:
         """Single poll iteration."""
         # Check capacity
         with self._lock:
-            available_slots = self._batch_size - len(self._current_instances)
+            active_count = len(self._current_instances)
+            available_slots = self._batch_size - active_count
 
         if available_slots <= 0:
             return
 
-        # Claim instances
-        for _ in range(available_slots):
-            if not self._running:
-                break
-
-            instance = self._instance_manager.find_and_claim_instance(self._worker_id)
-            if instance is None:
-                break
-
-            # Start processing thread
+        def _start_instance(instance: WorkflowInstance) -> bool:
             with self._lock:
                 if instance.instance_id in self._current_instances:
-                    continue
+                    return False
 
                 thread = threading.Thread(
                     target=self._process_instance,
@@ -234,6 +240,36 @@ class DurableWorkflowWorker:
                 )
                 self._current_instances[instance.instance_id] = thread
                 thread.start()
+                return True
+
+        started_count = 0
+        for _ in range(available_slots):
+            if not self._running:
+                break
+
+            instance = self._instance_manager.find_and_claim_instance(
+                self._worker_id,
+                priority_only=True,
+            )
+            if instance is None:
+                break
+            if _start_instance(instance):
+                started_count += 1
+
+        available_slots -= started_count
+        background_capacity = max(
+            0,
+            self._batch_size - self._priority_reserved_slots - active_count - started_count,
+        )
+        general_slots = min(available_slots, background_capacity)
+        for _ in range(general_slots):
+            if not self._running:
+                break
+
+            instance = self._instance_manager.find_and_claim_instance(self._worker_id)
+            if instance is None:
+                break
+            _start_instance(instance)
 
     def _process_instance(self, instance: WorkflowInstance) -> None:
         """Process a single workflow instance.

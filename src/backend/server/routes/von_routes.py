@@ -16,11 +16,13 @@ import secrets
 import uuid
 import json
 from pathlib import Path
+from urllib.parse import unquote
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, Sequence, cast
+from typing import Any, Dict, Iterator, Mapping, Sequence, cast
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
+from ...workflows.durable.models import WorkflowInstanceStatus
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
@@ -97,6 +99,7 @@ from ...services.python_decision_authority_service import (
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     WorkflowExecutionTrace,
     insert_workflow_execution_trace,
 )
@@ -3672,6 +3675,7 @@ def download_file_copy(file_copy_concept_id: str):
 
     # Allow query-parameter override so callers don't need to place the full id in the path.
     concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = unquote(str(concept_id or ""))
     concept_id = str(concept_id or "").strip()
     if not concept_id:
         return jsonify({"success": False, "error": "missing_concept_id"}), 400
@@ -3689,6 +3693,7 @@ def download_file_copy(file_copy_concept_id: str):
 
     result = fetch_file_copy_bytes(
         file_copy_concept_id=concept_id,
+        user_concept_id=user_concept_id,
         allow_large=True,
         logger=current_app.logger,
     )
@@ -3755,6 +3760,7 @@ def delete_file_copy(file_copy_concept_id: str):
         )
 
     concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = unquote(str(concept_id or ""))
     concept_id = str(concept_id or "").strip()
     if not concept_id:
         return jsonify({"success": False, "error": "missing_concept_id"}), 400
@@ -4373,6 +4379,152 @@ def get_generation_progress(request_id: str):
 # ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
 
 
+def _extract_durable_display_text(
+    display_elements: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(display_elements, Mapping):
+        return None
+    elements = display_elements.get("elements")
+    if not isinstance(elements, list):
+        return None
+    for element in elements:
+        if not isinstance(element, Mapping):
+            continue
+        payload = element.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        text_value = payload.get("text")
+        if isinstance(text_value, str) and text_value.strip():
+            return text_value.strip()
+    return None
+
+
+def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
+    outputs = dict(instance.outputs) if isinstance(instance.outputs, Mapping) else {}
+    display_elements = outputs.get("display_elements")
+    if not isinstance(display_elements, Mapping):
+        display_elements = None
+
+    response_text = outputs.get("response")
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = _extract_durable_display_text(display_elements)
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("response_preview")
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("error")
+    if not isinstance(response_text, str):
+        response_text = ""
+
+    session_id = outputs.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        inputs = instance.inputs if isinstance(instance.inputs, Mapping) else {}
+        session_id = inputs.get("conversation_session_id")
+
+    request_id = outputs.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        request_id = getattr(instance, "source_event_id", None)
+
+    llm_debug: dict[str, Any] = {
+        "response": response_text,
+        "request_id": request_id,
+        "workflow_instance_id": getattr(instance, "instance_id", None),
+        "workflow_instance_status": getattr(getattr(instance, "status", None), "value", None)
+        or str(getattr(instance, "status", "") or ""),
+        "workflow_instance_current_state": getattr(instance, "current_state", None),
+        "background_result_source": "durable_conversation_turn_instance",
+    }
+    for key in (
+        "workflow_discovery",
+        "workflow_routing",
+        "turn_execution_record",
+        "turn_execution_diagnostics",
+        "response_transformations",
+    ):
+        value = outputs.get(key)
+        if isinstance(value, Mapping):
+            llm_debug[key] = dict(value)
+
+    return {
+        "request_id": request_id,
+        "session_id": session_id,
+        "conversation_session_id": session_id,
+        "conversation_session_name": None,
+        "conversation_session_created": False,
+        "response": response_text,
+        "response_channels": None,
+        "llm_debug": llm_debug,
+        "display_elements": dict(display_elements) if display_elements else None,
+        "rag_trace": None,
+        "background_result_source": "durable_conversation_turn_instance",
+        "workflow_instance_id": getattr(instance, "instance_id", None),
+    }
+
+
+def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
+    try:
+        manager = get_instance_manager()
+        instances = manager.list_instances(
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            source_event_type="conversation_turn",
+            source_event_id=task_id,
+            status=(
+                WorkflowInstanceStatus.COMPLETED,
+                WorkflowInstanceStatus.FAILED,
+                WorkflowInstanceStatus.CANCELLED,
+            ),
+            limit=1,
+        )
+    except Exception as exc:
+        current_app.logger.warning(
+            "[background_task] Durable turn reconciliation failed for task %s: %s",
+            task_id,
+            exc,
+        )
+        return None
+    return instances[0] if instances else None
+
+
+def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> Any:
+    if status is not None and getattr(status, "status", None) == "completed":
+        return status
+
+    instance = _find_terminal_durable_turn_instance(task_id)
+    if instance is None:
+        return status
+
+    instance_status = getattr(instance, "status", None)
+    workflow_status = getattr(instance_status, "value", None) or str(
+        instance_status or ""
+    )
+    if workflow_status == WorkflowInstanceStatus.FAILED.value:
+        task_status = "failed"
+    elif workflow_status == WorkflowInstanceStatus.CANCELLED.value:
+        task_status = "cancelled"
+    else:
+        task_status = "completed"
+
+    result = _build_durable_turn_background_result(instance)
+    progress = {
+        "status": task_status,
+        "source": "durable_conversation_turn_instance",
+        "workflow_instance_id": getattr(instance, "instance_id", None),
+        "workflow_status": workflow_status,
+        "workflow_current_state": getattr(instance, "current_state", None),
+    }
+    error = getattr(instance, "error", None) if task_status != "completed" else None
+    marker = getattr(background_task_registry, "mark_terminal_external", None)
+    if callable(marker):
+        return marker(
+            task_id,
+            status=task_status,
+            result=result,
+            error=error,
+            progress=progress,
+            session_id=result.get("session_id"),
+        )
+    return status
+
+
 @von_bp.route("/api/task/status/<task_id>", methods=["GET"])
 def get_task_status(task_id: str):
     """Get the status of a background task.
@@ -4385,7 +4537,9 @@ def get_task_status(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
-    status = background_task_registry.get_task_status(task_id.strip())
+    task_id_clean = task_id.strip()
+    status = background_task_registry.get_task_status(task_id_clean)
+    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
     if status is None:
         return jsonify({"error": "Task not found", "task_id": task_id}), 404
 
@@ -4544,7 +4698,9 @@ def get_task_result(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
-    status = background_task_registry.get_task_status(task_id.strip())
+    task_id_clean = task_id.strip()
+    status = background_task_registry.get_task_status(task_id_clean)
+    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
     if status is None:
         return jsonify({"error": "Task not found", "task_id": task_id}), 404
 
@@ -6333,6 +6489,12 @@ def _looks_like_internal_status_diagnostic(value: str | None) -> bool:
     if lowered.startswith("i do not yet have a complete workflow-backed answer"):
         return True
 
+    if lowered.startswith("i ran tools for this request"):
+        return True
+
+    if "required workflow_execute-based" in lowered:
+        return True
+
     if lowered.startswith("workflow ") and " (state:" in lowered:
         return True
 
@@ -6443,6 +6605,173 @@ def _extract_created_concept_labels_from_payload(
     return labels[: max(1, max_items)]
 
 
+def _iter_presenter_nested_mappings(
+    value: Any,
+    *,
+    max_depth: int = 7,
+    max_nodes: int = 240,
+) -> Iterator[Mapping[str, Any]]:
+    """Yield bounded nested mapping evidence from tool payloads."""
+
+    import json
+
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    while stack and visited < max_nodes:
+        current, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        if isinstance(current, Mapping):
+            visited += 1
+            yield current
+
+            preview = current.get("_preview")
+            if isinstance(preview, str) and preview.strip().startswith(("{", "[")):
+                try:
+                    stack.append((json.loads(preview), depth + 1))
+                except Exception:
+                    pass
+
+            for nested_value in current.values():
+                if isinstance(nested_value, (Mapping, list, tuple)):
+                    stack.append((nested_value, depth + 1))
+        elif isinstance(current, (list, tuple)):
+            for nested_value in reversed(current):
+                if isinstance(nested_value, (Mapping, list, tuple)):
+                    stack.append((nested_value, depth + 1))
+
+
+def _append_unique_presenter_line(
+    lines: list[str],
+    seen: set[str],
+    line: str | None,
+    *,
+    limit: int,
+) -> None:
+    cleaned = line.strip() if isinstance(line, str) else ""
+    if not cleaned or cleaned in seen or len(lines) >= limit:
+        return
+    seen.add(cleaned)
+    lines.append(cleaned)
+
+
+def _extract_nested_workflow_tool_evidence(
+    tool_name: str,
+    payload: dict[str, Any],
+    *,
+    max_lines: int = 8,
+) -> dict[str, Any]:
+    """Summarise nested workflow evidence hidden inside aggregate tool payloads."""
+
+    tool_name_lower = (tool_name or "").lower()
+    workflow_evidence_seen = tool_name_lower.startswith("workflow_")
+    durable_evidence_lines: list[str] = []
+    blocker_lines: list[str] = []
+    durable_seen: set[str] = set()
+    blocker_seen: set[str] = set()
+
+    for mapping in _iter_presenter_nested_mappings(payload):
+        if any(
+            key in mapping
+            for key in (
+                "iteration_results",
+                "subworkflow_invocation",
+                "subworkflow_result_envelope",
+                "workflow_terminal",
+                "workflow_terminal_state",
+                "last_action_id",
+                "last_action_outputs",
+            )
+        ):
+            workflow_evidence_seen = True
+
+        action_id = _progress_str(mapping.get("last_action_id")) or _progress_str(
+            mapping.get("last_action_target_id")
+        )
+        action_status = (
+            _progress_str(mapping.get("last_action_status"))
+            or _progress_str(mapping.get("last_action_outcome"))
+            or _progress_str(mapping.get("last_step_outcome"))
+        )
+        if action_id and action_status:
+            _append_unique_presenter_line(
+                durable_evidence_lines,
+                durable_seen,
+                f"- Nested workflow action `{action_id}` reported `{action_status}`.",
+                limit=max_lines,
+            )
+
+        terminal_state = _progress_str(mapping.get("workflow_terminal_state"))
+        final_state = _progress_str(mapping.get("final_state"))
+        if terminal_state or final_state:
+            workflow_evidence_seen = True
+            _append_unique_presenter_line(
+                durable_evidence_lines,
+                durable_seen,
+                f"- Nested workflow reached `{terminal_state or final_state}`.",
+                limit=max_lines,
+            )
+
+        paper_concept_id = _progress_str(mapping.get("paper_concept_id"))
+        file_copy_concept_id = _progress_str(mapping.get("file_copy_concept_id"))
+        representation_verified = mapping.get("scholarly_representation_verified")
+        if representation_verified is True or paper_concept_id or file_copy_concept_id:
+            workflow_evidence_seen = True
+            if representation_verified is True:
+                _append_unique_presenter_line(
+                    durable_evidence_lines,
+                    durable_seen,
+                    (
+                        "- Representation/read-back verified"
+                        + (f" for `{paper_concept_id}`" if paper_concept_id else "")
+                        + "."
+                    ),
+                    limit=max_lines,
+                )
+            elif paper_concept_id:
+                _append_unique_presenter_line(
+                    durable_evidence_lines,
+                    durable_seen,
+                    f"- Nested workflow produced paper concept `{paper_concept_id}`.",
+                    limit=max_lines,
+                )
+            if file_copy_concept_id:
+                _append_unique_presenter_line(
+                    durable_evidence_lines,
+                    durable_seen,
+                    f"- Nested workflow produced file-copy concept `{file_copy_concept_id}`.",
+                    limit=max_lines,
+                )
+
+        nested_tool = _progress_str(mapping.get("mcp_tool")) or _progress_str(
+            mapping.get("mcp_requested_tool")
+        )
+        error_code = _progress_str(mapping.get("error_code"))
+        error_text = _progress_str(mapping.get("error"))
+        mcp_result = mapping.get("mcp_result")
+        if isinstance(mcp_result, Mapping):
+            error_code = error_code or _progress_str(mcp_result.get("error_code"))
+            error_text = error_text or _progress_str(mcp_result.get("error"))
+        if error_code or error_text:
+            workflow_evidence_seen = True
+            label = nested_tool or _progress_str(mapping.get("tool")) or tool_name or "tool"
+            detail = ": ".join(
+                part for part in (error_code, error_text) if isinstance(part, str) and part
+            )
+            _append_unique_presenter_line(
+                blocker_lines,
+                blocker_seen,
+                f"- `{label}` reported {detail}.",
+                limit=max_lines,
+            )
+
+    return {
+        "workflow_evidence_seen": workflow_evidence_seen,
+        "durable_evidence_lines": durable_evidence_lines,
+        "blocker_lines": blocker_lines,
+    }
+
+
 def _build_presenter_screen_summary_from_tool_messages(
     tool_messages: list[dict],
 ) -> str | None:
@@ -6464,6 +6793,11 @@ def _build_presenter_screen_summary_from_tool_messages(
     relationship_write_seen = False
     names_write_seen = False
     concept_create_seen = False
+    nested_workflow_evidence_seen = False
+    nested_workflow_lines: list[str] = []
+    nested_workflow_blocker_lines: list[str] = []
+    nested_line_seen: set[str] = set()
+    nested_blocker_seen: set[str] = set()
 
     index = 0
     for msg in tool_messages:
@@ -6532,6 +6866,27 @@ def _build_presenter_screen_summary_from_tool_messages(
                 if concept_labels:
                     lines.append(f"   created: {', '.join(concept_labels)}")
 
+            nested_evidence = _extract_nested_workflow_tool_evidence(
+                tool_name_text, payload
+            )
+            nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
+                nested_evidence.get("workflow_evidence_seen")
+            )
+            for nested_line in nested_evidence.get("durable_evidence_lines", []):
+                _append_unique_presenter_line(
+                    nested_workflow_lines,
+                    nested_line_seen,
+                    nested_line,
+                    limit=12,
+                )
+            for blocker_line in nested_evidence.get("blocker_lines", []):
+                _append_unique_presenter_line(
+                    nested_workflow_blocker_lines,
+                    nested_blocker_seen,
+                    blocker_line,
+                    limit=12,
+                )
+
     if index == 0:
         return None
 
@@ -6556,8 +6911,22 @@ def _build_presenter_screen_summary_from_tool_messages(
             lines.append("- Name writes detected")
         if concept_create_seen:
             lines.append("- Concept creation detected")
+    elif nested_workflow_evidence_seen:
+        lines.append("Nested workflow evidence was detected.")
+        lines.append(
+            "- No direct top-level write-tool summary was available; do not treat this as evidence that nothing was written or verified."
+        )
     else:
         lines.append("No write activity was detected in the tool results.")
+
+    if nested_workflow_lines:
+        lines.append("")
+        lines.append("Nested workflow/read-back evidence:")
+        lines.extend(nested_workflow_lines)
+    if nested_workflow_blocker_lines:
+        lines.append("")
+        lines.append("Typed tool blockers:")
+        lines.extend(nested_workflow_blocker_lines)
 
     return "\n".join(lines).strip() or None
 
@@ -6723,11 +7092,11 @@ def _build_presenter_workflow_execution_follow_up_summary(
         lines.append(
             "Verification still needs follow-up before Von should claim the user task is complete."
         )
-        blocking_failure_codes = [
-            _progress_str(item)
-            for item in completion_gate_map.get("blocking_failure_codes", [])
-            if _progress_str(item)
-        ]
+        blocking_failure_codes: list[str] = []
+        for item in completion_gate_map.get("blocking_failure_codes", []):
+            blocking_failure_code = _progress_str(item)
+            if blocking_failure_code:
+                blocking_failure_codes.append(blocking_failure_code)
         if blocking_failure_codes:
             lines.append(
                 "- Blocking failure codes: " + ", ".join(blocking_failure_codes)
@@ -6876,6 +7245,11 @@ def _build_tool_messages_prompt_blob(
     executed_lines: list[str] = []
     writes_lines: list[str] = []
     relation_evidence_lines: list[str] = []
+    nested_workflow_lines: list[str] = []
+    nested_workflow_blocker_lines: list[str] = []
+    nested_workflow_evidence_seen = False
+    nested_line_seen: set[str] = set()
+    nested_blocker_seen: set[str] = set()
 
     # Track a small set of write categories we care about for UI truthfulness.
     description_write_seen = False
@@ -7095,6 +7469,24 @@ def _build_tool_messages_prompt_blob(
 
         _append_relation_evidence(tool_name, payload)
         _mark_description_write(tool_name, payload)
+        nested_evidence = _extract_nested_workflow_tool_evidence(tool_name, payload)
+        nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
+            nested_evidence.get("workflow_evidence_seen")
+        )
+        for nested_line in nested_evidence.get("durable_evidence_lines", []):
+            _append_unique_presenter_line(
+                nested_workflow_lines,
+                nested_line_seen,
+                nested_line,
+                limit=16,
+            )
+        for blocker_line in nested_evidence.get("blocker_lines", []):
+            _append_unique_presenter_line(
+                nested_workflow_blocker_lines,
+                nested_blocker_seen,
+                blocker_line,
+                limit=16,
+            )
 
     # Always include an explicit description verdict because it is a common source of confusion.
     if description_write_seen:
@@ -7119,6 +7511,19 @@ def _build_tool_messages_prompt_blob(
     blob_lines.append("")
     blob_lines.append("TOOL WRITES LEDGER (authoritative):")
     blob_lines.extend(writes_lines or ["- No writes detected"])
+    if nested_workflow_evidence_seen:
+        blob_lines.append("")
+        blob_lines.append("NESTED WORKFLOW EVIDENCE (authoritative):")
+        blob_lines.extend(
+            nested_workflow_lines
+            or [
+                "- Nested workflow/subworkflow evidence is present, but no compact durable-write details were extracted."
+            ]
+        )
+    if nested_workflow_blocker_lines:
+        blob_lines.append("")
+        blob_lines.append("TYPED TOOL BLOCKERS (authoritative):")
+        blob_lines.extend(nested_workflow_blocker_lines)
     if relation_evidence_lines:
         blob_lines.append("")
         blob_lines.append("TOOL RELATION EVIDENCE (authoritative):")

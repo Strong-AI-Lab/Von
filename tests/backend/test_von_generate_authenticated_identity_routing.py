@@ -473,6 +473,7 @@ class _AffiliationLookupGatewayStub:
                     "type": "object",
                     "properties": {
                         "entity_name": {"type": "string"},
+                        "namespace": {"type": ["string", "null"]},
                     },
                 },
             }
@@ -818,6 +819,7 @@ class _PredicateExtentRoutingGatewayStub:
                     "properties": {
                         "concept_id": {"type": "string"},
                         "predicate_filter": {"type": "array"},
+                        "namespace": {"type": ["string", "null"]},
                     },
                 },
             },
@@ -830,6 +832,7 @@ class _PredicateExtentRoutingGatewayStub:
                         "concept_id": {"type": "string"},
                         "predicate_filter": {"type": "array"},
                         "limit": {"type": "integer"},
+                        "namespace": {"type": ["string", "null"]},
                     },
                 },
             },

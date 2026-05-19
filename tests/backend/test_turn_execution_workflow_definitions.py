@@ -69,6 +69,173 @@ def _build_stub_kb_postcondition_critic_definition() -> WorkflowDefinition:
     )
 
 
+def test_durable_turn_selector_prepare_discovers_and_projects_selector_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        lambda *args, **kwargs: {
+            "matches": [
+                {
+                    "concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "relevance_score": 1.0,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "relevance_score": 1.0,
+                }
+            ],
+            "routing_matches": [
+                {
+                    "concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "relevance_score": 1.0,
+                }
+            ],
+            "query": "Look for recent Gmail messages about arXiv papers",
+            "match_count": 1,
+            "candidate_count": 1,
+        },
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    prepare_spec = registry.get("turn_execution.prepare_selector_context")
+    assert prepare_spec is not None
+
+    result = prepare_spec.handler(
+        WorkflowActionRequest(
+            action_id="turn_execution.prepare_selector_context",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={
+                "user_prompt": "Look for recent Gmail messages about arXiv papers",
+            },
+        )
+    )
+
+    assert result.outputs["workflow_discovery_result"]["match_count"] == 1
+    assert result.outputs["workflow_discovery"] == result.outputs[
+        "workflow_discovery_result"
+    ]
+    assert result.outputs["selector_prompt_available"] is False
+    assert result.outputs["selector_prompt_id"] == (
+        "durable_selector_prompt_unavailable"
+    )
+    assert result.outputs["selector_candidate_ids"] == [
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    ]
+
+    route_spec = registry.get("turn_execution.route")
+    assert route_spec is not None
+    route_result = route_spec.handler(
+        WorkflowActionRequest(
+            action_id="turn_execution.route",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={
+                "user_prompt": "Look for recent Gmail messages about arXiv papers",
+                "workflow_discovery_result": result.outputs[
+                    "workflow_discovery_result"
+                ],
+            },
+        )
+    )
+
+    assert route_result.outputs["selected_workflow_id"] == (
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+    assert route_result.outputs["workflow_routing"]["candidate_workflow_ids"] == [
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    ]
+
+
+def test_durable_turn_selector_prepare_routes_on_user_prompt_before_contract(
+    monkeypatch,
+) -> None:
+    raw_prompt = (
+        "Look for recent email messages in the vonwitbrock-gmail profile about "
+        "arxiv papers and represent them if they are not already represented."
+    )
+    calls: list[str] = []
+
+    def fake_discovery(query_text: str, *args, **kwargs) -> dict[str, object]:
+        calls.append(query_text)
+        if "claim concept" in query_text or "add_relationship" in query_text:
+            selected = "#V#link_created_claim_to_paper_workflow"
+        else:
+            selected = "#V#zhan_gmail_arxiv_ingestion_workflow"
+        match = {"concept_id": selected, "relevance_score": 1.0}
+        return {
+            "matches": [match],
+            "candidates": [match],
+            "routing_matches": [match],
+            "query": query_text,
+            "match_count": 1,
+            "candidate_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        fake_discovery,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    prepare_spec = registry.get("turn_execution.prepare_selector_context")
+    assert prepare_spec is not None
+
+    result = prepare_spec.handler(
+        WorkflowActionRequest(
+            action_id="turn_execution.prepare_selector_context",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={
+                "user_prompt": raw_prompt,
+                "turn_expected_outcome_summary": (
+                    "Find recent Gmail messages in the resolved vonwitbrock-gmail "
+                    "profile about arxiv papers, determine whether the paper "
+                    "content is already represented, and represent any new ones."
+                ),
+                "turn_expected_grounding_requirement": (
+                    "Create or link representation only when the message contains "
+                    "grounded evidence. Do not fabricate a claim concept."
+                ),
+                "turn_expected_required_tools": [
+                    "gmail_list_messages",
+                    "search_concepts",
+                    "add_relationship",
+                ],
+            },
+        )
+    )
+
+    assert calls == [raw_prompt]
+    assert result.outputs["workflow_discovery_result"]["query_source"] == "user_prompt"
+    assert result.outputs["selector_candidate_ids"][0] == (
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+
+
+def test_turn_execution_actions_do_not_define_private_lexical_workflow_discovery() -> (
+    None
+):
+    from src.backend.workflows.durable import turn_execution_actions
+
+    assert not hasattr(
+        turn_execution_actions,
+        "_build_workflow_registry_lexical_discovery",
+    )
+
+
 def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None:
     workflow = build_authoritative_test_workflow_definition(TOOL_CALLING_WORKFLOW_ID)
     assert workflow.initial_state == "preflight_requirements"

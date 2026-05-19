@@ -850,6 +850,7 @@ def test_run_generate_background_omits_model_when_not_requested(
         base_url="http://127.0.0.1:5000",
         prompt="Who am I in this conversation?",
         model=None,
+        presenter_mode=False,
         timeout_seconds=30.0,
         poll_interval_seconds=0.2,
     )
@@ -858,6 +859,42 @@ def test_run_generate_background_omits_model_when_not_requested(
     assert generate_payload == {"response": "ok"}
     assert seen_payloads
     assert "model" not in seen_payloads[0]
+    assert "presenter_mode" not in seen_payloads[0]
+
+
+def test_run_generate_background_can_request_presenter_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
+            return {"task_id": "task-123"}
+        if url.endswith("/von/api/task/status/task-123"):
+            return {"status": "completed"}
+        if url.endswith("/von/api/task/result/task-123"):
+            return {"result": {"response": "ok"}}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    task_id, generate_payload = sampler._run_generate_background(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        prompt="Summarise this for the presenter UI",
+        model="gpt-5.4-mini",
+        presenter_mode=True,
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+
+    assert task_id == "task-123"
+    assert generate_payload == {"response": "ok"}
+    assert seen_payloads
+    assert seen_payloads[0]["model"] == "gpt-5.4-mini"
+    assert seen_payloads[0]["presenter_mode"] is True
 
 
 def test_replay_session_creation_payload_marks_sampler_chat_as_test_run() -> None:

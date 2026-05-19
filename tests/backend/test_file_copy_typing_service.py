@@ -44,6 +44,19 @@ def test_infer_file_copy_typing_derives_dynamic_extension_subtype_when_needed() 
     assert "dynamic_extension" in result["matched_rule_ids"]
 
 
+def test_infer_file_copy_typing_extracts_arxiv_identifier_from_filename() -> None:
+    result = infer_file_copy_typing(
+        content_type="application/pdf",
+        original_filename="2502.14996.pdf",
+    )
+
+    assert result["route_hint"] == "arxiv"
+    assert result["route_confidence"] == 0.99
+    assert result["arxiv_id"] == "2502.14996"
+    assert result["arxiv_ids"] == ["2502.14996"]
+    assert result["semantic_type_concept_id"] == "#V#scholarly_paper_file_copy"
+
+
 def test_ensure_file_copy_typing_types_exist_creates_dynamic_blueprints(monkeypatch) -> None:
     ensured_calls: list[dict[str, object]] = []
 

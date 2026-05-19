@@ -43,6 +43,12 @@ _DEFAULT_RESULT_TTL_SEC = 10 * 60
 # Maximum concurrent background tasks
 _MAX_WORKERS = 4
 
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _is_active_status(status: str) -> bool:
+    return status in {"pending", "running"}
+
 
 @dataclass
 class TaskStatus:
@@ -156,14 +162,14 @@ class BackgroundTaskRegistry:
                 # Mark as running
                 with self._lock:
                     task_status = self._tasks.get(task_id)
-                    if task_status:
+                    if task_status and _is_active_status(task_status.status):
                         task_status.status = "running"
                         task_status.started_at = datetime.now(timezone.utc)
 
                 def _update_progress(info: Mapping[str, Any]) -> None:
                     with self._lock:
                         task_status = self._tasks.get(task_id)
-                        if task_status:
+                        if task_status and _is_active_status(task_status.status):
                             task_status.progress = dict(info)
                     if progress_callback:
                         try:
@@ -181,7 +187,7 @@ class BackgroundTaskRegistry:
 
                     with self._lock:
                         task_status = self._tasks.get(task_id)
-                        if task_status:
+                        if task_status and _is_active_status(task_status.status):
                             task_status.status = "completed"
                             task_status.completed_at = datetime.now(timezone.utc)
                             task_status.result = result
@@ -195,7 +201,7 @@ class BackgroundTaskRegistry:
                     )
                     with self._lock:
                         task_status = self._tasks.get(task_id)
-                        if task_status:
+                        if task_status and _is_active_status(task_status.status):
                             task_status.status = "cancelled"
                             task_status.completed_at = datetime.now(timezone.utc)
                             task_status.error = str(exc)
@@ -208,7 +214,7 @@ class BackgroundTaskRegistry:
                     )
                     with self._lock:
                         task_status = self._tasks.get(task_id)
-                        if task_status:
+                        if task_status and _is_active_status(task_status.status):
                             task_status.status = "failed"
                             task_status.completed_at = datetime.now(timezone.utc)
                             task_status.error = str(exc)
@@ -221,6 +227,79 @@ class BackgroundTaskRegistry:
 
         _logger.info("[background_task] Submitted task %s", task_id)
         return status
+
+    def mark_terminal_external(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        result: Any = None,
+        error: str | None = None,
+        progress: Mapping[str, Any] | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> TaskStatus:
+        """Record an externally observed terminal task state.
+
+        Durable workflow execution can finish before the worker that launched it
+        returns its final HTTP-shaped payload. This method lets polling routes
+        publish that terminal durable result without allowing a late worker
+        exception to overwrite it afterwards.
+        """
+        terminal_status = str(status or "").strip().lower()
+        if terminal_status not in _TERMINAL_STATUSES:
+            raise ValueError(f"Unsupported terminal task status: {status}")
+
+        now = datetime.now(timezone.utc)
+        progress_payload = dict(progress) if isinstance(progress, Mapping) else {}
+        progress_payload.setdefault("status", terminal_status)
+
+        with self._lock:
+            task_status = self._tasks.get(task_id)
+            if task_status is None:
+                task_status = TaskStatus(
+                    task_id=task_id,
+                    status=terminal_status,
+                    created_at=now,
+                    started_at=now,
+                    completed_at=now,
+                    result=result,
+                    error=error,
+                    progress=progress_payload,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                self._tasks[task_id] = task_status
+                return task_status
+
+            if task_status.status in _TERMINAL_STATUSES:
+                if task_status.status != terminal_status and terminal_status == "completed":
+                    task_status.status = terminal_status
+                    task_status.completed_at = now
+                    task_status.result = result
+                    task_status.error = None
+                    task_status.progress = progress_payload
+                    return task_status
+                if task_status.result is None and result is not None:
+                    task_status.result = result
+                if task_status.error is None and error is not None:
+                    task_status.error = error
+                if not task_status.progress and progress_payload:
+                    task_status.progress = progress_payload
+                return task_status
+
+            task_status.status = terminal_status
+            if task_status.started_at is None:
+                task_status.started_at = now
+            task_status.completed_at = now
+            task_status.result = result
+            task_status.error = error
+            task_status.progress = progress_payload
+            if task_status.session_id is None and session_id is not None:
+                task_status.session_id = session_id
+            if task_status.user_id is None and user_id is not None:
+                task_status.user_id = user_id
+            return task_status
 
     def get_task_status(self, task_id: str) -> TaskStatus | None:
         """Get the current status of a task.

@@ -744,17 +744,27 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_capability_index_build_in_progress_fails_fast_without_secondary_search(
+    def test_capability_index_build_in_progress_falls_back_to_secondary_search(
         self,
         mock_capability_state: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_capability_state.return_value = {
@@ -772,14 +782,22 @@ class TestDiscoverWorkflowsForTurn:
 
         result = discover_workflows("Represent the uploaded paper now", max_results=1)
 
-        assert result.search_sources == ["capability_index"]
-        assert result.match_absence_reason == (
-            "capability_index_wait_timed_out_build_in_progress"
-        )
+        assert result.search_sources == ["capability_index", "semantic", "vontology"]
+        assert [match.concept_id for match in result.matches] == [
+            "#V#semantic_candidate"
+        ]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#semantic_candidate"
+        ]
+        assert result.match_absence_reason is None
         assert "capability_index_build_in_progress" in result.errors
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
-        assert result.stage_timings[1]["stage"] == "capability_index_search"
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 0
+            for timing in result.stage_timings
+        )
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
@@ -825,9 +843,13 @@ class TestDiscoverWorkflowsForTurn:
             result.match_absence_reason
             == "capability_index_wait_timed_out_build_in_progress"
         )
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
-        assert result.stage_timings[1]["stage"] == "capability_index_search"
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 0
+            for timing in result.stage_timings
+        )
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(

@@ -101,6 +101,8 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
+        ai_chat_session_source_profile_vontology_service as ai_chat_session_source_profile_bootstrap,
+        benchmark_suite_vontology_service as benchmark_suite_bootstrap,
         concept_search_instance_retrieval_workflow_vontology_service as concept_search_instance_retrieval_workflow_bootstrap,
         conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
         email_source_representation_convergence_schedule_bootstrap_service as email_source_convergence_schedule_bootstrap,
@@ -110,22 +112,29 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
+        jira_task_incremental_import_workflow_vontology_service as jira_task_incremental_import_workflow_bootstrap,
         multilingual_concept_enrichment_schedule_bootstrap_service as multilingual_schedule_bootstrap,
         multilingual_concept_enrichment_vontology_service as multilingual_workflow_bootstrap,
         paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
+        paper_recommendation_background_schedule_bootstrap_service as paper_recommendation_schedule_bootstrap,
+        paper_recommendation_workflow_vontology_service as paper_recommendation_workflow_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
+        representation_workflow_routing_coverage_audit_vontology_service as representation_routing_audit_workflow_bootstrap,
         represented_artefact_creation_workflow_vontology_service as represented_artefact_creation_workflow_bootstrap,
         testing_workflow_vontology_service as testing_workflow_bootstrap,
         talk_representation_workflow_vontology_service as talk_workflow_bootstrap,
         turn_pipeline_monitoring_schedule_bootstrap_service as turn_pipeline_monitoring_schedule_bootstrap,
         turn_pipeline_monitoring_workflow_vontology_service as turn_pipeline_monitoring_workflow_bootstrap,
         workflow_capability_service as workflow_capability_service,
+        workflow_authoring_vontology_service as workflow_authoring_prompt_bootstrap,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
+        workflow_model_selection_workflow_vontology_service as workflow_model_selection_bootstrap,
     )
 
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    startup_events: list[str] = []
 
     # Reset globals to force fresh startup path.
     monkeypatch.setattr(utils_flask, "_durable_workflow_registry", None)
@@ -180,10 +189,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
 
     monkeypatch.setattr(durable_startup, "recover_orphaned_instances", lambda: 0)
+
+    def _start_worker_and_scheduler(**_kwargs):
+        startup_events.append("worker_started")
+        return {"worker": "worker", "scheduler": "scheduler"}
+
     monkeypatch.setattr(
         durable_startup,
         "start_worker_and_scheduler",
-        lambda **_kwargs: {"worker": "worker", "scheduler": "scheduler"},
+        _start_worker_and_scheduler,
     )
     monkeypatch.setattr(
         durable_startup,
@@ -254,13 +268,25 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        entity_workflow_bootstrap,
-        "bootstrap_canonical_entity_representation_workflows",
+        workflow_authoring_prompt_bootstrap,
+        "ensure_workflow_authoring_prompt_support",
         lambda: {
+            "success": True,
+            "linked_workflow_ids": ["#V#workflow_authoring_workflow"],
+        },
+    )
+    def _bootstrap_entity_workflows():
+        startup_events.append("entity_bootstrap")
+        return {
             "success": True,
             "workflow_ids": ["#V#entity_representation_workflow"],
             "publication": {"skipped": True},
-        },
+        }
+
+    monkeypatch.setattr(
+        entity_workflow_bootstrap,
+        "bootstrap_canonical_entity_representation_workflows",
+        _bootstrap_entity_workflows,
     )
     monkeypatch.setattr(
         entity_information_retrieval_workflow_bootstrap,
@@ -358,6 +384,33 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        jira_task_incremental_import_workflow_bootstrap,
+        "bootstrap_canonical_jira_task_incremental_import_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#jira_task_incremental_import_workflow",
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        representation_routing_audit_workflow_bootstrap,
+        "bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#representation_workflow_routing_coverage_audit_workflow",
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        paper_recommendation_workflow_bootstrap,
+        "bootstrap_canonical_paper_recommendation_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#paper_recommendation_evaluation_workflow",
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         testing_workflow_bootstrap,
         "bootstrap_canonical_testing_workflows",
         lambda: {
@@ -379,6 +432,25 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        workflow_model_selection_bootstrap,
+        "bootstrap_canonical_workflow_model_selection_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#workflow_model_selection_workflow",
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark_suite_bootstrap,
+        "ensure_canonical_benchmark_suites_from_seed_fixtures",
+        lambda: {"success": True, "suite_count": 1},
+    )
+    monkeypatch.setattr(
+        ai_chat_session_source_profile_bootstrap,
+        "ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture",
+        lambda: {"success": True, "profile_count": 1},
+    )
+    monkeypatch.setattr(
         talk_workflow_bootstrap,
         "bootstrap_canonical_talk_representation_workflows",
         lambda: {
@@ -398,6 +470,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         lambda: {"success": True, "ensured": True, "created_count": 1},
     )
     monkeypatch.setattr(
+        paper_recommendation_schedule_bootstrap,
+        "ensure_paper_recommendation_background_schedule",
+        lambda: {"success": True, "ensured": True, "created_count": 1},
+    )
+    monkeypatch.setattr(
         multilingual_schedule_bootstrap,
         "ensure_multilingual_concept_enrichment_background_schedule",
         lambda: {"success": True, "ensured": True, "created_count": 1},
@@ -407,6 +484,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     result = utils_flask._start_durable_workflow_system(app_logger)
 
     assert isinstance(result, dict)
+    assert startup_events[:2] == ["worker_started", "entity_bootstrap"]
+    assert result.get("startup_queue_ready") == {
+        "stage": "before_canonical_bootstraps",
+        "recovered_orphaned_instances": 0,
+    }
     bootstrap_report = result.get("identity_resolution_schedule_bootstrap")
     assert isinstance(bootstrap_report, dict)
     assert bootstrap_report.get("success") is True

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from flask import Flask
 from typing import Protocol
 
@@ -1383,6 +1385,109 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
         "I ran tools for this request, but I do not have a reliable final answer yet."
         in llm.calls[0]["context"][1]["content"]
     )
+
+
+def test_presenter_mode_reconciles_nested_workflow_evidence_and_tool_blocker(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "workflow_control.for_each",
+                    "status": "ok",
+                    "payload": {
+                        "iteration_results": [
+                            {
+                                "completed": True,
+                                "final_state": "#V#workflow_done",
+                                "tool_invocations": [
+                                    {
+                                        "tool": "workflow_invoke_subworkflow",
+                                        "status": "ok",
+                                        "payload": {
+                                            "result": {
+                                                "last_action_id": "scholarly_paper.verify_representation",
+                                                "last_action_status": "success",
+                                                "last_action_outputs": {
+                                                    "scholarly_representation_verified": True,
+                                                    "paper_concept_id": "#V#paper_nested",
+                                                    "file_copy_concept_id": "#V#file_nested",
+                                                },
+                                            }
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ),
+        },
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "workflow_mcp.invoke_tool",
+                    "status": "ok",
+                    "payload": {
+                        "mcp_tool": "gmail_modify_labels",
+                        "mcp_result": {
+                            "success": False,
+                            "error_code": "gmail_api_error",
+                            "error": "Gmail modify labels failed: Profile scopes do not include gmail.modify",
+                        },
+                    },
+                    "error": "gmail_api_error",
+                }
+            ),
+        },
+    ]
+    aux_llm_calls = (
+        {
+            "type": "turn_completion_gate",
+            "decision": "failed",
+            "decision_reason": "Mutation attempt failed or was blocked.",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "blocking_failure_codes": ["required_tool_attempt_failed"],
+        },
+    )
+    orchestrator_result = OrchestratorResult(
+        response_text=(
+            "I ran tools for this request, but I do not have a reliable final answer yet.\n\n"
+            "The required workflow_execute-based retrieval/mutation evidence was not executed."
+        ),
+        extra_messages=tool_messages,
+        tool_invocations=(),
+        aux_llm_calls=aux_llm_calls,
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Represent recent arXiv email papers", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    screen_text = body["response_channels"]["screen"]
+
+    assert "Nested workflow evidence was detected" in screen_text
+    assert "Representation/read-back verified for `#V#paper_nested`" in screen_text
+    assert "`gmail_modify_labels` reported gmail_api_error" in screen_text
+    assert "Profile scopes do not include gmail.modify" in screen_text
+    assert "No write activity was detected" not in screen_text
+    assert "required workflow_execute-based" not in screen_text
 
 
 def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypatch):

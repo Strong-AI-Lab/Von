@@ -7,6 +7,7 @@ and result retrieval.
 from __future__ import annotations
 
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -446,6 +447,94 @@ class TestBackgroundTaskRegistry:
         status_dict = status.to_dict()
         assert status_dict["session_id"] == "sess-123"
         assert status_dict["user_id"] == "user-456"
+
+        registry.shutdown(wait=True)
+
+    def test_mark_terminal_external_creates_completed_status(self) -> None:
+        """mark_terminal_external() should restore a completed task result."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+
+        status = registry.mark_terminal_external(
+            "external-complete",
+            status="completed",
+            result={"source": "durable"},
+            progress={"source": "durable_conversation_turn_instance"},
+            session_id="session-123",
+            user_id="user-456",
+        )
+
+        assert status.status == "completed"
+        assert status.result == {"source": "durable"}
+        assert status.progress["status"] == "completed"
+        assert status.progress["source"] == "durable_conversation_turn_instance"
+        assert registry.get_task_result("external-complete") == {"source": "durable"}
+
+        restored = registry.get_task_status("external-complete")
+        assert restored is not None
+        assert restored.session_id == "session-123"
+        assert restored.user_id == "user-456"
+
+        registry.shutdown(wait=True)
+
+    def test_mark_terminal_external_resists_late_worker_failure(self) -> None:
+        """A durable completion should not be overwritten by a late worker error."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _late_failing_task() -> str:
+            started.set()
+            release.wait(timeout=2)
+            raise RuntimeError("late post-processing failure")
+
+        registry.submit_task(task_id="late-worker", callable=_late_failing_task)
+        assert started.wait(timeout=2)
+
+        registry.mark_terminal_external(
+            "late-worker",
+            status="completed",
+            result={"source": "durable"},
+            progress={"source": "durable_conversation_turn_instance"},
+        )
+        release.set()
+
+        for _ in range(50):
+            status = registry.get_task_status("late-worker")
+            if status and status.completed_at is not None:
+                break
+            time.sleep(0.05)
+
+        status = registry.get_task_status("late-worker")
+        assert status is not None
+        assert status.status == "completed"
+        assert status.result == {"source": "durable"}
+        assert status.error is None
+        assert registry.get_task_result("late-worker") == {"source": "durable"}
+
+        registry.shutdown(wait=True)
+
+    def test_mark_terminal_external_completed_overrides_failed_status(self) -> None:
+        """A durable completion should restore a task already marked failed."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        registry.mark_terminal_external(
+            "restore-failed",
+            status="failed",
+            error="post-processing failed",
+            progress={"source": "worker"},
+        )
+
+        restored = registry.mark_terminal_external(
+            "restore-failed",
+            status="completed",
+            result={"source": "durable"},
+            progress={"source": "durable_conversation_turn_instance"},
+        )
+
+        assert restored.status == "completed"
+        assert restored.error is None
+        assert restored.result == {"source": "durable"}
+        assert restored.progress["status"] == "completed"
+        assert restored.progress["source"] == "durable_conversation_turn_instance"
 
         registry.shutdown(wait=True)
 

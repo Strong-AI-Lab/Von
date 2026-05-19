@@ -43,6 +43,9 @@ Read the following before planning or implementing work in the matching area:
 - **Frontend/UI changes, browser acceptance, or authenticated user-view testing**
   `docs/engineering/frontend_browser_user_view_validation.md`
 
+- **Live user-visible Von behaviour, real-path replay, or telemetry-based turn diagnosis**
+  `docs/engineering/real_path_server_replay_and_telemetry_loop.md`
+
 If the task crosses multiple areas, read all relevant documents.
 
 ### 2.4 Operational companion
@@ -101,6 +104,7 @@ For frontend/browser user-view validation practice, also see
 37. If the user challenges a change as "Python hackery", "not Von", "backsliding", or similar authority drift, stop extending the patch. Do a short drift incident review, remove or quarantine speculative policy code, update Jira/task wording if it encoded the wrong fix direction, and resume only with a named authority surface plus support-only Python scope.
 38. Domain-handler-first implementation is a warning sign, not a plan. If the first substantial edit for a workflow/prompt/KB-authoritative task is inside a domain-specific Python workflow handler, service, registry entry, fallback table, or verifier, pause before continuing and write down why the behaviour cannot be expressed by an existing or newly added generic VWL/Vontology/tool-language surface. If that explanation is "the workflow language is missing a small reusable capability", add that capability first and then express the behaviour in the workflow.
 39. Do not use a legacy Python workflow handler as a temporary staging area for authored behaviour while intending to "move it to workflow later". That pattern usually becomes the implementation. Prototype or materialise the workflow/prompt/Vontology artefact first; add Python only for the named reusable primitive, validation, telemetry, or canonical tool bridge that the artefact needs.
+40. When a task claims to repair a live user-visible turn, workflow failure, or motivating prompt family, closure requires replay of the exact triggering prompt or conversation/session reference on the real user-facing path, plus a small nearby prompt family where appropriate. Unit tests, materialised artefacts, synthetic helper calls, or a single nearby pass are not sufficient. The final claim must reconcile the user-visible answer, selector/discovery/dispatch telemetry, workflow/tool execution state, Thinking-card or debug surfaces, and read-back or typed failure evidence. Treat partial or contradictory diagnostic content as hypotheses, not truth.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -235,6 +239,7 @@ Verify all of the following:
 - Do not stop at local implementation, local validation success, or a "ready to commit" state unless the user explicitly asks to pause there. For Jira implementation work, the default expectation is commit, merge to `main`, verify `origin/main`, and close the Jira issue before reporting completion.
 - rerun targeted regression checks
 - gather direct acceptance evidence
+- for live-turn or replay-backed tasks, record the exact replay evidence before closure: prompt or conversation reference, request_id, visible answer, candidate/selector/dispatch summary, workflow or tool terminal state, read-back evidence or typed blocker, and what the Thinking/debug surface showed. If any of those disagree, the task is not done; update the Jira/task notes instead of closing on nearby evidence.
 - verify any required Vontology/workflow/KB state changes were actually
   materialised; repo-side support code alone is not sufficient closure evidence
 - review linked issues and update or transition them as justified
@@ -287,6 +292,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 12. Never run backend tests against `VON_DB_NAME=von_db`. Use the test DB.
 13. Before every commit, run the lint/type-check gate and fix outstanding diagnostics.
 14. After any significant architectural change — replacing a heuristic with an authority surface, decomposing a monolith, or removing code-side semantic steering — perform a bounded anti-pattern test audit in the affected area. Scan for tests that (a) directly assert on outputs of the removed or replaced heuristic, (b) autostub the new authority-backed path to return empty/fixed values so the real architecture is never exercised, or (c) pin downstream effects of heuristic code through end-to-end assertions. Remove or rewrite such tests, then remove any code that existed only to satisfy them. Tests that validate anti-patterns are load-bearing obstacles to architectural progress; leaving them in place causes the old code to persist indefinitely because developers fear breaking the test suite.
+15. Thinking cards, copied debug bundles, conversation references, and embedded completion diagnostics are evidence surfaces, not authorities. Validate them against persisted turn records, workflow/tool state, and the actual visible answer before using them to declare root cause or success. If the debug surface is missing, stale, internally inconsistent, or not accepted by the history/debug tools that should read it, treat that as part of the bug and capture it in the task evidence.
 
 ## 9. Tooling defaults
 

@@ -1214,6 +1214,54 @@ class TestWorkflowInstanceManager:
         assert finalised[0]["terminal_stage"] == "tool_execution"
         assert finalised[0]["termination_code"] == "tool_timeout"
 
+    def test_find_and_claim_prioritises_conversation_turn_instances(self) -> None:
+        """User-facing conversation turns should not sit behind maintenance backlog."""
+        manager = WorkflowInstanceManager()
+
+        stale_conversation_instance_id = manager.create_instance(
+            "#V#conversation_turn_execution_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            source_event_type="conversation_turn",
+        )
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": stale_conversation_instance_id},
+            {
+                "$set": {
+                    "created_at": datetime.now(timezone.utc) - timedelta(days=2)
+                }
+            },
+        )
+        background_instance_id = manager.create_instance(
+            "#V#episode_evaluation_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            source_event_type="episode.created",
+        )
+        conversation_instance_id = manager.create_instance(
+            "#V#conversation_turn_execution_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            source_event_type="conversation_turn",
+        )
+
+        claimed = manager.find_and_claim_instance("worker-priority-test")
+
+        assert claimed is not None
+        assert claimed.instance_id == conversation_instance_id
+        assert claimed.workflow_id == "#V#conversation_turn_execution_workflow"
+
+        second_claim = manager.find_and_claim_instance("worker-priority-test-2")
+
+        assert second_claim is not None
+        assert second_claim.instance_id == background_instance_id
+        assert second_claim.workflow_id == "#V#episode_evaluation_workflow"
+
     def test_find_and_claim_returns_none_when_empty(self) -> None:
         """find_and_claim_instance() should return None when no instances available."""
         manager = WorkflowInstanceManager()
