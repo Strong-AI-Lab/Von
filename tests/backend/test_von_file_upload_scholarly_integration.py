@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 import pytest
@@ -180,6 +181,51 @@ def _mock_paper_metadata(**kwargs):
     }
 
 
+class _UploadWorkflowLLM:
+    def generate(self, prompt: str, context=None, model=None) -> str:
+        prompt_text = str(prompt or "").lower()
+        if "metadata extraction" in prompt_text:
+            return json.dumps(
+                {
+                    "paper_metadata": {
+                        "id": _TEST_ARXIV_ID,
+                        "title": _TEST_ARXIV_TITLE,
+                        "authors": list(_TEST_ARXIV_AUTHORS),
+                        "summary": _TEST_ARXIV_SUMMARY,
+                        "categories": list(_TEST_ARXIV_CATEGORIES),
+                    },
+                    "title": _TEST_ARXIV_TITLE,
+                    "summary": _TEST_ARXIV_SUMMARY,
+                    "author_names": list(_TEST_ARXIV_AUTHORS),
+                    "topic_labels": list(_TEST_ARXIV_CATEGORIES),
+                    "doi": None,
+                    "source_uri": f"https://arxiv.org/abs/{_TEST_ARXIV_ID}",
+                    "publication_date": None,
+                    "reasoning": "Deterministic upload integration fixture.",
+                }
+            )
+        return json.dumps(
+            {
+                "response_text": "Materialised and verified the uploaded scholarly paper.",
+                "observations": [
+                    {
+                        "label": "upload_scholarly_representation_readback",
+                        "verdict": "pass",
+                        "expected_outcome": "paper concept metadata read-back",
+                        "observed_outcome": "workflow context contains read-back evidence",
+                    }
+                ],
+                "metadata_verification": {
+                    "paper_concept_id": "from_context",
+                    "author_concept_ids": "from_context",
+                    "readback_present": True,
+                },
+                "verification_passed": True,
+                "reasoning": "The deterministic fixture supplies the LLM evidence summary.",
+            }
+        )
+
+
 def _run_pending_file_copy_instance(instance_id: str):
     manager = get_instance_manager()
     instance = manager.get_instance(instance_id)
@@ -322,6 +368,22 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.catalogue._get_paper_metadata",
         _mock_paper_metadata,
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda **_kwargs: "test-upload-workflow-llm",
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        lambda **_kwargs: _UploadWorkflowLLM(),
+    )
+
+    def _skip_gateway_model_runtime(_request):
+        raise RuntimeError("skip model selector in upload integration test")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        _skip_gateway_model_runtime,
     )
 
     app = _build_upload_app()
