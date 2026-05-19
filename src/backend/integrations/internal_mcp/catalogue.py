@@ -20621,6 +20621,7 @@ def _gmail_get_auth_config(**kwargs):
         )
 
     return {
+        "success": True,
         "profile_id": profile_id_arg,
         "concept_id": concept_id,
         "scopes": scopes,
@@ -28141,7 +28142,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         ),
     )
     gmail_get_auth_config_output_schema = Schema(
-        required={"profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
+        required={"success": bool, "profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
         optional={
             "concept_id": str,
             "token_scopes": list,
@@ -28152,8 +28153,11 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         },
         allow_unknown=False,
         description=(
-            "Gmail profile OAuth config: scopes (from Vontology or env), token_status "
-            "(authorised|missing|unavailable), and re-auth advisory when scope has changed."
+            "Gmail profile OAuth config: success=True means scope config was retrieved "
+            "(scopes/scope_source are valid). token_status (authorised|missing|unavailable) "
+            "reflects the OAuth token state independently — missing token does NOT mean "
+            "the lookup failed. Re-auth advisory is present when scope has changed or "
+            "scope_source is env-only."
         ),
     )
     gmail_set_profile_scope_input_schema = Schema(
