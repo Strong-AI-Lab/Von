@@ -17,7 +17,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   integration-specific Python defaults after that closure.
 - `JVNAUTOSCI-1957` - structural predicate metadata fallback/default evidence.
 - `JVNAUTOSCI-2172` - generic Vontology-backed entity profiles.
-- `JVNAUTOSCI-2177` - repo seed overwrite protection.
 - `JVNAUTOSCI-1971` - broad buttonify prose-extraction heuristic cleanup.
 - `JVNAUTOSCI-2024` - episode evaluator criteria, benchmark proxies,
   recommendation wording, and critic signal policy in Python.
@@ -77,8 +76,8 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2326` - AI coding-session ingestion source profiles, document and
   file-copy type ids, predicate vocabulary, and per-environment ontology
   catalogues live in Python instead of represented Vontology profile authority.
-- `JVNAUTOSCI-2327` - selector/context benchmark labels, expected outcomes,
-  coverage tags, expected sources, execution modes, and signal/rubric categories
+- `JVNAUTOSCI-2327` - selector/context benchmark labels, outcomes,
+  coverage tags, expected authority sources, execution modes, and signal/rubric categories
   live in Python/repo seed bundles instead of represented benchmark authority.
 - `JVNAUTOSCI-2329` - required-tool operation classes, target-bearing fields,
   and target-closure semantics live in Python prefix/key heuristics instead of
@@ -92,3 +91,9 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2350` - synthesiser context active-request and tool-hint wrapper
   wording is built and pinned in Python instead of represented prompt/template
   authority.
+- `JVNAUTOSCI-2352` - durable turn workflow discovery fallback uses Python
+  lexical token/stopword scoring, support-workflow demotion, and first-match
+  routing instead of represented/canonical discovery authority.
+- `JVNAUTOSCI-2353` - presenter nested-workflow evidence/read-back/blocker
+  wording and model-visible "authoritative" headings are authored in Python
+  route helpers instead of represented presenter/evidence authority.

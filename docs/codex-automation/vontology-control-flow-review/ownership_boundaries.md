@@ -84,6 +84,12 @@ predicates, and KB assertions should own durable:
   context, including active-request labels, section headings, and hint-wrapper
   wording. Python may bind values into represented templates but should not own
   the durable wording the model sees.
+- Durable conversation-turn discovery and selector-preparation policy,
+  including fallback applicability, candidate ranking, support-workflow
+  demotion, first-match selection, and selector prompt/fallback wording.
+- Presenter/debug progress and evidence-summary wording, including nested
+  workflow read-back labels, blocker descriptions, domain target labels, and
+  model-visible section headings marked as authoritative.
 
 ## Python Support
 
@@ -153,6 +159,13 @@ Python can remain the surface for:
   hints, extracts active-turn values from shared context, binds those values
   into represented templates, validates the resulting messages, and records
   context-lineage telemetry;
+- generic durable turn-discovery plumbing that passes through existing discovery
+  payloads, invokes canonical discovery services/actions, validates structured
+  discovery results, and emits fail-closed diagnostics when discovery authority
+  is unavailable;
+- generic presenter/debug evidence projection support that traverses bounded
+  payloads, redacts/validates fields, applies represented evidence-view or
+  presenter contracts, and records telemetry without authoring domain wording;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,

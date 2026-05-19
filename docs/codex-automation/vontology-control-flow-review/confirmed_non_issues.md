@@ -24,17 +24,17 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   `routing_policy_fragments`: learned-selection support/evidence formatting.
   File only if Python token features, formatter rules, or recovery wording
   override represented routing or prompt authority.
-- `renderer_applicability_service.py`: renderer aliases; file only with strong
+- `renderer_applicability_service.py`: render aliases; file only with strong
   evidence of durable semantic/display-profile authority.
 - `workflow_override_policy_service.py` and `workflow_continuation_service.py`:
   file only if they override represented workflow/routing policy.
-- `tool_result_hint_actions.py`: generic action support for Vontology-authored
+- `tool_result_hint_actions.py` generic action support for Vontology-authorised
   signal/follow-up hints. File only if integration-specific hint text or
   selection policy appears in Python.
 - `workflow_mcp_tool_actions.py`: generic static MCP invocation support with
   namespace/write guardrails. File only if tool choice or domain process policy
   is added there rather than represented workflow metadata.
-- `conversation_turn_stage_model.py`: telemetry/stage labelling support. File
+- `conversation_turn_stage_model.py: telemetry/stage labelling support. File
   only if stage specs prune context, alter user-facing semantics, or override
   workflow authority.
 - `scripts/publish_email_resource_link_extraction_workflow.py`,
@@ -72,7 +72,7 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
 - `file_copy_upload_classification_workflow.py` and
   `file_copy_upload_handler_workflow.py`: route-map handling remains a
   non-issue while candidate routes and dispatch metadata are loaded from
-  Vontology, especially `#V#hasWorkflowTypedSubworkflowRouteMapJson`.
+  Vontology, especially `##hasWorkflowTypedSubworkflowRouteMapJson`.
 - `annotation_extraction_service.py`: annotation prompt instructions are loaded
   through Vontology relations and protected by workflow-purity checks.
 - `experiment_run_service.py` meeting-invitation scenario template: already
@@ -91,7 +91,7 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   repo-seed/workflow-purity track (`JVNAUTOSCI-2080`, `JVNAUTOSCI-2260`) unless
   they become a distinct runtime authority path not represented in Vontology.
 - 2026-05-12: commits `72d8e7c1..0a438ac8` expanded
-  `#V#general_mail_review_workflow` and `#V#gmail_message_detail_fetch_workflow`
+  `##general_mail_review_workflow` and `#V#gmail_message_detail_fetch_workflow`
   seed content, including profile lookup, Gmail list/detail fan-out, and
   grounded rendering. This reinforced `JVNAUTOSCI-2260`; no duplicate was filed.
   The surrounding Python catalogue/runtime edits looked support-only unless they
@@ -134,40 +134,10 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   support-only in this scan. File only if prompt bodies, user-facing recovery
   copy, model-choice semantics, or budget policy defaults become Python-owned
   rather than represented prompt/model metadata.
-- 2026-05-16: legacy durable modules containing `WorkflowDefinition(...)`
-  builders remain watch items, not automatic duplicates, while production
-  registry loading reports Vontology as the active source and
-  `built_in_registration_count=0`. File only where the Python builder or
-  publisher remains the reproducible source for workflow graph/control policy.
-- 2026-05-17: `workflow_studio_service.py` child-concept materialisation and
-  `workflow_concept_authority_service.py` `create_missing_child_concepts`
-  handling looked like workflow-authoring support, not a new policy surface.
-  The replay observation changes look like remediation for `JVNAUTOSCI-2324`
-  while durable recording still requires represented replay evaluation by
-  default. No duplicates were filed for those areas.
-- 2026-05-18: required-tool obligation changes from `c6289c1d` look like
-  remediation for `JVNAUTOSCI-2329`: operation/evidence/target semantics are
-  moved toward metadata rather than inferred from tool-name prefixes. Do not
-  file a duplicate without fresh evidence that Python fallback semantics still
-  decide operation class or target closure.
-- 2026-05-18: `JVNAUTOSCI-2335` and `JVNAUTOSCI-2331` were existing feature
-  tasks, not duplicate drift tickets. Fresh residual authority issues were filed
-  as `JVNAUTOSCI-2340` and `JVNAUTOSCI-2341`; update those instead of reopening
-  broad duplicates for the same email convergence or representation-routing
-  audit surfaces.
-- 2026-05-19: `f2988eed` (`JVNAUTOSCI-2283`), `46ddd799`
-  (`JVNAUTOSCI-2326`), and `8e0ab8a4` (`JVNAUTOSCI-2327`) looked like
-  remediation rather than new drift. Gmail evidence roles now come from
-  Vontology metadata; AI chat-session source profiles and benchmark suites load
-  represented definitions and fail closed unless an explicit fixture path/import
-  helper is used. Do not file duplicates without fresh runtime fallback
-  evidence.
-- 2026-05-19: source-specific adapter classes for Codex/Copilot/Gemini chat
-  transcript file discovery are support-only while source roots, file patterns,
-  profile concepts, and ontology type/predicate definitions are loaded from
-  represented source profiles. File only if adapter code starts authoring source
-  profile policy or silently falls back when Vontology authority is missing.
-
-Do not file solely because a file is large or contains domain nouns. File when
-Python owns durable decision policy, evidence choice, prompt/workflow content,
-user-visible copy, or KB/profile semantics.
+- 2026-05-16: legacy durable modules containing `WorkflowDefinition(‹‹ŠXˆZ[\œÈ™[XZ[ˆØ]Ú][\Ë›İ]]ÛX]XÈ\XØ]\ËÚ[H›ÙXİ[Û‚ˆ™YÚ\İHØY[™È™\ÜÈ›ÛÛÙŞH\ÈHXİ]™HÛİ\˜ÙH[™ˆZ[Ú[—Ü™YÚ\İ˜][Û—ØÛİ[Lˆš[HÛ›HÚ\™HH]ÛˆZ[\ˆÜ‚ˆX›\Ú\ˆ™[XZ[œÈH™\›ÙXÚX›HÛİ\˜ÙH›ÜˆÛÜšÙ›İÈÜ˜\ØÛÛ›ÛÛXŞK‚‹HŒ‹LKLMÎˆÛÜšÙ›İ×ÜİY[×ÜÙ\šXÙKœXÚ[XÛÛ˜Ù\X]\šX[\Ø][Ûˆ[™ˆÛÜšÙ›İ×ØÛÛ˜Ù\Ø]]Üš]WÜÙ\šXÙKœXÜ™X]WÛZ\ÜÚ[™×ØÚ[ØÛÛ˜Ù\Øˆ[™[™ÈÛÚÙYZÙHÛÜšÙ›İËX]]Üš[™Èİ\Ü›İH™]ÈÛXŞHİ\™˜XÙK‚ˆH™\^HØœÙ\˜][ÛˆÚ[™Ù\ÈÛÚÈZÙH™[YYX][Ûˆ›Üˆ•“UUÔĞÒKLŒÌˆÚ[H\˜X›H™XÛÜ™[™Èİ[™\]Z\™\È™\™\Ù[Y™\^H]˜[X][ÛˆBˆY˜][ˆ›È\XØ]\ÈÙ\™Hš[Y›ÜˆÜÙH\™X\Ë‚‹HŒ‹LKLNˆ™\]Z\™Y]ÛÛØ›YØ][ÛˆÚ[™Ù\Èœ›ÛHÍŒXÌYÛÚÈZÙBˆ™[YYX][Ûˆ›Üˆ•“UUÔĞÒKLŒÌXˆÜ\˜][Û‹Ù]šY[˜ÙKİ\™Ù]Ù[X[XÜÈ\™Bˆ[İ™YİØ\™Y]Y]H˜]\ˆ[ˆ[™™\œ™Yœ›ÛHÛÛ[˜[YH™Yš^\ËˆÈ›İˆš[HH\XØ]HÚ]İ]œ™\Ú]šY[˜ÙH]]Ûˆ˜[˜XÚÈÙ[X[XÜÈİ[ˆXÚYHÜ\˜][ÛˆÛ\ÜÈÜˆ\™Ù]ÛÜİ\™K‚‹HŒ‹LKLNˆ•“UUÔĞÒKLŒÌÍX[™•“UUÔĞÒKLŒÌÌXÙ\™H^\İ[™È™X]\™Bˆ\ÚÜË›İ\XØ]HšYXÚÙ]Ëˆœ™\Ú™\ÚYX[]]Üš]H\ÜİY\ÈÙ\™Hš[Yˆ\È•“UUÔĞÒKLŒÍ[™•“UUÔĞÒKLŒÍXÈ\]HÜÙH[œİXYÙˆ™[Ü[š[™Âˆœ›ØY\XØ]\È›ÜˆHØ[YH[XZ[ÛÛ™\™Ù[˜ÙHÜˆ™\™\Ù[][Û‹\›İ][™Âˆ]Y]İ\™˜XÙ\Ë‚‹HŒ‹LKLNNˆŒNYY
+•“UUÔĞÒKLŒØ
+K™ÎNXˆ
+•“UUÔĞÒKLŒÌ˜
+K[™LXM
+•“UUÔĞÒKLŒÌØ
+HÛÚÙYZÙBˆ™[YYX][Ûˆ˜]\ˆ[ˆ™]ÈšYˆÛXZ[]šY[˜ÙH›Û\È›İÈÛÛYHœ›ÛBˆ›ÛÛÙŞHY]Y]NÈRHÚ]\Ù\ÜÚ[ÛˆÛİ\˜ÙH›Ùš[\È[™™[˜ÚX\šÈİZ]\ÈØYˆ™\™\Ù[YYš[š][ÛœÈ[™˜Z[ÛÜÙY[›\ÜÈ[ˆ^XÚ]š^\™H]Ú[\Üˆ[\ˆ\È\ÙYˆÈ›İš[H\XØ]\ÈÚ]İ]œ™\Ú[[YH˜[˜XÚÂˆ]šY[˜ÙK‚‹HŒ‹LKLNNˆÛİ\˜ÙK\ÜXÚYšXÈY\\ˆÛ\ÜÙ\È›ÜˆÛÙ^ĞÛÜ[İÑÙ[Z[šHÚ]ˆ˜[œØÜš\š[H\ØÛİ™\H\™Hİ\Ü[Û›HÚ[HÛİ\˜ÙH›ÛİËš[H]\›œËˆ›Ùš[HÛÛ˜Ù\Ë[™ÛÛÙŞH\KÜ™YXØ]HYš[š][ÛœÈ\™HØYYœ›ÛBˆ™\™\Ù[YÛİ\˜ÙH›Ùš[\Ëˆš[HÛ›HYˆY\\ˆÛÙHİ\È]]Üš[™ÈÛİ\˜ÙBˆ›Ùš[HÛXŞHÜˆÚ[[H˜[È˜XÚÈÚ[ˆ›ÛÛÙŞH]]Üš]H\ÈZ\ÜÚ[™Ë‚‹HŒ‹LKLŒˆÛÜšÙ›İÈ\š]Hİ[˜Z[YÛ›HÛˆH›İ\ˆÛ›İÛˆ™\Ë\ÙYY]Âˆ[™XYH˜XÚÙYH•“UUÔĞÒKLŒÌMX•“UUÔĞÒKLŒÌX•“UUÔĞÒKLŒÍˆ[™•“UUÔĞÒKLŒÍXˆÈ›İš[H™]ÈXÚÙ]È›ÜˆÜÙH]ÈÚ]İ]œ™\ÚˆšY]šY[˜ÙK‚‹HŒ‹LKLŒˆ˜XÚÙÜ›İ[™]\ÚÈ™XÛÛ˜Ú[X][ÛˆÙˆ\›Z[˜[\˜X›HÛÛ™\œØ][Û‚ˆ[œİ[˜Ù\ÈÛÚÙYZÙHİ\Ü[Xš[™ÈÚ[H]Û›HX\È\œÚ\İYÛÜšÙ›İÂˆİ]]ËÜİ]\È[È\ÚÈİ]\ËÜ™\İ[[™Ú[Ëˆš[HÛ›HYˆ]İ\ÂˆXÚY[™È[œİÙ\ˆÙ[X[XÜÈÜˆÛÜšÙ›İÈİXØÙ\ÜÈÛXŞH[ˆ]Û‹‚‚‘È›İš[HÛÛ[H™XØ]\ÙHHš[H\È\™ÙHÜˆÛÛZ[œÈÛXZ[ˆ›İ[œËˆš[HÚ[‚”]ÛˆİÛœÈ\˜X›HXÚ\Ú[ÛˆÛXŞK]šY[˜ÙHÚÚXÙK›Û\İÛÜšÙ›İÈÛÛ[\Ù\‹]š\ÚX›HÛÜKÜˆĞ‹Ü›Ùš[HÙ[X[XÜË‚

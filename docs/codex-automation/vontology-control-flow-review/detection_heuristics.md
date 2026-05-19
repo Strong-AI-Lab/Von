@@ -117,6 +117,16 @@ represented authority before filing Jira work.
   assemble LLM-visible system-message framing from Python string literals.
   Resolving Vontology-authored hint bodies is not enough if the wrapper labels,
   active-request framing, or tests pin the model-visible template in code.
+- Durable turn-execution fallbacks are drift candidates when they implement
+  workflow discovery or selector preparation with Python stopwords, token
+  overlap, suffix stripping, support-workflow demotion, first-candidate routing,
+  or fallback selector prompt text. Discovery reliability defects should repair
+  represented/canonical discovery plumbing or fail closed, not introduce a
+  second lexical selector.
+- Presenter/debug fallback helpers are drift candidates when route code turns
+  nested workflow/tool payload fields into durable user-facing or model-visible
+  wording, especially with source-specific fields such as paper/file-copy ids,
+  Gmail blockers, read-back labels, or headings marked "authoritative".
 
 ## Recent Examples
 
@@ -162,3 +172,9 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2350` - synthesiser-context-prep active-request/tool-hint framing
   strings and exact-message tests live in Python rather than represented
   prompt/context-template authority.
+- `JVNAUTOSCI-2352` - durable conversation-turn workflow discovery fallback uses
+  Python stopwords, token overlap, support-workflow demotion, and first-match
+  routing instead of represented/canonical discovery authority.
+- `JVNAUTOSCI-2353` - presenter nested-workflow evidence and blocker wording is
+  authored in Python route helpers instead of represented presenter/evidence
+  contracts or workflow/prompt authority.

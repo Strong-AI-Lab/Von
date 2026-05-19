@@ -47,3 +47,20 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   and hint-wrapper strings in Python, and tests pin those exact literals instead of a
   represented prompt/context-template authority.
 - No production code was changed by this review run.
+
+## 2026-05-20T02:06:52.6193094+12:00
+
+- Read required repo guidance, workflow manual, authority-alignment guidance, and
+  repo-local automation memory.
+- Reviewed the dirty `jvnautosci-2351-live-arxiv-gmail-replay` worktree plus broad
+  drift patterns. Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py
+  --verbose`; it still failed only on the known four repo-seed paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and `JVNAUTOSCI-2341`.
+- Created `JVNAUTOSCI-2352` for new durable turn workflow-discovery fallback drift in
+  `turn_execution_actions.py`: Python stopwords/token overlap/support-workflow
+  demotion/first-match routing and selector fallback wording.
+- Created `JVNAUTOSCI-2353` for new presenter nested-workflow evidence drift in
+  `von_routes.py`: Python-authored read-back/blocker/domain wording and model-visible
+  "authoritative" sections.
+- Treated durable background-task reconciliation as support plumbing for now.
+- No production code was changed by this review run.
