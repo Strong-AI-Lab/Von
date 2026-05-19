@@ -20543,6 +20543,166 @@ def _gmail_modify_labels(**kwargs):
         )
 
 
+def _gmail_get_auth_config(**kwargs):
+    """Return the OAuth scope and token status for a configured Gmail profile."""
+    from ...services.mail_profile_resource_vontology_service import (
+        gmail_profile_resource_concept_id,
+    )
+    from ...services import concept_service as _cs
+    from ...services.agent_gmail_token_store import get_agent_gmail_token_status
+    from ...integrations.google import gmail_service as gs
+
+    profile_id_arg = str(kwargs.get("profile_id") or "").strip()
+    if not profile_id_arg:
+        return make_error_response(
+            "missing_profile_id",
+            "profile_id is required",
+            suggestions=["Call gmail_list_profiles to see available profile ids"],
+        )
+
+    try:
+        profiles = gs.load_profiles_from_env()
+        profile = gs.get_profile(profile_id_arg, profiles)
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "profile_not_found",
+            f"Gmail profile '{profile_id_arg}' not found: {exc}",
+            suggestions=["Call gmail_list_profiles to see configured profiles"],
+        )
+
+    concept_id = gmail_profile_resource_concept_id(profile_id_arg)
+    vontology_scopes: list[str] | None = None
+    try:
+        concept_doc = _cs.get_concept_by_concept_id(concept_id)
+        if isinstance(concept_doc, Mapping):
+            raw = (concept_doc.get("attributes") or {}).get("oauth_scopes")
+            if isinstance(raw, list) and raw:
+                vontology_scopes = [s for s in raw if isinstance(s, str)]
+    except Exception:  # noqa: BLE001
+        pass
+
+    scopes: list[str]
+    scope_source: str
+    if vontology_scopes is not None:
+        scopes = vontology_scopes
+        scope_source = "vontology"
+    else:
+        scopes = list(getattr(profile, "scopes", []) or [])
+        scope_source = "env"
+
+    try:
+        token_status_obj = get_agent_gmail_token_status(profile_id_arg)
+        token_status = "authorised" if token_status_obj.has_tokens else "missing"
+        token_scopes = token_status_obj.scopes
+        authorised_email = token_status_obj.authorised_email
+        expires_at = (
+            token_status_obj.expires_at.isoformat()
+            if token_status_obj.expires_at is not None
+            else None
+        )
+    except Exception:  # noqa: BLE001
+        token_status = "unavailable"
+        token_scopes = []
+        authorised_email = None
+        expires_at = None
+
+    scope_mismatch = bool(token_scopes) and set(token_scopes) != set(scopes)
+    reauth_advisory = None
+    if scope_source == "env":
+        reauth_advisory = (
+            "Scopes resolved from env var only — call gmail_set_profile_scope to "
+            "persist the desired scope in Vontology, then re-authorise via Von UI."
+        )
+    elif scope_mismatch:
+        reauth_advisory = (
+            "Vontology scope differs from the scope on the stored token. "
+            "Re-authorise via Von UI → Settings → Agent Gmail OAuth to issue "
+            "a new token with the updated scopes."
+        )
+
+    return {
+        "profile_id": profile_id_arg,
+        "concept_id": concept_id,
+        "scopes": scopes,
+        "scope_source": scope_source,
+        "token_status": token_status,
+        "token_scopes": token_scopes,
+        "authorised_email": authorised_email,
+        "expires_at": expires_at,
+        "scope_mismatch": scope_mismatch,
+        "reauth_advisory": reauth_advisory,
+    }
+
+
+def _gmail_set_profile_scope(**kwargs):
+    """Write an OAuth scope list to the Vontology Gmail profile concept."""
+    from ...services.mail_profile_resource_vontology_service import (
+        gmail_profile_resource_concept_id,
+    )
+    from ...services import concept_service as _cs
+    from ...integrations.google import gmail_service as gs
+
+    profile_id_arg = str(kwargs.get("profile_id") or "").strip()
+    new_scopes = kwargs.get("scopes")
+
+    if not profile_id_arg:
+        return make_error_response(
+            "missing_profile_id",
+            "profile_id is required",
+            suggestions=["Call gmail_list_profiles to see configured profiles"],
+        )
+    if not isinstance(new_scopes, list) or not new_scopes:
+        return make_error_response(
+            "invalid_scopes",
+            "scopes must be a non-empty list of OAuth scope URI strings",
+            suggestions=[
+                "Example: ['https://www.googleapis.com/auth/gmail.modify']",
+                "Use gmail_get_auth_config to inspect the current scope",
+            ],
+        )
+    scope_strings = [s for s in new_scopes if isinstance(s, str) and s.strip()]
+    if not scope_strings:
+        return make_error_response(
+            "invalid_scopes",
+            "scopes list contains no valid string values",
+        )
+
+    try:
+        profiles = gs.load_profiles_from_env()
+        gs.get_profile(profile_id_arg, profiles)
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "profile_not_found",
+            f"Gmail profile '{profile_id_arg}' not found: {exc}",
+            suggestions=["Call gmail_list_profiles to see configured profiles"],
+        )
+
+    concept_id = gmail_profile_resource_concept_id(profile_id_arg)
+    try:
+        _cs.update_concept(
+            concept_id,
+            {"attributes.oauth_scopes": scope_strings},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "vontology_update_failed",
+            f"Failed to update OAuth scope in Vontology for profile '{profile_id_arg}': {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+    return {
+        "success": True,
+        "profile_id": profile_id_arg,
+        "concept_id": concept_id,
+        "scopes_set": scope_strings,
+        "reauth_required": True,
+        "reauth_advisory": (
+            "OAuth scope updated in Vontology. Re-authorise via Von UI → Settings → "
+            "Agent Gmail OAuth to issue a new token with the updated scopes."
+        ),
+    }
+
+
 # Jira MCP handlers
 
 _JIRA_WRITE_CACHE: dict[str, dict[str, Any]] = {}
@@ -27971,6 +28131,50 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         allow_unknown=False,
         description="Gmail profile summaries: [{profile_id, authorised_email}].",
     )
+    gmail_get_auth_config_input_schema = Schema(
+        required={"profile_id": str},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=False,
+        description=(
+            "Return the OAuth scope and token status for a configured Gmail profile. "
+            "Resolves scope from Vontology (authoritative) with env var as fallback."
+        ),
+    )
+    gmail_get_auth_config_output_schema = Schema(
+        required={"profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
+        optional={
+            "concept_id": str,
+            "token_scopes": list,
+            "authorised_email": (str, type(None)),
+            "expires_at": (str, type(None)),
+            "scope_mismatch": bool,
+            "reauth_advisory": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "Gmail profile OAuth config: scopes (from Vontology or env), token_status "
+            "(authorised|missing|unavailable), and re-auth advisory when scope has changed."
+        ),
+    )
+    gmail_set_profile_scope_input_schema = Schema(
+        required={"profile_id": str, "scopes": list},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=False,
+        description=(
+            "Write an OAuth scope list to the Vontology Gmail profile concept. "
+            "Returns a re-auth advisory — the user must re-authorise via Von UI "
+            "for the new scope to take effect with the OAuth provider."
+        ),
+    )
+    gmail_set_profile_scope_output_schema = Schema(
+        required={"success": bool, "profile_id": str, "scopes_set": list, "reauth_required": bool},
+        optional={
+            "concept_id": str,
+            "reauth_advisory": str,
+        },
+        allow_unknown=False,
+        description="Confirmation of scope update and re-auth advisory.",
+    )
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
         optional={
@@ -28469,6 +28673,43 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "first when a user asks about a mailbox by email address so "
                 "you can pass the correct profile alias to gmail_list_messages "
                 "and gmail_get_message. Does not return tokens or secrets."
+            ),
+        ),
+        MethodDefinition(
+            name="gmail_get_auth_config",
+            handler=_gmail_get_auth_config,
+            input_schema=gmail_get_auth_config_input_schema,
+            output_schema=gmail_get_auth_config_output_schema,
+            category="read",
+            timeout_sec=10.0,
+            description=(
+                "Return the OAuth scope and token status for a configured Gmail "
+                "profile. Resolves scope from Vontology (authoritative) with the "
+                "env var as fallback when not yet seeded. Returns profile_id, "
+                "scopes, scope_source (vontology|env), token_status "
+                "(authorised|missing|unavailable), token_scopes, authorised_email, "
+                "scope_mismatch, and a reauth_advisory when re-authorisation is "
+                "needed. Use when a user asks about Gmail OAuth configuration, "
+                "scope, or token state for a profile."
+            ),
+        ),
+        MethodDefinition(
+            name="gmail_set_profile_scope",
+            handler=_gmail_set_profile_scope,
+            input_schema=gmail_set_profile_scope_input_schema,
+            output_schema=gmail_set_profile_scope_output_schema,
+            category="write",
+            timeout_sec=10.0,
+            description=(
+                "Write an OAuth scope list to the Vontology Gmail profile concept "
+                "for the named profile_id. The scope is persisted in Vontology and "
+                "will be used by the OAuth flow on next authorisation. Returns "
+                "scopes_set and a reauth_advisory — the user must re-authorise via "
+                "Von UI → Settings → Agent Gmail OAuth for the new scope to take "
+                "effect with the OAuth provider. Requires allow_mutation=true is "
+                "NOT enforced here because updating scope in Vontology is metadata "
+                "only; re-auth is a separate, explicit UI action. Use when a user "
+                "wants to change a Gmail profile's OAuth permissions."
             ),
         ),
         MethodDefinition(

@@ -81,6 +81,44 @@ class AgentGmailOAuthService:
             "or ensure the Gmail profile includes credentials_path."
         )
 
+    def _resolve_scopes(self, *, profile_id: str, profile: GmailProfile) -> list[str]:
+        """Resolve OAuth scopes from Vontology, falling back to env-loaded profile."""
+        try:
+            from .mail_profile_resource_vontology_service import (
+                gmail_profile_resource_concept_id,
+            )
+            from . import concept_service
+            from collections.abc import Mapping as _Mapping
+
+            concept_id = gmail_profile_resource_concept_id(profile_id)
+            concept_doc = concept_service.get_concept_by_concept_id(concept_id)
+            if isinstance(concept_doc, _Mapping):
+                raw = (concept_doc.get("attributes") or {}).get("oauth_scopes")
+                if isinstance(raw, list) and raw:
+                    vontology_scopes = [s for s in raw if isinstance(s, str)]
+                    if vontology_scopes:
+                        logger.debug(
+                            "gmail_oauth._resolve_scopes: Vontology scopes for %s: %r",
+                            profile_id,
+                            vontology_scopes,
+                        )
+                        return vontology_scopes
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "gmail_oauth._resolve_scopes: Vontology lookup failed for %s, "
+                "falling back to env: %r",
+                profile_id,
+                exc,
+            )
+
+        env_scopes = list(getattr(profile, "scopes", []) or [])
+        logger.debug(
+            "gmail_oauth._resolve_scopes: env scopes for %s: %r",
+            profile_id,
+            env_scopes,
+        )
+        return env_scopes
+
     def _build_flow(self, *, profile_id: str) -> Flow:
         profile = self._get_profile(profile_id)
         redirect_uri = self._get_redirect_uri()
@@ -94,7 +132,7 @@ class AgentGmailOAuthService:
 
         return Flow.from_client_secrets_file(
             secret_path,
-            scopes=list(getattr(profile, "scopes", []) or []),
+            scopes=self._resolve_scopes(profile_id=profile_id, profile=profile),
             redirect_uri=redirect_uri,
         )
 

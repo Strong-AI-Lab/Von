@@ -35,6 +35,7 @@ MAIL_PROFILE_RUNTIME_ALIAS_TYPE_ID = "#V#mail_profile_runtime_alias"
 HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID = "#V#has_authorised_mail_profile"
 HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID = "#V#has_default_mail_profile"
 HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID = "#V#has_runtime_profile_alias"
+HAS_OAUTH_SCOPE_PREDICATE_ID = "#V#has_oauth_scope"
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,19 @@ _VOCABULARY_CONCEPT_SPECS: tuple[ConceptSpec, ...] = (
         create_as_instance=True,
         category="predicate",
     ),
+    _concept(
+        concept_id=HAS_OAUTH_SCOPE_PREDICATE_ID,
+        name="has OAuth scope",
+        description=(
+            "Predicate representing the OAuth scope list associated with a "
+            "Gmail profile resource concept. Scope values are stored as the "
+            "oauth_scopes attribute on the profile concept for runtime lookup "
+            "by the OAuth flow and Gmail MCP tools."
+        ),
+        parent_concept_ids=(PREDICATE_TYPE_ID, BINARY_PREDICATE_TYPE_ID),
+        create_as_instance=True,
+        category="predicate",
+    ),
 )
 
 
@@ -239,7 +253,10 @@ def _ensure_relationship(spec: RelationshipSpec) -> dict[str, Any]:
     return dict(result) if isinstance(result, Mapping) else {"success": False}
 
 
-def _profile_concept_specs(profile_ids: Sequence[str]) -> tuple[ConceptSpec, ...]:
+def _profile_concept_specs(
+    profile_ids: Sequence[str],
+    profile_scopes: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[ConceptSpec, ...]:
     specs: list[ConceptSpec] = []
     seen: set[str] = set()
     for raw_profile_id in profile_ids:
@@ -249,6 +266,9 @@ def _profile_concept_specs(profile_ids: Sequence[str]) -> tuple[ConceptSpec, ...
         seen.add(profile_id)
         resource_concept_id = gmail_profile_resource_concept_id(profile_id)
         alias_concept_id = gmail_profile_alias_concept_id(profile_id)
+        extra_attrs: dict[str, Any] = {"runtime_profile_alias": profile_id}
+        if profile_scopes and profile_id in profile_scopes:
+            extra_attrs["oauth_scopes"] = list(profile_scopes[profile_id])
         specs.append(
             _concept(
                 concept_id=resource_concept_id,
@@ -260,7 +280,7 @@ def _profile_concept_specs(profile_ids: Sequence[str]) -> tuple[ConceptSpec, ...
                 parent_concept_ids=(GMAIL_PROFILE_RESOURCE_TYPE_ID,),
                 create_as_instance=True,
                 category="gmail_profile_resource",
-                attributes={"runtime_profile_alias": profile_id},
+                attributes=extra_attrs,
             )
         )
         specs.append(
@@ -357,6 +377,7 @@ def materialise_gmail_profile_resources_for_user(
     user_concept_id: str,
     profile_ids: Sequence[str],
     default_profile_id: str | None = None,
+    profile_scopes: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Materialise safe Gmail profile resource facts for a user.
 
@@ -397,7 +418,7 @@ def materialise_gmail_profile_resources_for_user(
             }
         )
 
-    concept_specs = _profile_concept_specs(cleaned_profile_ids)
+    concept_specs = _profile_concept_specs(cleaned_profile_ids, profile_scopes)
     relationship_specs = _profile_relationship_specs(
         user_concept_id=cleaned_user_concept_id,
         profile_ids=cleaned_profile_ids,
@@ -416,6 +437,26 @@ def materialise_gmail_profile_resources_for_user(
                         "reason_code": str(exc),
                     }
                 )
+
+        if profile_scopes:
+            for profile_id in cleaned_profile_ids:
+                scopes_for_profile = profile_scopes.get(profile_id)
+                if not scopes_for_profile:
+                    continue
+                resource_concept_id = gmail_profile_resource_concept_id(profile_id)
+                try:
+                    concept_service.update_concept(
+                        resource_concept_id,
+                        {"attributes.oauth_scopes": list(scopes_for_profile)},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "section": "scope_attributes",
+                            "profile_id": profile_id,
+                            "reason_code": str(exc),
+                        }
+                    )
 
         for relationship_spec in relationship_specs:
             try:
@@ -479,6 +520,7 @@ __all__ = [
     "GMAIL_PROFILE_RESOURCE_TYPE_ID",
     "HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID",
     "HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID",
+    "HAS_OAUTH_SCOPE_PREDICATE_ID",
     "HAS_RUNTIME_PROFILE_ALIAS_PREDICATE_ID",
     "MAIL_PROFILE_RESOURCE_TYPE_ID",
     "MAIL_PROFILE_RUNTIME_ALIAS_TYPE_ID",
