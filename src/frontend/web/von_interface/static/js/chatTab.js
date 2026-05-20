@@ -15435,8 +15435,10 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     // Preserve clickable #V# tokens; cartouchify where allowed, otherwise linkify in-place.
+    // Note: linkifyVontologyTokensInElement does NOT skip <pre>/<code> blocks so that #V# tokens
+    // inside JSON or other code fences become clickable links with visible styling.
     cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
+    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
     hydrateChatConceptCartouches(container);
     await resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'rendered' });
 }
@@ -15482,7 +15484,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         convertJustSayInstructionsToButtons(messageTextEl);
         convertQuotedInstructionListItemsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
+        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
         hydrateChatConceptCartouches(messageTextEl);
         void resolveInlineVontologyAliasesInElement(messageTextEl, { expectedRenderMode: 'rendered' });
         renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);

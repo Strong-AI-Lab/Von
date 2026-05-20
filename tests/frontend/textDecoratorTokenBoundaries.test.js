@@ -155,4 +155,51 @@ describe('Vontology token boundaries', () => {
         expect(normalisePotentialConceptId('V#michael_witbrock.')).toBe('#V#michael_witbrock');
         expect(normalisePotentialConceptId('not_a_concept')).toBe('');
     });
+
+    test('linkifyVontologyTokensInElement creates visible links (not plain/invisible) inside <pre><code> blocks', () => {
+        const { linkifyVontologyTokensInElement } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.innerHTML = '<pre><code>{"concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow", "other": "value"}</code></pre>';
+
+        // Calling without plain:true (as chatTab.js now does) — tokens should get .vontology-token, not .vontology-token-plain.
+        linkifyVontologyTokensInElement(root, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+
+        const links = root.querySelectorAll('a.vontology-token');
+        expect(links.length).toBe(1);
+        expect(links[0].dataset.conceptId).toBe('zhan_gmail_arxiv_ingestion_workflow');
+        expect(links[0].classList.contains('vontology-token-plain')).toBe(false);
+    });
+
+    test('linkifyVontologyTokensInElement skips <pre><code> content when skipSelectors includes pre or code', () => {
+        const { linkifyVontologyTokensInElement } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.innerHTML = '<pre><code>{"concept_id": "#V#some_concept"}</code></pre>';
+
+        linkifyVontologyTokensInElement(root, { skipSelectors: ['pre', 'code', 'a'] });
+
+        const links = root.querySelectorAll('a.vontology-token');
+        expect(links.length).toBe(0);
+    });
+
+    test('linkifyVontologyTokensInElement inside code block dispatches von:selectConceptById on click', () => {
+        const { linkifyVontologyTokensInElement } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.innerHTML = '<pre><code>#V#email_arxiv_ingestion_from_message_workflow</code></pre>';
+
+        linkifyVontologyTokensInElement(root, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+
+        const link = root.querySelector('a.vontology-token');
+        expect(link).not.toBeNull();
+
+        const events = [];
+        document.addEventListener('von:selectConceptById', (e) => events.push(e.detail));
+        link.click();
+
+        expect(events.length).toBe(1);
+        expect(events[0].conceptId).toBe('email_arxiv_ingestion_from_message_workflow');
+        document.removeEventListener('von:selectConceptById', events[0]);
+    });
 });
