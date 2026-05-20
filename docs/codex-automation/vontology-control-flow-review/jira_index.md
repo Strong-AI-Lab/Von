@@ -56,7 +56,10 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   Python rather than represented Vontology profiles/contracts.
 - `JVNAUTOSCI-2296` - mail-profile resource vocabulary, Gmail profile alias
   concepts, authorised/default profile predicates, and user-profile facts in
-  Python rather than represented Vontology/profile authority.
+  Python rather than represented Vontology/profile authority. Also covers
+  residual Gmail OAuth scope/profile drift from `JVNAUTOSCI-2354`: Python-owned
+  `#V#has_oauth_scope` vocabulary, `attributes.oauth_scopes`, env fallback, and
+  `gmail_set_profile_scope` auto-bootstrap behaviour.
 - `JVNAUTOSCI-2302` - workflow-introspection maintenance workflow graph,
   diagnosis/repair policy, prompt patch text, and Jira remediation wording in
   Python rather than Vontology-stored VWL/prompt authority.
