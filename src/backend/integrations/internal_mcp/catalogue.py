@@ -20690,6 +20690,19 @@ def _gmail_set_profile_scope(**kwargs):
             "invalid_scopes",
             "scopes list contains no valid string values",
         )
+    non_uri_scopes = [s for s in scope_strings if not s.startswith("https://")]
+    if non_uri_scopes:
+        return make_error_response(
+            "invalid_scope_format",
+            (
+                f"Scope strings must be full OAuth URIs starting with 'https://'. "
+                f"Invalid entries: {non_uri_scopes}"
+            ),
+            suggestions=[
+                "Use the full scope URI, e.g. 'https://www.googleapis.com/auth/gmail.modify'",
+                "Abbreviated names like 'gmail.readonly' are not accepted by Google OAuth.",
+            ],
+        )
 
     try:
         profiles = gs.load_profiles_from_env()
