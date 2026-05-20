@@ -175,6 +175,17 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   instances looked like support plumbing while it only maps persisted workflow
   outputs/status into task status/result endpoints. File only if it starts
   deciding answer semantics or workflow success policy in Python.
+- 2026-05-21: current `main` still contains the `JVNAUTOSCI-2352` and
+  `JVNAUTOSCI-2353` drift surfaces from the previous dirty-worktree scan
+  (`durable_discovery_fallback`/`first_routing_match` in
+  `turn_execution_actions.py`; nested presenter wording such as
+  `NESTED WORKFLOW EVIDENCE (authoritative)` in `von_routes.py`). Do not file
+  duplicates; update those issues if new evidence appears.
+- 2026-05-21: `JVNAUTOSCI-2354` added useful Gmail OAuth scope tooling but
+  fresh residual drift belongs under open `JVNAUTOSCI-2296`: OAuth-scope
+  predicate/profile facts and env-fallback/auto-bootstrap behaviour are part of
+  the existing mail-profile resource authority cleanup. A Jira comment and
+  Relates link to `JVNAUTOSCI-2354` were added instead of creating a duplicate.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
