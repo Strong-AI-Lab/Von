@@ -20572,14 +20572,20 @@ def _gmail_get_auth_config(**kwargs):
 
     concept_id = gmail_profile_resource_concept_id(profile_id_arg)
     vontology_scopes: list[str] | None = None
+    vontology_lookup_error: str | None = None
     try:
         concept_doc = _cs.get_concept_by_concept_id(concept_id)
         if isinstance(concept_doc, Mapping):
             raw = (concept_doc.get("attributes") or {}).get("oauth_scopes")
             if isinstance(raw, list) and raw:
                 vontology_scopes = [s for s in raw if isinstance(s, str)]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _vl_exc:  # noqa: BLE001
+        vontology_lookup_error = type(_vl_exc).__name__
+        logger.debug(
+            "gmail_get_auth_config: Vontology concept lookup failed for %s: %s",
+            concept_id,
+            _vl_exc,
+        )
 
     scopes: list[str]
     scope_source: str
@@ -20610,8 +20616,9 @@ def _gmail_get_auth_config(**kwargs):
     reauth_advisory = None
     if scope_source == "env":
         reauth_advisory = (
-            "Scopes resolved from env var only — call gmail_set_profile_scope to "
-            "persist the desired scope in Vontology, then re-authorise via Von UI."
+            "Scopes resolved from env var only — call gmail_set_profile_scope "
+            "with full scope URIs (e.g. 'https://www.googleapis.com/auth/gmail.modify') "
+            "to persist the desired scope in Vontology, then re-authorise via Von UI."
         )
     elif scope_mismatch:
         reauth_advisory = (
@@ -20625,6 +20632,12 @@ def _gmail_get_auth_config(**kwargs):
         f"Scopes for profile '{profile_id_arg}': {scope_str} "
         f"(source: {scope_source}). Token status: {token_status}."
     )
+    if vontology_lookup_error:
+        message += (
+            f" Vontology concept lookup failed ({vontology_lookup_error});"
+            " scope resolved from env. Call gmail_set_profile_scope — it will"
+            " auto-bootstrap the profile concept and persist the scope."
+        )
     if reauth_advisory:
         message += f" {reauth_advisory}"
 
@@ -20641,6 +20654,7 @@ def _gmail_get_auth_config(**kwargs):
         "expires_at": expires_at,
         "scope_mismatch": scope_mismatch,
         "reauth_advisory": reauth_advisory,
+        "vontology_lookup_error": vontology_lookup_error,
     }
 
 
@@ -20688,23 +20702,58 @@ def _gmail_set_profile_scope(**kwargs):
         )
 
     concept_id = gmail_profile_resource_concept_id(profile_id_arg)
+    auto_bootstrapped = False
     try:
         _cs.update_concept(
             concept_id,
             {"attributes.oauth_scopes": scope_strings},
         )
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "vontology_update_failed",
-            f"Failed to update OAuth scope in Vontology for profile '{profile_id_arg}': {exc}",
-            details={"exception_type": type(exc).__name__},
-        )
+        from ...services.concept_service import ConceptNotFoundError as _ConceptNotFoundError
+
+        if not isinstance(exc, _ConceptNotFoundError):
+            return make_error_response(
+                "vontology_update_failed",
+                f"Failed to update OAuth scope in Vontology for profile '{profile_id_arg}': {exc}",
+                details={"exception_type": type(exc).__name__},
+            )
+        # Profile concept doesn't exist yet — auto-bootstrap it with the scope set inline
+        try:
+            from ...services.mail_profile_resource_vontology_service import (
+                materialise_gmail_profile_resources_for_user,
+            )
+            from ...services.workflow_event_integration_service import (
+                resolve_event_actor_context,
+            )
+
+            actor_user_id, _actor_org = resolve_event_actor_context()
+            if not actor_user_id:
+                raise RuntimeError("Cannot resolve user concept ID for profile bootstrap")
+            bootstrap_result = materialise_gmail_profile_resources_for_user(
+                user_concept_id=actor_user_id,
+                profile_ids=[profile_id_arg],
+                profile_scopes={profile_id_arg: scope_strings},
+            )
+            if not bootstrap_result.get("success"):
+                raise RuntimeError(f"Bootstrap reported failure: {bootstrap_result.get('errors')}")
+            auto_bootstrapped = True
+        except Exception as bootstrap_exc:  # noqa: BLE001
+            return make_error_response(
+                "vontology_update_failed",
+                f"Profile concept '{concept_id}' not found and auto-bootstrap failed: {bootstrap_exc}",
+                details={"exception_type": type(bootstrap_exc).__name__},
+                suggestions=[
+                    "The Gmail profile concept must exist in Vontology before setting scopes.",
+                    "Ensure the profile was bootstrapped via the Gmail resource materialisation workflow.",
+                ],
+            )
 
     return {
         "success": True,
         "profile_id": profile_id_arg,
         "concept_id": concept_id,
         "scopes_set": scope_strings,
+        "auto_bootstrapped": auto_bootstrapped,
         "reauth_required": True,
         "reauth_advisory": (
             "OAuth scope updated in Vontology. Re-authorise via Von UI → Settings → "
@@ -28160,6 +28209,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "expires_at": (str, type(None)),
             "scope_mismatch": bool,
             "reauth_advisory": (str, type(None)),
+            "vontology_lookup_error": (str, type(None)),
         },
         allow_unknown=False,
         description=(
@@ -28185,9 +28235,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         optional={
             "concept_id": str,
             "reauth_advisory": str,
+            "auto_bootstrapped": bool,
         },
         allow_unknown=False,
-        description="Confirmation of scope update and re-auth advisory.",
+        description=(
+            "Confirmation of scope update and re-auth advisory. "
+            "auto_bootstrapped=True means the Vontology profile concept did not exist "
+            "and was created automatically alongside the scope write."
+        ),
     )
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
