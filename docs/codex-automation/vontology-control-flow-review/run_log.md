@@ -64,3 +64,24 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   "authoritative" sections.
 - Treated durable background-task reconciliation as support plumbing for now.
 - No production code was changed by this review run.
+
+## 2026-05-21T02:08:40.6983998+12:00
+
+- Read required repo guidance, workflow manual excerpts, authority-alignment
+  guidance, automation memory, and repo-local review memory.
+- Reviewed commits since `2026-05-19T14:00:59Z`. The fresh code was mainly
+  Gmail OAuth/profile work (`JVNAUTOSCI-2354`) plus the previously identified
+  `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` surfaces now on `main`.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`; it
+  still failed only on the known four repo-seed paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2341`.
+- Confirmed `turn_execution_actions.py` and `von_routes.py` still contain the
+  prior `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` drift evidence; no duplicate tasks
+  were created.
+- Updated `JVNAUTOSCI-2296` with fresh residual Gmail OAuth scope evidence:
+  Python now defines `#V#has_oauth_scope`, writes `attributes.oauth_scopes`,
+  falls back to env scope authority, emits re-authorisation/advisory wording,
+  and auto-bootstraps missing Gmail profile concepts. Linked `JVNAUTOSCI-2296`
+  to completed `JVNAUTOSCI-2354`.
+- No production code was changed by this review run.
