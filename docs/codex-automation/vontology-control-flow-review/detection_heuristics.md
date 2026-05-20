@@ -127,6 +127,12 @@ represented authority before filing Jira work.
   nested workflow/tool payload fields into durable user-facing or model-visible
   wording, especially with source-specific fields such as paper/file-copy ids,
   Gmail blockers, read-back labels, or headings marked "authoritative".
+- Integration auth/profile tools are drift candidates when Python treats env
+  profile values as fallback authority for represented profile facts, writes
+  profile-scope attributes directly, auto-bootstraps missing resource concepts,
+  or emits durable re-authorisation/recovery wording. For Gmail/mail profiles,
+  update `JVNAUTOSCI-2296` unless the evidence is clearly a separate generic
+  auth/profile support-surface gap.
 
 ## Recent Examples
 
