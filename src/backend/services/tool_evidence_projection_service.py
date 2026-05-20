@@ -7,6 +7,8 @@ behaviour belongs in Vontology materialisation services, not in the runtime.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -24,6 +26,75 @@ VIEW_PURPOSE_PRIORITY: tuple[str, ...] = (
 )
 
 PROJECTION_SCHEMA_VERSION = "tool_evidence_projection.v1"
+SURFACEABLE_CONCEPT_EVIDENCE_SCHEMA_VERSION = "surfaceable_concept_evidence.v1"
+
+_CONCEPT_ID_RE = re.compile(r"#V#[A-Za-z0-9._-]+")
+_CONDITIONALLY_SURFACEABLE_SINGLE_KEYS = {
+    "concept_id",
+    "canonical_concept_id",
+    "existing_concept_id",
+}
+_SURFACEABLE_SINGLE_KEYS = {
+    "created_concept_id",
+    "materialised_concept_id",
+    "materialized_concept_id",
+    "represented_artefact_concept_id",
+    "paper_concept_id",
+    "file_copy_concept_id",
+    "computer_file_copy_concept_id",
+    "source_file_copy_concept_id",
+}
+_SURFACEABLE_PATH_MARKERS = {
+    "created",
+    "created_concepts",
+    "created_results",
+    "creation_results",
+    "materialised",
+    "materialized",
+    "materialisation",
+    "materialization",
+    "new_concepts",
+    "surfaceable",
+}
+_SURFACEABLE_LIST_KEYS = {
+    "concept_ids",
+    "created_concept_ids",
+    "materialised_concept_ids",
+    "materialized_concept_ids",
+    "represented_artefact_concept_ids",
+    "paper_concept_ids",
+    "file_copy_concept_ids",
+    "computer_file_copy_concept_ids",
+    "source_file_copy_concept_ids",
+    "artefact_ids",
+}
+_NON_SURFACEABLE_CONCEPT_KEYS = {
+    "actor_concept_id",
+    "assignee_concept_id",
+    "author_concept_id",
+    "object_concept_id",
+    "org_concept_id",
+    "predicate_concept_id",
+    "source_concept_id",
+    "subject_concept_id",
+    "target_concept_id",
+    "type_concept_id",
+    "user_concept_id",
+}
+_MUTATION_KIND_KEYS = {
+    "mutation_kind",
+    "operation",
+    "status",
+    "action",
+}
+_CREATED_MUTATION_KINDS = {
+    "created",
+    "materialised",
+    "materialized",
+    "upserted",
+    "linked",
+    "bound",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +115,282 @@ class ToolProjectionContract:
     fields: tuple[ToolFieldContract, ...]
     output_field_ids: tuple[str, ...]
     collection_field_ids: tuple[str, ...]
+
+
+def project_surfaceable_concept_evidence(
+    payload: Any,
+    *,
+    max_items: int = 40,
+    max_depth: int = 8,
+) -> list[dict[str, Any]]:
+    """Extract durable concept handles that are safe to show or reuse.
+
+    This is a generic evidence projection, not a response policy. It preserves
+    concept IDs that tool/workflow results identify as created, materialised,
+    linked, represented artefacts, or canonical concept outputs so later LLM
+    stages and follow-up turns do not have to recover them from truncated JSON.
+    """
+
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _clean_text(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    def _looks_like_concept_id(value: Any) -> bool:
+        return isinstance(value, str) and bool(_CONCEPT_ID_RE.fullmatch(value.strip()))
+
+    def _normalise_mutation_kind(value: Any) -> str | None:
+        text = _clean_text(value)
+        if not text:
+            return None
+        if text == "materialized":
+            return "materialised"
+        return text.lower()
+
+    def _artefact_type_from_key(key: str) -> str | None:
+        lowered = key.lower().strip()
+        if lowered in {"paper_concept_id", "paper_concept_ids"}:
+            return "paper_concept"
+        if lowered in {
+            "file_copy_concept_id",
+            "file_copy_concept_ids",
+            "computer_file_copy_concept_id",
+            "computer_file_copy_concept_ids",
+            "source_file_copy_concept_id",
+            "source_file_copy_concept_ids",
+        }:
+            return "file_copy"
+        if lowered in {"created_concept_id", "created_concept_ids"}:
+            return "concept"
+        if lowered in {
+            "represented_artefact_concept_id",
+            "represented_artefact_concept_ids",
+        }:
+            return "represented_artefact"
+        return None
+
+    def _truthy_creation_flag(value: Any) -> bool:
+        if value is True:
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "yes", "created"}
+        return False
+
+    def _container_marks_surfaceable(
+        container: Mapping[str, Any], path: tuple[str, ...]
+    ) -> bool:
+        mutation_kind = _normalise_mutation_kind(container.get("mutation_kind"))
+        if mutation_kind in _CREATED_MUTATION_KINDS:
+            return True
+        if _truthy_creation_flag(container.get("created")) or _truthy_creation_flag(
+            container.get("was_created")
+        ):
+            return True
+        lowered_path = {part.lower() for part in path}
+        return bool(lowered_path.intersection(_SURFACEABLE_PATH_MARKERS))
+
+    def _add(
+        concept_id: str,
+        *,
+        source_key: str,
+        source_path: tuple[str, ...],
+        container: Mapping[str, Any] | None = None,
+        mutation_kind: str | None = None,
+        artefact_type: str | None = None,
+    ) -> None:
+        if len(entries) >= max_items:
+            return
+        clean_id = concept_id.strip()
+        if not _looks_like_concept_id(clean_id):
+            return
+        lowered = clean_id.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        container_map = container if isinstance(container, Mapping) else {}
+        resolved_mutation = mutation_kind
+        if resolved_mutation is None:
+            for mutation_key in _MUTATION_KIND_KEYS:
+                resolved_mutation = _normalise_mutation_kind(
+                    container_map.get(mutation_key)
+                )
+                if resolved_mutation:
+                    break
+        resolved_type = artefact_type or _artefact_type_from_key(source_key)
+        if not resolved_type:
+            resolved_type = _clean_text(container_map.get("artefact_type"))
+        if not resolved_type and "paper" in clean_id.lower():
+            resolved_type = "paper_concept"
+        elif not resolved_type and "file_copy" in clean_id.lower():
+            resolved_type = "file_copy"
+
+        entry: dict[str, Any] = {
+            "concept_id": clean_id,
+            "source_key": source_key,
+            "source_path": ".".join(source_path),
+        }
+        if resolved_mutation:
+            entry["mutation_kind"] = resolved_mutation
+        if resolved_type:
+            entry["artefact_type"] = resolved_type
+        arxiv_id = _clean_text(container_map.get("arxiv_id"))
+        if arxiv_id:
+            entry["arxiv_id"] = arxiv_id
+        entries.append(entry)
+
+    def _scan_string_preview(text: str, path: tuple[str, ...]) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        parsed: Any = None
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, (Mapping, list, tuple)):
+            _walk(parsed, path=path, depth=0)
+            return
+        source_key = path[-1] if path else "text"
+        if source_key.lower() not in {"_preview", "preview", "content", "text"}:
+            return
+        for match in _CONCEPT_ID_RE.finditer(stripped):
+            _add(match.group(0), source_key=source_key, source_path=path)
+
+    def _walk(value: Any, *, path: tuple[str, ...], depth: int) -> None:
+        if len(entries) >= max_items or depth > max_depth:
+            return
+        if isinstance(value, Mapping):
+            container = value
+            mutation_kind = _normalise_mutation_kind(value.get("mutation_kind"))
+            artefact_type = _clean_text(value.get("artefact_type"))
+            for raw_key, nested in value.items():
+                if len(entries) >= max_items:
+                    break
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                lowered_key = key.lower()
+                next_path = (*path, key)
+                if lowered_key in _NON_SURFACEABLE_CONCEPT_KEYS:
+                    continue
+                if lowered_key in _SURFACEABLE_SINGLE_KEYS and isinstance(nested, str):
+                    _add(
+                        nested,
+                        source_key=key,
+                        source_path=next_path,
+                        container=container,
+                        mutation_kind=mutation_kind,
+                        artefact_type=artefact_type,
+                    )
+                    continue
+                if (
+                    lowered_key in _CONDITIONALLY_SURFACEABLE_SINGLE_KEYS
+                    and isinstance(nested, str)
+                    and _container_marks_surfaceable(container, next_path)
+                ):
+                    _add(
+                        nested,
+                        source_key=key,
+                        source_path=next_path,
+                        container=container,
+                        mutation_kind=mutation_kind,
+                        artefact_type=artefact_type,
+                    )
+                    continue
+                if (
+                    lowered_key in _SURFACEABLE_LIST_KEYS
+                    and isinstance(nested, Sequence)
+                    and not isinstance(nested, (str, bytes, bytearray))
+                ):
+                    for index, item in enumerate(nested):
+                        if not isinstance(item, str):
+                            continue
+                        _add(
+                            item,
+                            source_key=key,
+                            source_path=(*next_path, str(index)),
+                            container=container,
+                            mutation_kind=mutation_kind,
+                            artefact_type=artefact_type,
+                        )
+                    continue
+                if isinstance(nested, str):
+                    _scan_string_preview(nested, next_path)
+                elif isinstance(nested, (Mapping, list, tuple)):
+                    _walk(nested, path=next_path, depth=depth + 1)
+            return
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for index, item in enumerate(value):
+                if len(entries) >= max_items:
+                    break
+                _walk(item, path=(*path, str(index)), depth=depth + 1)
+
+    _walk(payload, path=(), depth=0)
+    return entries
+
+
+def surfaceable_concept_ids_from_evidence(
+    evidence: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+    for entry in evidence or ():
+        if not isinstance(entry, Mapping):
+            continue
+        concept_id = entry.get("concept_id")
+        if not isinstance(concept_id, str) or not _CONCEPT_ID_RE.fullmatch(
+            concept_id.strip()
+        ):
+            continue
+        clean_id = concept_id.strip()
+        lowered = clean_id.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        concept_ids.append(clean_id)
+    return concept_ids
+
+
+def render_surfaceable_concept_lines(
+    evidence: Sequence[Mapping[str, Any]] | None,
+    *,
+    existing_text: str | None = None,
+    max_lines: int = 12,
+) -> list[str]:
+    lines: list[str] = []
+    existing = existing_text or ""
+    for entry in evidence or ():
+        if len(lines) >= max_lines or not isinstance(entry, Mapping):
+            break
+        concept_id = entry.get("concept_id")
+        if not isinstance(concept_id, str) or not _CONCEPT_ID_RE.fullmatch(
+            concept_id.strip()
+        ):
+            continue
+        clean_id = concept_id.strip()
+        if clean_id in existing:
+            continue
+        artefact_type = _clean_str(entry.get("artefact_type")) or "concept"
+        mutation_kind = (_clean_str(entry.get("mutation_kind")) or "created").lower()
+        if artefact_type in {"paper_concept", "paper"}:
+            label = "Created paper concept"
+        elif artefact_type in {"file_copy", "computer_file_copy", "source_file_copy"}:
+            label = "Linked file copy"
+        elif mutation_kind in _CREATED_MUTATION_KINDS:
+            label = f"{mutation_kind.replace('_', ' ').capitalize()} concept"
+        else:
+            label = "Concept"
+        line = f"{label}: {clean_id}."
+        if line not in lines:
+            lines.append(line)
+    return lines
 
 
 def project_tool_payload_for_llm(
@@ -109,7 +456,10 @@ def project_tool_payload_for_llm(
             )
 
     for field in contract.fields:
-        if field.concept_id in collection_field_ids or field.concept_id in row_projected_field_ids:
+        if (
+            field.concept_id in collection_field_ids
+            or field.concept_id in row_projected_field_ids
+        ):
             continue
         if field.redacted:
             telemetry["redacted_fields"].append(
@@ -120,11 +470,17 @@ def project_tool_payload_for_llm(
         if not found:
             if field.required:
                 telemetry["missing_required_fields"].append(
-                    {"field_concept_id": field.concept_id, "output_key": field.output_key}
+                    {
+                        "field_concept_id": field.concept_id,
+                        "output_key": field.output_key,
+                    }
                 )
             else:
                 telemetry["omitted_fields"].append(
-                    {"field_concept_id": field.concept_id, "output_key": field.output_key}
+                    {
+                        "field_concept_id": field.concept_id,
+                        "output_key": field.output_key,
+                    }
                 )
             continue
         compact_value = _compact_value(value)
@@ -237,7 +593,8 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
             field := _load_field_contract(
                 field_id,
                 required=field_id in required_field_ids,
-                included=field_id in included_field_ids or field_id in preserve_field_ids,
+                included=field_id in included_field_ids
+                or field_id in preserve_field_ids,
                 redacted=field_id in redacted_field_ids,
             )
         )
@@ -246,7 +603,8 @@ def resolve_tool_projection_contract(tool_name: str) -> ToolProjectionContract |
     collection_field_ids = tuple(
         field.concept_id
         for field in fields
-        if "#V#tool_field_role_collection_membership" in _relationship_targets(
+        if "#V#tool_field_role_collection_membership"
+        in _relationship_targets(
             load_concept(field.concept_id),
             "#V#field_has_role",
         )
@@ -309,8 +667,12 @@ def _load_field_contract(
     if not isinstance(doc, Mapping):
         return None
     raw_attributes = doc.get("attributes")
-    attributes: Mapping[str, Any] = raw_attributes if isinstance(raw_attributes, Mapping) else {}
-    output_key = _clean_str(attributes.get("field_key")) or _fallback_field_key(field_id)
+    attributes: Mapping[str, Any] = (
+        raw_attributes if isinstance(raw_attributes, Mapping) else {}
+    )
+    output_key = _clean_str(attributes.get("field_key")) or _fallback_field_key(
+        field_id
+    )
     aliases = tuple(
         alias
         for alias_id in _relationship_targets(doc, "#V#field_has_wire_alias")
@@ -341,13 +703,19 @@ def _project_collection_fields(
     max_collection_items: int,
 ) -> dict[str, Any]:
     collection_fields = [
-        field for field in contract.fields if field.concept_id in contract.collection_field_ids
+        field
+        for field in contract.fields
+        if field.concept_id in contract.collection_field_ids
     ]
     for collection_field in collection_fields:
         found, value = _extract_field_value(payload, collection_field)
         if not found or not isinstance(value, list):
             continue
-        row_fields = [field for field in contract.fields if field.concept_id != collection_field.concept_id]
+        row_fields = [
+            field
+            for field in contract.fields
+            if field.concept_id != collection_field.concept_id
+        ]
         rows: list[dict[str, Any]] = []
         projected_field_ids: set[str] = set()
         for item in value[:max_collection_items]:
@@ -383,9 +751,9 @@ def _field_for_collection_item(
     field: ToolFieldContract,
     collection_field: ToolFieldContract,
 ) -> ToolFieldContract:
-    prefixes = [
-        f"{alias}[]." for alias in collection_field.wire_aliases
-    ] + [f"{path}[]." for path in collection_field.payload_paths]
+    prefixes = [f"{alias}[]." for alias in collection_field.wire_aliases] + [
+        f"{path}[]." for path in collection_field.payload_paths
+    ]
     stripped_paths: list[str] = []
     for path in field.payload_paths:
         stripped = path
@@ -405,7 +773,9 @@ def _field_for_collection_item(
     )
 
 
-def _extract_field_value(payload: Mapping[str, Any], field: ToolFieldContract) -> tuple[bool, Any]:
+def _extract_field_value(
+    payload: Mapping[str, Any], field: ToolFieldContract
+) -> tuple[bool, Any]:
     for alias in field.wire_aliases:
         if alias in payload:
             return True, payload.get(alias)
@@ -540,7 +910,9 @@ def _relationships(doc: Mapping[str, Any]) -> Mapping[str, Any]:
     return relationships if isinstance(relationships, Mapping) else {}
 
 
-def _relationship_targets(doc: Mapping[str, Any] | None, predicate: str) -> tuple[str, ...]:
+def _relationship_targets(
+    doc: Mapping[str, Any] | None, predicate: str
+) -> tuple[str, ...]:
     if not isinstance(doc, Mapping):
         return ()
     return tuple(_normalise_unique(_relationships(doc).get(predicate)))

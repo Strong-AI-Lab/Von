@@ -18,7 +18,10 @@ from src.backend.services.tool_evidence_contract_vontology_service import (
     bootstrap_tool_evidence_contract_vocabulary,
 )
 from src.backend.services.tool_evidence_projection_service import (
+    project_surfaceable_concept_evidence,
     project_tool_payload_for_llm,
+    render_surfaceable_concept_lines,
+    surfaceable_concept_ids_from_evidence,
 )
 
 
@@ -285,6 +288,82 @@ def test_orchestrator_formats_gmail_detail_with_vontology_projection(
     assert payload["subject"] == "A useful message"
     assert payload["snippet"] == "The short useful description."
     assert "payload" not in payload
+
+
+def test_surfaceable_concept_projection_collects_nested_workflow_outputs() -> None:
+    evidence = project_surfaceable_concept_evidence(
+        {
+            "workflow_execution_summary": {
+                "result": {
+                    "successful_results": [
+                        {
+                            "arxiv_id": "2402.18144",
+                            "paper_concept_id": "#V#paper_on_arxiv_2402_18144_c100899e",
+                            "file_copy_concept_id": "#V#file_copy_arxiv_2402_18144_c100899e",
+                        },
+                        {
+                            "arxiv_id": "2603.24621",
+                            "paper_concept_id": "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+                        },
+                    ]
+                }
+            },
+            "search_results": [
+                {"concept_id": "#V#ordinary_search_hit", "name": "Search hit"}
+            ],
+            "user_concept_id": "#V#user_should_not_surface",
+        }
+    )
+
+    assert surfaceable_concept_ids_from_evidence(evidence) == [
+        "#V#paper_on_arxiv_2402_18144_c100899e",
+        "#V#file_copy_arxiv_2402_18144_c100899e",
+        "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+    ]
+    assert render_surfaceable_concept_lines(evidence)[:2] == [
+        "Created paper concept: #V#paper_on_arxiv_2402_18144_c100899e.",
+        "Linked file copy: #V#file_copy_arxiv_2402_18144_c100899e.",
+    ]
+
+
+def test_orchestrator_format_preserves_surfaceable_concepts_when_payload_truncates() -> (
+    None
+):
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, object()),
+        max_tool_invocations=1,
+        max_tool_result_chars=900,
+        max_tool_result_field_chars=30_000,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "workflow_execute",
+        {
+            "content": "x" * 20_000,
+            "result": {
+                "successful_results": [
+                    {
+                        "paper_concept_id": "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+                        "file_copy_concept_id": "#V#file_copy_arxiv_2603_24621_eb7a21c4",
+                    }
+                ]
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_truncated"] is True
+    concept_ids = surfaceable_concept_ids_from_evidence(
+        payload["_surfaceable_concepts"]
+    )
+    assert concept_ids == [
+        "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+        "#V#file_copy_arxiv_2603_24621_eb7a21c4",
+    ]
 
 
 def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(

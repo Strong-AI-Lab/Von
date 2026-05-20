@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 from ...services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
+from ...services.tool_evidence_projection_service import (
+    project_surfaceable_concept_evidence,
+    render_surfaceable_concept_lines,
+    surfaceable_concept_ids_from_evidence,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ..action_registry import WorkflowActionResult
 from ..definitions import (
@@ -921,6 +926,7 @@ def _render_structured_observation_lines(observations: Any) -> list[str]:
 
 def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[str]:
     lines: list[str] = []
+    surfaceable_evidence = project_surfaceable_concept_evidence(data)
     paper_concept_id = _coerce_non_empty_text(data.get("paper_concept_id"))
     file_copy_concept_id = _coerce_non_empty_text(data.get("file_copy_concept_id"))
     if paper_concept_id:
@@ -955,6 +961,12 @@ def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[st
                     lines.append(
                         f"Created {artefact_type.replace('_', ' ')}: {first_id}."
                     )
+    for line in render_surfaceable_concept_lines(
+        surfaceable_evidence,
+        existing_text="\n".join(lines),
+    ):
+        if line not in lines:
+            lines.append(line)
     return lines
 
 
@@ -1834,6 +1846,12 @@ def build_turn_execution_selected_workflow_outputs(
     turn_expected_outcome_contract_available = (
         not resolved_turn_expected_outcome_contract.is_empty()
     )
+    initial_surfaceable_evidence = project_surfaceable_concept_evidence(
+        {
+            "child_outputs": child_outputs_map,
+            "child_result_snapshot": child_snapshot,
+        }
+    )
     derived_user_response = _coerce_non_empty_text(rendered_response) or (
         render_selected_workflow_user_response(
             selected_workflow_id=clean_selected_workflow_id,
@@ -1844,6 +1862,15 @@ def build_turn_execution_selected_workflow_outputs(
             child_result_snapshot=child_snapshot,
         )
     )
+    if derived_user_response and initial_surfaceable_evidence:
+        missing_surface_lines = render_surfaceable_concept_lines(
+            initial_surfaceable_evidence,
+            existing_text=derived_user_response,
+        )
+        if missing_surface_lines:
+            derived_user_response = "\n".join(
+                [*missing_surface_lines, "", derived_user_response]
+            )
 
     completion_report = child_outputs_map.get("completion_report")
     completion_report_source = "child_completion_report"
@@ -1880,6 +1907,20 @@ def build_turn_execution_selected_workflow_outputs(
         for key, value in child_snapshot.items():
             if isinstance(key, str) and key not in completion_report_map:
                 completion_report_map[key] = value
+    surfaceable_evidence = project_surfaceable_concept_evidence(
+        {
+            "child_outputs": child_outputs_map,
+            "child_result_snapshot": child_snapshot,
+            "completion_report": completion_report_map,
+        }
+    )
+    if surfaceable_evidence:
+        completion_report_map["surfaceable_concept_evidence"] = list(
+            surfaceable_evidence
+        )
+        completion_report_map["surfaceable_concept_ids"] = (
+            surfaceable_concept_ids_from_evidence(surfaceable_evidence)
+        )
     if turn_expected_outcome_contract_available:
         completion_report_map["turn_expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload

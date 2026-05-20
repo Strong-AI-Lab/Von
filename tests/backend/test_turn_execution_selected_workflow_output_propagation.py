@@ -301,6 +301,62 @@ def test_selected_workflow_outputs_preserve_parent_dispatch_telemetry() -> None:
     assert outputs["aux_llm_calls"] == parent_aux
 
 
+def test_selected_workflow_outputs_surface_nested_created_paper_concepts() -> None:
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#represent_papers_from_arxiv_results_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Represented the requested arXiv papers.",
+            "workflow_execution_summary": {
+                "result": {
+                    "successful_results": [
+                        {
+                            "arxiv_id": "2402.18144",
+                            "paper_concept_id": "#V#paper_on_arxiv_2402_18144_c100899e",
+                            "file_copy_concept_id": "#V#file_copy_arxiv_2402_18144_c100899e",
+                        },
+                        {
+                            "arxiv_id": "2603.24621",
+                            "paper_concept_id": "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+                            "file_copy_concept_id": "#V#file_copy_arxiv_2603_24621_eb7a21c4",
+                        },
+                    ]
+                }
+            },
+        },
+        rendered_child_response_text="Represented the requested arXiv papers.",
+        child_result_snapshot={
+            "iteration_results": [
+                {
+                    "result_snapshot": {
+                        "paper_concept_id": "#V#paper_on_arxiv_2402_18144_c100899e",
+                    }
+                },
+                {
+                    "result_snapshot": {
+                        "paper_concept_id": "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+                    }
+                },
+            ]
+        },
+    )
+
+    response_text = outputs["response_text"]
+    assert "#V#paper_on_arxiv_2402_18144_c100899e" in response_text
+    assert "#V#paper_on_arxiv_2603_24621_eb7a21c4" in response_text
+    assert (
+        "Created paper concept: #V#paper_on_arxiv_2402_18144_c100899e." in response_text
+    )
+    assert outputs["completion_report"]["surfaceable_concept_ids"] == [
+        "#V#paper_on_arxiv_2402_18144_c100899e",
+        "#V#file_copy_arxiv_2402_18144_c100899e",
+        "#V#paper_on_arxiv_2603_24621_eb7a21c4",
+        "#V#file_copy_arxiv_2603_24621_eb7a21c4",
+    ]
+
+
 def test_selected_workflow_outputs_merge_parent_and_child_telemetry() -> None:
     parent_aux = [
         {

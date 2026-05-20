@@ -21894,7 +21894,19 @@ class InternalMCPChatOrchestrator:
         if status == "ok":
             # Tool outputs can be very large (e.g., web extraction). Truncate nested
             # strings/lists so the *next* model call doesn't balloon.
+            surfaceable_concepts: list[dict[str, Any]] = []
+            try:
+                from ...services.tool_evidence_projection_service import (
+                    project_surfaceable_concept_evidence,
+                )
+
+                surfaceable_concepts = project_surfaceable_concept_evidence(payload)
+            except Exception:
+                surfaceable_concepts = []
             llm_payload = self._prepare_tool_payload_for_llm(tool_name, payload)
+            if surfaceable_concepts and isinstance(llm_payload, Mapping):
+                llm_payload = dict(llm_payload)
+                llm_payload.setdefault("_surfaceable_concepts", surfaceable_concepts)
             result["payload"] = self._truncate_nested_for_llm(
                 llm_payload,
                 max_string_chars=self._max_tool_result_field_chars,
@@ -21918,6 +21930,8 @@ class InternalMCPChatOrchestrator:
                 "_original_chars": len(encoded),
                 "_preview": preview_str,
             }
+            if status == "ok" and surfaceable_concepts:
+                truncated_payload["_surfaceable_concepts"] = surfaceable_concepts
             result["payload"] = truncated_payload
             encoded_truncated = json.dumps(result, default=str)
             if len(encoded_truncated) <= self._max_tool_result_chars:
@@ -21948,6 +21962,8 @@ class InternalMCPChatOrchestrator:
                 "_truncated": True,
                 "_original_chars": len(encoded),
             }
+            if status == "ok" and surfaceable_concepts:
+                result["payload"]["_surfaceable_concepts"] = surfaceable_concepts
             encoded_minimal = json.dumps(result, default=str)
             if len(encoded_minimal) <= self._max_tool_result_chars:
                 return encoded_minimal
@@ -35245,7 +35261,34 @@ class InternalMCPChatOrchestrator:
             # Python completion-claim validation was removed so user-visible
             # response ownership stays with the workflow/LLM path.
             del tool_invocations_for_validation
-            del tool_messages_for_validation
+            try:
+                from ...services.tool_evidence_projection_service import (
+                    project_surfaceable_concept_evidence,
+                    render_surfaceable_concept_lines,
+                )
+
+                evidence_payloads: list[Any] = []
+                for message in tool_messages_for_validation:
+                    if not isinstance(message, Mapping):
+                        continue
+                    content = message.get("content")
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+                    try:
+                        parsed = json.loads(content)
+                    except Exception:
+                        continue
+                    if isinstance(parsed, Mapping):
+                        evidence_payloads.append(parsed)
+                evidence = project_surfaceable_concept_evidence(evidence_payloads)
+                missing_lines = render_surfaceable_concept_lines(
+                    evidence,
+                    existing_text=response_text,
+                )
+                if missing_lines:
+                    return "\n".join([response_text.rstrip(), "", *missing_lines])
+            except Exception:
+                pass
             return response_text
 
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
