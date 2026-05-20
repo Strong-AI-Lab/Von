@@ -28211,6 +28211,11 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "Return the OAuth scope and token status for a configured Gmail profile. "
             "Resolves scope from Vontology (authoritative) with env var as fallback."
         ),
+        aliases={
+            "profile": "profile_id",
+            "identity": "profile_id",
+            "profile_alias": "profile_id",
+        },
     )
     gmail_get_auth_config_output_schema = Schema(
         required={"success": bool, "profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
@@ -28275,7 +28280,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "List Gmail messages for a profile with optional query/labels "
             "(read-only). Set bypass_profile_query_prefix=true to ignore the "
             "profile's configured query_prefix and label_filter for this call. "
-            "The 'limit' alias maps to max_results; order/order_by, scope, and "
+            "The 'limit' alias maps to max_results; order/order_by/sort, scope, and "
             "include_metadata are accepted as read-only planning hints."
         ),
         aliases={
@@ -28284,6 +28289,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "user_id": "profile",
             "q": "query",
             "limit": "max_results",
+            "sort": "order_by",
+            "sort_by": "order_by",
+            "order_field": "order_by",
         },
         batch_propagated_fields=("profile",),
     )
