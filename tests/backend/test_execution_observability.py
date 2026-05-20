@@ -18,7 +18,9 @@ def test_await_workflow_terminal_state_retries_transient_get_instance() -> None:
     manager = SimpleNamespace(
         get_instance=MagicMock(
             side_effect=[
-                PyMongoError("server selection timeout while reading workflow_instances"),
+                PyMongoError(
+                    "server selection timeout while reading workflow_instances"
+                ),
                 SimpleNamespace(status="completed"),
             ]
         )
@@ -88,8 +90,62 @@ def test_workflow_execution_response_marks_queued_timeout_as_not_started() -> No
 
     execution = payload.get("workflow_execution") or {}
     assert payload.get("success") is False
-    assert payload.get("error_code") == "workflow_instance_never_started"
+    assert payload.get("error_code") == "workflow_worker_unavailable"
     assert payload.get("timed_out") is True
     assert execution.get("execution_state") == "not_started"
-    assert execution.get("failure_code") == "workflow_instance_never_started"
+    assert execution.get("failure_code") == "workflow_worker_unavailable"
+    assert execution.get("failure_family") == "workflow_instance_never_started"
     assert execution.get("durable_system_status", {}).get("worker_running") is False
+    assert execution.get("queue_diagnostic", {}).get("worker_running") is False
+
+
+def test_workflow_execution_response_marks_running_worker_claim_timeout() -> None:
+    submission = WorkflowInstanceSubmissionResult(
+        success=True,
+        workflow_id="#V#arxiv_paper_representation_workflow",
+        status="created",
+        instance_id="instance-queued-2",
+        verification={"runnable_verification_success": True},
+        created_new=True,
+    )
+    instance = SimpleNamespace(
+        to_status_dict=lambda: {
+            "instance_id": "instance-queued-2",
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "status": "pending",
+            "current_state": "queued",
+            "step_index": 0,
+            "started_at": None,
+            "progress": {"message": "queued"},
+            "outputs": {},
+            "execution_trace_id": None,
+        },
+        status="pending",
+        workflow_data={},
+    )
+
+    payload = build_workflow_execution_response(
+        submission,
+        workflow_inputs={"arxiv_id": "2406.15341"},
+        instance=instance,
+        await_terminal=True,
+        timeout_seconds=180,
+        poll_interval_seconds=1,
+        poll_count=181,
+        timed_out=True,
+        durable_system_status={
+            "worker_running": True,
+            "instances": {"pending": 2, "running": 1},
+        },
+    )
+
+    execution = payload.get("workflow_execution") or {}
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "workflow_worker_did_not_claim_instance"
+    assert execution.get("failure_family") == "workflow_instance_never_started"
+    assert execution.get("queue_diagnostic") == {
+        "authority_surface": "durable_system_status",
+        "worker_running": True,
+        "pending_instance_count": 2,
+        "running_instance_count": 1,
+    }

@@ -1338,8 +1338,9 @@ def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):
 
     execution = payload.get("workflow_execution") or {}
     assert payload.get("success") is False
-    assert payload.get("error_code") == "workflow_instance_never_started"
+    assert payload.get("error_code") == "workflow_worker_unavailable"
     assert execution.get("execution_state") == "not_started"
+    assert execution.get("failure_family") == "workflow_instance_never_started"
     assert execution.get("current_status") == "pending"
     assert execution.get("durable_system_status", {}).get("worker_running") is False
 
@@ -2194,9 +2195,9 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     methods = set(build_default_catalogue().list_methods())
     tracked = set(tracked_workflow_surface_tool_names())
     missing = sorted(tracked - methods)
-    assert not missing, (
-        f"Tracked workflow surface tools missing from catalogue: {missing}"
-    )
+    assert (
+        not missing
+    ), f"Tracked workflow surface tools missing from catalogue: {missing}"
 
 
 def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):

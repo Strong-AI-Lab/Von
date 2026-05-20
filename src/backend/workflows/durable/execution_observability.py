@@ -180,6 +180,28 @@ def _coerce_int_or_none(value: Any) -> int | None:
     return None
 
 
+def _durable_status_bool(
+    durable_system_status: Mapping[str, Any] | None,
+    key: str,
+) -> bool | None:
+    if not isinstance(durable_system_status, Mapping):
+        return None
+    value = durable_system_status.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _durable_instance_count(
+    durable_system_status: Mapping[str, Any] | None,
+    key: str,
+) -> int | None:
+    if not isinstance(durable_system_status, Mapping):
+        return None
+    instances = durable_system_status.get("instances")
+    if not isinstance(instances, Mapping):
+        return None
+    return _coerce_int_or_none(instances.get(key))
+
+
 def _workflow_instance_appears_not_started(instance_payload: Mapping[str, Any]) -> bool:
     status = _safe_str(instance_payload.get("status")).lower()
     if status not in {"pending", "queued"}:
@@ -196,25 +218,66 @@ def _workflow_instance_appears_not_started(instance_payload: Mapping[str, Any]) 
     return True
 
 
+def _classify_not_started_timeout(
+    durable_system_status: Mapping[str, Any] | None,
+) -> tuple[str, str, dict[str, Any]]:
+    if _durable_status_bool(durable_system_status, "database_connected") is False:
+        return (
+            "workflow_durable_database_unavailable",
+            "The durable workflow database was unavailable while waiting for the workflow instance to start.",
+            {"authority_surface": "durable_system_status"},
+        )
+
+    worker_running = _durable_status_bool(durable_system_status, "worker_running")
+    pending_count = _durable_instance_count(durable_system_status, "pending")
+    running_count = _durable_instance_count(durable_system_status, "running")
+    diagnostic = {
+        "authority_surface": "durable_system_status",
+        "worker_running": worker_running,
+        "pending_instance_count": pending_count,
+        "running_instance_count": running_count,
+    }
+
+    if worker_running is False:
+        return (
+            "workflow_worker_unavailable",
+            "No durable workflow worker was running, so the workflow instance remained pending until the workflow_execute timeout elapsed.",
+            diagnostic,
+        )
+    if worker_running is True:
+        return (
+            "workflow_worker_did_not_claim_instance",
+            "A durable workflow worker was running, but this workflow instance was not claimed before the workflow_execute timeout elapsed.",
+            diagnostic,
+        )
+    return (
+        "workflow_instance_never_started",
+        "Workflow instance remained pending or queued until the awaited workflow_execute timeout elapsed.",
+        diagnostic,
+    )
+
+
 def _apply_not_started_timeout_projection(
     payload: dict[str, Any],
     workflow_execution: dict[str, Any],
     *,
     durable_system_status: Mapping[str, Any] | None,
 ) -> None:
-    failure_code = "workflow_instance_never_started"
+    failure_family = "workflow_instance_never_started"
+    failure_code, failure_reason, queue_diagnostic = _classify_not_started_timeout(
+        durable_system_status
+    )
     workflow_execution["execution_state"] = "not_started"
     workflow_execution["failure_code"] = failure_code
-    workflow_execution["failure_reason"] = (
-        "Workflow instance remained pending or queued until the awaited "
-        "workflow_execute timeout elapsed."
-    )
+    workflow_execution["failure_family"] = failure_family
+    workflow_execution["failure_reason"] = failure_reason
+    workflow_execution["queue_diagnostic"] = queue_diagnostic
     if isinstance(durable_system_status, Mapping):
         workflow_execution["durable_system_status"] = dict(durable_system_status)
     payload["success"] = False
     payload["error_code"] = failure_code
-    payload["error"] = workflow_execution["failure_reason"]
-    payload["message"] = workflow_execution["failure_reason"]
+    payload["error"] = failure_reason
+    payload["message"] = failure_reason
 
 
 def build_metadata_validation_summary(
@@ -247,9 +310,7 @@ def build_metadata_validation_summary(
             last_payload.get("phase") if last_payload is not None else None
         )
         or None,
-        "last_event_ok": (
-            last_payload.get("ok") if last_payload is not None else None
-        ),
+        "last_event_ok": (last_payload.get("ok") if last_payload is not None else None),
         "last_reason_code": _safe_str(
             last_payload.get("reason_code") if last_payload is not None else None
         )
@@ -269,9 +330,7 @@ def build_workflow_execution_telemetry(
         include_workflow_data=False,
     )
     workflow_data = getattr(instance, "workflow_data", None)
-    workflow_context = (
-        dict(workflow_data) if isinstance(workflow_data, Mapping) else {}
-    )
+    workflow_context = dict(workflow_data) if isinstance(workflow_data, Mapping) else {}
     step_result_envelopes = _mapping_list(
         workflow_context.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
     )
@@ -282,7 +341,9 @@ def build_workflow_execution_telemetry(
         latest_step_result_envelope = dict(step_result_envelopes[-1])
 
     metadata_events = _mapping_list(workflow_context.get(WORKFLOW_METADATA_EVENTS_KEY))
-    last_metadata_event = _mapping_or_none(workflow_context.get(LAST_METADATA_EVENT_KEY))
+    last_metadata_event = _mapping_or_none(
+        workflow_context.get(LAST_METADATA_EVENT_KEY)
+    )
 
     telemetry: dict[str, Any] = {
         "workflow_result_envelope": _mapping_or_none(
@@ -400,9 +461,7 @@ def build_workflow_execution_trace_summary(
     actions = _mapping_list(trace_doc.get("actions"))
     steps = _mapping_list(trace_doc.get("steps"))
     failed_steps = [
-        step
-        for step in steps
-        if _safe_str(step.get("status")).lower() == "failed"
+        step for step in steps if _safe_str(step.get("status")).lower() == "failed"
     ]
     last_error = None
     for step in reversed(failed_steps):
