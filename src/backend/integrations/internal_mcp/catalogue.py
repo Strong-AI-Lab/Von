@@ -20620,8 +20620,17 @@ def _gmail_get_auth_config(**kwargs):
             "a new token with the updated scopes."
         )
 
+    scope_str = ", ".join(scopes) if scopes else "(none configured)"
+    message = (
+        f"Scopes for profile '{profile_id_arg}': {scope_str} "
+        f"(source: {scope_source}). Token status: {token_status}."
+    )
+    if reauth_advisory:
+        message += f" {reauth_advisory}"
+
     return {
         "success": True,
+        "message": message,
         "profile_id": profile_id_arg,
         "concept_id": concept_id,
         "scopes": scopes,
@@ -28144,6 +28153,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     gmail_get_auth_config_output_schema = Schema(
         required={"success": bool, "profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
         optional={
+            "message": str,
             "concept_id": str,
             "token_scopes": list,
             "authorised_email": (str, type(None)),
