@@ -54,6 +54,9 @@ from ..execution_contracts import (
     increment_runtime_metric,
     normalise_control_signal,
 )
+from ..tool_invocation_evidence import (
+    derive_tool_invocation_records_from_step_envelopes,
+)
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
 from ..plan_state_runtime import (
     LAST_WORKFLOW_COMPLETION_GATE_KEY,
@@ -262,6 +265,39 @@ def _compact_child_result_payload(child_data: Mapping[str, Any] | None) -> Dict[
     return compact_payload
 
 
+def _derive_child_step_invocations(
+    result: Any,
+    *,
+    child_workflow_id: str,
+) -> list[dict[str, Any]]:
+    data = getattr(result, "data", None)
+    if not isinstance(data, Mapping):
+        return []
+    context_payload = {
+        key: data.get(key)
+        for key in (
+            "concept_id",
+            "paper_concept_id",
+            "file_copy_concept_id",
+            "computer_file_copy_concept_id",
+            "source_file_copy_concept_id",
+            "represented_artefact_concept_id",
+        )
+        if data.get(key) not in (None, "", [], {})
+    }
+    if "concept_id" not in context_payload and context_payload.get(
+        "represented_artefact_concept_id"
+    ):
+        context_payload["concept_id"] = context_payload[
+            "represented_artefact_concept_id"
+        ]
+    return derive_tool_invocation_records_from_step_envelopes(
+        data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY),
+        context_payload=context_payload,
+        workflow_id_filter=child_workflow_id,
+    )
+
+
 def _build_subworkflow_handler(
     *,
     registry: ActionRegistry,
@@ -410,6 +446,12 @@ def _build_subworkflow_handler(
         )
 
         child_result_payload = _compact_child_result_payload(child_result.data)
+        child_invocations = _derive_child_step_invocations(
+            child_result,
+            child_workflow_id=child_workflow_id,
+        )
+        if child_invocations:
+            child_result_payload["invocations"] = list(child_invocations)
         outputs: Dict[str, Any] = {
             "result": child_result_payload,
             "subworkflow_invocation": invocation_event,
@@ -419,6 +461,8 @@ def _build_subworkflow_handler(
                 else None
             ),
         }
+        if child_invocations:
+            outputs["invocations"] = list(child_invocations)
         child_control_signal = normalise_control_signal(
             (
                 child_result.result_envelope or {}

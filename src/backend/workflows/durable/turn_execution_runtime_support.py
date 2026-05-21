@@ -28,6 +28,12 @@ from ..definitions import (
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
 from ..execution_contracts import WORKFLOW_STEP_RESULT_ENVELOPES_KEY
+from ..tool_invocation_evidence import (
+    derive_tool_invocation_records_from_step_envelopes,
+    preferred_tool_invocation_name,
+    tool_invocation_completed_successfully,
+    tool_invocation_names,
+)
 from ..turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
@@ -543,6 +549,17 @@ def _merge_selected_child_trace_bridge(
             },
         }
 
+    if bridge is None and selected_workflow_id and child_completed and not existing_ids:
+        bridge = {
+            "trace_role": "selected_workflow",
+            "workflow_id": selected_workflow_id,
+            "trace_unavailable": True,
+            "trace_unavailable_reason": (
+                "selected_workflow_completed_without_trace_identifier"
+            ),
+            "selected_child_trace_source": "selected_workflow_outputs",
+        }
+
     if not isinstance(bridge, Mapping):
         return
     if existing_ids and not (bridge.get("execution_id") or bridge.get("instance_id")):
@@ -569,43 +586,8 @@ def _merge_selected_child_trace_bridge(
             completion_report_map.setdefault(key, value)
 
 
-def _tool_invocation_completed_successfully(invocation: Mapping[str, Any]) -> bool:
-    if bool(invocation.get("blocked")):
-        return False
-    if (
-        isinstance(invocation.get("error"), str)
-        and str(invocation.get("error")).strip()
-    ):
-        return False
-
-    status = invocation.get("status")
-    if isinstance(status, str) and status.strip().lower() in {
-        "error",
-        "failed",
-        "failure",
-    }:
-        return False
-
-    payload = invocation.get("effective_payload")
-    if not isinstance(payload, Mapping):
-        payload = invocation.get("payload")
-    if isinstance(payload, Mapping):
-        status_value = str(payload.get("status") or "").strip().lower()
-        if status_value in {"error", "failed", "failure"}:
-            return False
-        if payload.get("success") is False:
-            return False
-    return True
-
-
 def _tool_invocation_name(invocation: Mapping[str, Any]) -> str | None:
-    raw_tool = invocation.get("tool")
-    if isinstance(raw_tool, str) and raw_tool.strip():
-        return raw_tool.strip()
-    raw_method = invocation.get("method")
-    if isinstance(raw_method, str) and raw_method.strip():
-        return raw_method.strip()
-    return None
+    return preferred_tool_invocation_name(invocation)
 
 
 def _tool_invocation_payload(invocation: Mapping[str, Any]) -> Any:
@@ -627,7 +609,7 @@ def _tool_invocation_status(invocation: Mapping[str, Any]) -> str:
     error_text = _safe_str(invocation.get("error"))
     if error_text:
         return "error"
-    if _tool_invocation_completed_successfully(invocation):
+    if tool_invocation_completed_successfully(invocation):
         return "ok"
     return "error"
 
@@ -674,11 +656,10 @@ def _missing_required_tools_from_invocations(
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
             continue
-        if not _tool_invocation_completed_successfully(invocation):
+        if not tool_invocation_completed_successfully(invocation):
             continue
-        raw_tool = invocation.get("tool")
-        if isinstance(raw_tool, str) and raw_tool.strip():
-            successful_tools.add(raw_tool.strip().lower())
+        for tool_name in tool_invocation_names(invocation):
+            successful_tools.add(tool_name.lower())
 
     return [
         tool_name
@@ -720,21 +701,10 @@ def _derive_required_effect_invocations_from_workflow_steps(
     child_outputs: Mapping[str, Any],
     required_tools: Sequence[str],
 ) -> list[dict[str, Any]]:
-    required_lookup = {
-        tool_name.strip().lower()
-        for tool_name in required_tools
-        if isinstance(tool_name, str) and tool_name.strip()
-    }
-    if not required_lookup:
+    if not _dedupe_string_sequence(required_tools):
         return []
 
     raw_envelopes = child_outputs.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
-    if not isinstance(raw_envelopes, Sequence) or isinstance(
-        raw_envelopes,
-        (str, bytes, bytearray),
-    ):
-        return []
-
     context_target_payload = {
         key: child_outputs.get(key)
         for key in (
@@ -748,51 +718,12 @@ def _derive_required_effect_invocations_from_workflow_steps(
         )
         if child_outputs.get(key) not in (None, "", [], {})
     }
-    derived: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for envelope in raw_envelopes:
-        if not isinstance(envelope, Mapping):
-            continue
-        action_id = _safe_str(envelope.get("action_id"))
-        if not action_id or action_id.lower() not in required_lookup:
-            continue
-        raw_output_payload = envelope.get("output_payload")
-        output_payload: dict[str, Any] = {}
-        if isinstance(raw_output_payload, Mapping):
-            for key, value in raw_output_payload.items():
-                output_payload[str(key)] = value
-        effective_payload = {**context_target_payload, **output_payload}
-        status_text = (
-            _safe_str(envelope.get("action_outcome"))
-            or _safe_str(envelope.get("action_status"))
-            or ""
-        ).lower()
-        raw_diagnostics = envelope.get("diagnostics")
-        diagnostics: Mapping[str, Any] = {}
-        if isinstance(raw_diagnostics, Mapping):
-            diagnostics = raw_diagnostics
-        error_text = _safe_str(diagnostics.get("error"))
-        status = "ok" if status_text in {"success", "succeeded", "ok"} else "failed"
-        fingerprint = (
-            action_id.lower(),
-            json.dumps(effective_payload, sort_keys=True, default=str),
-        )
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        record: dict[str, Any] = {
-            "tool": action_id,
-            "status": status,
-            "payload": _bounded_snapshot(effective_payload),
-            "effective_payload": effective_payload,
-            "workflow_step_evidence": True,
-            "workflow_id": _safe_str(envelope.get("workflow_id")),
-            "workflow_state_id": _safe_str(envelope.get("state_id")),
-        }
-        if error_text:
-            record["error"] = error_text
-        derived.append(record)
-    return derived
+    return derive_tool_invocation_records_from_step_envelopes(
+        raw_envelopes,
+        context_payload=context_target_payload,
+        required_tools=required_tools,
+        payload_projector=_bounded_snapshot,
+    )
 
 
 def _coerce_non_empty_text(value: Any) -> str | None:

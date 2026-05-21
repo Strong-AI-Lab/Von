@@ -5,6 +5,7 @@ from typing import Any, Mapping, Sequence
 
 from src.backend.services.selected_workflow_handoff_service import (
     evaluate_selected_workflow_handoff,
+    workflow_result_tool_invocations,
 )
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
@@ -194,6 +195,38 @@ def test_workflow_step_action_evidence_satisfies_routing_required_tools() -> Non
     assert decision.missing_required_tools == ()
     assert decision.evidence_classification["prompt_required_tools"] == [
         "paper_representation.finalise"
+    ]
+
+
+def test_workflow_result_tool_invocations_omits_internal_steps_without_required_tool() -> None:
+    workflow_result = SimpleNamespace(
+        completed=True,
+        final_state="complete",
+        error=None,
+        data={
+            WORKFLOW_STEP_RESULT_ENVELOPES_KEY: [
+                {
+                    "action_id": "turn_execution.critic",
+                    "action_status": "success",
+                    "output_payload": {"success": True},
+                },
+                {
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "action_status": "success",
+                    "output_payload": {
+                        "mcp_requested_tool": "gmail_get_message",
+                        "mcp_resolved_tool": "gmail_get_message",
+                        "success": True,
+                    },
+                },
+            ]
+        },
+    )
+
+    invocations = workflow_result_tool_invocations(workflow_result)
+
+    assert [invocation.get("tool") for invocation in invocations] == [
+        "gmail_get_message"
     ]
 
 

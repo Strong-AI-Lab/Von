@@ -7499,11 +7499,23 @@ def _build_tool_messages_prompt_blob(
     # Provide a small "did not happen" block to make negative facts explicit.
     did_not_lines: list[str] = []
     if not relationship_write_seen:
-        did_not_lines.append("- No relationship writes detected")
+        did_not_lines.append(
+            "- No top-level relationship write evidence detected"
+            if nested_workflow_evidence_seen
+            else "- No relationship writes detected"
+        )
     if not names_write_seen:
-        did_not_lines.append("- No name writes detected")
+        did_not_lines.append(
+            "- No top-level name write evidence detected"
+            if nested_workflow_evidence_seen
+            else "- No name writes detected"
+        )
     if not concept_create_seen:
-        did_not_lines.append("- No concept creation detected")
+        did_not_lines.append(
+            "- No top-level concept creation evidence detected"
+            if nested_workflow_evidence_seen
+            else "- No concept creation detected"
+        )
 
     blob_lines: list[str] = []
     blob_lines.append("TOOL EXECUTION (authoritative):")

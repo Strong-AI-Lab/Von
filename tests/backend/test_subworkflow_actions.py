@@ -438,6 +438,64 @@ def test_subworkflow_action_compacts_child_runtime_payload_before_propagating() 
     assert "workflow_result_envelope" not in result_payload
 
 
+def test_subworkflow_action_preserves_compact_child_mcp_invocation_evidence() -> None:
+    registry = ActionRegistry()
+    child_definition = WorkflowDefinition(
+        workflow_id="#V#child_mcp_tool",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id="workflow_mcp.invoke_tool"),),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+
+    registry.register(
+        ActionSpec(
+            action_id="workflow_mcp.invoke_tool",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={
+                    "mcp_requested_tool": "gmail_get_message",
+                    "mcp_resolved_tool": "gmail_get_message",
+                    "success": True,
+                    "message_id": "msg-123",
+                }
+            ),
+        )
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            child_definition if workflow_id == "#V#child_mcp_tool" else None
+        ),
+    )
+
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_mcp_tool",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "success"
+    result_payload = execution.outputs.get("result")
+    assert isinstance(result_payload, dict)
+    invocations = result_payload.get("invocations")
+    assert isinstance(invocations, list)
+    assert invocations[0]["tool"] == "gmail_get_message"
+    assert invocations[0]["workflow_action_id"] == "workflow_mcp.invoke_tool"
+    assert invocations[0]["effective_payload"]["message_id"] == "msg-123"
+    assert "workflow_step_result_envelopes" not in result_payload
+
+
 def test_subworkflow_action_can_be_rebound_after_registry_merge() -> None:
     base_registry = ActionRegistry()
     register_subworkflow_actions(
@@ -585,6 +643,6 @@ def test_subworkflow_action_uses_authority_resolver_with_actor_context(
     assert execution.status == "success"
     assert captured["workflow_id"] == "#V#child_success"
     assert captured["use_current_shared_registry"] is True
-    assert captured["promote_to_registry"] is registry
+    assert "promote_to_registry" not in captured
     assert captured["actor_user_id"] == "#V#michael_witbrock"
     assert captured["actor_org_id"] == "#V#university_of_auckland_strong_ai_lab"

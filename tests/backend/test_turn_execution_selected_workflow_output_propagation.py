@@ -15,6 +15,7 @@ from src.backend.workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
     render_selected_workflow_user_response,
 )
+from src.backend.workflows.execution_contracts import WORKFLOW_STEP_RESULT_ENVELOPES_KEY
 
 
 class _Gateway:
@@ -718,6 +719,91 @@ def test_selected_workflow_outputs_exposes_required_step_envelope_as_invocation(
         "#V#paper_2406_15341"
     )
     assert outputs["missing_prompt_tools"] == []
+
+
+def test_selected_workflow_outputs_credit_resolved_mcp_tool_step_evidence() -> None:
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "gmail_arxiv_readback",
+        "required_effects": [
+            {
+                "effect_id": "gmail_arxiv_retrieval",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "gmail_list_messages",
+                    "gmail_get_message",
+                    "search_arxiv",
+                ],
+            }
+        ],
+    }
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#zhan_gmail_arxiv_ingestion_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Found and represented the new papers.",
+            WORKFLOW_STEP_RESULT_ENVELOPES_KEY: [
+                {
+                    "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "state_id": "list_messages",
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "mcp_requested_tool": "gmail_list_messages",
+                        "mcp_resolved_tool": "gmail_list_messages",
+                        "success": True,
+                        "message_count": 2,
+                    },
+                },
+                {
+                    "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "state_id": "read_message",
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "mcp_requested_tool": "gmail_get_message",
+                        "mcp_resolved_tool": "gmail_get_message",
+                        "success": True,
+                        "message_id": "msg-123",
+                    },
+                },
+                {
+                    "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                    "state_id": "search_papers",
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "mcp_requested_tool": "search_arxiv",
+                        "mcp_resolved_tool": "search_arxiv",
+                        "success": True,
+                        "results": [{"arxiv_id": "2402.18144"}],
+                    },
+                },
+            ],
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        rendered_child_response_text="Found and represented the new papers.",
+    )
+
+    invocations = outputs.get("invocations")
+    assert isinstance(invocations, list)
+    assert [item["tool"] for item in invocations] == [
+        "gmail_list_messages",
+        "gmail_get_message",
+        "search_arxiv",
+    ]
+    assert {item["workflow_action_id"] for item in invocations} == {
+        "workflow_mcp.invoke_tool"
+    }
+    assert outputs["missing_prompt_tools"] == []
+    assert outputs["completion_report"]["missing_prompt_tools"] == []
 
 
 def test_selected_workflow_outputs_filters_turn_contract_tools_to_child_allowed_policy() -> (

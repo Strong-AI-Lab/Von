@@ -11,6 +11,9 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
+from src.backend.workflows.tool_invocation_evidence import (
+    derive_tool_invocation_records_from_step_envelopes,
+)
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
 )
@@ -473,7 +476,11 @@ def build_failed_custom_workflow_snapshot(
     return snapshot
 
 
-def workflow_result_tool_invocations(result: Any) -> list[Mapping[str, Any]]:
+def workflow_result_tool_invocations(
+    result: Any,
+    *,
+    required_tools: Sequence[str] | None = None,
+) -> list[Mapping[str, Any]]:
     result_data = getattr(result, "data", None)
     if not isinstance(result_data, Mapping):
         return []
@@ -498,30 +505,11 @@ def workflow_result_tool_invocations(result: Any) -> list[Mapping[str, Any]]:
             if isinstance(value, Mapping):
                 _append_invocation(value)
 
-    for envelope in workflow_execution_summary_mapping_list(
-        result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    for invocation in derive_tool_invocation_records_from_step_envelopes(
+        result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY),
+        required_tools=required_tools,
     ):
-        action_id = clean_workflow_summary_text(envelope.get("action_id"))
-        if not action_id:
-            continue
-        raw_output_payload = envelope.get("output_payload")
-        payload: dict[str, Any] = {}
-        if isinstance(raw_output_payload, Mapping):
-            for key, value in raw_output_payload.items():
-                payload[str(key)] = value
-        outcome = clean_workflow_summary_text(
-            envelope.get("action_outcome")
-        ) or clean_workflow_summary_text(envelope.get("action_status"))
-        if outcome and "status" not in payload:
-            payload["status"] = outcome
-        _append_invocation(
-            {
-                "tool": action_id,
-                "payload": payload,
-                "effective_payload": dict(payload),
-                "workflow_step_evidence": True,
-            }
-        )
+        _append_invocation(invocation)
     return invocations
 
 
@@ -702,7 +690,10 @@ def evaluate_selected_workflow_missing_required_tools(
             required_scholarly_representation_for_file_copy_ids=(
                 routing_required_scholarly_representation_file_copy_ids
             ),
-            tool_invocations=workflow_result_tool_invocations(workflow_result),
+            tool_invocations=workflow_result_tool_invocations(
+                workflow_result,
+                required_tools=required_tools,
+            ),
         )
     )
     missing_required_tools = normalise_tool_name_sequence(missing_tools)

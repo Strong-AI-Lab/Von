@@ -81,6 +81,19 @@ class _TurnAwareLLM:
             return _EXPECTED_OUTCOME_RESPONSE
         if "structured user-request evidence" in prompt_text:
             return _write_request_evidence_response(self._write_request_tool_name)
+        if "You are the postcondition critic for one completed Von turn" in prompt_text:
+            return json.dumps(
+                {
+                    "verdict": "pass",
+                    "confidence": 0.95,
+                    "assessment_summary": (
+                        "The test evidence is treated as adequate for this "
+                        "route-level regression."
+                    ),
+                    "required_evidence_answer_consistency_blocker": None,
+                    "recommendations": [],
+                }
+            )
         if (
             "prompt_turn_execution_narrate_completion_report" in prompt_text
             or "You are composing the user-facing answer for a conversation turn"
@@ -135,6 +148,29 @@ def _write_request_evidence_response(tool_name: str) -> str:
         "}"
         "]"
         "}"
+    )
+
+
+def _minimal_imposition_runtime_profile():
+    return (
+        {
+            "profile_concept_id": "#V#minimal_imposition_runtime_profile_write_policy_v1",
+            "decision_policy": {
+                "default_allow_additive_low_risk": True,
+                "require_clear_request_for_recoverable_mutation": True,
+                "allow_recent_request_context_for_recoverable_mutation": True,
+                "require_confirmation_for_destructive": True,
+                "require_explicit_request_for_external": True,
+                "process_sensitive_additive_requires_clear_request": True,
+            },
+            "tool_risk_classes": {
+                "download_paper": "additive_low_risk",
+            },
+        },
+        {
+            "resolved_profile_concept_id": "#V#minimal_imposition_runtime_profile_write_policy_v1",
+            "loaded_profile_concept_id": "#V#minimal_imposition_runtime_profile_write_policy_v1",
+        },
     )
 
 
@@ -285,6 +321,10 @@ def _make_app(
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
         lambda *args, **kwargs: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.load_minimal_imposition_runtime_profile",
+        lambda **_kwargs: _minimal_imposition_runtime_profile(),
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
@@ -796,7 +836,7 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
     _assert_prompt_seen(llm, "Infer write-tool request evidence")
 
 
-def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
+def test_generate_bare_arxiv_url_fails_closed_on_noisy_initial_tool_plan_output(
     monkeypatch,
 ):
     llm = _TurnAwareLLM(
@@ -836,44 +876,44 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
         if isinstance(record, dict)
         and (record.get("tool") or record.get("method")) == "download_paper"
     ]
-    assert len(download_records) == 1
-    assert "Downloaded and represented the paper." in (body.get("response") or "")
+    assert download_records == []
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
-    assert int(diagnostics.get("tool_call_count") or 0) >= 1
-    assert int(diagnostics.get("tool_success_count") or 0) >= 1
+    assert diagnostics.get("tool_call_count") == 0
+    assert diagnostics.get("tool_success_count") == 0
     assert diagnostics.get("tool_failure_count") == 0
-    assert int(diagnostics.get("tool_pending_count") or 0) <= 1
+    assert diagnostics.get("tool_pending_count") == 0
 
     tool_history = diagnostics.get("tool_history") or []
-    assert tool_history
-    assert all(entry.get("tool") == "download_paper" for entry in tool_history)
+    assert tool_history == []
 
     workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
     assert TOOL_CALLING_WORKFLOW_ID in list(
         workflow_stage_path.get("observed_workflow_ids") or []
     )
     path = workflow_stage_path.get("path") or []
-    tool_execute_entry = next(
-        entry
+    assert not any(
+        isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
         for entry in path
-        if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
     )
-    assert tool_execute_entry.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
 
     stage_diagnostics = diagnostics.get("stage_diagnostics") or []
-    tool_stage = next(
-        entry
+    assert not any(
+        isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
         for entry in stage_diagnostics
-        if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
     )
-    assert int(tool_stage.get("tool_call_count") or 0) >= 1
-    assert int(tool_stage.get("tool_success_count") or 0) >= 1
-    assert tool_stage.get("tool_failure_count") == 0
-    assert tool_stage.get("tool_pending_count") == 0
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    completion_gate = turn_record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "tool_dispatch_boundary_missing" in list(
+        completion_gate.get("blocking_failure_codes") or []
+    )
     _assert_prompt_seen(llm, "expected-success inference policy")
     _assert_prompt_seen(llm, "Select workflow")
-    _assert_prompt_seen(llm, "Infer write-tool request evidence")
+    _assert_prompt_not_seen(llm, "Infer write-tool request evidence")
 
 
 def test_generate_bare_arxiv_url_without_selector_defaults_to_direct_response_without_forced_tool_route(

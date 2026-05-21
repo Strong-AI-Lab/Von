@@ -44,6 +44,10 @@ from ..execution_contracts import (
     append_runtime_event,
     increment_runtime_metric,
 )
+from ..tool_invocation_evidence import (
+    WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+    derive_tool_invocation_records_from_step_envelopes,
+)
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
 
@@ -267,63 +271,37 @@ def _child_context_target_payload(child_data: Mapping[str, Any]) -> dict[str, An
 def _derive_child_step_invocations(
     result: Any,
     *,
+    child_definition: WorkflowDefinition,
     child_workflow_id: str,
 ) -> list[dict[str, Any]]:
     data = getattr(result, "data", None)
     if not isinstance(data, Mapping):
         return []
-    raw_envelopes = data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
-    if not isinstance(raw_envelopes, Sequence) or isinstance(
-        raw_envelopes,
-        (str, bytes, bytearray),
-    ):
-        return []
-
     context_payload = _child_context_target_payload(data)
-    invocations: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for envelope in raw_envelopes:
-        if not isinstance(envelope, Mapping):
-            continue
-        envelope_workflow_id = _normalise_text(envelope.get("workflow_id"))
-        if envelope_workflow_id and envelope_workflow_id != child_workflow_id:
-            continue
-        action_id = _normalise_text(envelope.get("action_id"))
-        if not action_id:
-            continue
-        raw_output_payload = envelope.get("output_payload")
-        output_payload = (
-            dict(raw_output_payload) if isinstance(raw_output_payload, Mapping) else {}
-        )
-        effective_payload = {**context_payload, **output_payload}
-        action_outcome = _normalise_text(envelope.get("action_outcome")).lower()
-        status = "ok" if action_outcome in {"success", "succeeded", "ok"} else "failed"
-        fingerprint = (
-            action_id.lower(),
-            json.dumps(effective_payload, sort_keys=True, default=str),
-        )
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
+    return derive_tool_invocation_records_from_step_envelopes(
+        data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY),
+        context_payload=context_payload,
+        required_tools=_projectable_child_action_ids(child_definition),
+        workflow_id_filter=child_workflow_id,
+    )
 
-        raw_diagnostics = envelope.get("diagnostics")
-        diagnostics = (
-            dict(raw_diagnostics) if isinstance(raw_diagnostics, Mapping) else {}
-        )
-        error_text = _normalise_text(diagnostics.get("error"))
-        record: dict[str, Any] = {
-            "tool": action_id,
-            "status": status,
-            "payload": effective_payload,
-            "effective_payload": effective_payload,
-            "workflow_step_evidence": True,
-            "workflow_id": envelope_workflow_id,
-            "workflow_state_id": _normalise_text(envelope.get("state_id")),
-        }
-        if error_text:
-            record["error"] = error_text
-        invocations.append(record)
-    return invocations
+
+def _projectable_child_action_ids(definition: WorkflowDefinition) -> list[str]:
+    action_ids: list[str] = []
+    seen: set[str] = set()
+    for state in definition.states.values():
+        for action in state.actions:
+            action_id = _normalise_text(action.action_id)
+            if not action_id:
+                continue
+            if action_id.lower() == WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID:
+                continue
+            lowered = action_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            action_ids.append(action_id)
+    return action_ids
 
 
 def _build_continue_handler() -> Callable[[WorkflowActionRequest], WorkflowActionResult]:
@@ -573,6 +551,7 @@ def _build_for_each_handler(
             )
             child_invocations = _derive_child_step_invocations(
                 child_result,
+                child_definition=child_definition,
                 child_workflow_id=child_workflow_id,
             )
             return {
