@@ -101,3 +101,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2353` - presenter nested-workflow evidence/read-back/blocker
   wording and model-visible "authoritative" headings are authored in Python
   route helpers instead of represented presenter/evidence authority.
+- `JVNAUTOSCI-2357` - surfaceable concept evidence selection, artefact typing,
+  arXiv passthrough, and created-concept/file-copy response labels are authored
+  in Python projection/runtime surfaces instead of represented evidence-view or
+  presenter/workflow authority.
