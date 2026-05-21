@@ -90,6 +90,10 @@ predicates, and KB assertions should own durable:
 - Presenter/debug progress and evidence-summary wording, including nested
   workflow read-back labels, blocker descriptions, domain target labels, and
   model-visible section headings marked as authoritative.
+- Surfaceable concept-handle evidence roles and labels, including which result
+  fields count as created/materialised/represented handles, artefact-type
+  labels, source-specific provenance fields, and response/presenter wording for
+  those handles.
 
 ## Python Support
 
@@ -166,6 +170,10 @@ Python can remain the surface for:
 - generic presenter/debug evidence projection support that traverses bounded
   payloads, redacts/validates fields, applies represented evidence-view or
   presenter contracts, and records telemetry without authoring domain wording;
+- generic concept-handle projection support that loads represented
+  evidence-view/presenter metadata, validates concept IDs, bounds payload size,
+  preserves source paths/contract IDs, and emits telemetry without Python-owned
+  paper/file-copy/arXiv labels or field-name policy;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
