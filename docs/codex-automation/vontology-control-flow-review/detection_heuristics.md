@@ -133,6 +133,12 @@ represented authority before filing Jira work.
   or emits durable re-authorisation/recovery wording. For Gmail/mail profiles,
   update `JVNAUTOSCI-2296` unless the evidence is clearly a separate generic
   auth/profile support-surface gap.
+- Evidence-projection helpers are drift candidates when they decide
+  "surfaceable" concept handles from Python field-name allow-lists, concept-id
+  substrings, source-specific keys such as arXiv IDs, or user/model-visible
+  labels. The generic support surface may preserve bounded typed evidence, but
+  surfaceability roles and display wording should come from represented
+  evidence-view/presenter/workflow authority.
 
 ## Recent Examples
 
@@ -184,3 +190,7 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2353` - presenter nested-workflow evidence and blocker wording is
   authored in Python route helpers instead of represented presenter/evidence
   contracts or workflow/prompt authority.
+- `JVNAUTOSCI-2357` - surfaceable concept evidence selection, artefact typing,
+  arXiv passthrough, and created-concept/file-copy labels live in Python runtime
+  projection and selected-workflow response surfaces rather than represented
+  evidence-view/presenter authority.
