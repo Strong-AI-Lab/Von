@@ -85,3 +85,23 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   and auto-bootstraps missing Gmail profile concepts. Linked `JVNAUTOSCI-2296`
   to completed `JVNAUTOSCI-2354`.
 - No production code was changed by this review run.
+
+## 2026-05-22T02:06:36.9847037+12:00
+
+- Read required repo guidance, security guidance, workflow/prompt/memory and
+  operational/authority-alignment docs, plus repo-local review memory.
+- Reviewed current `origin/main` at `9ecfc2b8` and the dirty
+  `fix/selected-workflow-evidence-gate` worktree. Existing dirty production
+  files were not edited or staged.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  it still failed only on the known four repo-seed drift paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2341`.
+- Created `JVNAUTOSCI-2357` for new surfaceable concept evidence drift:
+  `tool_evidence_projection_service.py`, `turn_execution_runtime_support.py`,
+  and `orchestrator.py` now use Python key lists/substrings/source keys and
+  labels such as `Created paper concept` / `Linked file copy` to decide and
+  describe surfaceable concept handles. Linked it to `JVNAUTOSCI-1913`,
+  `JVNAUTOSCI-2353`, `JVNAUTOSCI-2355`, and `JVNAUTOSCI-2356`; commented on
+  `JVNAUTOSCI-2356`.
+- No production code was changed by this review run.
