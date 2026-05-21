@@ -186,6 +186,12 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   predicate/profile facts and env-fallback/auto-bootstrap behaviour are part of
   the existing mail-profile resource authority cleanup. A Jira comment and
   Relates link to `JVNAUTOSCI-2354` were added instead of creating a duplicate.
+- 2026-05-22: nested selected-workflow evidence preservation remains a valid
+  support need under `JVNAUTOSCI-2356`; do not file merely because nested
+  invocations are preserved or bounded. File/update `JVNAUTOSCI-2357` when the
+  preservation path decides surfaceability, artefact type, source-specific
+  provenance, or user/model-visible labels from Python rather than represented
+  evidence-view/presenter metadata.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
