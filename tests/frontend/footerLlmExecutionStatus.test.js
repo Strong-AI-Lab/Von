@@ -90,7 +90,7 @@ describe('footer latest LLM execution status', () => {
         delete window.__VON_RESTORE_TITLES;
     });
 
-    test('shows no configured model when premium is disabled and no Ollama model is selected', async () => {
+    test('shows unselected model when premium is disabled and no Ollama model is selected', async () => {
         localStorage.setItem('von:localModelPreference', JSON.stringify({
             schemaVersion: 'localModelPreference.v1',
             activeSource: 'ollama',
@@ -103,7 +103,7 @@ describe('footer latest LLM execution status', () => {
 
         const modelSegment = await waitForModelSegment((seg) => (
             seg.classList.contains('fatal')
-            && seg.querySelector('.concept-footer-button')?.textContent?.trim() === 'No model configured'
+            && seg.querySelector('.concept-footer-button')?.textContent?.trim() === 'unselected'
         ));
         expect(modelSegment).toBeTruthy();
         expect(modelSegment.classList.contains('llm-status-badge')).toBe(true);
@@ -111,7 +111,7 @@ describe('footer latest LLM execution status', () => {
 
         const modelButton = modelSegment.querySelector('.concept-footer-button');
         expect(modelButton.getAttribute('aria-label')).toBe('Open language model settings');
-        expect(modelButton.title).toContain('Configured status: No model configured');
+        expect(modelButton.title).toContain('Configured status: Unselected');
         expect(modelButton.title).toContain('No usable model configured: premium model use is disabled and no Ollama model is selected.');
 
         const llmInfoCalls = global.fetch.mock.calls.filter(([url]) => {

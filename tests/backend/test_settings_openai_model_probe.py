@@ -59,3 +59,77 @@ def test_openai_model_probe_chat_fallback_omits_temperature(monkeypatch) -> None
     assert payload["usable"] is True
     assert captured_completion_kwargs["model"] == "gpt-5.5-2026-04-23"
     assert "temperature" not in captured_completion_kwargs
+
+
+def test_ollama_model_probe_uses_selected_host_and_model(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as llm_interface
+
+    captured_generate_kwargs: dict[str, object] = {}
+
+    class _FakeOllamaClient:
+        def __init__(self, *, host: str | None = None):
+            self.host = host or "http://localhost:11434"
+
+        @staticmethod
+        def list_models() -> list[str]:
+            return ["llama3.1:8b"]
+
+        def generate(self, prompt: str, **kwargs):
+            captured_generate_kwargs["prompt"] = prompt
+            captured_generate_kwargs.update(kwargs)
+            return "OK"
+
+    monkeypatch.setattr(llm_interface, "OllamaClient", _FakeOllamaClient)
+
+    response = _make_app().test_client().post(
+        "/api/settings/ollama/test_model",
+        json={
+            "host_url": "http://localhost:11434",
+            "model": "llama3.1:8b",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["usable"] is True
+    assert payload["model"] == "llama3.1:8b"
+    assert payload["host_url"] == "http://localhost:11434"
+    assert captured_generate_kwargs["model"] == "llama3.1:8b"
+    assert captured_generate_kwargs["llm_params"] == {"num_predict": 8}
+    assert response.headers.get("Cache-Control") == "no-store"
+
+
+def test_ollama_model_probe_reports_missing_model() -> None:
+    response = _make_app().test_client().post(
+        "/api/settings/ollama/test_model",
+        json={"host_url": "http://localhost:11434", "model": ""},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["usable"] is False
+    assert payload["failure_kind"] == "missing_model"
+
+
+def test_ollama_model_probe_reports_unavailable_model(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as llm_interface
+
+    class _FakeOllamaClient:
+        def __init__(self, *, host: str | None = None):
+            self.host = host or "http://localhost:11434"
+
+        @staticmethod
+        def list_models() -> list[str]:
+            return ["mistral:7b"]
+
+    monkeypatch.setattr(llm_interface, "OllamaClient", _FakeOllamaClient)
+
+    response = _make_app().test_client().post(
+        "/api/settings/ollama/test_model",
+        json={"host_url": "http://localhost:11434", "model": "llama3.1:8b"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["usable"] is False
+    assert payload["failure_kind"] == "model_unavailable"

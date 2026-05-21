@@ -319,6 +319,12 @@
             <select id="globalModelSelect" name="global_ollama_model">
                 <option value="">Loading models...</option>
             </select>
+            <div class="inline-form inline-form-tight mt-2">
+                <button id="testOllamaModelButton" class="btn-secondary" type="button">Test Selected Model</button>
+            </div>
+            <div id="ollamaModelStatusMessage" class="status-message" role="alert">
+                <!-- Status messages for the selected Ollama model will appear here -->
+            </div>
 
             <!-- Per-model LLM call timeout -->
             <div class="inline-form inline-form-tight mb-2 mt-3">

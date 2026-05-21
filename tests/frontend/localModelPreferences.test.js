@@ -115,15 +115,23 @@ describe('local model preferences', () => {
     test('marks disabled premium with no Ollama selection as an unavailable local model state', async () => {
         const {
             applyLocalModelPreferenceOverlay,
+            clearStoredOllamaSelection,
             getEffectiveLocalModelPreference,
             getStoredLocalModelPreference,
             resolveLocalRequestedLlm,
             setLocalPremiumModelUseEnabled,
+            setStoredOllamaSelection,
             setStoredOpenAiSelectedModel,
         } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
 
         setStoredOpenAiSelectedModel('gpt-5.4-mini');
+        setStoredOllamaSelection({
+            value: 'http://localhost:11434:llama3.1:8b',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+        });
         setLocalPremiumModelUseEnabled(false);
+        clearStoredOllamaSelection();
 
         expect(getStoredLocalModelPreference()).toEqual({
             schemaVersion: 'localModelPreference.v1',

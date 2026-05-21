@@ -302,9 +302,6 @@ export function clearStoredOllamaSelection() {
 
   const next = cloneLocalModelPreference(stored);
   next.ollamaSelection = null;
-  if (next.activeSource === 'ollama') {
-    next.activeSource = null;
-  }
   persistLocalModelPreference(next);
 }
 

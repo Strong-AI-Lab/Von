@@ -99,7 +99,6 @@ const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
 const INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
-const DEFAULT_MODEL_LLM_TIMEOUT_SEC = 45;
 
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
@@ -108,6 +107,7 @@ let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
 let latestOpenAiModelProbe = null;
+let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
 let latestCapabilityIndexStatus = null;
 let latestRagRuntimeConfiguration = null;
@@ -859,6 +859,12 @@ function resolveOllamaSelection(includeFallback = false) {
   return selection;
 }
 
+function resolveOllamaDropdownSelectionValue(localModelPreference) {
+  return localModelPreference?.ollamaSelection?.value
+    || localModelPreference?.ollamaSelection?.model
+    || null;
+}
+
 function buildPersistedLlmSelections() {
   const selections = [];
   const openaiModelSelect = document.getElementById('openaiModelSelect');
@@ -936,6 +942,56 @@ function updateOpenAiModelStatusMessage() {
   );
 }
 
+function updateOllamaModelStatusMessage() {
+  const statusEl = document.getElementById('ollamaModelStatusMessage');
+  if (!statusEl) return;
+
+  const localModelPreference = getEffectiveLocalModelPreference();
+  const ollamaIsActive = localModelPreference.activeSource === 'ollama';
+  const selection = resolveOllamaSelection(false);
+  const selectedModel = String(selection?.model || selection?.value || '').trim();
+
+  if (!selectedModel) {
+    setInlineStatusMessage(
+      statusEl,
+      ollamaIsActive
+        ? 'Premium use is disabled on this machine, but no Ollama model is selected.'
+        : 'Select an Ollama model, then test it before relying on it.',
+      null,
+    );
+    return;
+  }
+
+  if (latestOllamaModelProbe && latestOllamaModelProbe.model === selectedModel) {
+    if (latestOllamaModelProbe.usable) {
+      setInlineStatusMessage(
+        statusEl,
+        latestOllamaModelProbe.reason
+          ? `${selectedModel} is usable. ${latestOllamaModelProbe.reason}`
+          : `${selectedModel} is usable.`,
+        'success',
+      );
+      return;
+    }
+    setInlineStatusMessage(
+      statusEl,
+      latestOllamaModelProbe.reason
+        ? `${selectedModel} is not usable. ${latestOllamaModelProbe.reason}`
+        : `${selectedModel} is not usable.`,
+      'error',
+    );
+    return;
+  }
+
+  setInlineStatusMessage(
+    statusEl,
+    ollamaIsActive
+      ? `${selectedModel} is selected as the active local Ollama model, but has not been tested yet.`
+      : `${selectedModel} is selected in the Ollama list, but premium model use is still active on this machine.`,
+    null,
+  );
+}
+
 function notifyLocalModelPreferenceChanged() {
   if (window.parent?.updateModelInfoFooterDisplay) {
     window.parent.updateModelInfoFooterDisplay();
@@ -989,6 +1045,52 @@ async function testSelectedOpenAiModel() {
 
   updateOpenAiModelStatusMessage();
   return latestOpenAiModelProbe;
+}
+
+async function testSelectedOllamaModel() {
+  const selection = resolveOllamaSelection(false);
+  const selectedModel = String(selection?.model || selection?.value || '').trim();
+  const statusEl = document.getElementById('ollamaModelStatusMessage');
+
+  if (!selectedModel) {
+    latestOllamaModelProbe = null;
+    updateOllamaModelStatusMessage();
+    return { usable: false, model: null, reason: 'No Ollama model selected.' };
+  }
+
+  setStoredOllamaSelection(selection);
+  setInlineStatusMessage(statusEl, `Testing ${selectedModel}...`, null);
+
+  try {
+    const response = await postJson('/api/settings/ollama/test_model', {
+      model: selectedModel,
+      host_url: selection?.host || null,
+    });
+    latestOllamaModelProbe = {
+      usable: !!response?.usable,
+      model: String(response?.model || selectedModel),
+      reason: String(response?.reason || '').trim(),
+      failure_kind: String(response?.failure_kind || '').trim() || null,
+    };
+  } catch (error) {
+    const message = String(error?.message || '').trim();
+    const restartHint = (
+      /404/.test(message)
+      || /unexpected token </i.test(message)
+      || /failed to fetch/i.test(message)
+    )
+      ? 'The server needs a restart before the Ollama model test endpoint is available.'
+      : null;
+    latestOllamaModelProbe = {
+      usable: false,
+      model: selectedModel,
+      reason: restartHint || message || 'Ollama model test failed.',
+      failure_kind: restartHint ? 'server_restart_required' : 'request_failed',
+    };
+  }
+
+  updateOllamaModelStatusMessage();
+  return latestOllamaModelProbe;
 }
 
 function resolveActiveLlmFromSelections(
@@ -2484,6 +2586,18 @@ export function __testOnly_resolveActiveLlmFromSelections(
   );
 }
 
+export function __testOnly_updateOllamaModelStatusMessage() {
+  updateOllamaModelStatusMessage();
+}
+
+export async function __testOnly_testSelectedOllamaModel() {
+  return testSelectedOllamaModel();
+}
+
+export function __testOnly_resolveOllamaDropdownSelectionValue(preference) {
+  return resolveOllamaDropdownSelectionValue(preference);
+}
+
 // Export for testing
 export function __testOnly_buildServerDefaultLlmPayload(options = {}) {
   return buildServerDefaultLlmPayload(options);
@@ -2834,7 +2948,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       setLocalPremiumModelUseEnabled(false);
     } else {
       clearStoredOllamaSelection();
+      if (!document.getElementById('enableOpenAiPremiumToggle')?.checked) {
+        setLocalPremiumModelUseEnabled(false);
+      }
     }
+    latestOllamaModelProbe = null;
+    updateOllamaModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
     // Load the saved timeout for the newly selected Ollama model
@@ -2866,7 +2985,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         showStatusMessage('settingsStatusMessage', 'Failed to save timeout.', true);
       }
-    } catch (e) {
+    } catch {
       showStatusMessage('settingsStatusMessage', 'Error saving timeout.', true);
     }
   });
@@ -2884,19 +3003,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     const premiumToggle = event?.target;
     if (!premiumToggle?.checked) {
       const ollamaSelection = resolveOllamaSelection(false);
-      if (!ollamaSelection) {
-        premiumToggle.checked = true;
-        updateOpenAiModelStatusMessage();
-        showStatusMessage(
-          'settingsStatusMessage',
-          'Select an Ollama model before disabling premium use on this machine.',
-          true,
-        );
-        return;
+      if (ollamaSelection) {
+        setStoredOllamaSelection(ollamaSelection);
+      } else {
+        clearStoredOllamaSelection();
       }
-      setStoredOllamaSelection(ollamaSelection);
       setLocalPremiumModelUseEnabled(false);
       updateOpenAiModelStatusMessage();
+      updateOllamaModelStatusMessage();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
       return;
@@ -3046,6 +3160,7 @@ document.getElementById('loadOllamaModelsButton')?.addEventListener('click', loa
 // Other event listeners
 document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', verifyOpenAiApiKey);
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
+document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 
 // Sync visibility of the remote hosts section based on the disable-scan toggle
 function syncOllamaRemoteHostsVisibility() {
@@ -3324,7 +3439,7 @@ async function loadAndDisplaySettings() {
     } = resolveDisplayedProviderModels(settings);
     currentResolvedLlm = effectiveLlm || null;
     const localModelPreference = getEffectiveLocalModelPreference();
-    const currentOllamaModel = localModelPreference.ollamaSelection?.value || null;
+    const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
     const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
     const openAiPremiumEnabled = localModelPreference.activeSource === 'openai';
 
@@ -3475,7 +3590,9 @@ async function loadAndDisplaySettings() {
       setStoredOpenAiSelectedModel(preferredOpenAiModel);
     }
     latestOpenAiModelProbe = null;
+    latestOllamaModelProbe = null;
     updateOpenAiModelStatusMessage();
+    updateOllamaModelStatusMessage();
     populateServerDefaultLlmForm(settings.server_default_llm);
     populateRuntimeModelSettingForm('ragEmbedder', settings.rag_embedder, { allowDisabled: false });
     populateRuntimeModelSettingForm('ragLlm', settings.rag_llm, { allowDisabled: true });

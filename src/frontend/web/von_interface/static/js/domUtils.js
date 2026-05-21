@@ -951,7 +951,7 @@ export async function setModelInfoFooterText() {
 
   if (localModelUnavailable) {
     llmClass = 'fatal';
-    configuredStatusLabel = 'No model configured';
+    configuredStatusLabel = 'Unselected';
   } else if (status === 'missing_key') {
     llmClass = 'missing-key';
     configuredStatusLabel = 'Missing Key';
@@ -1138,7 +1138,7 @@ export async function setModelInfoFooterText() {
       }
     }
     const displayModelText = localModelUnavailable
-      ? 'No model configured'
+      ? 'unselected'
       : executionOverlayActive
       ? (actualModel || requestedModel || configuredModel || 'Not Set')
       : (configuredModel || 'Not Set');

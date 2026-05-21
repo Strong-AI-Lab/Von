@@ -3115,6 +3115,89 @@ def test_openai_model():
         )
 
 
+@settings_bp.route("/ollama/test_model", methods=["POST"])
+def test_ollama_model():
+    """Probe whether a selected Ollama model is reachable and usable."""
+    payload = request.get_json(silent=True) or {}
+    requested_model = str(payload.get("model") or "").strip()
+    host_url = str(payload.get("host_url") or "").strip() or None
+
+    if not requested_model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_model",
+                "reason": "No Ollama model is selected.",
+            },
+            400,
+        )
+
+    try:
+        from ...languagemodels.llm_interface import OllamaClient
+
+        client = OllamaClient(host=host_url)
+        available_models = client.list_models()
+        if available_models and requested_model not in available_models:
+            return _jsonify_no_store(
+                {
+                    "success": True,
+                    "usable": False,
+                    "model": requested_model,
+                    "host_url": client.host,
+                    "failure_kind": "model_unavailable",
+                    "reason": (
+                        f"{requested_model} is not present in the models available "
+                        f"from {client.host}."
+                    ),
+                }
+            )
+        if not available_models:
+            return _jsonify_no_store(
+                {
+                    "success": True,
+                    "usable": False,
+                    "model": requested_model,
+                    "host_url": client.host,
+                    "failure_kind": "no_models_available",
+                    "reason": f"No Ollama models were listed from {client.host}.",
+                }
+            )
+
+        client.generate(
+            "Reply exactly with OK.",
+            model=requested_model,
+            llm_params={"num_predict": 8},
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": True,
+                "model": requested_model,
+                "host_url": client.host,
+                "failure_kind": None,
+                "reason": "The selected Ollama model completed a live probe successfully.",
+            }
+        )
+    except Exception as exc:
+        current_app.logger.warning(
+            "[ollama_test_model] Probe failed for %s: %s",
+            requested_model,
+            exc,
+            exc_info=True,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": False,
+                "model": requested_model,
+                "host_url": host_url,
+                "failure_kind": "probe_failed",
+                "reason": f"Ollama model probe failed: {exc}",
+            }
+        )
+
+
 @settings_bp.route("/model_timeout", methods=["GET"])
 def get_model_timeout_route():
     """Return the saved LLM call timeout for a specific model, or all overrides."""
