@@ -2,6 +2,9 @@ import re
 from unittest.mock import MagicMock
 
 from representation_intent_regression_helpers import patch_representation_profile_loader
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+)
 from src.backend.workflows.action_registry import (
     ActionSpec,
     ActionRegistry,
@@ -297,6 +300,11 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
 
     synthesiser_context_prep = workflow.states["synthesiser_context_prep"]
     assert synthesiser_context_prep.actions[0].action_id == "synthesiser_context_prep"
+    assert synthesiser_context_prep.actions[0].execution_mode == "deterministic"
+    assert synthesiser_context_prep.actions[0].prompt_contract is not None
+    assert synthesiser_context_prep.actions[0].prompt_contract[
+        "resolved_prompt_concept_id"
+    ] == SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
     assert any(
         t.to_state == "backfill" and t.reason == "synthesiser_context_prepared"
         for t in synthesiser_context_prep.transitions
@@ -1466,7 +1474,7 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
     assert result.data["selected_workflow_id"] == "#V#fake_multi_target_paper_workflow"
     assert len(result.data["invocations"]) == 4
     assert [
-        invocation["arguments"]["arxiv_id"] for invocation in result.data["invocations"]
+        invocation["payload"]["arxiv_id"] for invocation in result.data["invocations"]
     ] == [
         "2310.03714",
         "2310.03714",

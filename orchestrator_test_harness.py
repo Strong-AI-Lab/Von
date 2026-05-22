@@ -12,7 +12,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 from src.backend.services.conversation_turn_workflow_vontology_service import (
     _load_expected_outcome_prompt_seed_text,
+    _load_synthesiser_context_framing_prompt_seed_text,
     _load_narration_prompt_seed_text,
+)
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
 )
 from src.backend.services.entity_information_retrieval_workflow_vontology_service import (
     _load_entity_information_retrieval_prompt_seed_text,
@@ -328,8 +332,14 @@ def build_db_independent_orchestrator(
 
     gateway_for_orchestrator = _WorkflowPreludeGatewayProxy(gateway)
 
+    shared_test_registry: WorkflowRegistry | None = None
+
     def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
+        nonlocal shared_test_registry
         assert defer_parity_work is True
+        if shared_test_registry is not None:
+            return shared_test_registry
+
         registry = WorkflowRegistry(definition_loader=_load_seed_workflow_definition)
         for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS:
             spec = publication_specs.get(workflow_id)
@@ -361,6 +371,7 @@ def build_db_independent_orchestrator(
                     source="vontology",
                 )
             )
+        shared_test_registry = registry
         return registry
 
     monkeypatch.setattr(
@@ -514,6 +525,9 @@ def build_db_independent_orchestrator(
     write_tool_request_evidence_prompt_id = (
         "#V#prompt_write_tool_request_evidence_inference"
     )
+    synthesiser_context_framing_prompt_id = (
+        SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+    )
     turn_current_request_prompt_id = "#V#turn_current_request_stage_prompt"
 
     class _HarnessPromptTemplateService:
@@ -587,8 +601,35 @@ def build_db_independent_orchestrator(
                 max_chars=max_chars,
             )
 
+        def resolve_prompt_text(
+            self,
+            concept_ids: Any,
+            *,
+            fallback: Any = None,
+            max_chars: Any = None,
+        ) -> Any:
+            requested_prompt_ids = [
+                str(item).strip()
+                for item in (concept_ids or ())
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if synthesiser_context_framing_prompt_id in requested_prompt_ids:
+                return (
+                    synthesiser_context_framing_prompt_id,
+                    _load_synthesiser_context_framing_prompt_seed_text(),
+                )
+            return self._delegate.resolve_prompt_text(
+                concept_ids,
+                fallback=fallback,
+                max_chars=max_chars,
+            )
+
     monkeypatch.setattr(
         "src.backend.workflows.llm_step_executor.PromptTemplateService",
+        _HarnessPromptTemplateService,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.synthesiser_context_framing_service.PromptTemplateService",
         _HarnessPromptTemplateService,
     )
 

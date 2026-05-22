@@ -1,0 +1,7 @@
+{
+  "schema": "synthesiser_context_framing_template.v1",
+  "active_request_template": "Active request for this turn: {active_user_message}",
+  "tool_hints_template": "Synthesis hints for tool {tool_concept_id}:\n{hint_sections}",
+  "collection_presentation_hint_template": "Collection presentation hint: {collection_presentation_hint}",
+  "item_summary_hint_template": "Per-item summary hint: {item_summary_hint}"
+}

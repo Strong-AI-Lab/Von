@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.backend.workflows.engine import (
+    WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC,
     WORKFLOW_STEP_EXECUTION_MODE_LLM,
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -628,6 +629,39 @@ def test_validate_contract_keeps_prompt_contract_warnings_non_blocking() -> None
         and issue.get("severity") == "warning"
         for issue in validation.get("prompt_contract_issues", [])
     )
+
+
+def test_validate_contract_allows_deterministic_prompt_authority_actions() -> None:
+    prompt_contract = {
+        "validation_policy": "fail",
+        "requested_prompt_concept_ids": ["#V#template_prompt"],
+        "resolved_prompt_concept_id": "#V#template_prompt",
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#deterministic_prompt_authority_workflow",
+        initial_state="render_context",
+        states={
+            "render_context": WorkflowStateSpec(
+                state_id="render_context",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="render.context.template",
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC,
+                        prompt_contract=prompt_contract,
+                    ),
+                ),
+                terminal=True,
+                metadata={"prompt_contract": prompt_contract},
+            ),
+        },
+        termination_states=("render_context",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert "workflow_prompt_contract_invalid" not in (validation.get("errors") or [])
+    assert validation.get("prompt_contract_issues") == []
 
 
 def test_validate_contract_treats_llm_execution_mode_as_supported_without_registry_action() -> None:

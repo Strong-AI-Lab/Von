@@ -527,6 +527,19 @@ def execute_workflow_step_invocation(
         context=context,
         env=env,
         trace=trace,
+        prompt_contract=(
+            dict(action.prompt_contract)
+            if isinstance(action.prompt_contract, Mapping)
+            else None
+        ),
+        llm_policy=(
+            dict(action.llm_policy) if isinstance(action.llm_policy, Mapping) else None
+        ),
+        validation_policy=(
+            dict(action.validation_policy)
+            if isinstance(action.validation_policy, Mapping)
+            else None
+        ),
         workflow_id=workflow_id,
         workflow_state_id=workflow_state_id,
         workflow_state_metadata=workflow_state_metadata,

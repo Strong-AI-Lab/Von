@@ -48,6 +48,21 @@ class _CapturingLLM:
         return "ok"
 
 
+def _extract_preflight_text_for_prompt(
+    llm: _CapturingLLM,
+    prompt: str,
+) -> str | None:
+    for call in llm.calls:
+        if call.get("prompt") != prompt:
+            continue
+        context_messages = call.get("context") or []
+        for msg in context_messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
+                return content
+    return None
+
+
 _TEST_BASE_PROMPT = (
     "You have access to internal MCP tools.\n\n"
     "{auth_status}\n"
@@ -906,16 +921,12 @@ def test_preflight_session_memory_keeps_context_for_two_follow_up_turns(monkeypa
         conversation_session_id=session_id,
     )
 
-    def _extract_preflight_text(call_index: int) -> str | None:
-        context_messages = llm.calls[call_index].get("context") or []
-        for msg in context_messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
-                return content
-        return None
-
-    second_preflight = _extract_preflight_text(1)
-    third_preflight = _extract_preflight_text(2)
+    second_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue with affiliations."
+    )
+    third_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue and verify institutions."
+    )
 
     assert second_preflight is not None, "expected preflight on first follow-up turn"
     assert third_preflight is not None, "expected preflight on second follow-up turn"
@@ -1154,16 +1165,12 @@ def test_annotation_candidates_reused_across_two_follow_up_turns(monkeypatch):
         conversation_session_id=session_id,
     )
 
-    def _extract_preflight_text(call_index: int) -> str | None:
-        context_messages = llm.calls[call_index].get("context") or []
-        for msg in context_messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
-                return content
-        return None
-
-    second_preflight = _extract_preflight_text(1)
-    third_preflight = _extract_preflight_text(2)
+    second_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue with affiliations."
+    )
+    third_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue and verify institutions."
+    )
     assert second_preflight is not None, "expected preflight on first follow-up turn"
     assert third_preflight is not None, "expected preflight on second follow-up turn"
     assert "#V#john_smith" in second_preflight
@@ -1408,16 +1415,12 @@ def test_salient_predicates_persist_for_two_follow_up_turns(monkeypatch):
         conversation_session_id=session_id,
     )
 
-    def _extract_preflight_text(call_index: int) -> str | None:
-        context_messages = llm.calls[call_index].get("context") or []
-        for msg in context_messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
-                return content
-        return None
-
-    second_preflight = _extract_preflight_text(1)
-    third_preflight = _extract_preflight_text(2)
+    second_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue with predicates."
+    )
+    third_preflight = _extract_preflight_text_for_prompt(
+        llm, "Continue and verify relation choices."
+    )
     assert second_preflight is not None, "expected preflight on first follow-up turn"
     assert third_preflight is not None, "expected preflight on second follow-up turn"
     assert "#V#authored_by" in second_preflight

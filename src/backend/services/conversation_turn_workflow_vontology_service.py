@@ -14,6 +14,9 @@ from .workflow_prompt_authority_service import (
     safe_str,
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
+from .synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+)
 from ..workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -86,6 +89,12 @@ _TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "tool_call_repair_prompt_seed.md"
 )
+_SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "synthesiser_context_framing_prompt_seed.json"
+)
 _TARGET_WORKFLOW_IDS: tuple[str, ...] = (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
@@ -152,6 +161,15 @@ def _load_tool_call_repair_prompt_seed_text() -> str:
     ).strip()
     if not prompt_text:
         raise ValueError("tool_call_repair_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_synthesiser_context_framing_prompt_seed_text() -> str:
+    prompt_text = _SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("synthesiser_context_framing_prompt_seed_missing")
     return prompt_text
 
 
@@ -264,6 +282,16 @@ def _ensure_conversation_turn_prompt_support(
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
+            WorkflowPromptConceptSpec(
+                concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+                name="Synthesiser context framing template",
+                description=(
+                    "Canonical represented template for the summariser-stage "
+                    "system messages that preserve the active request and "
+                    "Vontology-authored tool-output hints."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
         ),
         provenance_source=_MANAGED_BY,
     )
@@ -372,6 +400,18 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
+    if force_prompt_seed or not prompt_concept_has_content(
+        SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_synthesiser_context_framing_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": "JVNAUTOSCI-2350", "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID)
 
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
@@ -452,6 +492,17 @@ def _ensure_conversation_turn_prompt_support(
         validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
         if _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
 
     report["errors_by_target"] = errors_by_target

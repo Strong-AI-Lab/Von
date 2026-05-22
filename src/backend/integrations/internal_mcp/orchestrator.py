@@ -149,6 +149,9 @@ from ...workflows.durable.registry_factory import (
 from ...workflows.durable.synthesiser_context_prep_actions import (
     SYNTHESISER_CONTEXT_PREP_ACTION_ID,
 )
+from ...services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+)
 from ...workflows.durable.subworkflow_actions import register_subworkflow_actions
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
@@ -7482,6 +7485,20 @@ class InternalMCPChatOrchestrator:
             inputs={},
             context=data,
             env=request.environment,
+            prompt_contract={
+                "validation_policy": "fail",
+                "requested_prompt_concept_ids": [
+                    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+                ],
+                "resolved_prompt_concept_id": (
+                    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+                ),
+                "metadata": {
+                    "prompt_source": "composite_tool_calling_runtime",
+                    "workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "state_id": "synthesiser_context_prep",
+                },
+            },
             workflow_id=TOOL_CALLING_WORKFLOW_ID,
             workflow_state_id="synthesiser_context_prep",
         )
@@ -12499,9 +12516,51 @@ class InternalMCPChatOrchestrator:
             tool_call_id = message.get("tool_call_id")
             if isinstance(tool_call_id, str) and tool_call_id.strip():
                 summary["tool_call_id"] = tool_call_id.strip()
+            for metadata_key in (
+                "source",
+                "requested_prompt_concept_id",
+                "source_prompt_concept_id",
+                "template_schema",
+                "template_field",
+                "tool_concept_id",
+            ):
+                metadata_value = message.get(metadata_key)
+                if isinstance(metadata_value, str) and metadata_value.strip():
+                    summary[metadata_key] = metadata_value.strip()
+            hint_predicate_ids = message.get("hint_predicate_ids")
+            if isinstance(hint_predicate_ids, Sequence) and not isinstance(
+                hint_predicate_ids,
+                (str, bytes, bytearray),
+            ):
+                cleaned_predicate_ids = [
+                    predicate_id.strip()
+                    for predicate_id in hint_predicate_ids
+                    if isinstance(predicate_id, str) and predicate_id.strip()
+                ]
+                if cleaned_predicate_ids:
+                    summary["hint_predicate_ids"] = cleaned_predicate_ids
             if summary:
                 summaries.append(summary)
         return summaries
+
+    @staticmethod
+    def _normalise_stage_message_for_llm(
+        message: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        role = str(message.get("role") or "system").strip() or "system"
+        content = message.get("content")
+        content_text = content if isinstance(content, str) else str(content or "")
+        content_text = content_text.strip()
+        if not content_text:
+            return None
+        normalised: dict[str, Any] = {"role": role, "content": content_text}
+        name = message.get("name")
+        if isinstance(name, str) and name.strip():
+            normalised["name"] = name.strip()
+        tool_call_id = message.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id.strip():
+            normalised["tool_call_id"] = tool_call_id.strip()
+        return normalised
 
     def _build_stage_llm_context(
         self,
@@ -12517,10 +12576,16 @@ class InternalMCPChatOrchestrator:
             for message in (base_context or ())
             if isinstance(message, Mapping)
         ]
-        stage_added_messages: list[Mapping[str, Any]] = [
+        raw_stage_added_messages: list[Mapping[str, Any]] = [
             dict(message)
             for message in (stage_messages or ())
             if isinstance(message, Mapping)
+        ]
+        stage_added_messages: list[Mapping[str, Any]] = [
+            normalised
+            for message in raw_stage_added_messages
+            if (normalised := self._normalise_stage_message_for_llm(message))
+            is not None
         ]
 
         leading_system, remainder = self._split_leading_system_messages(base_messages)
@@ -12542,7 +12607,7 @@ class InternalMCPChatOrchestrator:
             ),
             "stage_added_message_count": len(stage_added_messages),
             "stage_added_messages": self._summarise_added_context_messages_for_telemetry(
-                stage_added_messages
+                raw_stage_added_messages
             )
             or None,
             "stage_context_summary": self._summarise_context_messages_for_telemetry(
@@ -12559,22 +12624,32 @@ class InternalMCPChatOrchestrator:
     @staticmethod
     def _build_synthesiser_context_prep_stage_messages(
         data: Mapping[str, Any],
-    ) -> list[Mapping[str, str]]:
+    ) -> list[Mapping[str, Any]]:
         raw_messages = data.get("synthesiser_system_messages")
         if not isinstance(raw_messages, Sequence) or isinstance(
             raw_messages, (str, bytes, bytearray)
         ):
             return []
 
-        messages: list[Mapping[str, str]] = []
+        messages: list[Mapping[str, Any]] = []
         seen_content: set[str] = set()
         for raw_message in raw_messages:
-            content = raw_message if isinstance(raw_message, str) else str(raw_message)
+            if isinstance(raw_message, Mapping):
+                content = raw_message.get("content")
+            else:
+                content = raw_message
+            content = content if isinstance(content, str) else str(content)
             content = content.strip()
             if not content or content in seen_content:
                 continue
             seen_content.add(content)
-            messages.append({"role": "system", "content": content})
+            if isinstance(raw_message, Mapping):
+                message: dict[str, Any] = dict(raw_message)
+                message["role"] = str(message.get("role") or "system").strip() or "system"
+                message["content"] = content
+                messages.append(message)
+            else:
+                messages.append({"role": "system", "content": content})
         return messages
 
     def _inject_turn_memory_context_messages(

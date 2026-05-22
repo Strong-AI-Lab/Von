@@ -305,6 +305,28 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
         "path": "src/backend/workflows/durable/workflow_creation_workflow.py",
         "banned_symbol_names": WORKFLOW_CREATION_RETIRED_SYMBOLS,
     },
+    {
+        "name": "synthesiser_context_prep_authority_surface",
+        "path": "src/backend/workflows/durable/synthesiser_context_prep_actions.py",
+        "forbidden_patterns": {
+            "python_authored_synthesiser_active_request_framing": re.compile(
+                r"Active request for this turn",
+                re.IGNORECASE,
+            ),
+            "python_authored_synthesiser_tool_hint_heading": re.compile(
+                r"Synthesis hints for tool",
+                re.IGNORECASE,
+            ),
+            "python_authored_synthesiser_collection_hint_label": re.compile(
+                r"Collection presentation hint",
+                re.IGNORECASE,
+            ),
+            "python_authored_synthesiser_item_hint_label": re.compile(
+                r"Per-item summary hint",
+                re.IGNORECASE,
+            ),
+        },
+    },
 )
 
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)

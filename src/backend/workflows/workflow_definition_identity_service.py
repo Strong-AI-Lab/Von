@@ -928,6 +928,12 @@ def validate_workflow_definition_contract(
             for spec in executable_actions
             if str(spec.get("execution_mode") or "").strip().lower() == "llm"
         ]
+        prompt_authority_actions = [
+            spec
+            for spec in executable_actions
+            if isinstance(spec.get("prompt_contract"), Mapping)
+            and bool(spec.get("prompt_contract"))
+        ]
         is_terminal_state = bool(getattr(state_spec, "terminal", False)) or (
             state_id in termination_states
         )
@@ -1038,7 +1044,7 @@ def validate_workflow_definition_contract(
                     "severity": "error",
                 }
             )
-        if prompt_contract and executable_actions and not llm_actions:
+        if prompt_contract and executable_actions and not llm_actions and not prompt_authority_actions:
             prompt_contract_issues.append(
                 {
                     "state_id": state_id,

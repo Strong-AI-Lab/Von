@@ -409,6 +409,9 @@ def _normalise_profile(
     )
     if inventory_policy_errors:
         return None, inventory_policy_errors
+    evaluation_dimensions = profile.get("evaluation_dimensions")
+    suggestion_policy = profile.get("suggestion_policy")
+    self_improvement_contract = profile.get("self_improvement_contract")
     return (
         {
             "schema_version": REPRESENTATION_ROUTING_AUDIT_PROFILE_SCHEMA_VERSION,
@@ -418,18 +421,18 @@ def _normalise_profile(
             "audit_policy": audit_policy or {},
             "inventory_policy": inventory_policy or {},
             "evaluation_dimensions": (
-                list(profile.get("evaluation_dimensions"))
-                if isinstance(profile.get("evaluation_dimensions"), list)
+                list(evaluation_dimensions)
+                if isinstance(evaluation_dimensions, list)
                 else []
             ),
             "suggestion_policy": (
-                dict(profile.get("suggestion_policy"))
-                if isinstance(profile.get("suggestion_policy"), Mapping)
+                dict(suggestion_policy)
+                if isinstance(suggestion_policy, Mapping)
                 else {}
             ),
             "self_improvement_contract": (
-                dict(profile.get("self_improvement_contract"))
-                if isinstance(profile.get("self_improvement_contract"), Mapping)
+                dict(self_improvement_contract)
+                if isinstance(self_improvement_contract, Mapping)
                 else {}
             ),
             "audit_cases": audit_cases,

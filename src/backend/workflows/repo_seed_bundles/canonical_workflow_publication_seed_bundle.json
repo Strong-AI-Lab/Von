@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "20",
+  "seed_version": "21",
   "workflows": [
     {
       "publication_spec": {
@@ -1267,7 +1267,7 @@
             "context_input_mapping_specs": [],
             "context_input_mappings": [],
             "effects": [],
-            "execution_mode": null,
+            "execution_mode": "deterministic",
             "invoked_workflow_id": null,
             "llm_policy": null,
             "mutation_authority": null,
@@ -1279,7 +1279,9 @@
             "on_false_state": null,
             "on_true_state": null,
             "on_unknown_state": null,
-            "prompt_concept_ids": [],
+            "prompt_concept_ids": [
+              "#V#prompt_synthesiser_context_framing"
+            ],
             "state_id": "synthesiser_context_prep",
             "static_input_bindings": [],
             "tool_output_context_mappings": [],

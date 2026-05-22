@@ -10,6 +10,9 @@ from src.backend.services.conversation_turn_workflow_vontology_service import (
     _ensure_conversation_turn_prompt_support,
     bootstrap_canonical_conversation_turn_workflows,
 )
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+)
 from src.backend.services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
     EPISODE_EVALUATION_WORKFLOW_ID,
@@ -83,7 +86,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 7
+    assert report.get("seeded_prompt_count") == 8
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -100,6 +103,17 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert isinstance(expected_outcome_text, str)
     assert "expected-success inference policy" in expected_outcome_text
+    framing_rows = get_texts_for_concept(
+        SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    framing_text = next(
+        ((row or {}).get("text") for row in framing_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(framing_text, str)
+    assert "synthesiser_context_framing_template.v1" in framing_text
     assert "ownership, authorship, identity, provenance, attribution" in (
         expected_outcome_text
     )
@@ -302,6 +316,20 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         tool_calling_synth_prep_step_id
     ].actions[0]
     assert tool_calling_synth_prep_action.action_id == "synthesiser_context_prep"
+    assert tool_calling_synth_prep_action.execution_mode == "deterministic"
+    assert tool_calling_synth_prep_action.prompt_contract is not None
+    assert tool_calling_synth_prep_action.prompt_contract[
+        "resolved_prompt_concept_id"
+    ] == SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+    framing_prompt_rows = get_texts_for_concept(
+        SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=1,
+    )
+    assert framing_prompt_rows
+    assert "synthesiser_context_framing_template.v1" in str(
+        framing_prompt_rows[0].get("text")
+    )
     required_effects_contract = tool_calling_definition.metadata.get(
         "required_effects_contract"
     )

@@ -12,7 +12,12 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _ModelCandidate,
     _WorkflowModelPolicyState,
 )
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+    SynthesiserContextFramingTemplate,
+)
 from src.backend.workflows.action_registry import WorkflowActionResult
+from src.backend.workflows.durable import synthesiser_context_prep_actions as synth_mod
 
 
 class _StubGateway:
@@ -69,6 +74,29 @@ def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator._max_tool_result_field_chars = 1_500
     orchestrator._max_missing_tool_call_retries_per_turn = 3
     return orchestrator
+
+
+def _install_synthesiser_context_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    template = SynthesiserContextFramingTemplate(
+        prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        loaded_prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        schema_version=SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+        active_request_template="AUTH active request: {active_user_message}",
+        tool_hints_template="AUTH tool {tool_concept_id}:\n{hint_sections}",
+        collection_presentation_hint_template=(
+            "AUTH collection: {collection_presentation_hint}"
+        ),
+        item_summary_hint_template="AUTH item: {item_summary_hint}",
+        diagnostics={
+            "loaded_prompt_concept_id": "#V#test_synthesiser_context_framing_prompt",
+            "schema_version": SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+        },
+    )
+    monkeypatch.setattr(
+        synth_mod,
+        "resolve_synthesiser_context_framing_template",
+        lambda **_kwargs: (template, dict(template.diagnostics)),
+    )
 
 
 def test_load_workflow_model_policy_returns_disabled_state_without_resolution(
@@ -957,9 +985,32 @@ def test_tool_calling_backfill_injects_synthesiser_context_prep_messages(
             "prompt": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
             "prompt_for_requirements": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
             "synthesiser_system_messages": [
-                "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com",
-                "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com",
-                "Synthesis hints for tool gmail_list_messages:\nCollection presentation hint: Enumerate every retrieved email item.",
+                {
+                    "role": "system",
+                    "content": "AUTH active request: List the last ten email messages received by zhanvonwitbrock@gmail.com",
+                    "source": "vontology_prompt_template",
+                    "source_prompt_concept_id": "#V#test_synthesiser_context_framing_prompt",
+                    "template_schema": SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+                    "template_field": "active_request_template",
+                },
+                {
+                    "role": "system",
+                    "content": "AUTH active request: List the last ten email messages received by zhanvonwitbrock@gmail.com",
+                    "source": "vontology_prompt_template",
+                    "source_prompt_concept_id": "#V#test_synthesiser_context_framing_prompt",
+                    "template_schema": SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+                    "template_field": "active_request_template",
+                },
+                {
+                    "role": "system",
+                    "content": "AUTH tool gmail_list_messages:\nAUTH collection: Enumerate every retrieved email item.",
+                    "source": "vontology_prompt_template",
+                    "source_prompt_concept_id": "#V#test_synthesiser_context_framing_prompt",
+                    "template_schema": SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+                    "template_field": "tool_hints_template",
+                    "tool_concept_id": "gmail_list_messages",
+                    "hint_predicate_ids": ["#V#output_collection_presentation_hint"],
+                },
             ],
             "emit_progress": None,
         },
@@ -977,7 +1028,7 @@ def test_tool_calling_backfill_injects_synthesiser_context_prep_messages(
     ]
     assert (
         system_contents.count(
-            "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com"
+            "AUTH active request: List the last ten email messages received by zhanvonwitbrock@gmail.com"
         )
         == 1
     )
@@ -1000,6 +1051,13 @@ def test_tool_calling_backfill_injects_synthesiser_context_prep_messages(
         "system",
         "system",
     ]
+    assert (
+        stage_added_messages[0]["source_prompt_concept_id"]
+        == "#V#test_synthesiser_context_framing_prompt"
+    )
+    assert stage_added_messages[0]["template_field"] == "active_request_template"
+    assert stage_added_messages[1]["template_field"] == "tool_hints_template"
+    assert stage_added_messages[1]["tool_concept_id"] == "gmail_list_messages"
     assert all(
         isinstance(message.get("content_char_count"), int)
         and message["content_char_count"] > 0
@@ -1011,6 +1069,7 @@ def test_tool_calling_respond_runs_synthesiser_context_prep_before_backfill(
     monkeypatch,
 ) -> None:
     orchestrator = _bare_orchestrator()
+    _install_synthesiser_context_template(monkeypatch)
     data: dict[str, Any] = {
         "prompt": "List the last ten email messages received by zhanvonwitbrock@gmail.com",
         "augmented_context": [],
@@ -1069,8 +1128,8 @@ def test_tool_calling_respond_runs_synthesiser_context_prep_before_backfill(
 
     assert result.ok
     assert any(
-        message
-        == "Active request for this turn: List the last ten email messages received by zhanvonwitbrock@gmail.com"
+        "AUTH active request: List the last ten email messages received by zhanvonwitbrock@gmail.com"
+        in message
         for message in backfill_seen_messages
     )
 

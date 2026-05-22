@@ -313,6 +313,9 @@ class ActionRegistry:
         context: Dict[str, Any],
         env: WorkflowEnvironment,
         trace: Any | None = None,
+        prompt_contract: Mapping[str, Any] | None = None,
+        llm_policy: Mapping[str, Any] | None = None,
+        validation_policy: Mapping[str, Any] | None = None,
         workflow_id: str | None = None,
         workflow_state_id: str | None = None,
         workflow_state_metadata: Mapping[str, Any] | None = None,
@@ -349,6 +352,19 @@ class ActionRegistry:
                 trace=trace,
                 action_target_id=action_target_id or None,
                 contract_concept_id=contract_concept_id,
+                prompt_contract=(
+                    dict(prompt_contract)
+                    if isinstance(prompt_contract, Mapping)
+                    else None
+                ),
+                llm_policy=(
+                    dict(llm_policy) if isinstance(llm_policy, Mapping) else None
+                ),
+                validation_policy=(
+                    dict(validation_policy)
+                    if isinstance(validation_policy, Mapping)
+                    else None
+                ),
                 workflow_id=workflow_id,
                 workflow_state_id=workflow_state_id,
                 workflow_state_metadata=(

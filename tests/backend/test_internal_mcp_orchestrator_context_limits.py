@@ -4,9 +4,6 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
-from workflow_test_support import bootstrap_authoritative_conversation_turn_workflows
-
-
 class _StubResult:
     def __init__(self, payload, duration_ms=1.0):
         self.payload = payload
@@ -36,11 +33,6 @@ class _CapturingLLM:
         return "ok"
 
 
-def _bootstrap_authoritative_workflows() -> None:
-    report = bootstrap_authoritative_conversation_turn_workflows()
-    assert not report.get("graph_publication_errors")
-
-
 def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
     cast(Any, orchestrator)._load_base_system_prompt_from_vontology = lambda **_kwargs: (
         "You are Von.",
@@ -59,7 +51,6 @@ def _total_context_chars(context):
 
 
 def test_orchestrator_limits_context_by_chars():
-    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _StubGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -98,7 +89,6 @@ def test_orchestrator_limits_context_by_chars():
 
 
 def test_orchestrator_preserves_presenter_protocol_when_trimming_context():
-    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _StubGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -158,7 +148,6 @@ def test_orchestrator_truncates_tool_payload_in_context():
 
 
 def test_format_tool_result_shapes_search_concepts_payload_for_live_follow_up():
-    _bootstrap_authoritative_workflows()
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
         max_tool_invocations=1,
@@ -242,7 +231,6 @@ def test_format_tool_result_shapes_search_concepts_payload_for_live_follow_up():
 
 
 def test_format_tool_result_marks_search_concepts_payload_weak_when_matches_are_noisy():
-    _bootstrap_authoritative_workflows()
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
         max_tool_invocations=1,

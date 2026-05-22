@@ -1,23 +1,10 @@
 """Reusable durable workflow action: synthesiser context preparation.
 
-JVNAUTOSCI-2117 (Phase 0 of Epic JVNAUTOSCI-2112). This action is the
-Vontology-authored replacement for the heuristic context compaction in
-``orchestrator._build_follow_up_llm_context`` (the ``keep_recent_user_messages``
-path). It runs late in the turn, just before the synthesiser LLM call, and
-injects a system message into the shared turn context that:
-
-* names the active user request, so the synthesiser stage cannot lose it to
-  context trimming, and
-* surfaces collection-presentation and per-item summary hints authored against
-  each tool concept that produced results in this turn.
-
-JVNAUTOSCI-2110 wires the action into the tool-calling workflow before the
-backfill/synthesiser stage, with the orchestrator consuming the staged system
-messages as stage-local LLM context.
-
-Anti-drift: this module references no specific external service or domain. All
-tool-specific behaviour comes from hint bodies authored in Vontology against
-individual tool concepts.
+JVNAUTOSCI-2117 introduced the late-turn support step that preserves the active
+request and Vontology-authored tool-output hints for the synthesiser. The
+message wording itself is now resolved from a represented prompt/template
+concept; this module only extracts inputs, resolves hint bodies, binds template
+variables, and stages the resulting records for the summariser.
 """
 
 from __future__ import annotations
@@ -29,6 +16,14 @@ from typing import Any
 from ...services.output_hint_contracts import (
     OUTPUT_COLLECTION_PRESENTATION_HINT_PREDICATE_ID,
     OUTPUT_ITEM_SUMMARY_HINT_PREDICATE_ID,
+)
+from ...services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_INPUT_KEY,
+    SynthesiserContextFramingTemplateError,
+    render_active_request_framing,
+    render_tool_hints_framing,
+    resolve_synthesiser_context_framing_template,
 )
 from ...services.tool_result_hints import resolve_hint_body
 from ..action_registry import (
@@ -109,21 +104,11 @@ def _extract_tool_concept_ids(invocations: Any) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def _build_active_request_message(user_message: str) -> str:
-    if not user_message:
-        return ""
-    return f"Active request for this turn: {user_message}"
-
-
-def _build_tool_hints_message(
-    tool_concept_id: str, *, lang: str = "en-NZ"
-) -> str | None:
-    """Compose a system message bundling whichever hints are authored.
-
-    Returns None if neither hint is present, so callers can drop the entry
-    rather than emit empty system messages.
-    """
-
+def _resolve_tool_hint_payload(
+    tool_concept_id: str,
+    *,
+    lang: str = "en-NZ",
+) -> dict[str, Any] | None:
     presentation = resolve_hint_body(
         tool_concept_id,
         OUTPUT_COLLECTION_PRESENTATION_HINT_PREDICATE_ID,
@@ -136,13 +121,77 @@ def _build_tool_hints_message(
     )
     if not presentation and not item_summary:
         return None
+    return {
+        "tool_concept_id": tool_concept_id,
+        "collection_presentation_hint": presentation,
+        "item_summary_hint": item_summary,
+        "hint_predicate_ids": [
+            predicate_id
+            for predicate_id, hint_body in (
+                (OUTPUT_COLLECTION_PRESENTATION_HINT_PREDICATE_ID, presentation),
+                (OUTPUT_ITEM_SUMMARY_HINT_PREDICATE_ID, item_summary),
+            )
+            if hint_body
+        ],
+    }
 
-    parts: list[str] = [f"Synthesis hints for tool {tool_concept_id}:"]
-    if presentation:
-        parts.append(f"Collection presentation hint: {presentation}")
-    if item_summary:
-        parts.append(f"Per-item summary hint: {item_summary}")
-    return "\n".join(parts)
+
+def _message_content(message: Any) -> str:
+    if isinstance(message, Mapping):
+        return _safe_str(message.get("content"))
+    return _safe_str(message)
+
+
+def _message_source_summary(message: Any) -> dict[str, Any]:
+    if not isinstance(message, Mapping):
+        return {}
+    source_keys = (
+        "source",
+        "requested_prompt_concept_id",
+        "source_prompt_concept_id",
+        "template_schema",
+        "template_field",
+        "tool_concept_id",
+        "hint_predicate_ids",
+    )
+    return {
+        key: message.get(key)
+        for key in source_keys
+        if message.get(key) not in (None, "", [], {})
+    }
+
+
+def _resolve_framing_prompt_concept_id(
+    request: WorkflowActionRequest,
+    inputs: Mapping[str, Any],
+) -> str:
+    explicit = _safe_str(inputs.get(SYNTHESISER_CONTEXT_FRAMING_PROMPT_INPUT_KEY))
+    if explicit:
+        return explicit
+
+    for container in (request.prompt_contract, request.workflow_state_metadata):
+        if not isinstance(container, Mapping):
+            continue
+        prompt_contract = container
+        if "prompt_contract" in container and isinstance(
+            container.get("prompt_contract"),
+            Mapping,
+        ):
+            prompt_contract = container["prompt_contract"]  # type: ignore[index]
+        resolved = _safe_str(prompt_contract.get("resolved_prompt_concept_id"))
+        if resolved:
+            return resolved
+        requested_prompt_ids = prompt_contract.get("requested_prompt_concept_ids")
+        if isinstance(requested_prompt_ids, Sequence) and not isinstance(
+            requested_prompt_ids,
+            (str, bytes, bytearray),
+        ):
+            for prompt_id in requested_prompt_ids:
+                candidate = _safe_str(prompt_id)
+                if candidate:
+                    return candidate
+
+    return SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
 
 
 def _handle_synthesiser_context_prep(
@@ -168,20 +217,88 @@ def _handle_synthesiser_context_prep(
     invocations = inputs.get("invocations") or data.get("invocations") or ()
     tool_concept_ids = _extract_tool_concept_ids(invocations)
 
-    system_messages: list[str] = []
-
-    active_request = _build_active_request_message(user_message)
-    if active_request:
-        system_messages.append(active_request)
-
-    hints_resolved = 0
+    hint_payloads: list[dict[str, Any]] = []
     for concept_id in tool_concept_ids:
-        message = _build_tool_hints_message(concept_id, lang=lang)
-        if message:
-            system_messages.append(message)
-            hints_resolved += 1
+        payload = _resolve_tool_hint_payload(concept_id, lang=lang)
+        if payload:
+            hint_payloads.append(payload)
 
-    final_messages = list(system_messages)
+    if not user_message and not hint_payloads:
+        final_messages: list[Any] = []
+        if isinstance(request.data, dict):
+            existing = request.data.get(_SYNTHESISER_PREP_MESSAGES_KEY)
+            if isinstance(existing, list):
+                final_messages = list(existing)
+            else:
+                request.data[_SYNTHESISER_PREP_MESSAGES_KEY] = []
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                _SYNTHESISER_PREP_MESSAGES_KEY: list(final_messages),
+                "system_messages": [],
+                "system_message_records": [],
+                "synthesiser_system_message_sources": [],
+                "tool_concept_ids_seen": list(tool_concept_ids),
+                "hints_resolved_count": 0,
+                "active_user_message_present": False,
+                "context_framing_template_required": False,
+            },
+        )
+
+    prompt_concept_id = _resolve_framing_prompt_concept_id(request, inputs)
+    template, template_diagnostics = resolve_synthesiser_context_framing_template(
+        prompt_concept_id=prompt_concept_id,
+    )
+    if template is None:
+        return WorkflowActionResult(
+            status="failed",
+            error="synthesiser_context_framing_template_unavailable",
+            outputs={
+                "result": False,
+                "tool_concept_ids_seen": list(tool_concept_ids),
+                "hints_resolved_count": len(hint_payloads),
+                "active_user_message_present": bool(user_message),
+                "context_framing_template_required": True,
+                "context_framing_template_diagnostics": dict(template_diagnostics),
+            },
+        )
+
+    system_message_records: list[dict[str, Any]] = []
+    try:
+        active_request = render_active_request_framing(
+            template,
+            active_user_message=user_message,
+        )
+        if active_request:
+            system_message_records.append(active_request)
+
+        for payload in hint_payloads:
+            message = render_tool_hints_framing(
+                template,
+                tool_concept_id=str(payload.get("tool_concept_id") or ""),
+                collection_presentation_hint=str(
+                    payload.get("collection_presentation_hint") or ""
+                ),
+                item_summary_hint=str(payload.get("item_summary_hint") or ""),
+                hint_predicate_ids=payload.get("hint_predicate_ids") or (),
+            )
+            if message:
+                system_message_records.append(message)
+    except SynthesiserContextFramingTemplateError as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=str(exc),
+            outputs={
+                "result": False,
+                "tool_concept_ids_seen": list(tool_concept_ids),
+                "hints_resolved_count": len(hint_payloads),
+                "active_user_message_present": bool(user_message),
+                "context_framing_template_required": True,
+                "context_framing_template_diagnostics": dict(template_diagnostics),
+            },
+        )
+
+    final_messages: list[Any] = list(system_message_records)
 
     # Persist back onto the shared turn data so downstream stages can consume
     # it without redoing the resolution. Append rather than replace so multiple
@@ -190,20 +307,34 @@ def _handle_synthesiser_context_prep(
     if isinstance(request.data, dict):
         existing = request.data.get(_SYNTHESISER_PREP_MESSAGES_KEY)
         if isinstance(existing, list):
-            existing.extend(m for m in system_messages if m not in existing)
+            existing_contents = {_message_content(message) for message in existing}
+            for message in system_message_records:
+                content = _message_content(message)
+                if not content or content in existing_contents:
+                    continue
+                existing.append(message)
+                existing_contents.add(content)
             final_messages = list(existing)
         else:
-            request.data[_SYNTHESISER_PREP_MESSAGES_KEY] = list(system_messages)
-            final_messages = list(system_messages)
+            request.data[_SYNTHESISER_PREP_MESSAGES_KEY] = list(system_message_records)
+            final_messages = list(system_message_records)
 
     return WorkflowActionResult(
         status="success",
         outputs={
             _SYNTHESISER_PREP_MESSAGES_KEY: list(final_messages),
-            "system_messages": list(system_messages),
+            "system_messages": [
+                _message_content(message) for message in system_message_records
+            ],
+            "system_message_records": list(system_message_records),
+            "synthesiser_system_message_sources": [
+                _message_source_summary(message) for message in system_message_records
+            ],
             "tool_concept_ids_seen": list(tool_concept_ids),
-            "hints_resolved_count": hints_resolved,
+            "hints_resolved_count": len(hint_payloads),
             "active_user_message_present": bool(user_message),
+            "context_framing_template_required": True,
+            "context_framing_template_diagnostics": dict(template_diagnostics),
         },
     )
 
