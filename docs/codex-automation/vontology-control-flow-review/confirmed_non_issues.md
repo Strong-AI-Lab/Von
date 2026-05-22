@@ -192,6 +192,20 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   preservation path decides surfaceability, artefact type, source-specific
   provenance, or user/model-visible labels from Python rather than represented
   evidence-view/presenter metadata.
+- 2026-05-23: `synthesiser_context_framing_service.py` is support-only while it
+  loads a Vontology prompt concept, validates the JSON template schema, binds
+  variables, and fails closed on missing/invalid template text. The repo-side
+  `synthesiser_context_framing_prompt_seed.json` is a repo-seed prompt-authority
+  caveat covered by the repo-seed/workflow-purity track, not a new Python drift
+  issue by itself.
+- 2026-05-23: `tool_invocation_evidence.py` looked support-only in the
+  `JVNAUTOSCI-2356` follow-up scan. It canonicalises tool names, walks nested
+  invocation payloads, and preserves bounded evidence records; it did not add
+  domain workflow policy or user-facing wording.
+- 2026-05-23: `fc9bbaff` premium Ollama settings changes are UI/settings-state
+  fixes, not workflow/Vontology authority drift. Re-check only if model-choice
+  policy or prompt-stage routing starts being decided by the settings route
+  rather than represented model/workflow metadata.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
