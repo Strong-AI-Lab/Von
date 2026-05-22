@@ -105,3 +105,30 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   `JVNAUTOSCI-2353`, `JVNAUTOSCI-2355`, and `JVNAUTOSCI-2356`; commented on
   `JVNAUTOSCI-2356`.
 - No production code was changed by this review run.
+
+## 2026-05-23T02:05:41.1151605+12:00
+
+- Read required repo guidance, security guidance, workflow manual,
+  operational/authority-alignment guidance, automation memory, and repo-local
+  review memory.
+- Reviewed current `origin/main` / `main` at `6aa91175` on branch
+  `fix/jvnautosci-2351-live-arxiv-gmail-convergence`. The worktree had
+  pre-existing dirty changes in `von_routes.py`, `chatTab.js`,
+  `chatTab.test.js`, and `test_tool_progress_liveness.py`; none were edited or
+  staged by this review.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  it still failed only on the known four repo-seed drift paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2341`.
+- Reviewed commits since the prior run, especially `a0a51e8a` (`JVNAUTOSCI-2356`),
+  `6aa91175` (`JVNAUTOSCI-2350`), and `fc9bbaff`. `JVNAUTOSCI-2350` moved
+  synthesiser context framing from Python literals into a Vontology-resolved
+  prompt/template service; the remaining repo-seed prompt JSON caveat is a
+  repo-seed authority concern, not a new Python control-flow issue. Surfaceable
+  concept evidence policy remains the open `JVNAUTOSCI-2357` surface, so no
+  duplicate was filed.
+- Treated `tool_invocation_evidence.py` and the dirty live-progress fields in
+  `von_routes.py` as support plumbing: they preserve tool/stage evidence and
+  do not introduce new workflow, prompt, or KB authority.
+- No new Jira issues were created and no production code was changed by this
+  review run.
