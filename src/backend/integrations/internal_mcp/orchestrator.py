@@ -15430,10 +15430,16 @@ class InternalMCPChatOrchestrator:
         if not isinstance(model_ref, str) or not model_ref.strip():
             return None
         raw = model_ref.strip()
-        if "://" not in raw and ":" in raw and not raw.startswith("#V#"):
+        if "://" in raw and not raw.startswith("#V#"):
+            return "ollama"
+        if ":" in raw and not raw.startswith("#V#"):
             provider, _, _model = raw.partition(":")
             provider_text = provider.strip().lower()
-            return provider_text or None
+            if provider_text in {"openai", "ollama", "gemini"}:
+                return provider_text
+            if raw.lower().startswith("ft:"):
+                return "openai"
+            return "ollama"
         try:
             from src.backend.languagemodels.llm_interface import (
                 resolve_provider_from_model_concept,
@@ -16331,16 +16337,24 @@ class InternalMCPChatOrchestrator:
             resolved_provider = None
             try:
                 from src.backend.languagemodels.llm_interface import (
+                    infer_llm_client_provider,
+                    resolve_effective_llm_model_for_client,
                     resolve_provider_from_model_concept,
                     resolve_openai_model_name,
                     resolve_ollama_model_name,
                 )
 
-                resolved_provider = resolve_provider_from_model_concept(default_model)
+                resolved_model = resolve_effective_llm_model_for_client(
+                    default_client,
+                    default_model,
+                )
+                resolved_provider = resolve_provider_from_model_concept(
+                    default_model
+                ) or infer_llm_client_provider(default_client)
                 if resolved_provider == "openai":
-                    resolved_model = resolve_openai_model_name(default_model)
+                    resolved_model = resolve_openai_model_name(resolved_model)
                 elif resolved_provider == "ollama":
-                    resolved_model = resolve_ollama_model_name(default_model)
+                    resolved_model = resolve_ollama_model_name(resolved_model)
             except Exception:
                 resolved_provider = None
 
@@ -16348,6 +16362,11 @@ class InternalMCPChatOrchestrator:
                 telemetry["provider"] = resolved_provider
             if resolved_model:
                 telemetry["model"] = resolved_model
+                if not default_model:
+                    telemetry["model_resolution_source"] = "client_default"
+            client_host = getattr(default_client, "host", None)
+            if isinstance(client_host, str) and client_host.strip():
+                telemetry["host"] = client_host.strip()
             return default_client, resolved_model or default_model, telemetry
 
         provider = candidate.provider
@@ -16378,7 +16397,11 @@ class InternalMCPChatOrchestrator:
             return default_client, default_model, telemetry
 
         try:
-            from src.backend.languagemodels.llm_interface import get_llm_client
+            from src.backend.languagemodels.llm_interface import (
+                get_llm_client,
+                infer_llm_client_provider,
+                resolve_effective_llm_model_for_client,
+            )
 
             if provider:
                 client = get_llm_client(
@@ -16388,6 +16411,21 @@ class InternalMCPChatOrchestrator:
                 )
             else:
                 client = default_client
+            resolved_provider = provider or infer_llm_client_provider(client)
+            if resolved_provider and not telemetry.get("provider"):
+                telemetry["provider"] = resolved_provider
+            client_host = getattr(client, "host", None)
+            if isinstance(client_host, str) and client_host.strip():
+                telemetry["host"] = client_host.strip()
+            resolved_model = resolve_effective_llm_model_for_client(
+                client,
+                model or default_model,
+            )
+            if resolved_model:
+                model = resolved_model
+                if not telemetry.get("model"):
+                    telemetry["model"] = resolved_model
+                    telemetry["model_resolution_source"] = "client_default"
             return client, model or default_model, telemetry
         except Exception as exc:
             telemetry["error"] = str(exc)

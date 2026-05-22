@@ -84,6 +84,42 @@ def _truncate_for_log(text: str, *, max_chars: int = 2000) -> str:
     return text[:max_chars] + f"\n... [truncated {len(text) - max_chars} chars]"
 
 
+def resolve_llm_client_default_model(client: Any) -> Optional[str]:
+    """Return the concrete default model a client uses when call model is omitted."""
+
+    for attribute_name in ("default_model", "DEFAULT_MODEL"):
+        value = getattr(client, attribute_name, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def resolve_effective_llm_model_for_client(
+    client: Any,
+    model: Optional[str],
+) -> Optional[str]:
+    """Resolve the model that should be recorded for a call on this client."""
+
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return resolve_llm_client_default_model(client)
+
+
+def infer_llm_client_provider(client: Any) -> Optional[str]:
+    """Infer provider from a known LLM client instance for diagnostics."""
+
+    if client is None:
+        return None
+    class_ref = f"{type(client).__module__}.{type(client).__name__}".lower()
+    if "ollama" in class_ref:
+        return "ollama"
+    if "openai" in class_ref:
+        return "openai"
+    if "gemini" in class_ref or "google" in class_ref:
+        return "gemini"
+    return None
+
+
 #############################################
 # Global client and settings state
 #############################################

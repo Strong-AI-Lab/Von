@@ -40,6 +40,24 @@ class _SuccessfulClient:
         return '["Proceed", "Hold"]'
 
 
+class _StubOllamaClient:
+    def __init__(self, *, default_model: str = "llama3.2:latest") -> None:
+        self.default_model = default_model
+        self.host = "http://localhost:11434"
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(
+        self,
+        _prompt: str,
+        *,
+        context: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        **_kwargs: Any,
+    ) -> str:
+        self.calls.append({"context": context, "model": model})
+        return "resolved client default"
+
+
 def _policy_state() -> _WorkflowModelPolicyState:
     return _WorkflowModelPolicyState(
         enabled=True,
@@ -375,6 +393,90 @@ def test_run_llm_with_fallbacks_marks_policy_primary_active_llm_selection(
     assert stage_summary["selection_mode"] == "policy_primary_active_llm"
     assert stage_summary["follows_active_llm"] is True
     assert stage_summary["explicit_stage_model_override"] is False
+
+
+def test_run_llm_with_fallbacks_records_client_default_when_active_llm_is_null(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    default_client = _StubOllamaClient(default_model="llama3.2:latest")
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="workflow_dispatch",
+        policy_stage="classifier",
+        prompt="Select workflow",
+        context=[],
+        default_client=default_client,
+        default_model=None,
+        policy_state=_active_llm_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+    )
+
+    assert response == "resolved client default"
+    assert model_name == "llama3.2:latest"
+    assert default_client.calls == [{"context": [], "model": "llama3.2:latest"}]
+    assert telemetry["provider"] == "ollama"
+    assert telemetry["model"] == "llama3.2:latest"
+    assert telemetry["model_resolution_source"] == "client_default"
+
+    start_event = next(
+        event for event in progress_events if event.get("status") == "llm_call_start"
+    )
+    assert start_event["model"] == "llama3.2:latest"
+    assert start_event["candidate"]["provider"] == "ollama"
+    assert start_event["candidate"]["model"] == "llama3.2:latest"
+
+    assert recorded_calls[0]["model_name"] == "llama3.2:latest"
+    assert recorded_calls[0]["provider"] == "ollama"
+
+    stage_summary = next(
+        entry
+        for entry in aux_log
+        if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["selection_mode"] == "policy_primary_active_llm"
+    assert stage_summary["selected"]["model_resolved"] == "llama3.2:latest"
+    assert stage_summary["selected"]["model"] == "llama3.2:latest"
+    assert stage_summary["selected"]["model_resolution_source"] == "client_default"
+
+
+def test_provider_diagnostics_treat_raw_ollama_tags_as_ollama() -> None:
+    assert (
+        InternalMCPChatOrchestrator._infer_provider_from_model_reference("gemma4:26b")
+        == "ollama"
+    )
+    assert (
+        InternalMCPChatOrchestrator._infer_provider_from_model_reference(
+            "ollama:llama3.2:latest"
+        )
+        == "ollama"
+    )
+    assert (
+        InternalMCPChatOrchestrator._infer_provider_from_model_reference(
+            "openai:gpt-5.4-mini"
+        )
+        == "openai"
+    )
 
 
 def test_run_llm_with_fallbacks_marks_explicit_policy_stage_override(
