@@ -2000,6 +2000,59 @@ def test_progress_summary_prefers_lifecycle_counts_over_null_history_rows() -> N
     assert isinstance(stage_diagnostics, list)
 
 
+def test_stage_diagnostics_preserve_task_details_from_live_stage_summaries() -> None:
+    serialised = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-stage-summary-detail",
+            "status": "heartbeat",
+            "phase": "response_finalising",
+            "stage": "response_finalising",
+            "phase_label": "Finalising response",
+            "updated_at_epoch": 5600.0,
+            "last_activity_epoch": 5600.0,
+            "last_stage_activity_epoch": 5600.0,
+            "request_started_epoch": 5590.0,
+            "_workflow_runtime_stages": [
+                "workflow_dispatch_prepare",
+                "tool_plan",
+                "response_finalising",
+            ],
+            "_stage_summaries": {
+                "workflow_dispatch_prepare": {
+                    "stage_label": "Workflow dispatch preparation",
+                    "event_count": 3,
+                    "latest_status": "thinking",
+                    "latest_result_summary": "Preparing workflow dispatch",
+                    "latest_subtask": "Load workflow launch contract",
+                },
+                "tool_plan": {
+                    "stage_label": "Tool-call planning",
+                    "event_count": 2,
+                    "latest_status": "thinking",
+                    "latest_workflow_task": "fetch_concept",
+                    "latest_tool": "task_get",
+                },
+            },
+            "diagnostic_events": [],
+        },
+        now_epoch=5600.0,
+    )
+
+    stage_diagnostics = serialised.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    by_stage = {
+        entry.get("stage_id"): entry
+        for entry in stage_diagnostics
+        if isinstance(entry, dict) and isinstance(entry.get("stage_id"), str)
+    }
+
+    assert by_stage["workflow_dispatch_prepare"]["latest_subtask"] == (
+        "Load workflow launch contract"
+    )
+    assert by_stage["tool_plan"]["latest_workflow_task"] == "fetch_concept"
+    assert by_stage["tool_plan"]["latest_tool"] == "task_get"
+
+
 def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_and_dispatch() -> (
     None
 ):

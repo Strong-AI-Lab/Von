@@ -7834,11 +7834,11 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     const mode = getThinkingCardMode(request, options);
     const progressViewModel = buildThinkingCardProgressViewModel(request);
     const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode);
+    const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     if (mode === THINKING_CARD_MODE_DEFAULT && synopsisHtml) {
-        return synopsisHtml + renderToolHistoryHTML(request, mode);
+        return synopsisHtml + workflowStageHtml + renderToolHistoryHTML(request, mode);
     }
 
-    const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (workflowStageHtml) {
         return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode);
@@ -19347,6 +19347,24 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             .map((session) => (typeof session?.session_id === 'string' ? session.session_id.trim() : ''))
             .filter(Boolean)
     );
+    const protectedActiveSessions = [];
+    sessionsAfterHiddenFilter.forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        if (!sid || visibleSessionIds.has(sid)) {
+            return;
+        }
+        const shouldRemainVisible = sid === activeSessionId
+            || !!getLiveChatRequestForSession(sid)
+            || getQueuedChatPromptCountForSession(sid) > 0;
+        if (!shouldRemainVisible) {
+            return;
+        }
+        protectedActiveSessions.push(session);
+        visibleSessionIds.add(sid);
+    });
+    if (protectedActiveSessions.length > 0) {
+        visibleSessions = [...visibleSessions, ...protectedActiveSessions];
+    }
     if (showAgentCreatedSessions) {
         const extraAgentSessions = sessionsAfterAgentFilter.filter((session) => {
             if (!isAgentCreatedConversation(session)) {

@@ -69,7 +69,7 @@ For frontend/browser user-view validation practice, also see
 3. Never clobber `.env`. Only touch it when explicitly required, and never print secrets.
 4. Vontology is a first-class engineered authority surface, and the authoritative source of truth for persistent knowledge, prompts, workflow artefacts, predicates, types, and other enduring represented state unless an exception is explicitly justified.
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
-6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state.
+6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state. A Jira progress or closure comment is not completion: after commenting that implementation or validation is done, continue immediately through commit, merge/push, read-back verification, and Jira transition unless the user has explicitly asked to pause before those steps.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
    - Ignore Codex app connectors, including the Codex Gmail/email connector, when deciding what Von code or Von workflows should expose or use. Those connectors are assistant-side conveniences, not Von authority surfaces, canonical implementation paths, or evidence that internal MCP/tooling is redundant.
 8. Workflow-first / KB-authoritative is the default doctrine: if a durable behaviour or policy change can live cleanly in workflow, prompt, KB, or Vontology artefacts, prefer changing it there rather than encoding the policy in Python.
@@ -226,6 +226,7 @@ Verify all of the following:
 ### 7.2 During work
 
 - post concise Jira progress comments at meaningful milestones
+- do not treat a Jira progress or validation comment as a stopping point; if the comment says the implementation is done, validated, ready to merge, or ready to close, immediately proceed to the corresponding Git and Jira close-out steps or clearly record the blocker
 - use existing canonical helpers and pathways before adding new ones
 - run targeted tests as you go
 - keep changes minimal but systemic where a shared fix is clearly better than a point fix
@@ -237,6 +238,8 @@ Verify all of the following:
 - A task is not fully complete until code, Jira, and any required authoritative
   Vontology/workflow state all match the claimed outcome.
 - Do not stop at local implementation, local validation success, or a "ready to commit" state unless the user explicitly asks to pause there. For Jira implementation work, the default expectation is commit, merge to `main`, verify `origin/main`, and close the Jira issue before reporting completion.
+- Before reporting a Jira implementation task as complete, run an explicit close-out checkpoint: confirm the worktree is clean or contains only intentionally deferred/recorded changes, confirm the expected branch/commit relationship, read back the Jira status, and verify the issue is in the intended terminal state.
+- If any close-out step cannot be completed because of auth, merge conflicts, failing validation, unrelated dirty work, or tool failure, do not say the task is done. State the exact remaining step, the blocker, and the safest next action.
 - rerun targeted regression checks
 - gather direct acceptance evidence
 - for live-turn or replay-backed tasks, record the exact replay evidence before closure: prompt or conversation reference, request_id, visible answer, candidate/selector/dispatch summary, workflow or tool terminal state, read-back evidence or typed blocker, and what the Thinking/debug surface showed. If any of those disagree, the task is not done; update the Jira/task notes instead of closing on nearby evidence.

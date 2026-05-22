@@ -3190,6 +3190,63 @@ describe('thinking activity history normalisation', () => {
         expect(html).not.toContain('No recorded LLM input/output');
     });
 
+    test('default thinking card surfaces workflow-stage task steps', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'default',
+            promptRaw: 'Represent recent papers from a mailbox profile.',
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' },
+                    { stage_id: 'tool_plan', stage_label: 'Tool-call planning' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'workflow_dispatch_prepare',
+                    stage_label: 'Workflow dispatch preparation',
+                    selected_workflow_id: '#V#tool_calling_workflow',
+                    selected_workflow_name: 'Tool calling workflow',
+                    latest_subtask: 'Load workflow launch contract'
+                },
+                {
+                    stage_id: 'tool_plan',
+                    stage_label: 'Tool-call planning',
+                    selected_workflow_id: '#V#tool_calling_workflow',
+                    selected_workflow_name: 'Tool calling workflow',
+                    latest_workflow_task: 'fetch_concept',
+                    tool_execution: {
+                        planned_count: 2
+                    }
+                }
+            ],
+            latestProgress: {
+                phase: 'tool_plan',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+
+        expect(html).toContain('thinking-card-synopsis');
+        expect(container.textContent).toContain('Workflow dispatch preparation');
+        expect(container.textContent).toContain('Load workflow launch contract');
+        expect(container.textContent).toContain('Tool-call planning');
+        expect(container.textContent).toContain('fetch_concept');
+        expect(html).not.toContain('Stage id');
+        expect(html).not.toContain('Pre-dispatch checks');
+    });
+
     test('renders tool planning against the selected workflow instead of generic mechanism text', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             thinkingCardMode: 'debug',

@@ -201,7 +201,41 @@ treat that as a broader host issue rather than endlessly restarting repo
 processes. Record that fact in diagnostics and avoid pretending the repository
 itself is the only source of the problem.
 
-### 4.7 Post-merge branch and worktree hygiene
+### 4.7 Jira implementation close-out barrier
+
+For Jira implementation tasks, local validation is not a stopping point. A
+Jira comment that says the implementation is done, validated, ready to merge,
+or ready to close creates a close-out obligation: finish the Git/Jira lifecycle
+immediately unless the user explicitly asked to pause before commit, merge, or
+transition.
+
+Before telling the user the task is complete, run a bounded close-out checkpoint:
+
+- `git status --branch --short`
+- `git diff --name-only`
+- verify the intended commit is on the branch or on `origin/main`, depending
+  on the current lifecycle step
+- read back the Jira issue status after the last comment or transition
+- confirm there are no unrecorded authoritative Vontology/workflow/KB changes
+  required for the task
+
+Expected close-out for a Jira implementation task:
+
+1. Finish targeted validation and any required real-path acceptance.
+2. Add the closure/progress Jira comment with the evidence actually gathered.
+3. Commit the complete in-scope change set, including regressions and required
+   docs.
+4. Merge or fast-forward to `main` and push, unless the task is intentionally
+   stopping at a branch review state.
+5. Verify `origin/main` contains the intended commit.
+6. Transition the Jira issue to the intended done state and read it back.
+7. Clean up branch/worktree state as described below.
+
+If any step is blocked, do not describe the task as complete. Report the exact
+remaining step, the blocker, and whether the local worktree or Jira status is
+now inconsistent with the intended outcome.
+
+### 4.8 Post-merge branch and worktree hygiene
 
 After a Jira implementation task is merged to `main`, do not leave the Git
 state half-finished.

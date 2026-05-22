@@ -1529,6 +1529,11 @@ def _extract_live_stage_diagnostic_map(
                 summary.get("latest_result_summary")
             ),
             "latest_error": _progress_str(summary.get("latest_error")),
+            "latest_subtask": _progress_str(summary.get("latest_subtask")),
+            "latest_workflow_task": _progress_str(
+                summary.get("latest_workflow_task")
+            ),
+            "latest_tool": _progress_str(summary.get("latest_tool")),
         }
         for stage_id, summary in summary_map.items()
     }
@@ -4181,6 +4186,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         if live_stage_id:
             existing_summary = dict(stage_summaries.get(live_stage_id) or {})
             latest_result_summary = _progress_str(event_entry.get("result_summary"))
+            latest_subtask = _progress_str(event_entry.get("subtask"))
+            latest_workflow_task = _progress_str(event_entry.get("workflow_task"))
+            latest_tool = _progress_str(event_entry.get("tool"))
             existing_summary.update(
                 {
                     "stage_id": live_stage_id,
@@ -4199,6 +4207,23 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                         )
                     ),
                     "latest_error": _progress_str(event_entry.get("error")),
+                    "latest_subtask": (
+                        latest_subtask
+                        if latest_subtask
+                        else _progress_str(existing_summary.get("latest_subtask"))
+                    ),
+                    "latest_workflow_task": (
+                        latest_workflow_task
+                        if latest_workflow_task
+                        else _progress_str(
+                            existing_summary.get("latest_workflow_task")
+                        )
+                    ),
+                    "latest_tool": (
+                        latest_tool
+                        if latest_tool
+                        else _progress_str(existing_summary.get("latest_tool"))
+                    ),
                 }
             )
             stage_summaries[live_stage_id] = existing_summary
