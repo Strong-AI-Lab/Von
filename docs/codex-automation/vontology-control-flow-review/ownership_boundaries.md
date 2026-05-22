@@ -174,6 +174,10 @@ Python can remain the surface for:
   evidence-view/presenter metadata, validates concept IDs, bounds payload size,
   preserves source paths/contract IDs, and emits telemetry without Python-owned
   paper/file-copy/arXiv labels or field-name policy;
+- generic prompt/template rendering services that resolve Vontology prompt
+  concepts, validate represented template schemas, bind workflow/runtime values,
+  record source concept metadata, and fail closed when represented model-visible
+  wording is missing;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
