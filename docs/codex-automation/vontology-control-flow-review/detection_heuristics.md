@@ -139,6 +139,11 @@ represented authority before filing Jira work.
   labels. The generic support surface may preserve bounded typed evidence, but
   surfaceability roles and display wording should come from represented
   evidence-view/presenter/workflow authority.
+- Vontology-backed prompt/template rendering services are not drift merely
+  because Python validates schema, binds variables, or records source metadata.
+  They become drift when Python owns fallback prompt text, silently renders
+  model-visible wording after the represented template is missing, or treats
+  repo-side seed JSON as live authority rather than bootstrap/migration data.
 
 ## Recent Examples
 
