@@ -132,3 +132,31 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   do not introduce new workflow, prompt, or KB authority.
 - No new Jira issues were created and no production code was changed by this
   review run.
+
+## 2026-05-24T02:04:15.1730819+12:00
+
+- Read required repo guidance, security guidance, workflow manual,
+  operational/authority-alignment guidance, repo-local review memory, and
+  current automation memory path. The automation memory file was missing before
+  this run and was recreated.
+- Reviewed commits since `2026-05-22T14:02:21Z`: `08937b13`
+  (`JVNAUTOSCI-2351` live workflow progress), `91b2b891` (Pyright version
+  update), `1616b84f` (client default model resolution), and the review-memory
+  commits from the previous run.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  it still failed only on the known four repo-seed drift paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2341`.
+- Treated `08937b13` and `1616b84f` as support-only: the former preserves
+  live stage task/tool detail and the latter records concrete client default
+  model/provider diagnostics without selecting model policy in Python.
+- Reviewed the dirty `JVNAUTOSCI-2363-required-tool-dispatch-preflight`
+  worktree. The selector-call foreground prompt change looked like generic
+  request passthrough to avoid the model seeing only `Select workflow`; file
+  only if it grows selector instructions, fallback wording, or routing policy
+  beyond passing through the raw request. The legacy contract-text
+  `predicate|incidence|extent` required-tool inference already exists on
+  `origin/main` and remains covered by `JVNAUTOSCI-2329` / the required-tool
+  authority track.
+- No new Jira issues were created and no production code was changed by this
+  review run.
