@@ -206,6 +206,28 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   fixes, not workflow/Vontology authority drift. Re-check only if model-choice
   policy or prompt-stage routing starts being decided by the settings route
   rather than represented model/workflow metadata.
+- 2026-05-24: `08937b13` live workflow progress changes looked support-only:
+  `von_routes.py` preserves `latest_subtask`, `latest_workflow_task`, and
+  `latest_tool` from existing progress events, while `chatTab.js` renders
+  already-reported workflow-stage history in the default Thinking-card mode.
+  File only if this path starts inventing stage/task semantics or presenter
+  wording from payload fields.
+- 2026-05-24: `1616b84f` client default model resolution looked diagnostic and
+  support-only. It records the concrete client default model/provider/host when
+  no explicit model is passed; re-check only if this path starts deciding model
+  policy rather than reporting the effective call target.
+- 2026-05-24: active branch
+  `JVNAUTOSCI-2363-required-tool-dispatch-preflight` adds
+  `build_selector_call_prompt()` so the selector LLM foreground prompt includes
+  the raw user request rather than only `Select workflow`. Treat as a watch
+  item, not drift, while it remains generic request passthrough and selector
+  policy still lives in the Vontology-rendered selector prompt/context. File if
+  Python adds selector instructions, examples, fallback wording, or routing
+  semantics to that foreground prompt.
+- 2026-05-24: the `predicate|predicates|incidence|extent` required-tool
+  inference seam in `orchestrator.py` is not fresh; it is present on
+  `origin/main` and should be handled by the existing required-tool authority
+  track (`JVNAUTOSCI-2329` / related follow-through) rather than duplicated.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
