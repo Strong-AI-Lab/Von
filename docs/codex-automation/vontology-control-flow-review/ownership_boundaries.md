@@ -178,6 +178,12 @@ Python can remain the surface for:
   concepts, validate represented template schemas, bind workflow/runtime values,
   record source concept metadata, and fail closed when represented model-visible
   wording is missing;
+- generic LLM-call foreground prompt plumbing that passes the raw user request
+  to a Vontology-authored stage prompt without adding selector policy,
+  examples, fallback copy, or domain hints;
+- generic model-call diagnostics that report the concrete effective
+  client/model/provider/host already selected by represented settings or runtime
+  configuration;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
