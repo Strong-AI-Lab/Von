@@ -144,6 +144,15 @@ represented authority before filing Jira work.
   They become drift when Python owns fallback prompt text, silently renders
   model-visible wording after the represented template is missing, or treats
   repo-side seed JSON as live authority rather than bootstrap/migration data.
+- A short LLM-call foreground prompt can be support plumbing when it only
+  carries the raw user request into a stage whose system/context prompt remains
+  Vontology-authored. It becomes drift when that foreground string accumulates
+  selector examples, policy rules, fallback wording, domain hints, or
+  model-visible behavioural instructions.
+- Effective model/provider resolution is usually support telemetry when it
+  reports what a selected client will actually call. File only if the resolver
+  starts choosing model policy, provider preference, or stage routing outside
+  represented model/workflow policy metadata.
 
 ## Recent Examples
 
