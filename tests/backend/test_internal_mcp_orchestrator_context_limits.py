@@ -4,6 +4,8 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+
+
 class _StubResult:
     def __init__(self, payload, duration_ms=1.0):
         self.payload = payload
@@ -34,10 +36,13 @@ class _CapturingLLM:
 
 
 def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
-    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = lambda **_kwargs: (
-        "You are Von.",
-        "#V#test_base_system_prompt",
+    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = (
+        lambda **_kwargs: (
+            "You are Von.",
+            "#V#test_base_system_prompt",
+        )
     )
+    cast(Any, orchestrator)._workflow_selector.enabled = lambda: False
 
 
 def _total_context_chars(context):

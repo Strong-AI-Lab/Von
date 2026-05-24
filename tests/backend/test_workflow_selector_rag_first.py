@@ -225,15 +225,18 @@ class TestRagFirstPrompt:
         assert prompt.prompt_provenance["render_variables"]["turn_text"] == (
             "Run the meeting invitation test"
         )
-        assert prompt.prompt_provenance["render_variables"][
-            "selector_routing_context"
-        ] == "No active workflow continuation context."
-        assert prompt.prompt_provenance["render_variables"][
-            "continuation_routing_context"
-        ] == "No active workflow continuation context."
-        assert prompt.prompt_provenance["render_variables"][
-            "routing_policy_fragments"
-        ] == "No learned routing policy guidance is active."
+        assert (
+            prompt.prompt_provenance["render_variables"]["selector_routing_context"]
+            == "No active workflow continuation context."
+        )
+        assert (
+            prompt.prompt_provenance["render_variables"]["continuation_routing_context"]
+            == "No active workflow continuation context."
+        )
+        assert (
+            prompt.prompt_provenance["render_variables"]["routing_policy_fragments"]
+            == "No learned routing policy guidance is active."
+        )
         assert prompt.prompt_text is not None
         assert "Canonical valid output examples" in prompt.prompt_text
         assert "Invalid outputs. Never do any of these" in prompt.prompt_text
@@ -281,7 +284,9 @@ class TestRagFirstPrompt:
 
     def test_prompt_supplies_live_like_selector_contract_variables(self):
         class _StrictPromptService:
-            def render_prompt(self, concept_ids, *, variables=None, fallback=None, max_chars=None):
+            def render_prompt(
+                self, concept_ids, *, variables=None, fallback=None, max_chars=None
+            ):
                 _ = (concept_ids, fallback, max_chars)
                 template = (
                     "Selector routing context:\n{selector_routing_context}\n\n"
@@ -372,7 +377,10 @@ class TestRagFirstPrompt:
         assert "Recommended workflow: #V#todo_refresh_workflow" in policy_fragments
         assert "Policy confidence: 0.91" in policy_fragments
         assert "Top policy candidates:" in policy_fragments
-        assert "#V#todo_refresh_workflow: rank 1; score 1.42; evidence 7;" in policy_fragments
+        assert (
+            "#V#todo_refresh_workflow: rank 1; score 1.42; evidence 7;"
+            in policy_fragments
+        )
 
     def test_prompt_carries_candidate_evidence_signals(self):
         selector = _build_selector()
@@ -664,6 +672,9 @@ class TestRagFirstPrompt:
         assert result.workflow_id == "#V#tool_calling_workflow"
         assert result.verdict == "rag_selected"
         mock_llm.generate.assert_called_once()
+        selector_call_prompt = mock_llm.generate.call_args.kwargs["prompt"]
+        assert selector_call_prompt.startswith("Select workflow")
+        assert "Find papers about AI" in selector_call_prompt
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from src.backend.workflows import (
 )
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
 )
 from orchestrator_test_harness import build_db_independent_orchestrator
 
@@ -298,6 +299,135 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
     )
 
 
+def test_turn_execution_route_preflight_overrides_direct_response_with_required_tools(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    prompt_text = "What students do I supervise"
+    aux_llm_calls: list[dict[str, Any]] = []
+
+    class _DirectResponseSelectorLLM:
+        def generate(self, prompt, context=None, model=None):
+            if isinstance(prompt, str) and prompt.startswith("Select workflow"):
+                assert prompt_text in prompt
+                return (
+                    '{"workflow_id":"#V#chat_assistant_workflow",'
+                    '"confidence":0.91,'
+                    '"reasoning":"The request can be answered directly."}'
+                )
+            raise AssertionError(f"Unexpected selector prompt: {prompt!r}")
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": prompt_text,
+                "turn_expected_outcome_contract": {
+                    "summary": "Answer from grounded represented relationships.",
+                    "selector_guidance": (
+                        "Use the represented retrieval tools before answering."
+                    ),
+                    "required_tools": [
+                        "find_relations_with_argument",
+                        "get_text_relations_summary",
+                        "search_concepts",
+                    ],
+                },
+                "workflow_discovery_result": {
+                    "requested_query": prompt_text,
+                    "query": prompt_text,
+                    "discovery_query_input": prompt_text,
+                    "search_sources": ["capability_index"],
+                    "candidate_count": 2,
+                    "match_count": 2,
+                    "matches": [
+                        {
+                            "concept_id": "#V#entity_information_retrieval_workflow",
+                            "name": "Entity Information Retrieval Workflow",
+                            "description": (
+                                "Grounded retrieval of information of a requested "
+                                "kind about a resolved entity."
+                            ),
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "is_policy_safe": True,
+                            "routing_eligible": True,
+                            "routing_profile": {"role": "retrieval"},
+                            "candidate_source": "workflow_discovery",
+                        },
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default direct response workflow.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "is_policy_safe": True,
+                            "routing_eligible": True,
+                            "candidate_source": "selector_default",
+                        },
+                    ],
+                    "candidates": [
+                        {"concept_id": "#V#entity_information_retrieval_workflow"},
+                        {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID},
+                    ],
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_DirectResponseSelectorLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert result.outputs["workflow_routing"]["workflow_id"] == (
+        TOOL_CALLING_WORKFLOW_ID
+    )
+    assert result.outputs["workflow_routing"]["verdict"] == "tool_contract_override"
+    assert result.outputs["workflow_routing"]["source"] == "selector_override"
+    selector_override = result.outputs["selected_workflow_trace"]["selector_override"]
+    assert selector_override["reason"] == (
+        "direct_response_route_cannot_satisfy_required_turn_tools"
+    )
+    assert selector_override["prior_selected_workflow_id"] == (
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
+    assert selector_override["turn_contract_required_tools"] == [
+        "find_relations_with_argument",
+        "get_text_relations_summary",
+        "search_concepts",
+    ]
+    contract_check_entry = next(
+        (
+            entry
+            for entry in aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_turn_contract_check"
+        ),
+        None,
+    )
+    assert contract_check_entry is not None
+    assert contract_check_entry.get("status") == (
+        "direct_response_route_requires_tool_pipeline"
+    )
+
+
 def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query_changes(
     monkeypatch,
 ) -> None:
@@ -403,7 +533,7 @@ def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query
 
     class _CapturingRouteLLM:
         def generate(self, prompt, context=None, model=None):
-            if prompt == "Select workflow":
+            if isinstance(prompt, str) and prompt.startswith("Select workflow"):
                 return refreshed_workflow_id
             raise AssertionError(f"Unexpected selector prompt: {prompt!r}")
 
@@ -1668,9 +1798,7 @@ def test_turn_execution_route_recovers_workflow_execute_contract_from_generic_se
         selector_override["reason"]
         == "workflow_execute_contract_recovered_to_single_discovered_workflow"
     )
-    assert (
-        selector_override["prior_selected_workflow_id"] == "#V#tool_calling_workflow"
-    )
+    assert selector_override["prior_selected_workflow_id"] == "#V#tool_calling_workflow"
     workflow_execute_review = result.outputs["selected_workflow_trace"][
         "workflow_execute_candidate_review"
     ]

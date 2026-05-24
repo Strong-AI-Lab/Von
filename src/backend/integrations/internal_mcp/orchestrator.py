@@ -140,7 +140,11 @@ from ...workflows.workflow_launch_input_contracts import (
 )
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
-from ...workflows.workflow_selector import WorkflowSelectionPrompt, WorkflowSelector
+from ...workflows.workflow_selector import (
+    WorkflowSelectionPrompt,
+    WorkflowSelector,
+    build_selector_call_prompt,
+)
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
     get_shared_workflow_registry_read_only,
@@ -12645,7 +12649,9 @@ class InternalMCPChatOrchestrator:
             seen_content.add(content)
             if isinstance(raw_message, Mapping):
                 message: dict[str, Any] = dict(raw_message)
-                message["role"] = str(message.get("role") or "system").strip() or "system"
+                message["role"] = (
+                    str(message.get("role") or "system").strip() or "system"
+                )
                 message["content"] = content
                 messages.append(message)
             else:
@@ -31784,9 +31790,7 @@ class InternalMCPChatOrchestrator:
                 payload=payload,
             )
             if projection_lines:
-                tool_blocks.append(
-                    ((0, -10, invocation_index), projection_lines, True)
-                )
+                tool_blocks.append(((0, -10, invocation_index), projection_lines, True))
                 continue
 
             if tool_name not in {
@@ -32430,7 +32434,7 @@ class InternalMCPChatOrchestrator:
             "selector_prompt_id": selector_prompt.prompt_id,
             "selector_prompt_text": selector_prompt.prompt_text,
             "selector_call_prompt_text": (
-                "Select workflow"
+                build_selector_call_prompt(prompt_text)
                 if isinstance(selector_prompt.prompt_text, str)
                 and selector_prompt.prompt_text.strip()
                 else None
@@ -32756,14 +32760,17 @@ class InternalMCPChatOrchestrator:
                             augmented_context,
                         )
                     )
+                    selector_call_prompt = str(
+                        prepared_outputs.get("selector_call_prompt_text")
+                        or build_selector_call_prompt(
+                            str(data.get("user_prompt") or data.get("prompt") or "")
+                        )
+                    )
                     selector_response_text, _classifier_model, _selector_candidate = (
                         self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
                             policy_stage="classifier",
-                            prompt=str(
-                                prepared_outputs.get("selector_call_prompt_text")
-                                or "Select workflow"
-                            ),
+                            prompt=selector_call_prompt,
                             context=selector_context,
                             default_client=env.llm_client,
                             default_model=default_model,
@@ -33263,6 +33270,140 @@ class InternalMCPChatOrchestrator:
                             explicit_reasoning=selector_reasoning,
                         ),
                     )
+
+        if isinstance(routing_info, WorkflowRoutingInfo):
+            preflight_selection_state = _WorkflowDispatchSelectionState(
+                selected_workflow_id=selected_workflow_id,
+                selected_workflow_id_text=selected_workflow_id,
+                selector_verdict=routing_info.verdict,
+                selector_requests_narration=(
+                    selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                ),
+                selector_requests_custom_workflow=(
+                    selected_workflow_id not in _SELECTOR_GENERIC_WORKFLOW_IDS
+                ),
+                selected_uses_narration_contract=(
+                    selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                ),
+                selected_prefers_direct_response=(
+                    self._selected_workflow_prefers_direct_response(
+                        selected_workflow_id=selected_workflow_id
+                    )
+                ),
+                selected_uses_tool_pipeline_contract=(
+                    self._selected_workflow_execution_mode(
+                        selected_workflow_id=selected_workflow_id
+                    )
+                    == "tool_pipeline"
+                ),
+                routing_info=routing_info,
+            )
+
+            def _resolve_action_turn_preflight_workflow_name(
+                workflow_id: str | None,
+            ) -> str | None:
+                clean_workflow_id = (
+                    workflow_id.strip()
+                    if isinstance(workflow_id, str) and workflow_id.strip()
+                    else None
+                )
+                if not clean_workflow_id:
+                    return None
+                for match in (
+                    *selector_candidate_matches,
+                    *excluded_discovered_matches,
+                ):
+                    if not isinstance(match, Mapping):
+                        continue
+                    match_id = match.get("concept_id")
+                    if (
+                        isinstance(match_id, str)
+                        and match_id.strip() == clean_workflow_id
+                    ):
+                        match_name = match.get("name")
+                        if isinstance(match_name, str) and match_name.strip():
+                            return match_name.strip()
+                pretty_name = (
+                    clean_workflow_id[3:]
+                    if clean_workflow_id.startswith("#V#")
+                    else clean_workflow_id
+                )
+                pretty_name = pretty_name.replace("_", " ").strip()
+                return (
+                    pretty_name[:1].upper() + pretty_name[1:]
+                    if pretty_name
+                    else clean_workflow_id
+                )
+
+            def _record_action_turn_preflight_note(
+                *,
+                step_id: str,
+                step_label: str,
+                status: str = "completed",
+                duration_ms: int = 0,
+                result_summary: str | None = None,
+                workflow_id: str | None = None,
+                workflow_name: str | None = None,
+                **extra: Any,
+            ) -> None:
+                payload: dict[str, Any] = {
+                    "type": "workflow_dispatch_prepare_step",
+                    "stage": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                    "step_id": step_id,
+                    "step_label": step_label,
+                    "status": status,
+                    "duration_ms": int(max(0, duration_ms)),
+                }
+                for key, value in (
+                    ("result_summary", result_summary),
+                    ("workflow_id", workflow_id),
+                    ("workflow_name", workflow_name),
+                ):
+                    if isinstance(value, str) and value.strip():
+                        payload[key] = value.strip()
+                for key, value in extra.items():
+                    if (
+                        isinstance(key, str)
+                        and isinstance(value, str)
+                        and value.strip()
+                    ):
+                        payload[key] = value.strip()
+                aux_llm_calls.append(payload)
+
+            preflight_support = _CustomWorkflowDispatchSupport(
+                orchestrator=self,
+                prompt=str(data.get("user_prompt") or data.get("prompt") or "").strip(),
+                discovered_matches=discovered_matches,
+                aux_llm_calls=cast(list[Mapping[str, Any]], aux_llm_calls),
+                trace_enabled=False,
+                trace=None,
+                build_live_workflow_routing_payload=lambda: {},
+                build_custom_workflow_dispatch_data=lambda _workflow_id=None: {},
+                resolve_selected_workflow_name=(
+                    _resolve_action_turn_preflight_workflow_name
+                ),
+                record_dispatch_prepare_note=_record_action_turn_preflight_note,
+                emit_progress_local=lambda _payload: None,
+            )
+            preflight_support.apply_turn_contract_dispatch_preflight(
+                preflight_selection_state,
+                turn_expected_outcome_contract=selected_workflow_trace_contract.to_dict(),
+                required_tools=selected_workflow_trace_contract.required_tools,
+                required_surface_families=self._infer_required_tool_surface_families(
+                    required_tools=selected_workflow_trace_contract.required_tools
+                ),
+                external_surface_families=self._infer_required_external_surface_families(
+                    required_tools=selected_workflow_trace_contract.required_tools
+                ),
+            )
+            selected_workflow_id = (
+                preflight_selection_state.selected_workflow_id_text
+                or selected_workflow_id
+            )
+            routing_info = preflight_selection_state.routing_info or routing_info
+            selector_override_trace = (
+                preflight_support.selector_override_trace or selector_override_trace
+            )
 
         if not selected_workflow_id:
             return WorkflowActionResult(
@@ -36231,7 +36372,7 @@ class InternalMCPChatOrchestrator:
                         self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
                             policy_stage="classifier",
-                            prompt="Select workflow",
+                            prompt=build_selector_call_prompt(prompt),
                             context=selector_context,
                             default_client=llm_client,
                             default_model=model,

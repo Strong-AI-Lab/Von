@@ -38,7 +38,8 @@ def test_plain_response_skips_tool_calling(monkeypatch):
 
     # Exactly 2 LLM calls: selector + planner.
     assert len(llm.calls) == 2
-    assert llm.calls[0]["prompt"] == "Select workflow"
+    assert llm.calls[0]["prompt"].startswith("Select workflow")
+    assert "Hi there" in llm.calls[0]["prompt"]
     # The planner prompt should be the user's prompt, not a tool-call prompt.
     assert llm.calls[1]["prompt"] == "Hi there"
 
@@ -46,7 +47,6 @@ def test_plain_response_skips_tool_calling(monkeypatch):
     # No tool invocations for a plain response.
     assert result.tool_invocations == ()
     assert result.extra_messages == ()
-
 
 
 def test_plain_response_has_routing_info(monkeypatch):
@@ -84,7 +84,6 @@ def test_plain_response_has_routing_info(monkeypatch):
     ]
     assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
     assert dispatch_boundaries[-1].get("selected_execution_mode") == "direct_response"
-
 
 
 def test_plain_response_includes_turn_memory_and_policy_memory_context(monkeypatch):
@@ -177,7 +176,6 @@ def test_plain_response_includes_turn_memory_and_policy_memory_context(monkeypat
     )
 
 
-
 def test_run_fails_closed_when_requested_turn_memory_context_is_unavailable(
     monkeypatch,
 ):
@@ -219,7 +217,6 @@ def test_run_fails_closed_when_requested_turn_memory_context_is_unavailable(
     assert any(
         entry.get("type") == "turn_memory_context" for entry in result.aux_llm_calls
     )
-
 
 
 def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
@@ -417,7 +414,6 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     )
 
 
-
 def test_workflow_selector_reuses_augmented_context_and_tracks_context_lineage(
     monkeypatch,
 ):
@@ -491,7 +487,6 @@ def test_workflow_selector_reuses_augmented_context_and_tracks_context_lineage(
     assert selector_prompt_entry["context_lineage"]["stage_added_message_count"] == 1
 
 
-
 def test_mutative_wording_does_not_override_plain_response_routing(monkeypatch):
     """Mutative wording alone must not trigger Python-side routing overrides."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -541,7 +536,6 @@ def test_mutative_wording_does_not_override_plain_response_routing(monkeypatch):
     assert gate_entry is not None
     assert gate_entry.get("gate_state") == "not_applied"
     assert gate_entry.get("reason") == "workflow_llm_owns_mutation_routing"
-
 
 
 def test_explicit_tool_requirement_is_telemetry_visible_even_without_python_routing_override(
@@ -600,7 +594,6 @@ def test_explicit_tool_requirement_is_telemetry_visible_even_without_python_rout
     )
 
 
-
 def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
@@ -635,7 +628,6 @@ def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
         and entry.get("reason") == "required_prompt_tools_missing_preselector"
         for entry in result.aux_llm_calls
     )
-
 
 
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(
@@ -704,5 +696,3 @@ def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(
         isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
         for entry in result.aux_llm_calls
     )
-
-

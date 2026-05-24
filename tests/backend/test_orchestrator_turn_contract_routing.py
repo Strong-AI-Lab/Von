@@ -241,7 +241,6 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
     ]
 
 
-
 def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_check(
     monkeypatch,
 ):
@@ -423,7 +422,6 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
         "satisfied the multi-surface turn contract"
         in str(prepare_step_entry.get("result_summary") or "").lower()
     )
-
 
 
 def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metadata(
@@ -649,9 +647,7 @@ def test_direct_response_turn_contract_required_tools_recover_to_tool_pipeline(
                     {
                         "workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
                         "confidence": 0.91,
-                        "reasoning": (
-                            "This looks like an identity/context question."
-                        ),
+                        "reasoning": ("This looks like an identity/context question."),
                     }
                 )
             ]
@@ -753,7 +749,6 @@ def test_direct_response_turn_contract_required_tools_recover_to_tool_pipeline(
         "gmail_list_profiles",
         "find_relations_with_argument",
     ]
-
 
 
 def test_completed_custom_workflow_missing_required_tools_recovers_to_tool_pipeline(
@@ -927,7 +922,6 @@ def test_completed_custom_workflow_missing_required_tools_recovers_to_tool_pipel
     ]
 
 
-
 def test_custom_workflow_required_effects_recovery_carries_tools_to_pipeline(
     monkeypatch,
 ):
@@ -1074,7 +1068,6 @@ def test_custom_workflow_required_effects_recovery_carries_tools_to_pipeline(
     ]
 
 
-
 def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contract(
     monkeypatch,
 ):
@@ -1129,7 +1122,7 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
             )
             if "expected-success inference policy" in prompt:
                 return "{}"
-            if prompt == "Select workflow":
+            if isinstance(prompt, str) and prompt.startswith("Select workflow"):
                 return selected_workflow_id
             return "Recovered through the general tool workflow."
 
@@ -1211,5 +1204,3 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
     assert "turn_expected_precision_policy" not in handoff_data
     assert "turn_answering_guidance" not in handoff_data
     assert "turn_expected_outcome_reasoning" not in handoff_data
-
-

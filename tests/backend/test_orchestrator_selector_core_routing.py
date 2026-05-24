@@ -64,7 +64,6 @@ def test_orchestrator_injects_voice_hint_when_prompt_asks_for_voice(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-
 def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
     """When enabled and classifier returns 'narration', orchestrator emits spoken+screen."""
 
@@ -103,7 +102,8 @@ def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
 
     # Ensure we actually invoked the selector and then narration.
     assert len(llm.calls) == 3
-    assert llm.calls[0]["prompt"] == "Select workflow"
+    assert llm.calls[0]["prompt"].startswith("Select workflow")
+    assert "hi" in llm.calls[0]["prompt"]
     narration_prompt = str(llm.calls[2]["prompt"] or "")
     assert "<spoken>" in narration_prompt
     assert "spoken" in narration_prompt.lower()
@@ -112,7 +112,6 @@ def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector" in aux_types
-
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +153,8 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
     # The selector still fires even when the final response comes from the
     # tool workflow rather than a separate presenter-mode path.
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt"] == "Select workflow"
+    assert llm.calls[0]["prompt"].startswith("Select workflow")
+    assert "Search for papers about transformers" in llm.calls[0]["prompt"]
     assert result.response_text == "I'll help with that."
 
     aux_types = [
@@ -170,7 +170,6 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
     )
     assert selector_entry["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
     assert selector_entry["verdict"] == "rag_selected"
-
 
 
 def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypatch):
@@ -221,7 +220,9 @@ def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypat
     )
 
     assert len(llm.calls) == 1
-    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert all(
+        not str(call["prompt"]).startswith("Select workflow") for call in llm.calls
+    )
     assert result.response_text == "I'll help with that."
 
     selector_entry = next(
@@ -233,7 +234,6 @@ def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypat
     assert selector_entry["verdict"] == "selector_prompt_unavailable"
     assert selector_entry["selection_source"] == "selector_fail_closed"
     assert selector_entry["prompt_failure_reason"] == "selector_prompt_unavailable"
-
 
 
 def test_selector_prompt_unavailable_recovers_single_discovered_execution_workflow(
@@ -315,7 +315,9 @@ def test_selector_prompt_unavailable_recovers_single_discovered_execution_workfl
         turn_id="turn-selector-prompt-unavailable-recovery",
     )
 
-    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert all(
+        not str(call["prompt"]).startswith("Select workflow") for call in llm.calls
+    )
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == selected_workflow_id
     assert result.workflow_routing.verdict == "selector_prompt_unavailable"
@@ -341,7 +343,6 @@ def test_selector_prompt_unavailable_recovers_single_discovered_execution_workfl
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-922 Phase 1.3: Discovered workflows in selector prompt.
 # ---------------------------------------------------------------------------
-
 
 
 def test_selector_receives_discovered_workflows(monkeypatch):
@@ -426,7 +427,6 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     assert result.response_text == "Custom analysis complete."
 
 
-
 def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
     """Non-executable discovered workflows should not reach selector candidates by default."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -490,7 +490,6 @@ def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
     assert execution_entry is None
 
 
-
 def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
     """Explicit override should allow non-executable discovered workflows into selector context."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -545,7 +544,6 @@ def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
     )
     assert execution_entry is not None
     assert execution_entry["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
-
 
 
 def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
@@ -639,7 +637,6 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
 def test_selector_disabled_skips_classifier(monkeypatch):
     """When selector is disabled, no classifier LLM call should be made."""
 
@@ -657,7 +654,9 @@ def test_selector_disabled_skips_classifier(monkeypatch):
 
     assert llm.calls
     assert llm.calls[0]["prompt"] == "Hello"
-    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert all(
+        not str(call["prompt"]).startswith("Select workflow") for call in llm.calls
+    )
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -668,7 +667,6 @@ def test_selector_disabled_skips_classifier(monkeypatch):
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-922 Phase 1.3: No user_namespace → selector skipped.
 # ---------------------------------------------------------------------------
-
 
 
 def test_no_namespace_skips_selector(monkeypatch):
@@ -688,7 +686,9 @@ def test_no_namespace_skips_selector(monkeypatch):
 
     assert llm.calls
     assert llm.calls[0]["prompt"] == "Hello"
-    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert all(
+        not str(call["prompt"]).startswith("Select workflow") for call in llm.calls
+    )
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -699,7 +699,6 @@ def test_no_namespace_skips_selector(monkeypatch):
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Plain response routing (skips tool-calling overhead).
 # ---------------------------------------------------------------------------
-
 
 
 def test_tool_seeking_has_routing_info(monkeypatch):
@@ -769,7 +768,6 @@ def test_tool_seeking_has_routing_info(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
 def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
     """Routing telemetry should include timing in aux_llm_calls."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -822,7 +820,6 @@ def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
 def test_selector_enabled_by_default(monkeypatch):
     """The selector remains enabled without any compatibility toggle."""
     monkeypatch.delenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", raising=False)
@@ -834,7 +831,6 @@ def test_selector_enabled_by_default(monkeypatch):
     assert selector.enabled()
 
 
-
 def test_selector_ignores_legacy_disable_env(monkeypatch):
     """Legacy selector env toggles no longer affect runtime routing."""
     monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "0")
@@ -844,7 +840,6 @@ def test_selector_ignores_legacy_disable_env(monkeypatch):
         prompt_service=MagicMock(),
     )
     assert selector.enabled()
-
 
 
 def test_no_routing_info_when_selector_suppressed_in_harness(monkeypatch):
@@ -862,5 +857,3 @@ def test_no_routing_info_when_selector_suppressed_in_harness(monkeypatch):
     )
 
     assert result.workflow_routing is None
-
-

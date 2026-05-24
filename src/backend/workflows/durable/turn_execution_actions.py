@@ -18,6 +18,7 @@ from ..action_registry import (
     WorkflowActionRequest,
 )
 from ..subworkflow_contracts import WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
+from ..workflow_selector import build_selector_call_prompt
 from .turn_execution_runtime_support import (
     _bounded_snapshot,
     build_turn_execution_selected_workflow_outputs,
@@ -50,6 +51,7 @@ _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_PREFIXES: tuple[str, ...] = (
 _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_IDS: frozenset[str] = frozenset(
     {"workflow_invoke_subworkflow", "llm.action"}
 )
+
 
 def _normalise_tool_batch_cap(
     raw_value: Any,
@@ -345,9 +347,11 @@ def _discover_turn_workflows_for_durable_action(
         "requested_query": query_text,
         "match_count": 0,
         "candidate_count": 0,
-        "search_sources": discovery_result.get("search_sources")
-        if isinstance(discovery_result.get("search_sources"), list)
-        else ["workflow_discovery_service"],
+        "search_sources": (
+            discovery_result.get("search_sources")
+            if isinstance(discovery_result.get("search_sources"), list)
+            else ["workflow_discovery_service"]
+        ),
         "match_absence_reason": discovery_result.get("match_absence_reason")
         or "durable_workflow_discovery_no_match",
         "errors": discovery_result.get("errors"),
@@ -493,7 +497,14 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             "selector_prompt_text",
             "Durable selector prompt unavailable; routing uses workflow discovery directly.",
         )
-        outputs.setdefault("selector_call_prompt_text", "Select workflow")
+        outputs.setdefault(
+            "selector_call_prompt_text",
+            build_selector_call_prompt(
+                _coerce_non_empty_text(
+                    request.data.get("user_prompt") or request.data.get("prompt")
+                )
+            ),
+        )
         outputs.setdefault("selector_requested_prompt_ids", [])
         outputs.setdefault("selector_prompt_provenance", {})
         outputs.setdefault(

@@ -410,7 +410,8 @@ def test_orchestrator_uses_selector_llm_even_when_policy_guidance_is_strong(
     )
 
     assert llm.calls
-    assert llm.calls[0]["prompt"] == "Select workflow"
+    assert llm.calls[0]["prompt"].startswith("Select workflow")
+    assert "Refresh my Jira todo list" in llm.calls[0]["prompt"]
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == TODO_REFRESH_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"

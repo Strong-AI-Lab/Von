@@ -31,15 +31,29 @@ from .workflow_registry import WorkflowRegistry
 # Vontology or omits the required routing context variables.
 SELECTOR_PROMPT_UNAVAILABLE_REASON = "selector_prompt_unavailable"
 SELECTOR_PROMPT_RENDER_ERROR_REASON = "selector_prompt_render_error"
-SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON = (
-    "selector_prompt_missing_candidate_list"
-)
+SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON = "selector_prompt_missing_candidate_list"
 SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON = "selector_prompt_missing_turn_text"
 SELECTOR_FAIL_CLOSED_SOURCE = "selector_fail_closed"
 SELECTOR_PROMPT_MAX_CHARS = 24000
 SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS = 900
 SELECTOR_POLICY_REASONING_MAX_CHARS = 280
 SELECTOR_POLICY_FRAGMENT_MAX_CANDIDATES = 3
+SELECTOR_CALL_PROMPT_MAX_CHARS = 4000
+
+
+def build_selector_call_prompt(turn_text: str | None) -> str:
+    """Return the foreground prompt for selector LLM calls."""
+
+    cleaned_turn_text = " ".join(str(turn_text or "").split())
+    if not cleaned_turn_text:
+        return "Select workflow"
+    if len(cleaned_turn_text) > SELECTOR_CALL_PROMPT_MAX_CHARS:
+        omitted = len(cleaned_turn_text) - SELECTOR_CALL_PROMPT_MAX_CHARS
+        cleaned_turn_text = (
+            cleaned_turn_text[:SELECTOR_CALL_PROMPT_MAX_CHARS].rstrip()
+            + f"... [truncated {omitted} chars]"
+        )
+    return f"Select workflow for this user request:\n\n{cleaned_turn_text}"
 
 
 @dataclass(frozen=True)
@@ -90,6 +104,7 @@ class WorkflowSelector:
         self._prompt_service = prompt_service
         self._default_workflow_id = default_workflow_id
         self._classifier_prompt_ids = tuple(classifier_prompt_ids)
+
     _JSON_SELECTION_KEYS = (
         "workflow_id",
         "workflow",
@@ -118,6 +133,10 @@ class WorkflowSelector:
         "fallback to",
         "fall back to",
     )
+
+    @staticmethod
+    def build_selector_call_prompt(turn_text: str | None) -> str:
+        return build_selector_call_prompt(turn_text)
 
     @staticmethod
     def _humanise_candidate_signal(value: Any) -> str:
@@ -380,7 +399,10 @@ class WorkflowSelector:
 
         selected_source = str(selected_entry.get("candidate_source") or "").strip()
         selected_reason = str(selected_entry.get("candidate_reason") or "").strip()
-        if selected_source != "selector_default" and selected_reason != "builtin_selector_candidate":
+        if (
+            selected_source != "selector_default"
+            and selected_reason != "builtin_selector_candidate"
+        ):
             return ""
 
         disqualified_candidates: list[str] = []
@@ -414,9 +436,7 @@ class WorkflowSelector:
                         f"{concept_id} executability {executability_reason}"
                     )
                 else:
-                    disqualified_candidates.append(
-                        f"{concept_id} is not executable"
-                    )
+                    disqualified_candidates.append(f"{concept_id} is not executable")
                 continue
 
             if routing_exclusion_reason:
@@ -432,9 +452,8 @@ class WorkflowSelector:
 
         if not disqualified_candidates:
             return ""
-        return (
-            "Generic fallback selected because "
-            + "; ".join(disqualified_candidates[:2])
+        return "Generic fallback selected because " + "; ".join(
+            disqualified_candidates[:2]
         )
 
     @staticmethod
@@ -478,8 +497,7 @@ class WorkflowSelector:
             return False
         for cue in cls._REASONING_SELECTION_CUES:
             pattern = (
-                rf"\b{re.escape(cue)}\b(?:\s+\w+){{0,6}}\s+"
-                rf"{re.escape(alias)}\b"
+                rf"\b{re.escape(cue)}\b(?:\s+\w+){{0,6}}\s+" rf"{re.escape(alias)}\b"
             )
             if re.search(pattern, reasoning):
                 return True
@@ -567,7 +585,9 @@ class WorkflowSelector:
         )
 
     @classmethod
-    def _build_routing_policy_fragments(cls, policy_recommendation: Mapping[str, Any]) -> str:
+    def _build_routing_policy_fragments(
+        cls, policy_recommendation: Mapping[str, Any]
+    ) -> str:
         if not bool(policy_recommendation.get("policy_active")):
             return "No learned routing policy guidance is active."
 
@@ -609,7 +629,9 @@ class WorkflowSelector:
                 attempts = item.get("attempts")
                 if isinstance(attempts, (int, float)):
                     fragments.append(f"evidence {int(attempts)}")
-                candidate_reasoning = cls._truncate_policy_reasoning(item.get("reasoning"))
+                candidate_reasoning = cls._truncate_policy_reasoning(
+                    item.get("reasoning")
+                )
                 if candidate_reasoning:
                     fragments.append(candidate_reasoning)
                 if fragments:
@@ -646,7 +668,7 @@ class WorkflowSelector:
                 selection_prompt=selection_prompt,
             )
         response = llm_client.generate(
-            prompt="Select workflow",
+            prompt=self.build_selector_call_prompt(turn_text),
             context=[{"role": "system", "content": prompt_text}],
             model=model,
         )
@@ -773,7 +795,9 @@ class WorkflowSelector:
         )
         if ranked_candidate_ids:
             entry_lookup = {
-                item["concept_id"]: item for item in candidate_entries if item.get("concept_id")
+                item["concept_id"]: item
+                for item in candidate_entries
+                if item.get("concept_id")
             }
             reordered_entries: list[dict[str, Any]] = []
             for workflow_id in ranked_candidate_ids:
@@ -818,9 +842,7 @@ class WorkflowSelector:
                     "candidate_reason": "default_workflow_fallback",
                 }
             )
-            candidate_lines.append(
-                f"- {self._default_workflow_id}: Default workflow"
-            )
+            candidate_lines.append(f"- {self._default_workflow_id}: Default workflow")
 
         candidate_list = "\n".join(candidate_lines)
         continuation_context_text = (
@@ -839,11 +861,7 @@ class WorkflowSelector:
             ),
         }
         immutable_candidate_entries = tuple(
-            {
-                str(key): value
-                for key, value in entry.items()
-                if isinstance(key, str)
-            }
+            {str(key): value for key, value in entry.items() if isinstance(key, str)}
             for entry in candidate_entries
         )
         prompt_provenance_base = {
@@ -876,7 +894,11 @@ class WorkflowSelector:
                 prompt_failure_detail=str(exc),
             )
 
-        if prompt is None or not isinstance(prompt.text, str) or not prompt.text.strip():
+        if (
+            prompt is None
+            or not isinstance(prompt.text, str)
+            or not prompt.text.strip()
+        ):
             return WorkflowSelectionPrompt(
                 prompt_id=None,
                 prompt_text=None,
@@ -982,8 +1004,7 @@ class WorkflowSelector:
         returns a plain concept_id or unstructured text.
         """
         candidate_ids = tuple(
-            item for item in candidate_workflow_ids
-            if isinstance(item, str) and item
+            item for item in candidate_workflow_ids if isinstance(item, str) and item
         )
         candidate_lookup = {item.lower(): item for item in candidate_ids}
 
@@ -1085,7 +1106,8 @@ class WorkflowSelector:
             )
         if recovered_candidate is not None:
             prior_selection_resolution = (
-                str(selection_metadata.get("selection_resolution") or "").strip() or None
+                str(selection_metadata.get("selection_resolution") or "").strip()
+                or None
             )
             prior_workflow_id = workflow_id
             workflow_id = recovered_candidate["workflow_id"]
@@ -1101,13 +1123,11 @@ class WorkflowSelector:
             selection_metadata["selector_contract_recovery_applied"] = True
             selection_metadata["recovered_from_workflow_id"] = prior_workflow_id
             selection_metadata["recovered_candidate_workflow_id"] = workflow_id
-            selection_metadata["recovered_candidate_name"] = (
-                recovered_candidate["name"]
-            )
+            selection_metadata["recovered_candidate_name"] = recovered_candidate["name"]
             if recovered_candidate.get("candidate_source"):
-                selection_metadata["recovered_candidate_source"] = (
-                    recovered_candidate["candidate_source"]
-                )
+                selection_metadata["recovered_candidate_source"] = recovered_candidate[
+                    "candidate_source"
+                ]
             selection_metadata["eligible_specialised_candidate_ids"] = [workflow_id]
             reasoning = (
                 "Selector returned off-contract or unmatched output, so the only "
@@ -1181,9 +1201,9 @@ class WorkflowSelector:
                 }
             )
             if recovered_candidate.get("candidate_source"):
-                selection_metadata["recovered_candidate_source"] = (
-                    recovered_candidate["candidate_source"]
-                )
+                selection_metadata["recovered_candidate_source"] = recovered_candidate[
+                    "candidate_source"
+                ]
             return WorkflowSelection(
                 workflow_id=workflow_id,
                 verdict=failure_reason,
@@ -1299,8 +1319,7 @@ class WorkflowSelector:
     ) -> str:
         raw_text = str(raw_response or "")
         discovered_ids = tuple(
-            item for item in discovered_workflow_ids
-            if isinstance(item, str) and item
+            item for item in discovered_workflow_ids if isinstance(item, str) and item
         )
         discovered_lookup = {item.lower(): item for item in discovered_ids}
 
@@ -1309,9 +1328,7 @@ class WorkflowSelector:
         if stripped:
             snippets.append(stripped)
             snippets.extend(
-                line.strip()
-                for line in stripped.splitlines()
-                if isinstance(line, str)
+                line.strip() for line in stripped.splitlines() if isinstance(line, str)
             )
 
         json_candidate = cls._extract_json_candidate(raw_text)

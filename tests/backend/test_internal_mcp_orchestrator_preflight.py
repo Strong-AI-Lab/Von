@@ -110,6 +110,10 @@ def _seed_authoritative_conversation_turn_registry(monkeypatch) -> None:
 @pytest.fixture(autouse=True)
 def _stub_shared_runtime_registries(monkeypatch):
     _seed_authoritative_conversation_turn_registry(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.WorkflowSelector.enabled",
+        lambda self: False,
+    )
 
 
 @pytest.fixture(autouse=True)

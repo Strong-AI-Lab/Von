@@ -77,7 +77,6 @@ def test_same_session_follow_up_does_not_rehydrate_python_write_intent_memory(
     )
 
 
-
 def test_cross_session_follow_up_has_no_python_write_intent_reuse(monkeypatch):
     """Cross-session follow-up turns should also remain selector-owned."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -145,7 +144,6 @@ def test_cross_session_follow_up_has_no_python_write_intent_reuse(monkeypatch):
     )
 
 
-
 def test_confirm_structure_follow_up_does_not_rehydrate_python_write_intent_memory(
     monkeypatch,
 ):
@@ -208,7 +206,6 @@ def test_confirm_structure_follow_up_does_not_rehydrate_python_write_intent_memo
         isinstance(entry, dict) and entry.get("type") == "write_intent_session_memory"
         for entry in second.aux_llm_calls
     )
-
 
 
 def test_tool_planner_receives_authoritative_workflow_continuation_context(
@@ -308,7 +305,6 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     assert continuation_entry is not None
     assert continuation_entry.get("applied") is True
     assert continuation_entry.get("reason") == "workflow_state_authoritative"
-
 
 
 def test_custom_workflow_dispatch_projects_launch_inputs_from_applied_continuation_context(
@@ -462,7 +458,6 @@ def test_custom_workflow_dispatch_projects_launch_inputs_from_applied_continuati
     ]
 
 
-
 def test_custom_workflow_dispatch_preserves_plural_launch_inputs_from_continuation_context(
     monkeypatch,
 ):
@@ -603,7 +598,6 @@ def test_custom_workflow_dispatch_preserves_plural_launch_inputs_from_continuati
     }
 
 
-
 def test_selector_routes_failure_follow_up_with_episode_aware_context(
     monkeypatch,
 ):
@@ -662,7 +656,7 @@ def test_selector_routes_failure_follow_up_with_episode_aware_context(
             self.calls.append(
                 {"prompt": prompt, "context": list(context or []), "model": model}
             )
-            if prompt == "Select workflow":
+            if isinstance(prompt, str) and prompt.startswith("Select workflow"):
                 selector_prompt_text = "\n".join(
                     str(item.get("content") or "")
                     for item in (context or [])
@@ -725,7 +719,6 @@ def test_selector_routes_failure_follow_up_with_episode_aware_context(
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in continuation_context
     assert "conversation_diagnostics_required_evidence" in continuation_context
     assert "Active workflow source: conversation_turn" in continuation_context
-
 
 
 def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
@@ -817,7 +810,6 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
     assert "prompt_forbids_workflow_execution" in (
         continuation_entry.get("context", {}).get("apply_signals") or []
     )
-
 
 
 def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executable(
@@ -915,5 +907,3 @@ def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executabl
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------
-
-
