@@ -153,6 +153,11 @@ represented authority before filing Jira work.
   reports what a selected client will actually call. File only if the resolver
   starts choosing model policy, provider preference, or stage routing outside
   represented model/workflow policy metadata.
+- Dispatch-preflight helpers are support-only when they validate and apply a
+  represented decision. They become drift when Python decides direct-response
+  versus tool-pipeline override policy, external multi-surface recovery,
+  single-candidate workflow-execute recovery, or model/user-visible recovery
+  wording.
 
 ## Recent Examples
 
@@ -208,3 +213,6 @@ represented authority before filing Jira work.
   arXiv passthrough, and created-concept/file-copy labels live in Python runtime
   projection and selected-workflow response surfaces rather than represented
   evidence-view/presenter authority.
+- `JVNAUTOSCI-2365` - turn-contract dispatch override policy, including
+  direct-response/tool-pipeline override, external multi-surface recovery, and
+  workflow-execute single-candidate recovery, is authored in the orchestrator.

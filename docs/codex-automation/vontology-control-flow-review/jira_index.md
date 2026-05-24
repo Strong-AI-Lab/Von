@@ -105,3 +105,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   arXiv passthrough, and created-concept/file-copy response labels are authored
   in Python projection/runtime surfaces instead of represented evidence-view or
   presenter/workflow authority.
+- `JVNAUTOSCI-2365` - turn-contract dispatch override policy, including
+  direct-response/tool-pipeline override, external multi-surface recovery, and
+  workflow-execute single-candidate recovery, is authored in orchestrator Python
+  instead of represented workflow/contract/recovery authority.

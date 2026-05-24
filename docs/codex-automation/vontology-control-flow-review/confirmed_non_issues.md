@@ -228,6 +228,17 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   inference seam in `orchestrator.py` is not fresh; it is present on
   `origin/main` and should be handled by the existing required-tool authority
   track (`JVNAUTOSCI-2329` / related follow-through) rather than duplicated.
+- 2026-05-25: active dirty branch `JVNAUTOSCI-2364-entity-relation-boundary`
+  edits looked like a prompt/workflow-authority repair for self-relative
+  relation retrieval plus response-surface propagation. The repo-seed prompt
+  edits are covered by the existing seed-authority caveat, and the response-key
+  precedence changes are support-only unless they start inventing answer
+  semantics or presenter wording. No duplicate was filed for `JVNAUTOSCI-2364`.
+- 2026-05-25: `build_selector_call_prompt()` remains a watch item, not drift,
+  while it only passes the raw user request as the selector LLM foreground
+  prompt and selector policy remains in the Vontology-rendered system/context
+  prompt. File only if Python adds selector instructions, examples, fallback
+  wording, or routing semantics there.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

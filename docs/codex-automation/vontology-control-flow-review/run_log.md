@@ -160,3 +160,26 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   authority track.
 - No new Jira issues were created and no production code was changed by this
   review run.
+
+## 2026-05-25T02:06:33.3340832+12:00
+
+- Read required repo guidance, security guidance, workflow manual, memory and
+  authority-alignment guidance, current automation memory, and repo-local review
+  memory.
+- Reviewed commits since `2026-05-23T14:00:41Z`. The only production commit on
+  `origin/main` was `f63f66ef` (`JVNAUTOSCI-2363 Enforce required-tool dispatch
+  preflight`) plus prior review-memory commits.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  it still failed only on the known four repo-seed paths tracked by
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2341`.
+- Created `JVNAUTOSCI-2365` for new turn-contract dispatch override drift:
+  `orchestrator.py` now decides direct-response/tool-pipeline override,
+  external multi-surface recovery, and workflow-execute single-candidate
+  recovery in Python. Linked it to `JVNAUTOSCI-1913`, `JVNAUTOSCI-2298`,
+  `JVNAUTOSCI-1975`, and `JVNAUTOSCI-2352`.
+- Reviewed the dirty `JVNAUTOSCI-2364-entity-relation-boundary` worktree but did
+  not edit or stage existing production/test changes. Treated the self-relative
+  relation prompt edits and response-output propagation as support/authority
+  repair work rather than a duplicate drift task.
+- No production code was changed by this review run.

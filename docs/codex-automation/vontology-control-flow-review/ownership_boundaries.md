@@ -94,6 +94,10 @@ predicates, and KB assertions should own durable:
   fields count as created/materialised/represented handles, artefact-type
   labels, source-specific provenance fields, and response/presenter wording for
   those handles.
+- Turn-contract dispatch recovery authority, including whether required
+  evidence should keep the selected workflow, override to the tool pipeline,
+  recover to a concrete workflow-execute target, fail closed, or request
+  clarification.
 
 ## Python Support
 
@@ -184,6 +188,9 @@ Python can remain the surface for:
 - generic model-call diagnostics that report the concrete effective
   client/model/provider/host already selected by represented settings or runtime
   configuration;
+- generic dispatch-preflight plumbing that loads represented policy, validates
+  required-tool/evidence metadata, applies represented route-state decisions,
+  records stable reason codes, and fails closed when policy authority is absent;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
