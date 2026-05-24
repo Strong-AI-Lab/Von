@@ -13,7 +13,10 @@ from .conversation_scope_binding_service import (
 )
 from .debug_payload_store import hydrate_debug_payload_blob_refs
 from .turn_response_surface_service import build_turn_response_surface_reconciliation
-from .turn_execution_record_service import get_turn_execution_records_collection
+from .turn_execution_record_service import (
+    build_workflow_routing_diagnostics,
+    get_turn_execution_records_collection,
+)
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -687,6 +690,254 @@ def _build_minimal_timing_breakdown(
     }
 
 
+def _string_key_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _capture_has_text(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    text = _safe_str(value.get("text"))
+    if text:
+        return True
+    char_count = value.get("char_count")
+    return isinstance(char_count, (int, float)) and char_count > 0
+
+
+def _diagnostic_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if value == "" or value == [] or value == {}:
+        return False
+    return True
+
+
+def _selector_core_evidence_sparse(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return True
+    selector = value.get("selector")
+    if not isinstance(selector, Mapping):
+        return True
+    return not (
+        _capture_has_text(selector.get("prompt"))
+        and _capture_has_text(selector.get("candidate_list"))
+        and _capture_has_text(selector.get("response"))
+    )
+
+
+def _collect_aux_llm_entries_from_value(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [_string_key_mapping(item) or {} for item in value if isinstance(item, Mapping)]
+
+
+def _collect_routing_aux_entries(
+    *,
+    payload: Mapping[str, Any] | None,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    def _append_from(value: Any) -> None:
+        entries.extend(_collect_aux_llm_entries_from_value(value))
+
+    for source in (payload, llm_debug, turn_record):
+        if not isinstance(source, Mapping):
+            continue
+        _append_from(source.get("aux_llm_calls"))
+        _append_from(source.get("workflow_routing_aux"))
+        latest_progress = source.get("latest_progress")
+        if isinstance(latest_progress, Mapping):
+            _append_from(latest_progress.get("workflow_routing_aux"))
+        selected_trace = source.get("selected_workflow_trace")
+        if isinstance(selected_trace, Mapping):
+            _append_from(selected_trace.get("aux_llm_calls"))
+            _append_from(selected_trace.get("workflow_routing_aux"))
+
+    return [entry for entry in entries if entry]
+
+
+def _first_mapping_by_key(
+    key: str,
+    *sources: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        value = source.get(key)
+        if isinstance(value, Mapping):
+            return deepcopy(dict(value))
+    return None
+
+
+def _workflow_routing_from_sources(
+    *,
+    payload: Mapping[str, Any] | None,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    direct = _first_mapping_by_key("workflow_routing", payload, llm_debug, turn_record)
+    if direct is not None:
+        return direct
+
+    diagnostics = _first_mapping_by_key(
+        "workflow_routing_diagnostics", payload, llm_debug, turn_record
+    )
+    if isinstance(diagnostics, Mapping):
+        selector = diagnostics.get("selector")
+        return {
+            "workflow_id": diagnostics.get("selected_workflow_id"),
+            "verdict": diagnostics.get("selector_verdict"),
+            "source": diagnostics.get("selector_source"),
+            "prompt_id": (
+                selector.get("prompt_id") if isinstance(selector, Mapping) else None
+            ),
+            "confidence_score": (
+                selector.get("confidence_score")
+                if isinstance(selector, Mapping)
+                else None
+            ),
+            "reasoning": (
+                selector.get("reasoning") if isinstance(selector, Mapping) else None
+            ),
+            "selection_rationale": diagnostics.get("selection_rationale"),
+            "discovered_workflow_ids": (
+                selector.get("discovered_workflow_ids")
+                if isinstance(selector, Mapping)
+                else None
+            ),
+        }
+
+    workflow_selection = _first_mapping_by_key("workflow_selection", payload, turn_record)
+    if isinstance(workflow_selection, Mapping):
+        selector = workflow_selection.get("selector")
+        return {
+            "workflow_id": workflow_selection.get("selected_workflow_id"),
+            "verdict": workflow_selection.get("selector_verdict")
+            or workflow_selection.get("verdict"),
+            "source": workflow_selection.get("selector_source")
+            or workflow_selection.get("source"),
+            "prompt_id": workflow_selection.get("prompt_id")
+            or (selector.get("prompt_id") if isinstance(selector, Mapping) else None),
+            "confidence_score": workflow_selection.get("confidence_score"),
+            "reasoning": workflow_selection.get("reasoning"),
+            "selection_rationale": workflow_selection.get("selection_rationale"),
+            "discovered_workflow_ids": workflow_selection.get(
+                "discovered_workflow_ids"
+            ),
+        }
+
+    return None
+
+
+def _workflow_discovery_from_sources(
+    *,
+    payload: Mapping[str, Any] | None,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    direct = _first_mapping_by_key("workflow_discovery", payload, llm_debug)
+    if direct is not None:
+        return direct
+    workflow_selection = _first_mapping_by_key("workflow_selection", payload, turn_record)
+    if isinstance(workflow_selection, Mapping) and isinstance(
+        workflow_selection.get("workflow_discovery"), Mapping
+    ):
+        return deepcopy(dict(workflow_selection["workflow_discovery"]))
+    return None
+
+
+def _merge_section_with_repair(
+    existing: Mapping[str, Any] | None,
+    repair: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    merged = deepcopy(dict(existing or {}))
+    if not isinstance(repair, Mapping):
+        return merged
+    for key, value in repair.items():
+        if key == "telemetry_completeness":
+            merged[key] = deepcopy(value)
+            continue
+        if not _diagnostic_value_present(merged.get(key)) and _diagnostic_value_present(
+            value
+        ):
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _merge_workflow_routing_diagnostics_with_repair(
+    existing: Mapping[str, Any] | None,
+    repair: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(existing, Mapping):
+        return deepcopy(dict(repair))
+    merged = deepcopy(dict(existing))
+    for key, value in repair.items():
+        if key in {"selector", "discovery", "dispatch"}:
+            merged[key] = _merge_section_with_repair(
+                merged.get(key) if isinstance(merged.get(key), Mapping) else None,
+                value if isinstance(value, Mapping) else None,
+            )
+            continue
+        if not _diagnostic_value_present(merged.get(key)) and _diagnostic_value_present(
+            value
+        ):
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _repair_workflow_routing_diagnostics(
+    payload: dict[str, Any],
+    *,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> None:
+    current = payload.get("workflow_routing_diagnostics")
+    aux_llm_calls = _collect_routing_aux_entries(
+        payload=payload,
+        llm_debug=llm_debug,
+        turn_record=turn_record,
+    )
+    workflow_routing = _workflow_routing_from_sources(
+        payload=payload,
+        llm_debug=llm_debug,
+        turn_record=turn_record,
+    )
+    workflow_discovery = _workflow_discovery_from_sources(
+        payload=payload,
+        llm_debug=llm_debug,
+        turn_record=turn_record,
+    )
+    if not (
+        isinstance(current, Mapping)
+        or isinstance(workflow_routing, Mapping)
+        or isinstance(workflow_discovery, Mapping)
+        or aux_llm_calls
+    ):
+        return
+    if isinstance(current, Mapping) and not _selector_core_evidence_sparse(current):
+        selector = current.get("selector")
+        if isinstance(selector, Mapping) and isinstance(
+            selector.get("telemetry_completeness"), Mapping
+        ):
+            return
+
+    repair = build_workflow_routing_diagnostics(
+        workflow_discovery=workflow_discovery,
+        workflow_routing=workflow_routing,
+        turn_execution_diagnostics=payload,
+        aux_llm_calls=aux_llm_calls,
+    )
+    payload["workflow_routing_diagnostics"] = (
+        _merge_workflow_routing_diagnostics_with_repair(current, repair)
+        if isinstance(current, Mapping)
+        else repair
+    )
+
+
 def _build_fallback_turn_execution_diagnostics(
     *,
     request_id: str,
@@ -797,7 +1048,7 @@ def _build_fallback_turn_execution_diagnostics(
                 llm_debug_mapping.get("code_version_details")
             )
 
-    return {
+    payload = {
         "schema_version": TURN_EXECUTION_DIAGNOSTICS_SCHEMA_VERSION,
         "request_id": request_id,
         "generated_at_utc": generated_at_utc or _now_utc_iso(),
@@ -838,6 +1089,12 @@ def _build_fallback_turn_execution_diagnostics(
         },
         **tool_counts,
     }
+    _repair_workflow_routing_diagnostics(
+        payload,
+        llm_debug=llm_debug_mapping,
+        turn_record=turn_record,
+    )
+    return payload
 
 
 def _normalise_embedded_diagnostics_payload(
@@ -988,6 +1245,12 @@ def _normalise_embedded_diagnostics_payload(
     for key, value in tool_counts.items():
         if not isinstance(payload.get(key), int):
             payload[key] = value
+
+    _repair_workflow_routing_diagnostics(
+        payload,
+        llm_debug=llm_debug_mapping,
+        turn_record=turn_record,
+    )
 
     return payload
 

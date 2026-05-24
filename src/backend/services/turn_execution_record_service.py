@@ -2995,6 +2995,20 @@ def build_workflow_routing_diagnostics(
         selector_response_capture = _build_text_capture(
             selector_entry.get("raw_response")
         )
+    selector_prompt_present = isinstance(selector_prompt_capture, Mapping) and bool(
+        _safe_str(selector_prompt_capture.get("text"))
+        or selector_prompt_capture.get("char_count")
+    )
+    selector_candidate_list_present = isinstance(
+        selector_candidate_list_capture, Mapping
+    ) and bool(
+        _safe_str(selector_candidate_list_capture.get("text"))
+        or selector_candidate_list_capture.get("char_count")
+    )
+    selector_response_present = isinstance(selector_response_capture, Mapping) and bool(
+        _safe_str(selector_response_capture.get("text"))
+        or selector_response_capture.get("char_count")
+    )
     selector_prompt_failure_reason = _safe_str(
         _selector_context_value("prompt_failure_reason")
     )
@@ -3077,6 +3091,23 @@ def build_workflow_routing_diagnostics(
             else None
         )
     )
+    selector_missing_telemetry_fields: list[str] = []
+    if not selector_prompt_present:
+        selector_missing_telemetry_fields.append("prompt")
+    if not selector_candidate_list_present:
+        selector_missing_telemetry_fields.append("candidate_list")
+    if not selector_response_present:
+        selector_missing_telemetry_fields.append("response")
+    if not selector_candidates:
+        selector_missing_telemetry_fields.append("candidate_entries")
+    if not isinstance(selector_context_lineage, Mapping):
+        selector_missing_telemetry_fields.append("context_lineage")
+    selector_response_absence_reason = None
+    if not selector_response_present:
+        if selector_prompt_entries or selector_entries:
+            selector_response_absence_reason = "selector_response_not_captured"
+        else:
+            selector_response_absence_reason = "selector_aux_telemetry_unavailable"
     selected_model_candidate = (
         {
             str(key): value
@@ -3378,6 +3409,17 @@ def build_workflow_routing_diagnostics(
             ),
             "selection_metadata": selector_selection_metadata or None,
             "override_events": selector_override_entries,
+            "telemetry_completeness": {
+                "prompt_present": selector_prompt_present,
+                "candidate_list_present": selector_candidate_list_present,
+                "response_present": selector_response_present,
+                "candidate_entries_present": bool(selector_candidates),
+                "context_lineage_present": isinstance(selector_context_lineage, Mapping),
+                "selector_prompt_entry_count": len(selector_prompt_entries),
+                "selector_response_entry_count": len(selector_entries),
+                "missing_fields": selector_missing_telemetry_fields,
+                "response_absence_reason": selector_response_absence_reason,
+            },
         },
         "dispatch": {
             "selected_execution_mode": _safe_str(
