@@ -261,7 +261,9 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     assert "established facts versus likely inferences" in prompt_text
     assert "you must call a represented-knowledge" in prompt_text_lower
     assert "retrieval tool in this turn before answering" in prompt_text_lower
-    assert "do not conclude that no papers" in prompt_text_lower
+    assert "do not conclude that no matching predicate extent" in prompt_text_lower
+    assert "predicate-filtered entity-relative relation questions" in prompt_text_lower
+    assert "matching predicate extent" in prompt_text_lower
     assert "first ontology-native" in prompt_text_lower
     assert "anchor entity always goes in `concept_id`" in prompt_text_lower
     assert "payload keys named `subject` or `object`" in prompt_text_lower

@@ -323,6 +323,47 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
     )
 
 
+def test_completion_gate_promotes_selected_workflow_response_to_response_text() -> None:
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "required_effects": [],
+        },
+        "selected_workflow_user_response": "Grounded selected workflow answer.",
+        "final_response": "Generic narration answer.",
+        "response_text": "",
+        "current_response": "",
+        "invocations": [],
+        "aux_llm_calls": [],
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is True
+    assert result.outputs["completion_gate_requires_follow_up"] is False
+    assert result.outputs["selected_workflow_user_response"] == (
+        "Grounded selected workflow answer."
+    )
+    assert result.outputs["final_response"] == "Grounded selected workflow answer."
+    assert result.outputs["response_text"] == "Grounded selected workflow answer."
+    assert result.outputs["current_response"] == "Grounded selected workflow answer."
+
+
 def test_kr_required_tools_block_completion_when_write_and_readback_are_absent() -> (
     None
 ):

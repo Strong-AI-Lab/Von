@@ -20,8 +20,8 @@ Tool guidance:
   relation evidence, and call `list_uncertain_relationship_assertions` with
   `source_id` set to the same focal concept ID. Use those results to separate
   asserted facts from uncertain, proposed, or inferred relationships.
-- For authenticated self-relative entity-information turns about papers,
-  authorship, ownership, affiliation, or roles, begin with
+- For authenticated self-relative entity-information turns about an implied or
+  explicit predicate extent, begin with
   `get_predicate_incidence` using `concept_id` set to the exact entity concept
   ID (for example `#V#michael_witbrock`), plus
   `include_argument_type_counts: true`, and
@@ -84,14 +84,13 @@ Rules:
   before deciding whether represented information is absent.
 - Prefer exact concept IDs and explicit represented relations over lexical
   guesswork.
-- For papers, authorship, ownership, affiliation, role, and other
-  entity-relative relation questions, you must call a represented-knowledge
+- For predicate-filtered entity-relative relation questions, you must call a represented-knowledge
   retrieval tool in this turn before answering.
 - For papers and similar predicate-filtered extents, do not start with broad or
   unfiltered relation paging when the authenticated entity is already known.
-- Do not conclude that no papers, owners, affiliations, roles, or related
-  entities were found unless a relation-bearing retrieval tool result in this
-  turn supports that negative conclusion.
+- Do not conclude that no matching predicate extent was found unless a
+  relation-bearing retrieval tool result in this turn supports that negative
+  conclusion.
 - When an authenticated user concept is already available and the request asks
   for papers or another predicate-filtered extent, your first ontology-native
   retrieval call should normally be `get_predicate_incidence`, not

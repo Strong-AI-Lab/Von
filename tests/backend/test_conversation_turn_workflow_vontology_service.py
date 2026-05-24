@@ -129,6 +129,13 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`get_predicate_incidence` and then `find_relations_with_argument`" in (
         expected_outcome_text
     )
+    assert "extent of an implied or explicit predicate" in expected_outcome_text
+    assert "Resolved-entity predicate extent example" in expected_outcome_text
+    assert (
+        '"required_tools":["get_predicate_incidence","find_relations_with_argument"]'
+        in expected_outcome_text
+    )
+    assert "predicate-filtered extent" in expected_outcome_text
     assert "simple represented artefact" in expected_outcome_text
     assert "`create_concepts`, `upsert_singleton_text_relation`" in (
         expected_outcome_text

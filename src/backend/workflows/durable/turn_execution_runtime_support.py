@@ -2872,10 +2872,21 @@ def run_turn_execution_completion_gate(
         max_value=600_000,
     )
 
-    final_response = data.get("final_response")
-    if not isinstance(final_response, str):
-        current_response = data.get("current_response")
-        final_response = current_response if isinstance(current_response, str) else ""
+    selected_workflow_user_response = _safe_str(
+        data.get("selected_workflow_user_response")
+    )
+    response_text = _safe_str(data.get("response_text"))
+    current_response = _safe_str(data.get("current_response"))
+    final_response = (
+        _safe_str(data.get("final_response"))
+        or current_response
+        or response_text
+        or ""
+    )
+    if selected_workflow_user_response:
+        final_response = selected_workflow_user_response
+        response_text = selected_workflow_user_response
+        current_response = selected_workflow_user_response
 
     if not safe_to_claim_completion:
         unresolved_effect_types = {
@@ -2964,6 +2975,9 @@ def run_turn_execution_completion_gate(
                 final_response = f"{final_response.rstrip()}\n\n{status_line}"
         else:
             final_response = status_line
+
+        response_text = final_response
+        current_response = final_response
 
         aux_llm_calls = data.get("aux_llm_calls")
         if isinstance(aux_llm_calls, list):
@@ -3375,7 +3389,10 @@ def run_turn_execution_completion_gate(
 
     return WorkflowActionResult(
         outputs={
+            "selected_workflow_user_response": selected_workflow_user_response,
             "final_response": final_response,
+            "response_text": response_text or final_response,
+            "current_response": current_response or final_response,
             "completion_gate_decision": decision,
             "completion_gate_decision_reason": decision_reason,
             "completion_gate_blocking_effect_ids": list(blocking_effect_ids),

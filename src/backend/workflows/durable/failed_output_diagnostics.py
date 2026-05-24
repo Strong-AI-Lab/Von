@@ -231,6 +231,13 @@ def _declared_output_payload(
     return None
 
 
+def _non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def build_completed_workflow_outputs(
     run_data: Mapping[str, Any] | None,
     *,
@@ -318,6 +325,34 @@ def build_completed_workflow_outputs(
         )
     else:
         outputs["terminal_output_source"] = "workflow_result_envelope"
+
+    user_response_candidates = {
+        "selected_workflow_user_response": _non_empty_text(
+            context.get("selected_workflow_user_response")
+        ),
+        "final_response": _non_empty_text(context.get("final_response")),
+        "response_text": _non_empty_text(context.get("response_text")),
+        "current_response": _non_empty_text(context.get("current_response")),
+    }
+    for key, value in user_response_candidates.items():
+        if value is not None and key not in outputs:
+            outputs[key] = _compact_value(
+                value,
+                key=key,
+                max_text_chars=max_text_chars,
+            )
+    preferred_response = (
+        user_response_candidates.get("selected_workflow_user_response")
+        or user_response_candidates.get("final_response")
+        or user_response_candidates.get("response_text")
+        or user_response_candidates.get("current_response")
+    )
+    if preferred_response and "response" not in outputs:
+        outputs["response"] = _compact_value(
+            preferred_response,
+            key="response",
+            max_text_chars=max_text_chars,
+        )
 
     for key in (
         "workflow_execution_summary",

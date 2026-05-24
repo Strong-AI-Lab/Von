@@ -4432,6 +4432,14 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
 
     response_text = outputs.get("response")
     if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("selected_workflow_user_response")
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("final_response")
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("response_text")
+    if not isinstance(response_text, str) or not response_text.strip():
+        response_text = outputs.get("current_response")
+    if not isinstance(response_text, str) or not response_text.strip():
         response_text = _extract_durable_display_text(display_elements)
     if not isinstance(response_text, str) or not response_text.strip():
         response_text = outputs.get("response_preview")

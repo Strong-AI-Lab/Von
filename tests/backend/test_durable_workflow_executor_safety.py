@@ -405,6 +405,10 @@ def test_durable_executor_prefers_requested_model_override_from_instance_inputs(
         patch(
             "src.backend.languagemodels.llm_interface.get_active_model_name",
         ) as get_active_model_name,
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-2364",
+        ) as insert_trace,
     ):
         result = executor.run_durable(
             "instance-1",
@@ -418,6 +422,14 @@ def test_durable_executor_prefers_requested_model_override_from_instance_inputs(
         "requested_model": "gemma4:26b",
         "requested_client_type": "ollama",
     }
+    assert result.execution_trace_id == "trace-2364"
+    insert_trace.assert_called_once()
+    stored_doc = insert_trace.call_args.args[0]
+    assert stored_doc["metadata"]["default_model"] == "gemma4:26b"
+    assert stored_doc["metadata"]["requested_model"] == "gemma4:26b"
+    assert stored_doc["metadata"]["requested_client_type"] == "ollama"
+    assert stored_doc["metadata"]["requested_model_override_applied"] is True
+    assert stored_doc["metadata"]["default_provider"] == "ollama"
     get_llm_client.assert_called_once_with(
         client_type="ollama",
         user_concept_id=instance.user_id,
