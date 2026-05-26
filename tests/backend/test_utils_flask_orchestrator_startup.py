@@ -235,3 +235,58 @@ def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(
         "defer_parity_work": True,
         "start_deferred_registry_work": True,
     }
+
+
+def test_agent_test_startup_helpers_skip_remote_infrastructure(monkeypatch):
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+
+    class _Logger:
+        def info(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            raise AssertionError("AgentTest startup skip should not warn")
+
+    app = types.SimpleNamespace(logger=_Logger(), config={}, testing=False)
+
+    monkeypatch.setattr(
+        utils_flask,
+        "ensure_monitor_started",
+        lambda: (_ for _ in ()).throw(AssertionError("DB monitor should not start")),
+    )
+    monkeypatch.setattr(
+        utils_flask,
+        "prompt_concept_health_status",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Prompt concept health should not touch Vontology")
+        ),
+    )
+    monkeypatch.setattr(
+        utils_flask,
+        "_startup_requeue_unindexed_interaction_sessions",
+        lambda _logger: (_ for _ in ()).throw(
+            AssertionError("RAG startup requeue should not start")
+        ),
+    )
+    monkeypatch.setattr(
+        utils_flask,
+        "_start_prewarm",
+        lambda _app: (_ for _ in ()).throw(
+            AssertionError("Prewarm should not start")
+        ),
+    )
+
+    utils_flask._ensure_db_monitor_started(app)
+    utils_flask._maybe_start_startup_rag_requeue(app)
+    utils_flask._bootstrap_concept_summary_fields_for_startup(app)
+    utils_flask._log_prompt_concept_health(app)
+    utils_flask._register_optional_prewarm(app)
+
+    assert app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] == {
+        "success": True,
+        "skipped": True,
+        "reason": "agent_test_instance",
+    }

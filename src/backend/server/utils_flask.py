@@ -1232,6 +1232,10 @@ def _truthy_env_value(raw: str | None) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -2170,7 +2174,11 @@ def _configure_flask_app_core(
     if mongo_strict_startup_enabled():
         validate_mongo_startup_or_raise()
 
-    if mongo_startup_probe_enabled() and not _is_running_under_pytest():
+    if (
+        mongo_startup_probe_enabled()
+        and not _is_running_under_pytest()
+        and not _is_agent_test_instance()
+    ):
         probe_result = run_mongo_startup_probe()
         app.logger.info(
             "Mongo startup probe succeeded (read=%s write=%s collection=%s).",
@@ -2385,6 +2393,9 @@ def _configure_internal_mcp_orchestrator_startup(app: Flask, gateway_instance) -
 
 
 def _ensure_db_monitor_started(app: Flask) -> None:
+    if _is_agent_test_instance():
+        app.logger.info("[startup] AgentTest mode: skipping DB monitor startup.")
+        return
     try:
         ensure_monitor_started()
     except Exception as exc:  # pragma: no cover
@@ -2396,7 +2407,7 @@ def _ensure_db_monitor_started(app: Flask) -> None:
 
 def _maybe_start_startup_rag_requeue(app: Flask) -> None:
     """Requeue eligible unindexed sessions on startup outside pytest."""
-    if _is_running_under_pytest():
+    if _is_running_under_pytest() or _is_agent_test_instance():
         return
 
     try:
@@ -2418,6 +2429,16 @@ def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
     """Best-effort bootstrap of Vontology-backed concept-summary field metadata."""
 
     if _is_running_under_pytest():
+        return
+    if _is_agent_test_instance():
+        app.config["CONCEPT_SUMMARY_FIELD_BOOTSTRAP_REPORT"] = {
+            "success": True,
+            "skipped": True,
+            "reason": "agent_test_instance",
+        }
+        app.logger.info(
+            "[concept_summary_fields] AgentTest mode: skipping Vontology bootstrap."
+        )
         return
     if not _env_bool("VON_CONCEPT_SUMMARY_FIELD_BOOTSTRAP_ENABLE", True):
         return
@@ -2446,17 +2467,33 @@ def _bootstrap_concept_summary_fields_for_startup(app: Flask) -> None:
 
 def _configure_durable_workflow_startup(app: Flask) -> None:
     """Initialise or defer durable workflow runtime startup."""
+    running_under_pytest = _is_running_under_pytest()
+    agent_test_instance = _is_agent_test_instance()
     _set_durable_workflow_components_snapshot(app, None)
     _set_durable_workflow_startup_status_snapshot(
         app,
         {
-            "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
+            "state": (
+                "skipped_pytest"
+                if running_under_pytest
+                else "skipped_agent_test" if agent_test_instance else "pending"
+            ),
             "ready": False,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         },
     )
 
-    if _is_running_under_pytest():
+    if running_under_pytest:
+        return
+
+    if agent_test_instance:
+        try:
+            app.logger.info(
+                "[durable_workflows] Skipped for AgentTest instance "
+                "(VON_AGENT_TEST_INSTANCE=1)."
+            )
+        except Exception:
+            pass
         return
 
     blocking_durable_startup = os.getenv(
@@ -2567,6 +2604,9 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
 
 
 def _log_prompt_concept_health(app: Flask) -> None:
+    if _is_agent_test_instance():
+        app.logger.info("Prompt concept health check skipped for AgentTest mode.")
+        return
     try:
         pc_status = prompt_concept_health_status()
         if not pc_status.get("available"):
@@ -2613,8 +2653,12 @@ def _build_health_check_response(app: Flask):
             local_ip = "127.0.0.1"
 
     public_ip = app.config.get("PUBLIC_IP_ADDRESS")
+    if _is_agent_test_instance():
+        public_ip = None
     if not public_ip:
         try:
+            if _is_agent_test_instance():
+                raise RuntimeError("agent_test_instance")
             with urllib.request.urlopen(
                 "https://api.ipify.org?format=text", timeout=3
             ) as response:
@@ -2626,14 +2670,11 @@ def _build_health_check_response(app: Flask):
             public_ip = None
 
     version_info = get_runtime_code_version_info()
-    agent_test_instance = str(
-        os.environ.get("VON_AGENT_TEST_INSTANCE") or ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
     return jsonify(
         status="healthy",
         version=version_info.get("version"),
         version_details=version_info,
-        agent_test_instance=agent_test_instance,
+        agent_test_instance=_is_agent_test_instance(),
         agent_test_environment_marker="VON_AGENT_TEST_INSTANCE",
         pid=os.getpid(),
         start_time=app.config["SERVER_START_TIME"],
@@ -3706,6 +3747,9 @@ def _start_prewarm(app: Flask) -> None:
 
 
 def _register_optional_prewarm(app: Flask) -> None:
+    if _is_agent_test_instance():
+        app.logger.info("[prewarm] AgentTest mode: skipping optional prewarm.")
+        return
     if (
         not app.testing
         and "PYTEST_CURRENT_TEST" not in os.environ

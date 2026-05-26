@@ -25,6 +25,74 @@ def test_default_model_override_is_ollama_gemma4() -> None:
     assert sampler.DEFAULT_MODEL == "gemma4:26b"
 
 
+def test_infer_provider_from_model_identifier_treats_ollama_tags_as_local() -> None:
+    assert sampler._infer_provider_from_model_identifier("gemma4:e4b") == "ollama"
+    assert sampler._infer_provider_from_model_identifier("ollama:llama3.1:8b") == "ollama"
+
+
+def test_model_policy_rejects_premium_model_without_explicit_opt_in() -> None:
+    report = sampler._build_model_policy_report(
+        requested_model_arms=[
+            {"arm_id": "arm_1", "label": "gpt-5.4-mini", "requested_model": "gpt-5.4-mini"}
+        ],
+        run_environment={"server_resolved_active_llm_model": "gemma4:26b"},
+        allow_premium_model=False,
+    )
+
+    assert report["premium_model_deviation"] is True
+    assert report["premium_model_deviation_count"] == 1
+    with pytest.raises(RuntimeError, match="local-only model execution"):
+        sampler._enforce_model_policy(report)
+
+
+def test_model_policy_allows_local_ollama_default() -> None:
+    report = sampler._build_model_policy_report(
+        requested_model_arms=[
+            {"arm_id": "arm_1", "label": "gemma4:26b", "requested_model": "gemma4:26b"}
+        ],
+        run_environment={"server_resolved_active_llm_model": "gpt-5.4-mini"},
+        allow_premium_model=False,
+    )
+
+    sampler._enforce_model_policy(report)
+    assert report["local_only_default"] is True
+    assert report["premium_model_deviation"] is False
+    assert report["arms"][0]["effective_provider"] == "ollama"
+
+
+def test_model_policy_rejects_provider_prefixed_premium_model() -> None:
+    report = sampler._build_model_policy_report(
+        requested_model_arms=[
+            {
+                "arm_id": "arm_1",
+                "label": "openai:gpt-5.4-mini",
+                "requested_model": "openai:gpt-5.4-mini",
+            }
+        ],
+        run_environment={},
+        allow_premium_model=False,
+    )
+
+    assert report["premium_model_deviation"] is True
+    assert report["arms"][0]["effective_provider"] == "openai"
+    with pytest.raises(RuntimeError, match="local-only model execution"):
+        sampler._enforce_model_policy(report)
+
+
+def test_model_policy_reports_premium_opt_in() -> None:
+    report = sampler._build_model_policy_report(
+        requested_model_arms=[
+            {"arm_id": "arm_1", "label": "gpt-5.4-mini", "requested_model": "gpt-5.4-mini"}
+        ],
+        run_environment={"server_resolved_active_llm_provider": "openai"},
+        allow_premium_model=True,
+    )
+
+    sampler._enforce_model_policy(report)
+    assert report["premium_model_allowed"] is True
+    assert report["premium_model_deviation"] is True
+
+
 def test_default_base_url_targets_agent_test_instance() -> None:
     assert sampler.DEFAULT_BASE_URL == "http://127.0.0.1:5010"
 
@@ -792,6 +860,25 @@ def test_prompt_bank_includes_operational_task_and_message_cases() -> None:
     assert by_id["count_my_unread_von_messages"]["allows_grounded_empty_result"] is True
 
 
+def test_prompt_bank_includes_trivial_text_relation_replay_case() -> None:
+    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
+    by_id = {
+        prompt["id"]: prompt
+        for prompt in prompts
+        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
+    }
+
+    prompt = by_id["text_relations_for_michael_witbrock_concept"]
+    assert prompt["category"] == "represented_relation_lookup"
+    assert prompt["complexity_class"] == "vontology_grounded"
+    assert prompt["likely_tools"] == [
+        "search_concepts",
+        "get_text_relations_summary",
+        "get_text_relations",
+    ]
+    assert prompt["requires_tool_use"] is True
+
+
 def test_prompt_bank_includes_jira_replay_regressions() -> None:
     prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
     by_id = {
@@ -897,6 +984,150 @@ def test_run_generate_background_can_request_presenter_mode(
     assert seen_payloads[0]["presenter_mode"] is True
 
 
+def test_run_generate_background_sends_local_model_provider_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
+            return {"task_id": "task-123"}
+        if url.endswith("/von/api/task/status/task-123"):
+            return {"status": "completed"}
+        if url.endswith("/von/api/task/result/task-123"):
+            return {"result": {"response": "ok"}}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    sampler._run_generate_background(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        prompt="What text relations are used with the concept for Michael Witbrock?",
+        model="gemma4:e4b",
+        presenter_mode=False,
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+
+    assert seen_payloads
+    assert seen_payloads[0]["model"] == "gemma4:e4b"
+    assert seen_payloads[0]["model_provider"] == "ollama"
+    assert seen_payloads[0]["selected_model_provider"] == "ollama"
+
+
+def test_run_generate_background_cancels_task_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        calls.append(url)
+        if url.endswith("/von/generate"):
+            return {"task_id": "task-stalled"}
+        if url.endswith("/von/api/task/status/task-stalled"):
+            return {
+                "status": "running",
+                "task_id": "task-stalled",
+                "progress": {"step": "llm.action"},
+            }
+        if url.endswith("/von/api/task/cancel/task-stalled"):
+            return {"success": True, "task_id": "task-stalled"}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+    monkeypatch.setattr(sampler.time, "time", iter([100.0, 101.0, 131.0]).__next__)
+    monkeypatch.setattr(sampler.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(sampler.BackgroundGenerateTaskError) as exc_info:
+        sampler._run_generate_background(
+            session=requests.Session(),
+            base_url="http://127.0.0.1:5010",
+            prompt="What text relations are used with the concept for Michael Witbrock?",
+            model="gemma4:26b",
+            presenter_mode=False,
+            timeout_seconds=30.0,
+            poll_interval_seconds=0.2,
+        )
+
+    assert exc_info.value.task_id == "task-stalled"
+    assert exc_info.value.status_payload["status"] == "running"
+    assert exc_info.value.cancellation_payload == {
+        "success": True,
+        "task_id": "task-stalled",
+    }
+    assert calls[-1].endswith("/von/api/task/cancel/task-stalled")
+
+
+def test_main_writes_single_attempt_failure_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "single_attempt_failure.json"
+
+    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
+    monkeypatch.setattr(
+        sampler,
+        "_load_prompt_bank",
+        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_collect_run_environment",
+        lambda **kwargs: {
+            "base_url": kwargs["base_url"],
+            "requested_model": kwargs["requested_model"],
+            "session_name": kwargs["session_name"],
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_server_diag",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_agent_test_instance": True,
+        },
+    )
+
+    def fake_run_replay_plan(**kwargs: object) -> tuple[dict[str, object], bool]:
+        raise sampler.BackgroundGenerateTaskError(
+            "Background generate task did not complete before timeout",
+            task_id="task-stalled",
+            status_payload={"status": "running", "task_id": "task-stalled"},
+            cancellation_payload={"success": True, "task_id": "task-stalled"},
+        )
+
+    monkeypatch.setattr(sampler, "_run_replay_plan", fake_run_replay_plan)
+
+    exit_code = sampler.main(
+        [
+            "--prompt-text",
+            "What text relations are used with the concept for Michael Witbrock?",
+            "--model",
+            "gemma4:e4b",
+            "--output-json",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output == written
+    assert written["status"] == "error"
+    assert written["conversation"]["background_task_id"] == "task-stalled"
+    failure = written["response"]["failure"]
+    assert failure["background_task"]["status_payload"]["status"] == "running"
+    assert failure["background_task"]["cancellation_payload"] == {
+        "success": True,
+        "task_id": "task-stalled",
+    }
+
+
 def test_replay_session_creation_payload_marks_sampler_chat_as_test_run() -> None:
     payload = sampler._build_replay_session_creation_payload("Replay run")
 
@@ -984,16 +1215,19 @@ def test_build_model_arm_plan_includes_active_arm_and_deduplicates() -> None:
             "arm_id": "arm_1",
             "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
             "requested_model": None,
+            "requested_provider": None,
         },
         {
             "arm_id": "arm_2",
             "label": "gemma4:26b",
             "requested_model": "gemma4:26b",
+            "requested_provider": "ollama",
         },
         {
             "arm_id": "arm_3",
             "label": "gpt-5.4-mini",
             "requested_model": "gpt-5.4-mini",
+            "requested_provider": "openai",
         },
     ]
     assert (
@@ -1497,11 +1731,13 @@ def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None
             "arm_id": "arm_1",
             "label": "gemma4:26b",
             "requested_model": "gemma4:26b",
+            "requested_provider": None,
         },
         {
             "arm_id": "arm_2",
             "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
             "requested_model": None,
+            "requested_provider": None,
         },
     ]
     assert summary["comparison"]["arm_count"] == 2
@@ -1520,6 +1756,53 @@ def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None
         portfolio_report["aggregate_certification_decision"]["promotion_authorised"]
         is False
     )
+
+
+def test_build_repeated_replay_summary_reports_success_rate() -> None:
+    prompt_entry = {
+        "id": "text_relations_for_michael_witbrock_concept",
+        "category": "represented_relation_lookup",
+        "complexity_class": "vontology_grounded",
+        "prompt": "What text relations are used with the concept for Michael Witbrock?",
+        "knowledge_surfaces": ["kb"],
+        "likely_tools": ["get_text_relations_summary"],
+        "requires_tool_use": True,
+    }
+    attempts = [
+        {"status": "ok", "evaluation": {"should_user_be_happy": True}},
+        {"status": "ok", "evaluation": {"should_user_be_happy": True}},
+        {"status": "error", "evaluation": {"should_user_be_happy": False}},
+    ]
+
+    summary = sampler._build_repeated_replay_summary(
+        prompt_entry=prompt_entry,
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model="gemma4:26b",
+        requested_model_arms=[
+            {"arm_id": "arm_1", "label": "gemma4:26b", "requested_model": "gemma4:26b"}
+        ],
+        run_environment={
+            "base_url": "http://127.0.0.1:5010",
+            "model_policy": {"local_only_default": True},
+        },
+        attempt_summaries=attempts,
+        success_count=2,
+        minimum_success_rate=0.95,
+    )
+
+    assert summary["mode"] == "repeated_replay_suite"
+    assert summary["status"] == "failed"
+    assert summary["repeat"] == {
+        "attempt_count": 3,
+        "successful_attempt_count": 2,
+        "failed_attempt_count": 1,
+        "success_rate": pytest.approx(2 / 3),
+        "minimum_success_rate": 0.95,
+        "meets_minimum_success_rate": False,
+    }
+    assert summary["environment"]["model_policy"]["local_only_default"] is True
 
 
 def test_build_replay_arm_plan_adds_prompt_variant_arms() -> None:
@@ -1781,6 +2064,7 @@ def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
             "--compare-model",
             "gpt-5.4-mini",
             "--include-active-model-arm",
+            "--allow-premium-model",
         ]
     )
 
@@ -1806,16 +2090,19 @@ def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
             "arm_id": "arm_1",
             "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
             "requested_model": None,
+            "requested_provider": None,
         },
         {
             "arm_id": "arm_2",
             "label": "gemma4:26b",
             "requested_model": "gemma4:26b",
+            "requested_provider": "ollama",
         },
         {
             "arm_id": "arm_3",
             "label": "gpt-5.4-mini",
             "requested_model": "gpt-5.4-mini",
+            "requested_provider": "openai",
         },
     ]
 

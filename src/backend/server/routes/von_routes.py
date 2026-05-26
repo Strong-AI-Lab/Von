@@ -34,7 +34,11 @@ from ...languagemodels.llm_interface import (
     get_active_model_name,
     get_llm_client,
 )
-from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
+from ...integrations.internal_mcp import (
+    CancellationRequested,
+    ProgressTracker,
+    ToolCallParsingError,
+)
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services.background_task_service import background_task_registry
@@ -4690,12 +4694,34 @@ def _resolve_generate_requested_model(
     else:
         requested_model_name = None
 
+    requested_provider_name = None
+    if isinstance(data, Mapping):
+        for provider_key in (
+            "model_provider",
+            "selected_model_provider",
+            "provider",
+        ):
+            provider_value = data.get(provider_key)
+            if isinstance(provider_value, str) and provider_value.strip():
+                requested_provider_name = provider_value.strip().lower()
+                break
+    if requested_provider_name not in {"openai", "ollama", "gemini"}:
+        requested_provider_name = None
+
     explicit_client_type = None
     model_name = None
     if requested_model_name:
         requested_openai_model = _extract_openai_model_id(requested_model_name)
         requested_ollama_model = _extract_ollama_model_id(requested_model_name)
-        if requested_openai_model and _looks_like_openai_model(requested_openai_model):
+        if requested_provider_name:
+            explicit_client_type = requested_provider_name
+            if requested_provider_name == "ollama":
+                model_name = requested_ollama_model or requested_model_name
+            elif requested_provider_name == "openai":
+                model_name = requested_openai_model or requested_model_name
+            else:
+                model_name = requested_model_name
+        elif requested_openai_model and _looks_like_openai_model(requested_openai_model):
             explicit_client_type = "openai"
             model_name = requested_openai_model
         elif requested_ollama_model and _looks_like_ollama_model(requested_model_name):
@@ -8761,6 +8787,8 @@ def _submit_generate_background_request(
     background_payload = dict(request_data) if isinstance(request_data, Mapping) else {}
     background_payload["background"] = False
     background_payload["client_request_id"] = request_id
+    background_payload["background_task_id"] = request_id
+    background_payload["background_progress"] = True
 
     background_headers: dict[str, str] = {}
     for header_name in (
@@ -8854,6 +8882,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     # JVNAUTOSCI-1038: Background execution mode
     background_mode = bool(data.get("background", False))
+    background_task_id = None
+    raw_background_task_id = data.get("background_task_id")
+    if (
+        isinstance(raw_background_task_id, str)
+        and raw_background_task_id.strip()
+        and len(raw_background_task_id.strip()) <= 200
+    ):
+        candidate_background_task_id = raw_background_task_id.strip()
+        if candidate_background_task_id == request_id:
+            background_task_id = candidate_background_task_id
 
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
@@ -8871,6 +8909,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     else:
         thinking_card_mode = "default"
 
+    if background_mode:
+        return _submit_generate_background_request(
+            app=current_app._get_current_object(),
+            request_data=data if isinstance(data, Mapping) else None,
+            request_headers=request.headers,
+            session_snapshot=dict(session),
+            request_id=request_id,
+        )
+
     request_start_perf = time.perf_counter()
     workflow_discovery_result = None
     progress_heartbeat_stop_event: threading.Event | None = None
@@ -8887,12 +8934,26 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         show_tool_use_progress = bool(get_show_tool_use_during_thinking())
     except Exception:
         show_tool_use_progress = False
+    if background_task_id is not None:
+        show_tool_use_progress = False
+    progress_updates_enabled = show_tool_use_progress or background_task_id is not None
 
     def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
-        if not show_tool_use_progress:
-            return
         payload = dict(update) if isinstance(update, Mapping) else {"status": "unknown"}
         payload.setdefault("request_id", request_id)
+
+        if background_task_id is not None:
+            try:
+                update_background_progress = getattr(
+                    background_task_registry, "update_progress", None
+                )
+                if callable(update_background_progress):
+                    update_background_progress(background_task_id, payload)
+            except Exception:
+                pass
+
+        if not show_tool_use_progress:
+            return
 
         seen_scope_keys: set[str] = set()
         for target_scope_key in [progress_scope_key, *progress_mirror_scope_keys]:
@@ -8901,6 +8962,56 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 continue
             seen_scope_keys.add(clean_scope_key)
             _set_tool_progress(clean_scope_key, request_id, dict(payload))
+
+    def _emit_context_setup_progress(
+        *,
+        subtask: str,
+        result_summary: str,
+        status: str = "thinking",
+        phase_label: str = "Building context",
+        **extra: Any,
+    ) -> None:
+        if not progress_updates_enabled:
+            return
+        payload: dict[str, Any] = {
+            "status": status,
+            "stage": "context_build",
+            "phase": "context_build",
+            "phase_label": phase_label,
+            "workflow_task": "context_build",
+            "goal_label": progress_goal_label,
+            "request_id": request_id,
+            "subtask": subtask,
+            "result_summary": result_summary,
+        }
+        payload.update(extra)
+        _emit_generate_progress(payload)
+
+    def _is_background_cancellation_requested() -> bool:
+        if background_task_id is None:
+            return False
+        try:
+            is_requested = getattr(
+                background_task_registry,
+                "is_cancellation_requested",
+                None,
+            )
+            if callable(is_requested):
+                return bool(is_requested(background_task_id))
+        except Exception:
+            return False
+        return False
+
+    def _check_background_cancellation(subtask: str) -> None:
+        if not _is_background_cancellation_requested():
+            return
+        _emit_context_setup_progress(
+            subtask=subtask,
+            status="cancelled",
+            phase_label="Cancelling",
+            result_summary="Cancellation requested while preparing the generate request.",
+        )
+        raise CancellationRequested(task_id=background_task_id)
 
     progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
     if show_tool_use_progress:
@@ -8911,6 +9022,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             window_session_id=request_window_session_id,
             anonymous_session_id=_progress_str(session.get("tool_progress_scope")),
         )
+
+    if progress_updates_enabled:
         _emit_generate_progress(
             _build_request_initialising_tool_progress_payload(
                 request_id=request_id,
@@ -8918,14 +9031,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
         )
 
-    if background_mode:
-        return _submit_generate_background_request(
-            app=current_app._get_current_object(),
-            request_data=data if isinstance(data, Mapping) else None,
-            request_headers=request.headers,
-            session_snapshot=dict(session),
-            request_id=request_id,
-        )
+    _emit_context_setup_progress(
+        subtask="request payload fields",
+        result_summary="Parsing generate request metadata before session/context lookup.",
+    )
 
     # Get user/org context from request body (sent by frontend from localStorage)
     request_user_id = data.get("user_id")
@@ -9003,11 +9112,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             400,
         )
 
+    _emit_context_setup_progress(
+        subtask="flask session user lookup",
+        result_summary="Reading authenticated user id from the Flask session.",
+    )
     user_concept_id = session.get("user_concept_id")
+    _emit_context_setup_progress(
+        subtask="context cache lookup",
+        result_summary="Reading in-memory request context before authentication resolution.",
+    )
     context = current_app.config.get("CONTEXT", [])
 
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
+    _emit_context_setup_progress(
+        subtask="authentication context",
+        result_summary="Resolving authenticated user and window-session context.",
+    )
+    _check_background_cancellation("authentication context")
     try:
         from ...security.access_control import get_effective_user_concept_id
 
@@ -9039,6 +9161,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         org_concept_id = None
         effective = {}
 
+    _check_background_cancellation("authentication context")
+
     if show_tool_use_progress:
         _register_tool_progress_scope_aliases(
             request_id=request_id,
@@ -9051,6 +9175,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     role_in_org = effective.get("role") if isinstance(effective, dict) else None
 
+    _emit_context_setup_progress(
+        subtask="namespace resolution",
+        result_summary="Resolving namespace and organisation scope for the turn.",
+    )
+    _check_background_cancellation("namespace resolution")
     namespace_resolution = _resolve_generate_namespace_context(
         user_concept_id=user_concept_id,
         effective_context=effective if isinstance(effective, dict) else {},
@@ -9112,6 +9241,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_concept_id,
         )
 
+    _emit_context_setup_progress(
+        subtask="conversation session",
+        result_summary="Ensuring a conversation session exists for this replay turn.",
+    )
+    _check_background_cancellation("conversation session")
     session_id, created_conversation_session_name, created_conversation_session = (
         _ensure_generate_conversation_session(
             request_conversation_session_id=request_conversation_session_id,
@@ -9125,14 +9259,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             window_session_id=request_window_session_id,
         )
     )
+    _check_background_cancellation("conversation session")
 
+    _emit_context_setup_progress(
+        subtask="shared conversation owner",
+        result_summary="Resolving shared-conversation ownership before chat-history lookup.",
+    )
     history_owner_user_id, shared_invite = _resolve_shared_conversation_owner(
         user_concept_id=user_concept_id, session_id=session_id
     )
     history_user_id = history_owner_user_id or user_concept_id
+    _check_background_cancellation("shared conversation owner")
 
     if history_user_id:
-        if show_tool_use_progress:
+        if progress_updates_enabled:
             _emit_generate_progress(
                 {
                     "status": "thinking",
@@ -9144,6 +9284,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "result_summary": "Loading chat history for the active session.",
                 },
             )
+        _check_background_cancellation("chat-history lookup")
         _chat_history_start_perf = time.perf_counter()
         try:
             if (
@@ -9198,6 +9339,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         else None
                     ),
                 )
+            _check_background_cancellation("chat-history lookup")
         finally:
             _chat_history_elapsed_ms = (
                 time.perf_counter() - _chat_history_start_perf
@@ -9222,6 +9364,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     # ------------------------------------------------------------------
     _user_message_persisted_early = False
     if history_user_id:
+        _emit_context_setup_progress(
+            subtask="early user-message persist",
+            result_summary="Persisting the user message before workflow selection.",
+        )
+        _check_background_cancellation("early user-message persist")
         try:
             _add_chat_history_message(
                 user_id=history_user_id,
@@ -9245,8 +9392,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 request_id,
                 early_persist_exc,
             )
+            _check_background_cancellation("early user-message persist")
 
-    if show_tool_use_progress:
+    if progress_updates_enabled:
         try:
             max_calls = int(get_internal_mcp_max_tool_invocations())
         except Exception:
@@ -9274,9 +9422,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "tool_batch_cap": batch_cap,
             },
         )
-    else:
+    elif not show_tool_use_progress:
         progress_goal_label = None
 
+    _emit_context_setup_progress(
+        subtask="model client selection",
+        result_summary="Resolving the requested model and local provider client.",
+    )
+    _check_background_cancellation("model client selection")
     model_name, explicit_client_type = _resolve_generate_requested_model(
         data,
         user_concept_id=user_concept_id,
@@ -9291,7 +9444,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             org_concept_id=org_concept_id,
         )
     except Exception as e:
-        if show_tool_use_progress:
+        if progress_updates_enabled:
             _emit_generate_progress(
                 {
                     "status": "error",
@@ -9305,6 +9458,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 },
             )
         return jsonify({"error": f"Could not get LLM client: {e}"}), 500
+    _check_background_cancellation("model client selection")
 
     if show_tool_use_progress and not background_mode:
         progress_heartbeat_stop_event, progress_heartbeat_thread = (
@@ -9335,6 +9489,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "screen_prompt_concept_ids": [],
         }
         if user_concept_id:
+            _emit_context_setup_progress(
+                subtask="user prompt fragments",
+                result_summary="Loading user-specific prompt fragments from Vontology.",
+            )
+            _check_background_cancellation("user prompt fragments")
             try:
                 from ...services.chat_auxiliary_prompt_service import (
                     get_user_specific_prompt_fragments,
@@ -9447,6 +9606,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     e,
                 )
                 user_prompt_debug["error"] = str(e)
+            _check_background_cancellation("user prompt fragments")
 
         deterministic_introspection_enabled = _deterministic_introspection_enabled()
 
@@ -9521,6 +9681,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         # Try to get user name from concept if user_id provided
         if effective_request_user_id:
+            _emit_context_setup_progress(
+                subtask="user concept lookup",
+                result_summary="Resolving the authenticated user's concept label.",
+            )
+            _check_background_cancellation("user concept lookup")
             try:
                 from ...services.concept_service import get_concept_by_concept_id
 
@@ -9544,9 +9709,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 system_message_parts.append(
                     f"Current user ID: {effective_request_user_id}"
                 )
+            _check_background_cancellation("user concept lookup")
 
         # Try to get organization name from concept if org_id provided
         if effective_request_org_id:
+            _emit_context_setup_progress(
+                subtask="organisation concept lookup",
+                result_summary="Resolving the active organisation concept label.",
+            )
+            _check_background_cancellation("organisation concept lookup")
             try:
                 from ...services.concept_service import get_concept_by_concept_id
 
@@ -9570,6 +9741,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 system_message_parts.append(
                     f"Organization ID: {effective_request_org_id}"
                 )
+            _check_background_cancellation("organisation concept lookup")
 
         # Add language preference if provided
         if request_language and request_language != "en-NZ":
@@ -10415,7 +10587,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 # JVNAUTOSCI-1038: Create request-scoped progress tracker
                 progress_tracker = None
-                if show_tool_use_progress:
+                if progress_updates_enabled:
 
                     def _progress_update(info: dict[str, Any]) -> None:
                         payload = (
@@ -10426,9 +10598,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         payload.setdefault("request_id", request_id)
                         _emit_generate_progress(payload)
 
-                    progress_tracker = ProgressTracker(callback=_progress_update)
+                    progress_tracker = ProgressTracker(
+                        callback=_progress_update,
+                        cancellation_checker=(
+                            _is_background_cancellation_requested
+                            if background_task_id is not None
+                            else None
+                        ),
+                        task_id=background_task_id,
+                    )
 
-                if show_tool_use_progress:
+                if progress_updates_enabled:
                     _emit_generate_progress(
                         {
                             "status": "orchestrator_start",
@@ -10442,6 +10622,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         },
                     )
 
+                if progress_updates_enabled:
+                    _emit_generate_progress(
+                        {
+                            "status": "thinking",
+                            "stage": "workflow_dispatch_prepare",
+                            "phase": "workflow_dispatch_prepare",
+                            "phase_label": "Preparing workflow dispatch",
+                            "subtask": "conversation turn instance telemetry",
+                            "result_summary": "Recording conversation-turn workflow telemetry before supervised execution.",
+                            "goal_label": progress_goal_label,
+                            "request_id": request_id,
+                        },
+                    )
+                _check_background_cancellation("conversation turn instance telemetry")
                 _submit_generate_conversation_turn_instance(
                     state=conversation_turn_instance_state,
                     auxiliary_llm_calls=auxiliary_llm_calls,
@@ -10463,6 +10657,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     submit_verified_workflow_instance_fn=submit_verified_workflow_instance,
                     logger=current_app.logger,
                 )
+                if progress_updates_enabled:
+                    _emit_generate_progress(
+                        {
+                            "status": "thinking",
+                            "stage": "workflow_dispatch_prepare",
+                            "phase": "workflow_dispatch_prepare",
+                            "phase_label": "Preparing workflow dispatch",
+                            "subtask": "supervised orchestrator entry",
+                            "result_summary": "Entering supervised conversation-turn execution.",
+                            "goal_label": progress_goal_label,
+                            "request_id": request_id,
+                        },
+                    )
+                _check_background_cancellation("supervised orchestrator entry")
 
                 # JVNAUTOSCI-1768: Consolidated entry point. Discovery now happens inside the workflow.
                 orchestrator_start_perf = time.perf_counter()
@@ -11844,7 +12052,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
         buttonify_workflow_contract: dict[str, Any] | None = None
-        buttonify_enabled = get_buttonify_model_enabled() and not skip_buttonify
+        agent_test_instance = (
+            str(os.getenv("VON_AGENT_TEST_INSTANCE") or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        buttonify_setting_enabled = get_buttonify_model_enabled()
+        buttonify_enabled = (
+            buttonify_setting_enabled and not skip_buttonify and not agent_test_instance
+        )
         buttonify_allowed = (
             not current_app.testing
             and not os.getenv("PYTEST_CURRENT_TEST")
@@ -11872,6 +12087,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if skip_buttonify:
             buttonify_suppression_reason = "buttonify_skipped_by_request"
+        elif agent_test_instance:
+            buttonify_suppression_reason = "agent_test_instance"
         elif not buttonify_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
         elif not buttonify_allowed:
@@ -12495,16 +12712,36 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 rag_trace=rag_trace,
             )
         )
+    except CancellationRequested:
+        if progress_updates_enabled:
+            try:
+                if show_tool_use_progress:
+                    _stop_tool_progress_heartbeat(
+                        progress_heartbeat_stop_event, progress_heartbeat_thread
+                    )
+                _emit_generate_progress(
+                    {
+                        "status": "cancelled",
+                        "phase": "cancelled",
+                        "phase_label": "Cancelled",
+                        "request_id": request_id,
+                        "result_summary": "Cancellation requested for the background generate task.",
+                    }
+                )
+            except Exception:
+                pass
+        raise
     except Exception as e:
         print(f"Error during generation: {e}")  # Log error server-side
         # Return error with debug info showing the current turn only (not full context)
         # to avoid exponential token growth in debug data
 
-        if "show_tool_use_progress" in locals() and show_tool_use_progress:
+        if "progress_updates_enabled" in locals() and progress_updates_enabled:
             try:
-                _stop_tool_progress_heartbeat(
-                    progress_heartbeat_stop_event, progress_heartbeat_thread
-                )
+                if "show_tool_use_progress" in locals() and show_tool_use_progress:
+                    _stop_tool_progress_heartbeat(
+                        progress_heartbeat_stop_event, progress_heartbeat_thread
+                    )
                 _emit_generate_progress(
                     {
                         "status": "error",

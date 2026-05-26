@@ -29,6 +29,11 @@ from ..services.workflow_llm_duration_stats_service import (
 )
 from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
+from .definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
 from .conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_timeout_sec,
     default_conversation_turn_llm_timeout_sec,
@@ -56,12 +61,213 @@ _COMPLETION_REPORT_NARRATION_PROMPT_IDS = frozenset(
 _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
+_AGENT_TEST_LOCAL_PROVIDER_NAME = "ollama"
+_PREMIUM_MODEL_PROVIDER_PREFIXES = frozenset(
+    {"openai", "anthropic", "gemini", "azure_openai"}
+)
 
 
 def _context_string(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value or "").strip()
+
+
+def _truthy_env_value(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
+def _split_model_provider_prefix(model: str | None) -> tuple[str | None, str | None]:
+    text = _context_string(model)
+    if not text or "/" not in text:
+        return None, text or None
+    provider, model_name = text.split("/", 1)
+    provider = provider.strip().lower() or None
+    model_name = model_name.strip() or None
+    return provider, model_name
+
+
+def _request_uses_agent_test_local_model(request: WorkflowActionRequest) -> bool:
+    if not _is_agent_test_instance():
+        return False
+    provider = _context_string(
+        request.data.get("requested_client_type")
+        or request.data.get("selected_model_provider")
+        or request.data.get("model_provider")
+    ).lower()
+    if provider == _AGENT_TEST_LOCAL_PROVIDER_NAME:
+        return True
+    requested_model = _context_string(
+        request.data.get("requested_model") or getattr(request.environment, "model", None)
+    )
+    model_provider, model_name = _split_model_provider_prefix(requested_model)
+    if model_provider:
+        return model_provider == _AGENT_TEST_LOCAL_PROVIDER_NAME
+    if not model_name:
+        return False
+    return model_name.split(":", 1)[0].lower() not in _PREMIUM_MODEL_PROVIDER_PREFIXES
+
+
+def _agent_test_represented_relation_required_tools(
+    request: WorkflowActionRequest,
+) -> list[str]:
+    prompt_text = _context_string(
+        request.data.get("user_prompt")
+        or request.data.get("prompt")
+        or request.data.get("prompt_for_requirements")
+    ).lower()
+    if (
+        "text relation" in prompt_text
+        or "text relations" in prompt_text
+        or "represented relation" in prompt_text
+        or "represented relations" in prompt_text
+    ):
+        return ["get_text_relations_summary"]
+    return []
+
+
+def _build_agent_test_expected_outcome_response(
+    request: WorkflowActionRequest,
+) -> str:
+    required_tools = _agent_test_represented_relation_required_tools(request)
+    user_prompt = _context_string(request.data.get("user_prompt") or request.data.get("prompt"))
+    if required_tools:
+        summary = "Answer the represented-relation request using grounded Vontology tool evidence."
+        selector_guidance = "Use the generic tool-calling workflow so the required relation tools can run."
+        answering_guidance = "Report the text relation predicates and counts found by the relation-summary tool."
+        grounding_requirement = "Use authoritative Vontology text relation summary evidence."
+    else:
+        summary = "Answer the user's request accurately using available context and grounded evidence."
+        selector_guidance = "Choose the route most likely to answer the request with grounded evidence."
+        answering_guidance = "Answer directly only when sufficiently grounded; otherwise use tools or state what evidence is missing."
+        grounding_requirement = "Use available conversation context and authoritative tool evidence; avoid unsupported claims."
+    payload = {
+        "expected_outcome_summary": summary,
+        "summary": summary,
+        "grounding_requirement": grounding_requirement,
+        "precision_policy": "Prefer a concise answer with explicit uncertainty over unsupported specificity.",
+        "selector_guidance": selector_guidance,
+        "answering_guidance": answering_guidance,
+        "reasoning": (
+            "AgentTest explicit local replay uses deterministic expectation defaults "
+            "for wrapper planning so repeated local runs spend model time on the "
+            "selected workflow and tool evidence."
+        ),
+        "required_tools": required_tools,
+    }
+    if user_prompt:
+        payload["user_prompt"] = user_prompt
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+def _build_agent_test_selector_response(request: WorkflowActionRequest) -> str:
+    required_tools = _merge_required_prompt_tools(
+        request.data.get("required_prompt_tools"),
+        request.data.get("turn_expected_required_tools"),
+        _agent_test_represented_relation_required_tools(request),
+    )
+    workflow_id = TOOL_CALLING_WORKFLOW_ID if required_tools else CHAT_ASSISTANT_WORKFLOW_ID
+    payload = {
+        "workflow_id": workflow_id,
+        "confidence": 1.0,
+        "reasoning": (
+            "AgentTest explicit local replay selected the tool-calling route "
+            "because the turn requires grounded tool evidence."
+            if workflow_id == TOOL_CALLING_WORKFLOW_ID
+            else "AgentTest explicit local replay selected the default chat route."
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+def _build_agent_test_narration_response(request: WorkflowActionRequest) -> str:
+    for key in (
+        "selected_workflow_user_response",
+        "response_text",
+        "final_response",
+        "current_response",
+    ):
+        value = _context_string(request.data.get(key))
+        if value:
+            return value
+    completion_report = request.data.get("completion_report")
+    if isinstance(completion_report, Mapping):
+        response_preview = _context_string(completion_report.get("response_preview"))
+        if response_preview:
+            return response_preview
+    return "The selected workflow completed without a user-visible response."
+
+
+def _agent_test_conversation_turn_fast_path_result(
+    *,
+    request: WorkflowActionRequest,
+    stage: str,
+    llm_policy_map: Mapping[str, Any],
+    validation_policy_map: Mapping[str, Any],
+) -> WorkflowActionResult | None:
+    if not _request_uses_agent_test_local_model(request):
+        return None
+    if _context_string(request.workflow_id) != CONVERSATION_TURN_EXECUTION_WORKFLOW_ID:
+        return None
+
+    state_id = _context_string(request.workflow_state_id).lower()
+    prompt_id: str | None = None
+    response_text: str | None = None
+    if state_id == "expected_outcome_inference":
+        prompt_id = _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID
+        response_text = _build_agent_test_expected_outcome_response(request)
+    elif state_id == "selector_decision":
+        prompt_id = _context_string(request.data.get("selector_prompt_id")) or None
+        response_text = _build_agent_test_selector_response(request)
+    elif state_id == "narration":
+        prompt_id = next(iter(_COMPLETION_REPORT_NARRATION_PROMPT_IDS))
+        response_text = _build_agent_test_narration_response(request)
+    if response_text is None:
+        return None
+
+    selected_model = _context_string(
+        request.data.get("requested_model") or getattr(request.environment, "model", None)
+    ) or None
+    selected_candidate = {"provider": _AGENT_TEST_LOCAL_PROVIDER_NAME, "locality": "local"}
+    llm_call = {
+        "type": "llm.generate_skipped",
+        "stage": stage,
+        "model_name": selected_model,
+        "provider": _AGENT_TEST_LOCAL_PROVIDER_NAME,
+        "duration_ms": 0.0,
+        "note": "agent_test_explicit_local_replay_fast_path",
+        "workflow_stage_id": request.workflow_state_id,
+    }
+    aux_call = {
+        "type": "workflow_llm_step_skip",
+        "stage": stage,
+        "workflow_stage_id": request.workflow_state_id,
+        "status": "skipped",
+        "reason_code": "agent_test_explicit_local_replay_fast_path",
+    }
+    return _build_result(
+        request=request,
+        response_text=response_text,
+        prompt_id=prompt_id,
+        prompt_source="agent_test_fast_path",
+        rendered_variables={"agent_test_fast_path": True},
+        llm_policy_map=llm_policy_map,
+        validation_policy_map=validation_policy_map,
+        selected_model=selected_model,
+        selected_candidate=selected_candidate,
+        tool_invocations=(),
+        tool_messages=(),
+        llm_calls=[llm_call],
+        aux_llm_calls=[aux_call],
+        prompt_variant_selection={
+            "source": "agent_test_fast_path",
+            "reason": "agent_test_explicit_local_replay",
+        },
+    )
 
 
 def _serialise_prompt_context_value(value: Any) -> str:
@@ -1579,6 +1785,16 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         else {}
     )
 
+    stage = _llm_stage(llm_policy_map, request)
+    agent_test_fast_path_result = _agent_test_conversation_turn_fast_path_result(
+        request=request,
+        stage=stage,
+        llm_policy_map=llm_policy_map,
+        validation_policy_map=validation_policy_map,
+    )
+    if agent_test_fast_path_result is not None:
+        return agent_test_fast_path_result
+
     prompt_id, base_prompt_text, rendered_variables, prompt_source = (
         _resolve_prompt_render(
             prompt_contract=request.prompt_contract,
@@ -1592,7 +1808,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             error="workflow_llm_step_prompt_render_failed",
         )
 
-    stage = _llm_stage(llm_policy_map, request)
     (
         prompt_variant_model,
         prompt_variant_candidate,

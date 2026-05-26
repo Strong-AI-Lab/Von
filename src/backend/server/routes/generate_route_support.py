@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -10,6 +11,11 @@ from src.backend.services.debug_payload_store import (
 )
 
 from ...workflows import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+
+
+def _is_agent_test_instance() -> bool:
+    value = os.getenv("VON_AGENT_TEST_INSTANCE", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -231,6 +237,20 @@ def _submit_generate_conversation_turn_instance(
             org_concept_id=org_concept_id,
             status="submission_skipped",
             reason_code="missing_user_context",
+        )
+        return
+
+    if _is_agent_test_instance():
+        _append_generate_conversation_turn_instance_event(
+            auxiliary_llm_calls=auxiliary_llm_calls,
+            state=state,
+            session_id=session_id,
+            request_id=request_id,
+            user_namespace=user_namespace,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            status="submission_skipped",
+            reason_code="agent_test_instance",
         )
         return
 

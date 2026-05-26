@@ -57,11 +57,28 @@ from src.backend.services import (
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:26b"
+DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE = 0.95
 DEFAULT_REPLAY_SET_ID = "JVNAUTOSCI-1894"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
+LOCAL_MODEL_PROVIDER_NAME = "ollama"
+PREMIUM_MODEL_PROVIDER_NAMES = frozenset({"openai", "anthropic", "gemini", "azure_openai"})
+KNOWN_MODEL_PROVIDER_NAMES = frozenset(
+    {LOCAL_MODEL_PROVIDER_NAME, *PREMIUM_MODEL_PROVIDER_NAMES}
+)
+PREMIUM_MODEL_PREFIXES = (
+    "gpt-",
+    "gpt4",
+    "gpt5",
+    "o1",
+    "o3",
+    "o4",
+    "claude",
+    "gemini",
+    "text-davinci",
+)
 MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION = "model_portfolio_replay_report.v1"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
 CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
@@ -262,6 +279,15 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             "prompt": "What predicates are salient to SAIL students?",
             "knowledge_surfaces": ["background_knowledge", "kb"],
             "likely_tools": ["search_concepts", "get_predicate_incidence"],
+        },
+        {
+            "id": "text_relations_for_michael_witbrock_concept",
+            "category": "represented_relation_lookup",
+            "complexity_class": "vontology_grounded",
+            "prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["get_text_relations_summary"],
+            "requires_tool_use": True,
         },
         {
             "id": "list_my_papers",
@@ -781,6 +807,132 @@ def _dedupe_texts(values: Sequence[Any]) -> list[str]:
     return deduped
 
 
+def _split_model_provider_prefix(value: Any) -> tuple[str | None, str]:
+    cleaned = _safe_text(value)
+    if not cleaned or ":" not in cleaned:
+        return None, cleaned
+    provider, remainder = cleaned.split(":", 1)
+    provider_key = provider.strip().lower()
+    if provider_key in KNOWN_MODEL_PROVIDER_NAMES:
+        return provider_key, remainder.strip()
+    return None, cleaned
+
+
+def _infer_provider_from_model_identifier(value: Any) -> str | None:
+    provider, bare_model = _split_model_provider_prefix(value)
+    if provider:
+        return provider
+    lowered = bare_model.lower()
+    if not lowered:
+        return None
+    if lowered.startswith("claude"):
+        return "anthropic"
+    if lowered.startswith("gemini"):
+        return "gemini"
+    if any(lowered.startswith(prefix) for prefix in PREMIUM_MODEL_PREFIXES):
+        return "openai"
+    if ":" in bare_model and not lowered.startswith("ft:"):
+        return LOCAL_MODEL_PROVIDER_NAME
+    return None
+
+
+def _model_identifier_looks_premium(value: Any) -> bool:
+    provider, bare_model = _split_model_provider_prefix(value)
+    if provider == LOCAL_MODEL_PROVIDER_NAME:
+        return False
+    if _provider_looks_premium(provider):
+        return True
+    lowered = bare_model.lower()
+    return bool(lowered) and any(
+        lowered.startswith(prefix) for prefix in PREMIUM_MODEL_PREFIXES
+    )
+
+
+def _provider_looks_premium(value: Any) -> bool:
+    cleaned = _safe_text(value).lower()
+    return cleaned in PREMIUM_MODEL_PROVIDER_NAMES
+
+
+def _build_model_policy_report(
+    *,
+    requested_model_arms: Sequence[Mapping[str, Any]],
+    run_environment: Mapping[str, Any],
+    allow_premium_model: bool,
+) -> dict[str, Any]:
+    active_provider = _safe_text(
+        run_environment.get("server_resolved_active_llm_provider")
+    ) or None
+    active_model = _safe_text(run_environment.get("server_resolved_active_llm_model")) or None
+    active_lookup_error = _safe_text(
+        run_environment.get("server_resolved_active_llm_lookup_error")
+    ) or None
+    arms: list[dict[str, Any]] = []
+    for arm in requested_model_arms:
+        requested_model = _safe_text(arm.get("requested_model")) or None
+        requested_provider = _safe_text(arm.get("requested_provider")) or None
+        if requested_model and not requested_provider:
+            requested_provider = _infer_provider_from_model_identifier(requested_model)
+        source = "explicit_model_override" if requested_model else "active_authenticated_model"
+        effective_model = requested_model or active_model
+        effective_provider = requested_provider if requested_model else active_provider
+        premium = (
+            _model_identifier_looks_premium(effective_model)
+            or _provider_looks_premium(effective_provider)
+        )
+        unverifiable_active_model = (
+            requested_model is None and not active_model and bool(active_lookup_error)
+        )
+        arms.append(
+            {
+                "arm_id": _safe_text(arm.get("arm_id")) or None,
+                "label": _safe_text(arm.get("label")) or None,
+                "source": source,
+                "requested_model": requested_model,
+                "requested_provider": requested_provider,
+                "effective_model": effective_model,
+                "effective_provider": effective_provider,
+                "premium_model_deviation": premium,
+                "active_model_unverified": unverifiable_active_model,
+            }
+        )
+    premium_arm_count = sum(
+        1 for arm in arms if bool(arm.get("premium_model_deviation"))
+    )
+    unverified_active_arm_count = sum(
+        1 for arm in arms if bool(arm.get("active_model_unverified"))
+    )
+    return {
+        "default_model": DEFAULT_MODEL,
+        "local_only_default": True,
+        "premium_model_allowed": bool(allow_premium_model),
+        "premium_model_deviation": premium_arm_count > 0,
+        "premium_model_deviation_count": premium_arm_count,
+        "unverified_active_model_arm_count": unverified_active_arm_count,
+        "arms": arms,
+    }
+
+
+def _enforce_model_policy(report: Mapping[str, Any]) -> None:
+    if bool(report.get("premium_model_allowed")):
+        return
+    premium_arms = [
+        arm
+        for arm in _as_list(report.get("arms"))
+        if isinstance(arm, Mapping)
+        and (
+            bool(arm.get("premium_model_deviation"))
+            or bool(arm.get("active_model_unverified"))
+        )
+    ]
+    if not premium_arms:
+        return
+    raise RuntimeError(
+        "Replay sampler defaults to local-only model execution. Premium or "
+        "unverified active-model arms require --allow-premium-model. "
+        f"Model policy report: {json.dumps(dict(report), ensure_ascii=True, sort_keys=True)}"
+    )
+
+
 def _load_json_mapping_argument(value: str, *, argument_name: str) -> dict[str, Any]:
     cleaned = _safe_text(value)
     if not cleaned:
@@ -1090,6 +1242,28 @@ def _assert(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+class BackgroundGenerateTaskError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        task_id: str | None = None,
+        status_payload: Mapping[str, Any] | None = None,
+        cancellation_payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.task_id = task_id
+        self.status_payload = dict(status_payload or {})
+        self.cancellation_payload = dict(cancellation_payload or {})
+
+    def to_report(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "status_payload": self.status_payload,
+            "cancellation_payload": self.cancellation_payload,
+        }
+
+
 def _build_replay_session_creation_payload(session_name: str) -> dict[str, Any]:
     # Mirrors the create_chat_session provenance contract without importing backend services.
     return {
@@ -1394,6 +1568,27 @@ def _establish_authenticated_session(
     return session_id, window_session_id
 
 
+def _request_task_cancellation(
+    *,
+    session: requests.Session,
+    base_url: str,
+    task_id: str,
+) -> dict[str, Any]:
+    try:
+        return _request_json(
+            session,
+            "POST",
+            f"{base_url}/von/api/task/cancel/{task_id}",
+            timeout_seconds=15.0,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "task_id": task_id,
+            "error": str(exc),
+        }
+
+
 def _run_generate_background(
     *,
     session: requests.Session,
@@ -1415,6 +1610,10 @@ def _run_generate_background(
         request_payload["model"] = cleaned_model
     if presenter_mode:
         request_payload["presenter_mode"] = True
+    model_provider = _infer_provider_from_model_identifier(cleaned_model)
+    if model_provider:
+        request_payload["model_provider"] = model_provider
+        request_payload["selected_model_provider"] = model_provider
     submission = _request_json(
         session,
         "POST",
@@ -1440,27 +1639,42 @@ def _run_generate_background(
         if status == "completed":
             break
         if status in {"failed", "cancelled"}:
-            raise RuntimeError(
+            raise BackgroundGenerateTaskError(
                 "Background generate task did not complete successfully: "
-                f"{json.dumps(status_payload, ensure_ascii=True, sort_keys=True)}"
+                f"{json.dumps(status_payload, ensure_ascii=True, sort_keys=True)}",
+                task_id=task_id,
+                status_payload=status_payload,
             )
         time.sleep(max(float(poll_interval_seconds), 0.2))
 
-    _assert(
+    if not (
         isinstance(status_payload, dict)
-        and _safe_text(status_payload.get("status")) == "completed",
-        f"Background generate task did not complete before timeout: {status_payload!r}",
-    )
+        and _safe_text(status_payload.get("status")) == "completed"
+    ):
+        cancellation_payload = _request_task_cancellation(
+            session=session,
+            base_url=base_url,
+            task_id=task_id,
+        )
+        raise BackgroundGenerateTaskError(
+            "Background generate task did not complete before timeout: "
+            f"{json.dumps(status_payload or {}, ensure_ascii=True, sort_keys=True)}",
+            task_id=task_id,
+            status_payload=status_payload or {},
+            cancellation_payload=cancellation_payload,
+        )
     task_result_payload = _request_json(
         session,
         "GET",
         f"{base_url}/von/api/task/result/{task_id}",
     )
     generate_payload = _as_mapping(task_result_payload.get("result"))
-    _assert(
-        bool(generate_payload),
-        f"Background task result was empty: {task_result_payload!r}",
-    )
+    if not generate_payload:
+        raise BackgroundGenerateTaskError(
+            f"Background task result was empty: {task_result_payload!r}",
+            task_id=task_id,
+            status_payload=status_payload or {},
+        )
     return task_id, generate_payload
 
 
@@ -2015,6 +2229,22 @@ def _extract_selector_evidence(
     }
 
 
+def _selector_telemetry_completeness(routing: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = _extract_selector_evidence(routing)
+    missing_fields = [
+        field
+        for field in ("selected_workflow_id", "model_name", "raw_response")
+        if not evidence.get(field)
+    ]
+    return {
+        "complete": not missing_fields,
+        "missing_fields": missing_fields,
+        "selector_prompt_id": evidence.get("prompt_id"),
+        "selector_model_name": evidence.get("model_name"),
+        "structured_output_valid": evidence.get("structured_output_valid"),
+    }
+
+
 def _iter_llm_exchange_summaries(llm_debug_data: Mapping[str, Any]) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for stage in _as_list(llm_debug_data.get("stage_diagnostics")):
@@ -2426,6 +2656,9 @@ def _build_selection_summary(
                 "arm_id": _safe_text(entry.get("arm_id")) or None,
                 "label": _safe_text(entry.get("label")) or None,
                 "requested_model": _safe_text(entry.get("requested_model")) or None,
+                "requested_provider": (
+                    _safe_text(entry.get("requested_provider")) or None
+                ),
                 **{
                     optional_key: optional_value
                     for optional_key in (
@@ -2532,6 +2765,9 @@ def _build_summary(
             "tool_history": tool_history,
             "tool_count": len(tool_history),
             "workflow_routing_diagnostics": routing,
+            "selector_telemetry_completeness": _selector_telemetry_completeness(
+                routing
+            ),
         },
         "evaluation": dict(evaluation),
         "prompt_variant_evaluation": prompt_variant_evaluation,
@@ -2542,6 +2778,9 @@ def _build_summary(
             "arm_id": _safe_text(arm_metadata.get("arm_id")) or None,
             "label": _safe_text(arm_metadata.get("label")) or None,
             "requested_model": _safe_text(arm_metadata.get("requested_model")) or None,
+            "requested_provider": (
+                _safe_text(arm_metadata.get("requested_provider")) or None
+            ),
         }
         for optional_key in (
             "model_arm_id",
@@ -2584,6 +2823,11 @@ def _build_model_arm_plan(
                 "arm_id": f"arm_{len(planned_arms) + 1}",
                 "label": cleaned_model or ACTIVE_AUTHENTICATED_MODEL_LABEL,
                 "requested_model": cleaned_model,
+                "requested_provider": (
+                    _infer_provider_from_model_identifier(cleaned_model)
+                    if cleaned_model
+                    else None
+                ),
             }
         )
 
@@ -2619,6 +2863,12 @@ def _build_replay_arm_plan(
         replay_case_id=replay_case_id,
         default_replay_set_id=DEFAULT_REPLAY_SET_ID,
     )
+
+
+def _replay_arms_require_active_llm_info(
+    replay_arms: Sequence[Mapping[str, Any]],
+) -> bool:
+    return any(not _safe_text(arm.get("requested_model")) for arm in replay_arms)
 
 
 def _build_arm_session_name(
@@ -2819,6 +3069,174 @@ def _build_multi_arm_summary(
     return summary
 
 
+def _run_replay_plan(
+    *,
+    prompt_entry: Mapping[str, Any],
+    base_url: str,
+    requested_model: str | None,
+    replay_arms: Sequence[Mapping[str, Any]],
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    user_concept_id: str,
+    organisation_concept_id: str,
+    session_name: str,
+    run_environment: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    base_prompt_id: str | None,
+    prompt_variant_ids: Sequence[Any],
+    presenter_mode: bool,
+) -> tuple[dict[str, Any], bool]:
+    if len(replay_arms) == 1:
+        summary = _run_prompt_replay_arm(
+            prompt_entry=prompt_entry,
+            base_url=base_url,
+            requested_model=requested_model,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            base_session_name=session_name,
+            shared_run_environment=run_environment,
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
+            presenter_mode=presenter_mode,
+        )
+        should_user_be_happy = bool(
+            _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
+        )
+        return summary, should_user_be_happy
+
+    arm_summaries = [
+        _run_prompt_replay_arm(
+            prompt_entry=prompt_entry,
+            base_url=base_url,
+            requested_model=_safe_text(arm.get("requested_model")) or None,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            base_session_name=session_name,
+            shared_run_environment=run_environment,
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            arm_metadata=arm,
+            presenter_mode=presenter_mode,
+        )
+        for arm in replay_arms
+    ]
+    summary = _build_multi_arm_summary(
+        prompt_entry=prompt_entry,
+        prompt_bank_schema_version=prompt_bank_schema_version,
+        requested_complexity_classes=requested_complexity_classes,
+        seed=seed,
+        requested_model=requested_model,
+        requested_model_arms=replay_arms,
+        run_environment=run_environment,
+        arm_summaries=arm_summaries,
+    )
+    should_user_be_happy = bool(
+        _as_mapping(summary.get("comparison")).get("all_should_user_be_happy")
+    )
+    return summary, should_user_be_happy
+
+
+def _build_failed_replay_attempt_summary(
+    *,
+    exc: BaseException,
+    attempt_index: int,
+    prompt_entry: Mapping[str, Any],
+    run_environment: Mapping[str, Any],
+    requested_model: str | None,
+) -> dict[str, Any]:
+    failure: dict[str, Any] = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+    }
+    if isinstance(exc, BackgroundGenerateTaskError):
+        failure["background_task"] = exc.to_report()
+    return {
+        "status": "error",
+        "attempt": {"attempt_index": attempt_index},
+        "environment": dict(run_environment),
+        "selection": {
+            "requested_model": requested_model,
+            "requested_provider": _infer_provider_from_model_identifier(
+                requested_model
+            ),
+        },
+        "prompt": _build_prompt_summary(prompt_entry),
+        "conversation": {
+            "background_task_id": _as_mapping(failure.get("background_task")).get(
+                "task_id"
+            )
+        },
+        "response": {"text": "", "failure": failure},
+        "telemetry": {
+            "selected_workflow_id": None,
+            "selected_execution_mode": None,
+            "selector_telemetry_completeness": {
+                "complete": False,
+                "missing_fields": ["turn_execution_diagnostics"],
+            },
+        },
+        "evaluation": {
+            "verdict": "error",
+            "should_user_be_happy": False,
+            "reasons": [str(exc)],
+        },
+    }
+
+
+def _build_repeated_replay_summary(
+    *,
+    prompt_entry: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    requested_model: str | None,
+    requested_model_arms: Sequence[Mapping[str, Any]],
+    run_environment: Mapping[str, Any],
+    attempt_summaries: Sequence[Mapping[str, Any]],
+    success_count: int,
+    minimum_success_rate: float,
+) -> dict[str, Any]:
+    attempt_count = len(attempt_summaries)
+    success_rate = (float(success_count) / float(attempt_count)) if attempt_count else 0.0
+    return {
+        "status": "ok" if success_rate >= minimum_success_rate else "failed",
+        "mode": "repeated_replay_suite",
+        "guidance": {
+            "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
+            "replay_guide_note": REAL_PATH_REPLAY_GUIDE_NOTE,
+        },
+        "environment": dict(run_environment),
+        "selection": _build_selection_summary(
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            requested_model=requested_model,
+            requested_model_arms=requested_model_arms,
+        ),
+        "prompt": _build_prompt_summary(prompt_entry),
+        "repeat": {
+            "attempt_count": attempt_count,
+            "successful_attempt_count": success_count,
+            "failed_attempt_count": attempt_count - success_count,
+            "success_rate": success_rate,
+            "minimum_success_rate": minimum_success_rate,
+            "meets_minimum_success_rate": success_rate >= minimum_success_rate,
+        },
+        "attempts": [
+            dict(attempt) for attempt in attempt_summaries if isinstance(attempt, Mapping)
+        ],
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -2877,6 +3295,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             "override so the authenticated session's active user-facing model is "
             "measured alongside explicit requested-model arms."
         ),
+    )
+    parser.add_argument(
+        "--allow-premium-model",
+        action="store_true",
+        help=(
+            "Permit premium or unverified active-model arms. By default this "
+            "sampler is local-only and rejects OpenAI/Gemini/Anthropic-looking "
+            "models or active-model arms whose provider cannot be verified local."
+        ),
+    )
+    parser.add_argument(
+        "--repeat-count",
+        type=int,
+        default=1,
+        help="Run the same selected prompt/arm plan repeatedly and report a success rate.",
+    )
+    parser.add_argument(
+        "--minimum-success-rate",
+        type=float,
+        default=DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE,
+        help="Required repeated-suite success rate; default 0.95.",
     )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
@@ -3178,54 +3617,103 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if agent_test_error:
             raise RuntimeError(agent_test_error)
-    run_environment = _augment_run_environment_with_active_llm_info(
-        session=metadata_session,
-        base_url=base_url,
-        user_concept_id=authenticated_user_concept_id,
-        organisation_concept_id=authenticated_organisation_concept_id,
-        run_environment=run_environment,
-    )
-    if len(replay_arms) == 1:
-        summary = _run_prompt_replay_arm(
-            prompt_entry=prompt_entry,
+    if _replay_arms_require_active_llm_info(replay_arms):
+        run_environment = _augment_run_environment_with_active_llm_info(
+            session=metadata_session,
             base_url=base_url,
-            requested_model=requested_model,
-            timeout_seconds=float(args.timeout_seconds),
-            poll_interval_seconds=float(args.poll_interval_seconds),
             user_concept_id=authenticated_user_concept_id,
             organisation_concept_id=authenticated_organisation_concept_id,
-            base_session_name=session_name,
-            shared_run_environment=run_environment,
-            prompt_bank_schema_version=prompt_bank_schema_version,
-            requested_complexity_classes=requested_complexity_classes,
-            seed=args.seed,
-            arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
-            presenter_mode=bool(args.presenter_mode),
-        )
-        should_user_be_happy = bool(
-            _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
+            run_environment=run_environment,
         )
     else:
-        arm_summaries = [
-            _run_prompt_replay_arm(
+        run_environment = {
+            **run_environment,
+            "server_resolved_active_llm_lookup_skipped": True,
+            "server_resolved_active_llm_lookup_skip_reason": (
+                "explicit_model_override_arms_only"
+            ),
+        }
+    model_policy_report = _build_model_policy_report(
+        requested_model_arms=replay_arms,
+        run_environment=run_environment,
+        allow_premium_model=bool(args.allow_premium_model),
+    )
+    _enforce_model_policy(model_policy_report)
+    run_environment = {
+        **run_environment,
+        "model_policy": model_policy_report,
+    }
+    repeat_count = max(int(args.repeat_count or 1), 1)
+    minimum_success_rate = min(max(float(args.minimum_success_rate), 0.0), 1.0)
+    if repeat_count == 1:
+        try:
+            summary, should_user_be_happy = _run_replay_plan(
                 prompt_entry=prompt_entry,
                 base_url=base_url,
-                requested_model=_safe_text(arm.get("requested_model")) or None,
+                requested_model=requested_model,
+                replay_arms=replay_arms,
                 timeout_seconds=float(args.timeout_seconds),
                 poll_interval_seconds=float(args.poll_interval_seconds),
                 user_concept_id=authenticated_user_concept_id,
                 organisation_concept_id=authenticated_organisation_concept_id,
-                base_session_name=session_name,
-                shared_run_environment=run_environment,
+                session_name=session_name,
+                run_environment=run_environment,
                 prompt_bank_schema_version=prompt_bank_schema_version,
                 requested_complexity_classes=requested_complexity_classes,
                 seed=args.seed,
-                arm_metadata=arm,
+                base_prompt_id=base_prompt_id,
+                prompt_variant_ids=prompt_variant_ids,
                 presenter_mode=bool(args.presenter_mode),
             )
-            for arm in replay_arms
-        ]
-        summary = _build_multi_arm_summary(
+        except Exception as exc:
+            summary = _build_failed_replay_attempt_summary(
+                exc=exc,
+                attempt_index=1,
+                prompt_entry=prompt_entry,
+                run_environment=run_environment,
+                requested_model=requested_model,
+            )
+            should_user_be_happy = False
+    else:
+        attempt_summaries: list[dict[str, Any]] = []
+        successful_attempt_count = 0
+        for attempt_index in range(1, repeat_count + 1):
+            try:
+                attempt_summary, attempt_success = _run_replay_plan(
+                    prompt_entry=prompt_entry,
+                    base_url=base_url,
+                    requested_model=requested_model,
+                    replay_arms=replay_arms,
+                    timeout_seconds=float(args.timeout_seconds),
+                    poll_interval_seconds=float(args.poll_interval_seconds),
+                    user_concept_id=authenticated_user_concept_id,
+                    organisation_concept_id=authenticated_organisation_concept_id,
+                    session_name=session_name,
+                    run_environment=run_environment,
+                    prompt_bank_schema_version=prompt_bank_schema_version,
+                    requested_complexity_classes=requested_complexity_classes,
+                    seed=args.seed,
+                    base_prompt_id=base_prompt_id,
+                    prompt_variant_ids=prompt_variant_ids,
+                    presenter_mode=bool(args.presenter_mode),
+                )
+                attempt_summary = {
+                    **attempt_summary,
+                    "attempt": {"attempt_index": attempt_index},
+                }
+                successful_attempt_count += 1 if attempt_success else 0
+                attempt_summaries.append(attempt_summary)
+            except Exception as exc:
+                attempt_summaries.append(
+                    _build_failed_replay_attempt_summary(
+                        exc=exc,
+                        attempt_index=attempt_index,
+                        prompt_entry=prompt_entry,
+                        run_environment=run_environment,
+                        requested_model=requested_model,
+                    )
+                )
+        summary = _build_repeated_replay_summary(
             prompt_entry=prompt_entry,
             prompt_bank_schema_version=prompt_bank_schema_version,
             requested_complexity_classes=requested_complexity_classes,
@@ -3233,20 +3721,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_model=requested_model,
             requested_model_arms=replay_arms,
             run_environment=run_environment,
-            arm_summaries=arm_summaries,
+            attempt_summaries=attempt_summaries,
+            success_count=successful_attempt_count,
+            minimum_success_rate=minimum_success_rate,
         )
         should_user_be_happy = bool(
-            _as_mapping(summary.get("comparison")).get("all_should_user_be_happy")
+            _as_mapping(summary.get("repeat")).get("meets_minimum_success_rate")
         )
     if failure_case_intake is not None:
         summary["failure_case_intake"] = failure_case_intake
     experiment_run_id = _safe_text(args.experiment_run_id)
     if experiment_run_id:
-        arm_summaries_for_recording = (
-            _as_list(summary.get("arms"))
-            if isinstance(summary.get("arms"), Sequence)
-            else [summary]
-        )
+        if repeat_count > 1:
+            arm_summaries_for_recording = []
+            for attempt in _as_list(summary.get("attempts")):
+                if not isinstance(attempt, Mapping) or attempt.get("status") == "error":
+                    continue
+                if isinstance(attempt.get("arms"), Sequence):
+                    arm_summaries_for_recording.extend(_as_list(attempt.get("arms")))
+                else:
+                    arm_summaries_for_recording.append(attempt)
+        else:
+            arm_summaries_for_recording = (
+                _as_list(summary.get("arms"))
+                if isinstance(summary.get("arms"), Sequence)
+                else [summary]
+            )
         experiment_recording = _record_experiment_observations(
             run_id=experiment_run_id,
             arm_summaries=[

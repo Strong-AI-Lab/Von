@@ -606,6 +606,22 @@ def test_generate_buttonify_can_be_skipped_by_request(monkeypatch):
     assert buttonify_event["options_emitted_count"] == 0
 
 
+def test_generate_buttonify_skips_in_agent_test_instance(monkeypatch):
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    llm = _StubLLM("No options here.")
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    llm_debug = resp.get_json()["llm_debug"]
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "skipped"
+    assert buttonify_event["suppression_reason"] == "agent_test_instance"
+    assert buttonify_event["options_emitted_count"] == 0
+
+
 def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
     from src.backend.workflows import CHAT_BUTTONIFY_WORKFLOW_ID

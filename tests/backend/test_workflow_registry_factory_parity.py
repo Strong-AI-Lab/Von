@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
+from src.backend.workflows.definitions import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
 from src.backend.workflows.workflow_registry import WorkflowRegistration, WorkflowRegistry
 from src.backend.workflows.durable import registry_factory
 
@@ -597,3 +598,29 @@ def test_read_only_registry_can_opt_into_background_deferred_work(monkeypatch):
 
     assert isinstance(registry, WorkflowRegistry)
     assert observed == [(True, True)]
+
+
+def test_agent_test_registry_uses_repo_seed_without_vontology_discovery(monkeypatch):
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setattr(registry_factory, "_shared_workflow_registry", None)
+    registry_factory._agent_test_seed_workflow_definitions.cache_clear()
+
+    def _unexpected_discovery():
+        raise AssertionError("AgentTest registry should not query Vontology discovery")
+
+    def _unexpected_loader(workflow_id: str):
+        raise AssertionError(f"AgentTest registry should not load Vontology: {workflow_id}")
+
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", _unexpected_discovery)
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        _unexpected_loader,
+    )
+
+    registry = registry_factory.build_workflow_registry_read_only()
+    registration = registry.get_registration(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
+
+    assert registration is not None
+    assert registration.source == "repo_seed_agent_test"
+    assert registration.definition.workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID

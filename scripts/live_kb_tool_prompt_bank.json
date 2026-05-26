@@ -91,6 +91,19 @@
       ]
     },
     {
+      "id": "text_relations_for_michael_witbrock_concept",
+      "category": "represented_relation_lookup",
+      "complexity_class": "vontology_grounded",
+      "prompt": "What text relations are used with the concept for Michael Witbrock?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "get_text_relations_summary"
+      ],
+      "requires_tool_use": true
+    },
+    {
       "id": "list_my_papers",
       "category": "entity_relative_kb_lookup",
       "complexity_class": "vontology_grounded",

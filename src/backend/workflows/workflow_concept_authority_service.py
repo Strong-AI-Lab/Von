@@ -898,6 +898,27 @@ def seed_canonical_workflow_publication_specs() -> (
     return dict(_load_repo_seed_canonical_workflow_bundle()["publication_specs"])
 
 
+def build_seed_canonical_workflow_definitions(
+    *,
+    target_workflow_ids: Sequence[str] | None = None,
+) -> Dict[str, WorkflowDefinition]:
+    """Build DB-free workflow definitions from the canonical repo seed bundle."""
+
+    publication_specs = seed_canonical_workflow_publication_specs()
+    if target_workflow_ids:
+        allowed_ids = {
+            item.strip()
+            for item in target_workflow_ids
+            if isinstance(item, str) and item.strip()
+        }
+        publication_specs = {
+            workflow_id: spec
+            for workflow_id, spec in publication_specs.items()
+            if workflow_id in allowed_ids
+        }
+    return _build_definition_map_from_publication_specs(publication_specs)
+
+
 def seed_canonical_workflow_text_relations() -> Dict[str, tuple[dict[str, Any], ...]]:
     """Return repo-side seed workflow text relations for canonical workflows."""
 

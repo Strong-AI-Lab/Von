@@ -23,8 +23,13 @@ shift 1 || true
 
 # Defaults (match run.ps1)
 PORT=5000
+PORT_EXPLICIT=0
+AGENT_TEST=0
+ISOLATED_TEST_INSTANCE=0
+AGENT_TEST_INSTANCE=0
 NO_BROWSER=0
 FORCE_BROWSER=0
+CHROME_BETA=0
 TAIL=100
 FOLLOW=0
 LOG_RETENTION=20
@@ -35,6 +40,10 @@ HEALTH_GRACE_SEC=45
 BACKUP_DRY_RUN=0
 BACKUP_TAG="manual"
 BACKUP_OUT_DIR=""
+RESTORE_BACKUP_PATH=""
+RESTORE_TARGET_DB_NAME=""
+RESTORE_APPLY=0
+RESTORE_DROP_TARGET=0
 UPDATE_INTERVAL_MINUTES=60
 UPDATE_BRANCH="main"
 UPDATE_NO_RESTART_IF_RUNNING=0
@@ -50,19 +59,22 @@ EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -Port) PORT="$2"; shift 2 ;;
-        --port) PORT="$2"; shift 2 ;;
-        -NoBrowser) NO_BROWSER=1; shift ;;
+        -Port) PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
+        --port|--Port) PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
+        -AgentTest|--AgentTest) AGENT_TEST=1; shift ;;
+        -IsolatedTestInstance|--IsolatedTestInstance) ISOLATED_TEST_INSTANCE=1; shift ;;
+        -NoBrowser|--NoBrowser) NO_BROWSER=1; shift ;;
         --no-browser|-n) NO_BROWSER=1; shift ;;
-        -ForceBrowser) FORCE_BROWSER=1; shift ;;
+        -ForceBrowser|--ForceBrowser) FORCE_BROWSER=1; shift ;;
         --force-browser|-f) FORCE_BROWSER=1; shift ;;
+        -ChromeBeta|--ChromeBeta) CHROME_BETA=1; shift ;;
         -Tail) TAIL="$2"; shift 2 ;;
-        --tail) TAIL="$2"; shift 2 ;;
+        --tail|--Tail) TAIL="$2"; shift 2 ;;
         -Follow) FOLLOW=1; shift ;;
         --follow) FOLLOW=1; shift ;;
         -LogRetention) LOG_RETENTION="$2"; shift 2 ;;
         -AdminToken) ADMIN_TOKEN="$2"; shift 2 ;;
-        -SkipHealth) SKIP_HEALTH=1; shift ;;
+        -SkipHealth|--SkipHealth) SKIP_HEALTH=1; shift ;;
         --skip-health) SKIP_HEALTH=1; shift ;;
         -HealthTimeoutSec) HEALTH_TIMEOUT_SEC="$2"; shift 2 ;;
         -HealthGraceSec) HEALTH_GRACE_SEC="$2"; shift 2 ;;
@@ -86,6 +98,10 @@ while [ $# -gt 0 ]; do
         -BackupDryRun) BACKUP_DRY_RUN=1; BACKUP_FLAGS_SET=1; shift ;;
         -BackupTag) BACKUP_TAG="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
         -BackupOutDir) BACKUP_OUT_DIR="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
+        -RestoreBackupPath) RESTORE_BACKUP_PATH="$2"; shift 2 ;;
+        -RestoreTargetDbName) RESTORE_TARGET_DB_NAME="$2"; shift 2 ;;
+        -RestoreApply) RESTORE_APPLY=1; shift ;;
+        -RestoreDropTarget) RESTORE_DROP_TARGET=1; shift ;;
         -UpdateIntervalMinutes) UPDATE_INTERVAL_MINUTES="$2"; shift 2 ;;
         -UpdateBranch) UPDATE_BRANCH="$2"; shift 2 ;;
         -UpdateNoRestartIfRunning) UPDATE_NO_RESTART_IF_RUNNING=1; shift ;;
@@ -98,6 +114,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "$AGENT_TEST" -eq 1 ] || [ "$ISOLATED_TEST_INSTANCE" -eq 1 ]; then
+    AGENT_TEST_INSTANCE=1
+fi
+
+if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+    if [ "$PORT_EXPLICIT" -eq 0 ]; then
+        PORT=5010
+    fi
+    if [ "$FORCE_BROWSER" -eq 0 ]; then
+        NO_BROWSER=1
+    fi
+fi
+
 PID_FILE="${RUN_DIR}/von_${PORT}.pid"
 CURRENT_LOG="${LOGS_DIR}/von_${PORT}_current.log"
 TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)"
@@ -106,12 +135,23 @@ SERVER_ERR_LOG="${NEW_LOG}.err"
 RAG_PID_FILE="${RUN_DIR}/rag_worker.pid"
 RAG_LOG_FILE="${LOGS_DIR}/rag_worker_${TS}.log"
 RAG_ERR_LOG_FILE="${RAG_LOG_FILE}.err"
+CONCEPT_INDEX_PID_FILE="${RUN_DIR}/concept_index_worker.pid"
+CONCEPT_INDEX_LOG_FILE="${LOGS_DIR}/concept_index_worker_${TS}.log"
+CONCEPT_INDEX_ERR_LOG_FILE="${CONCEPT_INDEX_LOG_FILE}.err"
 TOKEN_FILE="${RUN_DIR}/admin_token.txt"
-SENTINEL_BROWSER="${RUN_DIR}/browser_opened_once"
+BROWSER_SENTINEL_NAME="browser_opened_once"
+if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+    BROWSER_SENTINEL_NAME="browser_opened_once_${PORT}"
+fi
+SENTINEL_BROWSER="${RUN_DIR}/${BROWSER_SENTINEL_NAME}"
 LOCAL_BACKUPS="${ROOT}/backups"
 BACKUP_ROOT=""
 REMOTE_BACKUP_ROOT=""
 REPAIR_ATTEMPTED=0
+ALLOW_REPO_BACKUP_OUTPUT=0
+case "${VON_ALLOW_BACKUP_IN_REPO:-}" in
+    1|true|TRUE|yes|YES|y|Y|on|ON) ALLOW_REPO_BACKUP_OUTPUT=1 ;;
+esac
 
 same_path() {
     local a="$1"
@@ -124,6 +164,69 @@ same_path() {
     ra="$(cd "$a" 2>/dev/null && pwd -P)" || return 1
     rb="$(cd "$b" 2>/dev/null && pwd -P)" || return 1
     [ "$ra" = "$rb" ]
+}
+
+normalise_path() {
+    local input_path="$1"
+    if [ -z "$input_path" ]; then
+        return 1
+    fi
+    local expanded="$input_path"
+    if [ "${expanded#\~}" != "$expanded" ]; then
+        expanded="${HOME}${expanded#\~}"
+    fi
+
+    local dir_part
+    local base_part
+    dir_part="$(dirname "$expanded")"
+    base_part="$(basename "$expanded")"
+    if [ "$dir_part" = "." ]; then
+        dir_part="$PWD"
+    fi
+
+    local abs_dir
+    abs_dir="$(cd "$dir_part" 2>/dev/null && pwd -P)" || return 1
+    printf '%s/%s' "$abs_dir" "$base_part"
+}
+
+is_path_inside_root() {
+    local candidate="$1"
+    local root_path="$2"
+    local candidate_abs=""
+    local root_abs=""
+    candidate_abs="$(normalise_path "$candidate")" || return 1
+    root_abs="$(normalise_path "$root_path")" || return 1
+    if [ "$candidate_abs" = "$root_abs" ]; then
+        return 0
+    fi
+    case "$candidate_abs" in
+        "$root_abs"/*) return 0 ;;
+    esac
+    return 1
+}
+
+backup_output_path_allowed() {
+    local path="$1"
+    local context="$2"
+    local apply_mode="$3"
+    if ! is_path_inside_root "$path" "$ROOT"; then
+        return 0
+    fi
+
+    local resolved
+    resolved="$(normalise_path "$path" 2>/dev/null || printf '%s' "$path")"
+    if [ "$ALLOW_REPO_BACKUP_OUTPUT" -eq 1 ]; then
+        log "[$context] WARN: backup output resolves inside repo root ($resolved), but continuing due to VON_ALLOW_BACKUP_IN_REPO=1."
+        return 0
+    fi
+
+    if [ "$apply_mode" = "1" ]; then
+        log "[$context] ERROR: refusing backup apply mode with output under repo root ($resolved). Set VON_BACKUP_ROOT/-BackupOutDir outside repo, or override with VON_ALLOW_BACKUP_IN_REPO=1."
+        return 1
+    fi
+
+    log "[$context] WARN: backup output is under repo root ($resolved). Dry-run allowed, apply mode remains blocked unless VON_ALLOW_BACKUP_IN_REPO=1."
+    return 0
 }
 
 resolve_backup_root() {
@@ -329,7 +432,9 @@ rotate_logs() {
 
 # Resolve backup root and migrate local backups if configured.
 resolve_backup_root
-if [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
+if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+    log "[backup-migrate] disabled via -AgentTest"
+elif [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
     migrate_local_backups
 else
     log "[backup-migrate] disabled via -NoBackupMigrate"
@@ -398,6 +503,12 @@ load_env_from_dotenv() {
 
 # Load .env overrides without executing arbitrary shell content.
 load_env_from_dotenv "${ROOT}/.env"
+
+if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+    export VON_AGENT_TEST_INSTANCE=1
+else
+    unset VON_AGENT_TEST_INSTANCE || true
+fi
 
 export PYTHONPATH="${ROOT}"
 export PYTHONUNBUFFERED=1
@@ -637,7 +748,25 @@ health_ok() {
 
 open_browser() {
     local url="http://localhost:${PORT}/"
-    # Prefer Chrome if available.
+    # Match run.ps1 behaviour: prefer Chrome Beta, with optional Beta-only mode.
+    if command -v google-chrome-beta >/dev/null 2>&1; then
+        google-chrome-beta "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if command -v chromium-beta >/dev/null 2>&1; then
+        chromium-beta "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ "$CHROME_BETA" -eq 1 ] && command -v open >/dev/null 2>&1; then
+        open -a "Google Chrome Beta" "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ "$CHROME_BETA" -eq 1 ]; then
+        log "Browser open skipped (-ChromeBeta requested, but Chrome Beta was not found). URL: $url"
+        return 0
+    fi
+
+    # Stable/browser fallbacks.
     if command -v google-chrome >/dev/null 2>&1; then
         google-chrome "$url" >/dev/null 2>&1 || true
         return 0
@@ -655,10 +784,35 @@ open_browser() {
         return 0
     fi
     if command -v open >/dev/null 2>&1; then
-        open -a "Google Chrome" "$url" >/dev/null 2>&1 || open "$url" >/dev/null 2>&1 || true
+        open -a "Google Chrome Beta" "$url" >/dev/null 2>&1 || open -a "Google Chrome" "$url" >/dev/null 2>&1 || open "$url" >/dev/null 2>&1 || true
         return 0
     fi
     log "Browser open skipped (no opener found). URL: $url"
+}
+
+open_browser_if_needed() {
+    if [ "$NO_BROWSER" -eq 1 ]; then
+        return 0
+    fi
+
+    local should_open=0
+    if [ "$FORCE_BROWSER" -eq 1 ]; then
+        should_open=1
+    elif [ ! -f "$SENTINEL_BROWSER" ]; then
+        should_open=1
+    fi
+
+    if [ "$should_open" -eq 1 ]; then
+        open_browser
+        date -Iseconds 2>/dev/null > "$SENTINEL_BROWSER" || true
+        if [ "$FORCE_BROWSER" -eq 1 ]; then
+            log "Opened browser (forced)."
+        else
+            log "Opened browser (first launch)."
+        fi
+    else
+        log "Browser already opened previously (use -ForceBrowser to open again)."
+    fi
 }
 
 get_listening_pid_by_port() {
@@ -1055,6 +1209,58 @@ stop_rag_worker() {
     rm -f "$RAG_PID_FILE" 2>/dev/null || true
 }
 
+start_concept_index_worker_bg() {
+    if [ -f "$CONCEPT_INDEX_PID_FILE" ]; then
+        local old
+        old="$(sed -n 's/^PID=//p' "$CONCEPT_INDEX_PID_FILE" 2>/dev/null | head -n 1 || true)"
+        if [ -n "$old" ] && process_exists "$old"; then
+            log "Concept Index Worker already running (PID=$old)."
+            return 0
+        fi
+        rm -f "$CONCEPT_INDEX_PID_FILE" 2>/dev/null || true
+    fi
+    stop_python_processes_by_script "src/backend/utilities/concept_index_worker.py" "Concept Index Worker"
+
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        log "ERROR: No python executable found for Concept Index Worker launch."
+        return 1
+    fi
+
+    local script_path="${ROOT}/src/backend/utilities/concept_index_worker.py"
+    if [ ! -f "$script_path" ]; then
+        log "[concept-index-worker] WARN: script missing: $script_path"
+        return 0
+    fi
+
+    log "Starting Concept Index Worker..."
+    rm -f "$CONCEPT_INDEX_LOG_FILE" "$CONCEPT_INDEX_ERR_LOG_FILE" 2>/dev/null || true
+    nohup "$py" -u "$script_path" >> "$CONCEPT_INDEX_LOG_FILE" 2>> "$CONCEPT_INDEX_ERR_LOG_FILE" &
+    local pid=$!
+    printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$CONCEPT_INDEX_PID_FILE"
+    log "Concept Index Worker started (PID=$pid). Logs: $CONCEPT_INDEX_LOG_FILE, $CONCEPT_INDEX_ERR_LOG_FILE"
+}
+
+stop_concept_index_worker() {
+    local pid_to_kill=0
+    if [ -f "$CONCEPT_INDEX_PID_FILE" ]; then
+        local content
+        content="$(cat "$CONCEPT_INDEX_PID_FILE" 2>/dev/null || true)"
+        if printf '%s' "$content" | grep -qE 'PID=[0-9]+'; then
+            pid_to_kill="$(printf '%s' "$content" | sed -n 's/^PID=//p' | head -n 1 || true)"
+        fi
+        if [ "$pid_to_kill" -gt 0 ] 2>/dev/null; then
+            log "Stopping Concept Index Worker (PID=$pid_to_kill)..."
+            if ! stop_process_tree_with_escalation "$pid_to_kill"; then
+                log "WARN: Concept Index Worker PID=$pid_to_kill may still be running."
+            fi
+        fi
+    fi
+    stop_python_processes_by_script "src/backend/utilities/concept_index_worker.py" "Concept Index Worker" "$pid_to_kill"
+    rm -f "$CONCEPT_INDEX_PID_FILE" 2>/dev/null || true
+}
+
 start_server() {
     local restart_takeover="${1:-0}"
 
@@ -1076,6 +1282,7 @@ start_server() {
     if [ -n "$existing" ] && process_exists "$existing"; then
         log "Already running (PID=$existing). Use ./run.sh stop or restart."
         write_pidfile "$existing"
+        open_browser_if_needed
         return 0
     fi
 
@@ -1091,13 +1298,22 @@ start_server() {
     local listener
     listener="$(get_listening_pid_by_port "$PORT" || true)"
     if [ -n "$listener" ]; then
+        if [ "$AGENT_TEST_INSTANCE" -eq 1 ] && ! is_von_main_process "$listener"; then
+            log "Agent test mode: port $PORT is owned by non-Von PID=$listener; aborting instead of adopting it."
+            return 1
+        fi
         log "Port $PORT already in use by PID=$listener; assuming server already running (untracked)."
         write_pidfile "$listener"
+        open_browser_if_needed
         return 0
     fi
 
     set_admin_token_env
-    stop_python_processes_by_script "src/workflows/von/main.py" "Von Server"
+    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+        log "Agent test mode: preserving other Von server processes; only port $PORT is managed."
+    else
+        stop_python_processes_by_script "src/workflows/von/main.py" "Von Server"
+    fi
 
     local py
     py="$(python_cmd)"
@@ -1108,7 +1324,9 @@ start_server() {
     fi
 
     local purity_script="${ROOT}/scripts/check_workflow_purity.py"
-    if [ -f "$purity_script" ]; then
+    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+        log "Agent test mode: skipping workflow purity check."
+    elif [ -f "$purity_script" ]; then
         log "Running Workflow Purity Check (warn-only)..."
         if [ "$launch_mode" = "pdm-fallback" ]; then
             "$py" run python "$purity_script" 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
@@ -1233,25 +1451,7 @@ start_server() {
 
         if [ "$healthy" -eq 1 ]; then
             log "Server healthy (http://localhost:$PORT)"
-            if [ $NO_BROWSER -eq 0 ]; then
-                local should_open=0
-                if [ $FORCE_BROWSER -eq 1 ]; then
-                    should_open=1
-                elif [ ! -f "$SENTINEL_BROWSER" ]; then
-                    should_open=1
-                fi
-                if [ $should_open -eq 1 ]; then
-                    open_browser
-                    date -Iseconds 2>/dev/null > "$SENTINEL_BROWSER" || true
-                    if [ $FORCE_BROWSER -eq 1 ]; then
-                        log "Opened browser (forced)."
-                    else
-                        log "Opened browser (first launch)."
-                    fi
-                else
-                    log "Browser already opened previously (use -ForceBrowser to open again)."
-                fi
-            fi
+            open_browser_if_needed
         elif [ "$listening_logged" -eq 1 ]; then
             log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
             log_mongo_status
@@ -1271,11 +1471,17 @@ start_server() {
     if [ "$SHOW_RELATION_COVERAGE" -eq 1 ]; then
         run_relation_coverage_summary || true
     fi
-    run_daily_backup_if_due || true
-    run_test_db_refresh_if_due || true
+    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+        log "Agent test mode: skipping startup maintenance and shared workers."
+    else
+        run_daily_backup_if_due || true
+        run_test_db_refresh_if_due || true
 
-    # Start RAG worker best-effort (mirrors run.ps1)
-    start_rag_worker_bg || true
+        # Start RAG worker best-effort (mirrors run.ps1)
+        start_rag_worker_bg || true
+        # Start Concept Index worker best-effort (mirrors run.ps1)
+        start_concept_index_worker_bg || true
+    fi
 }
 
 stop_server() {
@@ -1292,7 +1498,12 @@ stop_server() {
             if [ -z "$pid" ]; then
                 log "Not running"
                 remove_pidfile
-                stop_rag_worker || true
+                if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+                    log "Agent test mode: preserving shared RAG and concept-index workers."
+                else
+                    stop_rag_worker || true
+                    stop_concept_index_worker || true
+                fi
                 return 0
             fi
             # Verify command line looks like this Von server.
@@ -1316,13 +1527,23 @@ stop_server() {
     if [ -z "$pid" ]; then
         log "Not running"
         remove_pidfile
-        stop_rag_worker || true
+        if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+            log "Agent test mode: preserving shared RAG and concept-index workers."
+        else
+            stop_rag_worker || true
+            stop_concept_index_worker || true
+        fi
         return 0
     fi
     if ! process_exists "$pid"; then
         log "STALE: PID file exists but process missing."
         remove_pidfile
-        stop_rag_worker || true
+        if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+            log "Agent test mode: preserving shared RAG and concept-index workers."
+        else
+            stop_rag_worker || true
+            stop_concept_index_worker || true
+        fi
         return 0
     fi
     if ! is_von_main_process "$pid"; then
@@ -1335,7 +1556,12 @@ stop_server() {
         else
             log "STALE: PID file PID=$pid does not match this Von server."
             remove_pidfile
-            stop_rag_worker || true
+            if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+                log "Agent test mode: preserving shared RAG and concept-index workers."
+            else
+                stop_rag_worker || true
+                stop_concept_index_worker || true
+            fi
             return 0
         fi
     fi
@@ -1375,8 +1601,13 @@ stop_server() {
     fi
 
     remove_pidfile
-    stop_python_processes_by_script "src/workflows/von/main.py" "Von Server" "$pid"
-    stop_rag_worker || true
+    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+        log "Agent test mode: preserving other Von server processes and shared RAG/concept-index workers."
+    else
+        stop_python_processes_by_script "src/workflows/von/main.py" "Von Server" "$pid"
+        stop_rag_worker || true
+        stop_concept_index_worker || true
+    fi
 }
 
 log_mongo_status() {
@@ -1671,6 +1902,10 @@ run_daily_backup_if_due() {
     pdm="$(pdm_cmd)"
     local out_dir
     out_dir="$(resolve_backup_out_dir "$BACKUP_ROOT" "$LOCAL_BACKUPS" "daily-backup")"
+    if ! backup_output_path_allowed "$out_dir" "daily-backup" 1; then
+        log "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
+        return 0
+    fi
     log "[daily-backup] Launching background backup (interval ${interval_hours}h)..."
     (
         set +e
@@ -2276,6 +2511,11 @@ run_rag_worker_foreground() {
 }
 
 run_backup() {
+    if ! is_truthy "${VON_ENABLE_BACKUP_ACTION:-}"; then
+        log "[backup] ERROR: manual backup action is disabled by default. Set VON_ENABLE_BACKUP_ACTION=1 to acknowledge admin-level access and enable this action."
+        return 1
+    fi
+
     local backup_script="${ROOT}/scripts/backup_von_db.py"
     if [ ! -f "$backup_script" ]; then
         log "[backup] ERROR: backup script missing: $backup_script"
@@ -2292,6 +2532,13 @@ run_backup() {
     if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
         mode="dry-run"
     fi
+    local apply_mode=1
+    if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
+        apply_mode=0
+    fi
+    if ! backup_output_path_allowed "$out_dir" "backup" "$apply_mode"; then
+        return 1
+    fi
     log "[backup] Starting backup (mode=$mode tag=$BACKUP_TAG out=$out_dir)"
     if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
         "$pdm" run python "$backup_script" --out-dir "$out_dir" --tag "$BACKUP_TAG"
@@ -2303,7 +2550,9 @@ run_backup() {
         log "[backup] OK"
         run_code_mention_scan "manual-backup"
         run_code_predicate_sync "manual-backup"
-        if [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
+        if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+            log "[backup-migrate] disabled via -AgentTest"
+        elif [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
             migrate_local_backups
         else
             log "[backup-migrate] disabled via -NoBackupMigrate"
@@ -2312,6 +2561,59 @@ run_backup() {
         log "[backup] ERROR exit=$backup_exit"
     fi
     return "$backup_exit"
+}
+
+run_restore_backup() {
+    if ! is_truthy "${VON_ENABLE_RESTORE_ACTION:-}"; then
+        log "[restore-backup] ERROR: restore action is disabled by default. Set VON_ENABLE_RESTORE_ACTION=1 to acknowledge destructive restore risk and enable this action."
+        return 1
+    fi
+    if [ -z "$RESTORE_BACKUP_PATH" ]; then
+        log "[restore-backup] ERROR: specify -RestoreBackupPath with a backup artefact or receipt path."
+        return 1
+    fi
+
+    local restore_script="${ROOT}/scripts/restore_von_db.py"
+    if [ ! -f "$restore_script" ]; then
+        log "[restore-backup] ERROR: restore script missing: $restore_script"
+        return 1
+    fi
+
+    local pdm
+    pdm="$(pdm_cmd)"
+    local args=(run python "$restore_script" --backup-path "$RESTORE_BACKUP_PATH")
+    if [ -n "$RESTORE_TARGET_DB_NAME" ]; then
+        args+=(--target-db-name "$RESTORE_TARGET_DB_NAME")
+    fi
+    if [ "$RESTORE_DROP_TARGET" -eq 1 ]; then
+        args+=(--drop-target)
+    fi
+    if [ "$RESTORE_APPLY" -eq 1 ]; then
+        args+=(--apply)
+    fi
+
+    local mode="dry-run"
+    if [ "$RESTORE_APPLY" -eq 1 ]; then
+        mode="apply"
+    fi
+    local drop="false"
+    if [ "$RESTORE_DROP_TARGET" -eq 1 ]; then
+        drop="true"
+    fi
+    local target_summary="<auto restore probe>"
+    if [ -n "$RESTORE_TARGET_DB_NAME" ]; then
+        target_summary="$RESTORE_TARGET_DB_NAME"
+    fi
+
+    log "[restore-backup] Starting restore (mode=$mode backup=$RESTORE_BACKUP_PATH target_db=$target_summary drop_target=$drop)"
+    "$pdm" "${args[@]}"
+    local restore_exit=$?
+    if [ "$restore_exit" -eq 0 ]; then
+        log "[restore-backup] OK"
+    else
+        log "[restore-backup] ERROR exit=$restore_exit"
+    fi
+    return "$restore_exit"
 }
 
 run_autoupdate() {
@@ -2377,11 +2679,14 @@ show_help() {
     cat <<'TXT'
 Von Launcher Help
     Usage: ./run.sh [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | backup | autoupdate | rag-worker | help
+    Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
     Options:
-        -Port <int>
+        -Port <int>            Server port (default 5000; -AgentTest defaults to 5010)
+        -AgentTest             Isolated coding-agent test instance mode
+        -IsolatedTestInstance  Alias for -AgentTest
         -NoBrowser
         -ForceBrowser
+        -ChromeBeta
         -Tail <n>
         -Follow
         -LogRetention <n>
@@ -2401,6 +2706,17 @@ Von Launcher Help
         -BackupTag <tag>
         -BackupOutDir <path>
 
+    Restore options:
+        -RestoreBackupPath <path>
+        -RestoreTargetDbName <name>
+        -RestoreApply
+        -RestoreDropTarget
+
+    Backup safety environment variables:
+        VON_ENABLE_BACKUP_ACTION=1
+        VON_ENABLE_RESTORE_ACTION=1
+        VON_ALLOW_BACKUP_IN_REPO=1
+
     Autoupdate options:
         -UpdateIntervalMinutes <n>
         -UpdateBranch <name>
@@ -2409,8 +2725,10 @@ Von Launcher Help
     Examples:
         ./run.sh start
         ./run.sh restart -ForceBrowser
+        ./run.sh restart -AgentTest -HealthTimeoutSec 180
         ./run.sh logs -Tail 200 -Follow
         ./run.sh backup -BackupDryRun
+        ./run.sh restore-backup -RestoreBackupPath /path/to/last_successful_backup_receipt.json
         ./run.sh autoupdate -UpdateIntervalMinutes 30 -UpdateBranch main
 TXT
 }
@@ -2444,6 +2762,9 @@ case "$ACTION" in
         ;;
     backup)
         run_backup
+        ;;
+    restore-backup)
+        run_restore_backup
         ;;
     autoupdate)
         run_autoupdate

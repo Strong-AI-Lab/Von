@@ -441,6 +441,38 @@ def test_add_message_to_history_offloads_large_content_and_get_chat_history_hydr
     assert history[0]["content"] == large_content
 
 
+def test_agent_test_skips_episode_critique_memory_backfill(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    projection = MagicMock(return_value={"updated": True})
+    episode_backfill = MagicMock(side_effect=AssertionError("should not run"))
+    monkeypatch.setattr(
+        chat_history_service,
+        "upsert_turn_execution_record_projection",
+        projection,
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "upsert_episode_critique_memory_from_turn",
+        episode_backfill,
+    )
+
+    chat_history_service._upsert_turn_execution_projection_for_message(
+        message={"role": "assistant", "content": "done"},
+        llm_debug_data={
+            "turn_execution_record": {"request_id": "agent-test-turn"},
+        },
+        user_id="#V#u",
+        session_id="s1",
+        namespace="#V#u",
+        org_id=None,
+    )
+
+    projection.assert_called_once()
+    episode_backfill.assert_not_called()
+
+
 def test_get_chat_history_segments_reports_truncation(monkeypatch):
     from src.backend.services import chat_history_service
 

@@ -5,7 +5,9 @@ from typing import Any, cast
 
 import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
+    CancellationRequested,
     InternalMCPChatOrchestrator,
+    ProgressTracker,
 )
 from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
@@ -207,6 +209,198 @@ def test_supervised_turn_leaves_missing_discovery_unset_for_workflow_owned_routi
     assert workflow_data.get("workflow_discovery_result") is None
     assert workflow_data.get("workflow_discovery") is None
     assert result.response_text == "Done."
+
+
+def test_supervised_turn_check_cancellation_uses_progress_tracker(monkeypatch) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    observed: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        data = kwargs.get("data")
+        assert isinstance(data, dict)
+        check_cancellation = data.get("check_cancellation")
+        assert callable(check_cancellation)
+        try:
+            check_cancellation()
+        except CancellationRequested as exc:
+            observed["cancelled_task_id"] = exc.task_id
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done."},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    tracker = ProgressTracker(
+        callback=lambda _info: None,
+        cancellation_checker=lambda: True,
+        task_id="task-123",
+    )
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Cancel this background turn.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="test-model",
+        progress_tracker=tracker,
+    )
+
+    assert result.response_text == "Done."
+    assert observed["cancelled_task_id"] == "task-123"
+
+
+def test_agent_test_explicit_local_model_skips_remote_model_preloads(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+
+    def _unexpected_remote_lookup(*_args, **_kwargs):
+        raise AssertionError("remote AgentTest setup lookup should be skipped")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_workflow_model_policy",
+        _unexpected_remote_lookup,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        _unexpected_remote_lookup,
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "resolve_model_execution_budget_policy",
+        _unexpected_remote_lookup,
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_model_llm_timeout",
+        _unexpected_remote_lookup,
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_turn_memory_context_state",
+        _unexpected_remote_lookup,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        _unexpected_remote_lookup,
+    )
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done."},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+    progress_events: list[dict[str, Any]] = []
+    tracker = ProgressTracker(callback=lambda info: progress_events.append(dict(info)))
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="What text relations are used with the concept for Michael Witbrock?",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="gemma4:e4b",
+        progress_tracker=tracker,
+    )
+
+    workflow_data = captured.get("data")
+    assert isinstance(workflow_data, dict)
+    assert result.response_text == "Done."
+    assert workflow_data["policy_state"].enabled is False
+    assert workflow_data["registry_snapshot"]["source"] == (
+        "explicit_local_model_override"
+    )
+    assert workflow_data["model_execution_budget_policy"] is None
+    assert workflow_data["turn_memory_context_state"]["status"] == "none"
+    assert "AgentTest" in workflow_data["augmented_context"][0]["content"]
+    subtasks = {
+        event.get("subtask")
+        for event in progress_events
+        if isinstance(event.get("subtask"), str)
+    }
+    assert "Use explicit local model policy" in subtasks
+    assert "Use explicit local model registry snapshot" in subtasks
+    assert "Use no turn memory context" in subtasks
+    assert "Execute supervised workflow" in subtasks
+
+
+def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    workflow_id = "#V#agent_test_persistence_skip_workflow"
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+        purpose="AgentTest persistence skip regression workflow.",
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=definition,
+            purpose=definition.purpose,
+            source="test",
+        )
+    )
+    aux_log: list[dict[str, Any]] = []
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("AgentTest execute_workflow should skip persistence")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _unexpected,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_episode_service.start_workflow_use_episode",
+        _unexpected,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_episode_service.finalise_workflow_use_episode",
+        _unexpected,
+    )
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "conversation_session_id": "session-1",
+            "turn_id": "turn-1",
+            "workflow_episode_source": "conversation_turn_supervised",
+            "workflow_episode_stage": "conversation_turn",
+            "aux_llm_calls": aux_log,
+        },
+        llm_client=_DummyLLM(),
+        model="gemma4:e4b",
+        user_namespace="#V#michael_witbrock",
+    )
+
+    assert result is not None
+    assert result.completed is True
+    submission_event = next(
+        item
+        for item in aux_log
+        if item.get("type") == "workflow_instance_submission"
+    )
+    assert submission_event["status"] == "submission_skipped"
+    assert submission_event["reason_code"] == "agent_test_instance"
 
 
 def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(

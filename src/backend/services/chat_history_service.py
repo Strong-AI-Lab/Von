@@ -99,6 +99,10 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return default
 
 
+def _is_agent_test_instance() -> bool:
+    return _parse_bool_env("VON_AGENT_TEST_INSTANCE", False)
+
+
 def _positive_int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -1633,6 +1637,12 @@ def _upsert_turn_execution_projection_for_message(
                     record.get("request_id"),
                     reason,
                 )
+        if _is_agent_test_instance():
+            logger.debug(
+                "Skipping episode_critique_memory backfill for request_id=%s in AgentTest",
+                record.get("request_id"),
+            )
+            return
         critique_outcome = upsert_episode_critique_memory_from_turn(
             record=record,
             llm_debug_data=llm_debug_data,

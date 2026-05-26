@@ -151,6 +151,7 @@ def build_arm_run_environment(
             _safe_text(arm_metadata.get("label")) or None
         )
         for optional_key in (
+            "requested_provider",
             "model_arm_id",
             "base_prompt_id",
             "candidate_prompt_variant_id",

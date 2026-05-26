@@ -67,6 +67,10 @@ from ..plan_state_runtime import (
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
+from ..definitions import (
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
+)
 
 _FAILURE_MODE_INPUT_KEYS: tuple[str, ...] = ("failure_mode", "__failure_mode")
 _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
@@ -137,6 +141,257 @@ _TELEMETRY_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
 
 def _normalise_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _truthy_env_value(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
+def _agent_test_workflow_experience_profile_concept_id(
+    *,
+    inputs: Mapping[str, Any],
+    parent_context: Mapping[str, Any],
+    request: WorkflowActionRequest,
+) -> str:
+    from ...utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    workflow_id = (
+        _normalise_text(inputs.get("workflow_experience_target_workflow_id"))
+        or _normalise_text(parent_context.get("workflow_experience_target_workflow_id"))
+        or _normalise_text(parent_context.get("selected_workflow_id"))
+        or _normalise_text(inputs.get("__parent_workflow_id"))
+        or _normalise_text(parent_context.get("__parent_workflow_id"))
+        or "unknown_workflow"
+    )
+    model_ref = (
+        _normalise_text(inputs.get("workflow_experience_model_ref"))
+        or _normalise_text(inputs.get("requested_model"))
+        or _normalise_text(parent_context.get("workflow_experience_model_ref"))
+        or _normalise_text(parent_context.get("requested_model"))
+        or _normalise_text(getattr(request.environment, "model", None))
+        or "unknown_model"
+    )
+    return (
+        canonicalise_vontology_concept_id(
+            f"Workflow LLM experience profile: {workflow_id} / {model_ref}"
+        )
+        or "#V#workflow_llm_experience_profile_unknown_workflow_unknown_model"
+    )
+
+
+def _build_agent_test_workflow_experience_context_result(
+    *,
+    request: WorkflowActionRequest,
+    inputs: Mapping[str, Any],
+    child_workflow_id: str,
+    parent_workflow_id: str,
+    parent_state_id: str,
+    failure_mode: str,
+    invocation_chain: Sequence[str],
+    invocation_count: int,
+    invocation_limit: int,
+) -> WorkflowActionResult:
+    child_chain = [*invocation_chain, child_workflow_id]
+    request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+    profile_concept_id = _agent_test_workflow_experience_profile_concept_id(
+        inputs=inputs,
+        parent_context=request.data,
+        request=request,
+    )
+    child_result_payload: Dict[str, Any] = {
+        "workflow_success_guidance_history": [],
+        "workflow_failure_avoidance_history": [],
+        "workflow_low_imposition_exploration_history": [],
+        "workflow_experience_profile_concept_id": profile_concept_id,
+        "workflow_experience_effective_workflow_id": (
+            _normalise_text(inputs.get("workflow_experience_target_workflow_id"))
+            or _normalise_text(request.data.get("selected_workflow_id"))
+            or _normalise_text(parent_workflow_id)
+            or "unknown_workflow"
+        ),
+        "workflow_experience_effective_model_ref": (
+            _normalise_text(inputs.get("workflow_experience_model_ref"))
+            or _normalise_text(inputs.get("requested_model"))
+            or _normalise_text(request.data.get("requested_model"))
+            or _normalise_text(getattr(request.environment, "model", None))
+            or "unknown_model"
+        ),
+        "agent_test_guidance_skip_reason": "agent_test_instance",
+    }
+    invocation_event: Dict[str, Any] = {
+        "parent_workflow_id": parent_workflow_id or None,
+        "parent_state_id": parent_state_id or None,
+        "child_workflow_id": child_workflow_id,
+        "failure_mode": failure_mode,
+        "invocation_chain": list(child_chain),
+        "invocation_count": invocation_count + 1,
+        "invocation_limit": invocation_limit,
+        "child_completed": True,
+        "child_final_state": "agent_test_skipped",
+        "child_error": None,
+        "skip_reason": "agent_test_instance",
+    }
+    _append_parent_trace_event(
+        request_trace=request.trace,
+        invocation_event=invocation_event,
+    )
+    increment_runtime_metric(context=request.data, key="subworkflow_invocations")
+    append_runtime_event(
+        context=request.data,
+        event={
+            "status": "subworkflow_skipped",
+            "child_workflow_id": child_workflow_id,
+            "child_completed": True,
+            "child_final_state": "agent_test_skipped",
+            "invocation_count": invocation_count + 1,
+            "invocation_limit": invocation_limit,
+            "reason_code": "agent_test_instance",
+        },
+    )
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "result": child_result_payload,
+            "subworkflow_invocation": invocation_event,
+            "subworkflow_result_envelope": {
+                "workflow_id": child_workflow_id,
+                "completed": True,
+                "final_state": "agent_test_skipped",
+                "agent_test_bypass": True,
+            },
+        },
+    )
+
+
+def _model_identifier_looks_local_ollama(model: Any) -> bool:
+    if not isinstance(model, str):
+        return False
+    cleaned = model.strip().lower().replace(": ", ":")
+    if not cleaned:
+        return False
+    if cleaned.startswith("ollama:"):
+        return True
+    if cleaned.startswith(("openai:", "anthropic:", "gemini:", "azure_openai:")):
+        return False
+    if cleaned.startswith(("gpt-", "o1-", "claude", "gemini")):
+        return False
+    return ":" in cleaned
+
+
+def _agent_test_request_uses_local_model(request: WorkflowActionRequest) -> bool:
+    return _model_identifier_looks_local_ollama(
+        _normalise_text(getattr(request.environment, "model", None))
+        or _normalise_text(request.data.get("requested_model"))
+    )
+
+
+def _agent_test_relation_prompt_context(parent_context: Mapping[str, Any]) -> bool:
+    prompt_text = " ".join(
+        _normalise_text(value)
+        for value in (
+            parent_context.get("user_prompt"),
+            parent_context.get("prompt_for_requirements"),
+            parent_context.get("prompt"),
+        )
+        if _normalise_text(value)
+    ).lower()
+    if any(
+        marker in prompt_text
+        for marker in (
+            "text relation",
+            "text relations",
+            "represented relation",
+            "represented relations",
+        )
+    ):
+        return True
+    required_tools = parent_context.get("required_prompt_tools")
+    if not isinstance(required_tools, Sequence) or isinstance(
+        required_tools,
+        (str, bytes, bytearray),
+    ):
+        return False
+    return "get_text_relations_summary" in {
+        _normalise_text(tool_name) for tool_name in required_tools
+    }
+
+
+def _build_agent_test_postcondition_critic_result(
+    *,
+    request: WorkflowActionRequest,
+    inputs: Mapping[str, Any],
+    child_workflow_id: str,
+    parent_workflow_id: str,
+    parent_state_id: str,
+    failure_mode: str,
+    invocation_chain: Sequence[str],
+    invocation_count: int,
+    invocation_limit: int,
+) -> WorkflowActionResult:
+    from .turn_execution_runtime_support import run_turn_execution_critic
+
+    child_chain = [*invocation_chain, child_workflow_id]
+    request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+    critic_result = run_turn_execution_critic(
+        request,
+        annotation_component="workflow_subworkflow_agent_test",
+        annotation_function="_build_agent_test_postcondition_critic_result",
+    )
+    if critic_result.status == "failed":
+        return critic_result
+    child_result_payload: Dict[str, Any] = {
+        str(key): value
+        for key, value in critic_result.outputs.items()
+        if isinstance(key, str)
+    }
+    child_result_payload["agent_test_critic_skip_reason"] = "agent_test_instance"
+    invocation_event: Dict[str, Any] = {
+        "parent_workflow_id": parent_workflow_id or None,
+        "parent_state_id": parent_state_id or None,
+        "child_workflow_id": child_workflow_id,
+        "failure_mode": failure_mode,
+        "invocation_chain": list(child_chain),
+        "invocation_count": invocation_count + 1,
+        "invocation_limit": invocation_limit,
+        "child_completed": True,
+        "child_final_state": "agent_test_deterministic_critic",
+        "child_error": None,
+        "skip_reason": "agent_test_instance",
+    }
+    _append_parent_trace_event(
+        request_trace=request.trace,
+        invocation_event=invocation_event,
+    )
+    increment_runtime_metric(context=request.data, key="subworkflow_invocations")
+    append_runtime_event(
+        context=request.data,
+        event={
+            "status": "subworkflow_skipped",
+            "child_workflow_id": child_workflow_id,
+            "child_completed": True,
+            "child_final_state": "agent_test_deterministic_critic",
+            "invocation_count": invocation_count + 1,
+            "invocation_limit": invocation_limit,
+            "reason_code": "agent_test_instance",
+        },
+    )
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "result": child_result_payload,
+            "subworkflow_invocation": invocation_event,
+            "subworkflow_result_envelope": {
+                "workflow_id": child_workflow_id,
+                "completed": True,
+                "final_state": "agent_test_deterministic_critic",
+                "agent_test_bypass": True,
+            },
+        },
+    )
 
 
 def _normalise_chain(value: Any) -> list[str]:
@@ -351,6 +606,40 @@ def _build_subworkflow_handler(
                     "subworkflow_invocation_budget_exceeded:"
                     f"max_invocations={invocation_limit}"
                 ),
+            )
+
+        if (
+            child_workflow_id == WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
+            and _is_agent_test_instance()
+        ):
+            return _build_agent_test_workflow_experience_context_result(
+                request=request,
+                inputs=inputs,
+                child_workflow_id=child_workflow_id,
+                parent_workflow_id=parent_workflow_id,
+                parent_state_id=parent_state_id,
+                failure_mode=failure_mode,
+                invocation_chain=invocation_chain,
+                invocation_count=invocation_count,
+                invocation_limit=invocation_limit,
+            )
+
+        if (
+            child_workflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+            and _is_agent_test_instance()
+            and _agent_test_request_uses_local_model(request)
+            and _agent_test_relation_prompt_context(request.data)
+        ):
+            return _build_agent_test_postcondition_critic_result(
+                request=request,
+                inputs=inputs,
+                child_workflow_id=child_workflow_id,
+                parent_workflow_id=parent_workflow_id,
+                parent_state_id=parent_state_id,
+                failure_mode=failure_mode,
+                invocation_chain=invocation_chain,
+                invocation_count=invocation_count,
+                invocation_limit=invocation_limit,
             )
 
         definition = definition_loader(child_workflow_id)

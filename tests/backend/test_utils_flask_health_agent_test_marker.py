@@ -38,3 +38,19 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
 
     assert payload["agent_test_instance"] is True
     assert payload["agent_test_environment_marker"] == "VON_AGENT_TEST_INSTANCE"
+
+
+def test_agent_test_instance_skips_durable_workflow_startup(monkeypatch) -> None:
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+
+    app = Flask(__name__)
+
+    utils_flask._configure_durable_workflow_startup(app)
+
+    status = app.config["DURABLE_WORKFLOW_STARTUP_STATUS"]
+    assert status["state"] == "skipped_agent_test"
+    assert status["ready"] is False
+    assert app.config["DURABLE_WORKFLOW_COMPONENTS"] is None

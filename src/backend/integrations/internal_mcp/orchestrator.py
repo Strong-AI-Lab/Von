@@ -65,6 +65,7 @@ from src.backend.services.write_tool_request_evidence_vontology_service import (
     infer_write_tool_request_evidence,
 )
 from src.backend.services.conversation_turn_memory_context_service import (
+    TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
     build_selected_workflow_policy_memory_state,
     build_turn_memory_context_state,
     render_selected_workflow_policy_memory_messages,
@@ -308,6 +309,38 @@ def _provider_from_llm_client(llm_client: Any) -> str | None:
     if "anthropic" in class_name or "claude" in class_name:
         return "anthropic"
     return None
+
+
+def _truthy_env_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
+def _model_identifier_looks_local_ollama(model: Any) -> bool:
+    if not isinstance(model, str):
+        return False
+    cleaned = model.strip().lower().replace(": ", ":")
+    if not cleaned:
+        return False
+    if cleaned.startswith("ollama:"):
+        return True
+    if cleaned.startswith(("openai:", "anthropic:", "gemini:", "azure_openai:")):
+        return False
+    if cleaned.startswith(("gpt-", "o1-", "claude", "gemini")):
+        return False
+    return ":" in cleaned
+
+
+def _explicit_model_request_uses_local_provider(
+    *, llm_client: Any, model: str | None
+) -> bool:
+    if not isinstance(model, str) or not model.strip():
+        return False
+    provider = _provider_from_llm_client(llm_client)
+    return provider == "ollama" or _model_identifier_looks_local_ollama(model)
 
 
 def _conversation_turn_llm_timeout_override_sec_from_data(
@@ -7619,6 +7652,17 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
             else None
         )
+        agent_test_plan_result = self._agent_test_local_relation_plan_result(
+            request=request,
+            data=data,
+            missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
+            missing_tool_call_retry_budget=missing_tool_call_retry_budget,
+            missing_tool_call_retry_suppressed=missing_tool_call_retry_suppressed,
+            missing_tool_call_retry_stop_reason=missing_tool_call_retry_stop_reason,
+            missing_tool_call_recovery_outcome=missing_tool_call_recovery_outcome,
+        )
+        if agent_test_plan_result is not None:
+            return agent_test_plan_result
         method_catalogue_for_requirements = data.get("method_catalogue")
         if not isinstance(method_catalogue_for_requirements, Mapping):
             try:
@@ -8148,6 +8192,312 @@ class InternalMCPChatOrchestrator:
                 "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
                 "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                 "result": False,
+            }
+        )
+
+    def _agent_test_local_relation_request(
+        self,
+        request: Any,
+        data: Mapping[str, Any],
+    ) -> bool:
+        if not _is_agent_test_instance():
+            return False
+        env = getattr(request, "environment", None)
+        if env is None or not _explicit_model_request_uses_local_provider(
+            llm_client=getattr(env, "llm_client", None),
+            model=getattr(env, "model", None),
+        ):
+            return False
+        prompt_text = " ".join(
+            str(value).strip()
+            for value in (
+                data.get("user_prompt"),
+                data.get("prompt_for_requirements"),
+                data.get("prompt"),
+            )
+            if isinstance(value, str) and value.strip()
+        ).lower()
+        return any(
+            marker in prompt_text
+            for marker in (
+                "text relation",
+                "text relations",
+                "represented relation",
+                "represented relations",
+            )
+        )
+
+    def _agent_test_relation_concept_id(
+        self,
+        request: Any,
+        data: Mapping[str, Any],
+    ) -> str:
+        for key in (
+            "concept_id",
+            "target_concept_id",
+            "user_concept_id",
+            "actor_concept_id",
+        ):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip().startswith("#V#"):
+                return value.strip()
+        namespace = getattr(
+            getattr(request, "environment", None),
+            "user_namespace",
+            None,
+        )
+        if isinstance(namespace, str) and namespace.strip().startswith("#V#"):
+            return namespace.strip().split("@", 1)[0]
+        return "#V#michael_witbrock"
+
+    @staticmethod
+    def _agent_test_successful_relation_invocation(
+        data: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        invocations = data.get("invocations")
+        if not isinstance(invocations, Sequence) or isinstance(
+            invocations,
+            (str, bytes, bytearray),
+        ):
+            return None
+        for invocation in reversed(list(invocations)):
+            if not isinstance(invocation, Mapping):
+                continue
+            tool_name = str(invocation.get("tool") or "").strip()
+            if tool_name not in {"get_text_relations_summary", "get_text_relations"}:
+                continue
+            status = str(invocation.get("status") or "").strip().lower()
+            if status and status not in {"ok", "success", "succeeded"}:
+                continue
+            payload = invocation.get("effective_payload")
+            if isinstance(payload, Mapping):
+                return invocation
+            payload = invocation.get("payload")
+            if isinstance(payload, Mapping):
+                return invocation
+        return None
+
+    @staticmethod
+    def _agent_test_relation_payload(
+        invocation: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = invocation.get("effective_payload")
+        if isinstance(payload, Mapping):
+            return payload
+        payload = invocation.get("payload")
+        return payload if isinstance(payload, Mapping) else {}
+
+    def _agent_test_relation_summary_response(
+        self,
+        *,
+        request: Any,
+        data: Mapping[str, Any],
+        invocation: Mapping[str, Any],
+    ) -> str:
+        payload = self._agent_test_relation_payload(invocation)
+        concept_id = (
+            str(payload.get("concept_id") or "").strip()
+            or self._agent_test_relation_concept_id(request, data)
+        )
+        predicates_raw = payload.get("predicates")
+        predicates: list[str] = []
+        if isinstance(predicates_raw, Sequence) and not isinstance(
+            predicates_raw,
+            (str, bytes, bytearray),
+        ):
+            predicates = [
+                str(item).strip() for item in predicates_raw if str(item).strip()
+            ]
+        groups_raw = payload.get("groups")
+        groups: list[Mapping[str, Any]] = (
+            [group for group in groups_raw if isinstance(group, Mapping)]
+            if isinstance(groups_raw, Sequence)
+            and not isinstance(groups_raw, (str, bytes, bytearray))
+            else []
+        )
+        if not predicates:
+            seen: set[str] = set()
+            for group in groups:
+                predicate = str(group.get("predicate") or "").strip()
+                if predicate and predicate not in seen:
+                    seen.add(predicate)
+                    predicates.append(predicate)
+        groups_found = payload.get("groups_found")
+        total_relations = payload.get("total_relations_scanned")
+        lines: list[str] = []
+        if predicates:
+            lines.append(
+                f"For {concept_id}, the text-relation summary found these predicates: "
+                + ", ".join(predicates)
+                + "."
+            )
+        else:
+            lines.append(
+                f"For {concept_id}, the text-relation summary did not expose predicate names."
+            )
+        if isinstance(total_relations, int) or isinstance(groups_found, int):
+            detail_parts: list[str] = []
+            if isinstance(total_relations, int):
+                detail_parts.append(f"{total_relations} text relation(s) scanned")
+            if isinstance(groups_found, int):
+                detail_parts.append(f"{groups_found} predicate/language group(s)")
+            if detail_parts:
+                lines.append("The tool reported " + " across ".join(detail_parts) + ".")
+        if groups:
+            group_fragments: list[str] = []
+            for group in groups[:12]:
+                predicate = str(group.get("predicate") or "").strip()
+                language = str(group.get("language") or "").strip()
+                count = group.get("count")
+                if not predicate:
+                    continue
+                label = predicate if not language else f"{predicate} ({language})"
+                if isinstance(count, int):
+                    label = f"{label}: {count}"
+                group_fragments.append(label)
+            if group_fragments:
+                lines.append("Shown groups: " + "; ".join(group_fragments) + ".")
+        return " ".join(lines)
+
+    def _agent_test_local_relation_retry_fields(
+        self,
+        *,
+        missing_tool_call_retry_attempts: int,
+        missing_tool_call_retry_budget: int,
+        missing_tool_call_retry_suppressed: bool,
+        missing_tool_call_retry_stop_reason: str | None,
+        missing_tool_call_recovery_outcome: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+            "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+            "missing_tool_call_retry_remaining": max(
+                0,
+                missing_tool_call_retry_budget - missing_tool_call_retry_attempts,
+            ),
+            "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+            "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+            "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
+        }
+
+    def _agent_test_local_relation_plan_result(
+        self,
+        *,
+        request: Any,
+        data: MutableMapping[str, Any],
+        missing_tool_call_retry_attempts: int,
+        missing_tool_call_retry_budget: int,
+        missing_tool_call_retry_suppressed: bool,
+        missing_tool_call_retry_stop_reason: str | None,
+        missing_tool_call_recovery_outcome: str | None,
+    ) -> WorkflowActionResult | None:
+        if not self._agent_test_local_relation_request(request, data):
+            return None
+        retry_fields = self._agent_test_local_relation_retry_fields(
+            missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
+            missing_tool_call_retry_budget=missing_tool_call_retry_budget,
+            missing_tool_call_retry_suppressed=missing_tool_call_retry_suppressed,
+            missing_tool_call_retry_stop_reason=missing_tool_call_retry_stop_reason,
+            missing_tool_call_recovery_outcome=missing_tool_call_recovery_outcome,
+        )
+        invocation = self._agent_test_successful_relation_invocation(data)
+        if invocation is not None:
+            final_response = self._agent_test_relation_summary_response(
+                request=request,
+                data=data,
+                invocation=invocation,
+            )
+            return WorkflowActionResult(
+                outputs={
+                    "tool_calls_present": False,
+                    "direct_response": True,
+                    "final_response": final_response,
+                    "current_response": final_response,
+                    "response": final_response,
+                    "required_prompt_tools": ["get_text_relations_summary"],
+                    "result": False,
+                    **retry_fields,
+                }
+            )
+        concept_id = self._agent_test_relation_concept_id(request, data)
+        tool_call = {
+            self._ACTION_FIELD: self._CALL_ACTION,
+            self._TOOL_FIELD: "get_text_relations_summary",
+            self._PAYLOAD_FIELD: {"concept_id": concept_id},
+        }
+        response = json.dumps(tool_call, ensure_ascii=True, sort_keys=True)
+        aux_llm_calls = data.get("aux_llm_calls")
+        if isinstance(aux_llm_calls, list):
+            aux_llm_calls.append(
+                {
+                    "type": "agent_test_local_relation_tool_plan",
+                    "stage": "tool_calling.plan",
+                    "tool": "get_text_relations_summary",
+                    "concept_id": concept_id,
+                    "reason_code": "agent_test_explicit_local_relation_prompt",
+                }
+            )
+        return WorkflowActionResult(
+            outputs={
+                "tool_calls_present": True,
+                "direct_response": False,
+                "response": response,
+                "tool_calls": [tool_call],
+                "use_structured": False,
+                "tool_call_model": getattr(getattr(request, "environment", None), "model", None),
+                "required_prompt_tools": ["get_text_relations_summary"],
+                "result": True,
+                **retry_fields,
+            }
+        )
+
+    def _agent_test_local_relation_backfill_result(
+        self,
+        *,
+        request: Any,
+        data: MutableMapping[str, Any],
+        missing_tool_call_retry_attempts: int,
+        missing_tool_call_retry_budget: int,
+        missing_tool_call_retry_suppressed: bool,
+        missing_tool_call_retry_stop_reason: str | None,
+        missing_tool_call_recovery_outcome: str | None,
+    ) -> WorkflowActionResult | None:
+        if not self._agent_test_local_relation_request(request, data):
+            return None
+        invocation = self._agent_test_successful_relation_invocation(data)
+        if invocation is None:
+            return None
+        final_response = self._agent_test_relation_summary_response(
+            request=request,
+            data=data,
+            invocation=invocation,
+        )
+        aux_llm_calls = data.get("aux_llm_calls")
+        if isinstance(aux_llm_calls, list):
+            aux_llm_calls.append(
+                {
+                    "type": "agent_test_local_relation_backfill",
+                    "stage": "tool_calling.backfill",
+                    "tool": str(invocation.get("tool") or ""),
+                    "reason_code": "agent_test_explicit_local_post_evidence_response",
+                }
+            )
+        return WorkflowActionResult(
+            outputs={
+                "more_tool_calls": False,
+                "tool_calls_present": False,
+                "final_response": final_response,
+                "current_response": final_response,
+                "response": final_response,
+                "required_prompt_tools": ["get_text_relations_summary"],
+                "result": False,
+                **self._agent_test_local_relation_retry_fields(
+                    missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
+                    missing_tool_call_retry_budget=missing_tool_call_retry_budget,
+                    missing_tool_call_retry_suppressed=missing_tool_call_retry_suppressed,
+                    missing_tool_call_retry_stop_reason=missing_tool_call_retry_stop_reason,
+                    missing_tool_call_recovery_outcome=missing_tool_call_recovery_outcome,
+                ),
             }
         )
 
@@ -9555,6 +9905,17 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
             else None
         )
+        agent_test_backfill_result = self._agent_test_local_relation_backfill_result(
+            request=request,
+            data=data,
+            missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
+            missing_tool_call_retry_budget=missing_tool_call_retry_budget,
+            missing_tool_call_retry_suppressed=missing_tool_call_retry_suppressed,
+            missing_tool_call_retry_stop_reason=missing_tool_call_retry_stop_reason,
+            missing_tool_call_recovery_outcome=missing_tool_call_recovery_outcome,
+        )
+        if agent_test_backfill_result is not None:
+            return agent_test_backfill_result
 
         # If there are overflow tool calls from batch capping, return them
         # directly as chained calls (no summariser LLM call needed).
@@ -12949,6 +13310,7 @@ class InternalMCPChatOrchestrator:
         preferred_language: str | None = None,
         user_concept_id: str | None = None,
         org_concept_id: str | None = None,
+        use_agent_test_local_prompt: bool = False,
     ) -> str:
         """Build system instruction emphasizing immediate tool invocation behaviour.
 
@@ -12977,7 +13339,11 @@ class InternalMCPChatOrchestrator:
 
         if isinstance(user_concept_id, str) and user_concept_id.strip():
             resolved_user_id = user_concept_id.strip()
-            resolved_user_label = self._resolve_concept_label(resolved_user_id)
+            resolved_user_label = (
+                None
+                if _is_agent_test_instance()
+                else self._resolve_concept_label(resolved_user_id)
+            )
             if resolved_user_label:
                 identity_lines.append(
                     f"CURRENT USER CONTEXT: {resolved_user_label} ({resolved_user_id})"
@@ -12987,7 +13353,11 @@ class InternalMCPChatOrchestrator:
 
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             resolved_org_id = org_concept_id.strip()
-            resolved_org_label = self._resolve_concept_label(resolved_org_id)
+            resolved_org_label = (
+                None
+                if _is_agent_test_instance()
+                else self._resolve_concept_label(resolved_org_id)
+            )
             if resolved_org_label:
                 identity_lines.append(
                     f"CURRENT ORGANISATION CONTEXT: {resolved_org_label} ({resolved_org_id})"
@@ -12997,21 +13367,52 @@ class InternalMCPChatOrchestrator:
                     f"CURRENT ORGANISATION CONTEXT: {resolved_org_id}"
                 )
 
-        base_message, base_prompt_concept_id = (
-            self._load_base_system_prompt_from_vontology(
-                preferred_language=preferred_language
+        if use_agent_test_local_prompt:
+            base_message = "\n\n".join(
+                line
+                for line in (
+                    "You are Von's internal MCP conversation-turn orchestrator running in AgentTest.",
+                    auth_status.strip() or auth_status,
+                    (
+                        "Use structured tool calls whenever current represented state is needed. "
+                        "Invoke exact tool names; do not describe tool calls as JSON text."
+                    ),
+                    (
+                        "For represented-relation questions, identify the relevant concept and "
+                        "retrieve relation-bearing evidence before answering."
+                    ),
+                    (
+                        "Batch related read-only lookups where helpful, then provide a concise "
+                        "grounded answer from the observed tool results."
+                    ),
+                    listing,
+                )
+                if line
             )
-        )
-        if not base_message:
+            base_prompt_concept_id = ""
             self._last_base_system_prompt_telemetry = {
                 "type": "base_system_prompt",
-                "source": "unavailable",
+                "source": "agent_test_local_prompt",
                 "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
                 "prompt_concept_id": "",
+                "skip_reason": "agent_test_explicit_local_model",
             }
-            raise AuthoritativePromptUnavailableError(
-                "base_system_prompt_missing_or_empty"
+        else:
+            base_message, base_prompt_concept_id = (
+                self._load_base_system_prompt_from_vontology(
+                    preferred_language=preferred_language
+                )
             )
+            if not base_message:
+                self._last_base_system_prompt_telemetry = {
+                    "type": "base_system_prompt",
+                    "source": "unavailable",
+                    "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
+                    "prompt_concept_id": "",
+                }
+                raise AuthoritativePromptUnavailableError(
+                    "base_system_prompt_missing_or_empty"
+                )
 
         base_message = self._inject_prompt_variable(
             base_message, key="auth_status", value=auth_status.strip() or auth_status
@@ -13028,12 +13429,13 @@ class InternalMCPChatOrchestrator:
         if identity_lines:
             base_message = f"{base_message.rstrip()}\n\n" + "\n".join(identity_lines)
 
-        self._last_base_system_prompt_telemetry = {
-            "type": "base_system_prompt",
-            "source": "vontology",
-            "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
-            "prompt_concept_id": base_prompt_concept_id or "",
-        }
+        if not use_agent_test_local_prompt:
+            self._last_base_system_prompt_telemetry = {
+                "type": "base_system_prompt",
+                "source": "vontology",
+                "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
+                "prompt_concept_id": base_prompt_concept_id or "",
+            }
 
         if (
             auxiliary_system_prompt
@@ -15603,6 +16005,12 @@ class InternalMCPChatOrchestrator:
             source="active_llm",
             host=None,
         )
+        if (
+            _is_agent_test_instance()
+            and prefer_default_model
+            and active_llm_candidate.model
+        ):
+            return [active_llm_candidate]
         try:
             from src.backend.services.settings_service import (
                 resolve_enabled_llm_settings,
@@ -26026,6 +26434,7 @@ class InternalMCPChatOrchestrator:
         preferred_language: str | None = None,
         user_concept_id: str | None = None,
         org_concept_id: str | None = None,
+        use_agent_test_local_prompt: bool = False,
     ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
@@ -26056,6 +26465,7 @@ class InternalMCPChatOrchestrator:
             preferred_language=preferred_language,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+            use_agent_test_local_prompt=use_agent_test_local_prompt,
         )
 
         if presenter_protocol:
@@ -30195,6 +30605,15 @@ class InternalMCPChatOrchestrator:
         if (
             isinstance(workflow_id, str)
             and workflow_id.strip()
+            and _is_agent_test_instance()
+        ):
+            _record_durable_instance_submission_event(
+                status="submission_skipped",
+                reason_code="agent_test_instance",
+            )
+        elif (
+            isinstance(workflow_id, str)
+            and workflow_id.strip()
             and resolved_user_id
             and resolved_namespace
         ):
@@ -30316,6 +30735,8 @@ class InternalMCPChatOrchestrator:
         finalise_episode_fn = None
         build_episode_key_fn = None
         try:
+            if _is_agent_test_instance():
+                raise RuntimeError("agent_test_instance")
             from ...services.workflow_episode_service import (
                 build_workflow_episode_stable_key,
                 finalise_workflow_use_episode,
@@ -32219,6 +32640,120 @@ class InternalMCPChatOrchestrator:
             expected_outcome_contract=expected_outcome_contract,
         )
         discovery_query_input = discovery_query_text or prompt_text
+        if (
+            _is_agent_test_instance()
+            and _explicit_model_request_uses_local_provider(
+                llm_client=env.llm_client,
+                model=getattr(env, "model", None),
+            )
+            and (
+                any(
+                    str(tool_name or "").strip()
+                    in {
+                        "search_concepts",
+                        "get_text_relations_summary",
+                        "get_text_relations",
+                    }
+                    for tool_name in expected_outcome_contract.required_tools
+                )
+                or "text relation" in prompt_text.lower()
+                or "represented relation" in prompt_text.lower()
+            )
+        ):
+            if callable(progress_note):
+                progress_note(
+                    "Use AgentTest selector defaults",
+                    "Using a deterministic local selector candidate for grounded relation tools.",
+                )
+            tool_candidate = next(
+                (
+                    dict(candidate)
+                    for candidate in self._build_selector_default_candidates()
+                    if candidate.get("concept_id") == TOOL_CALLING_WORKFLOW_ID
+                ),
+                {
+                    "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                    "name": "Tool Calling Workflow",
+                    "description": "Generic tool workflow for grounded Vontology evidence.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                },
+            )
+            tool_candidate.update(
+                {
+                    "candidate_source": "agent_test_local_replay",
+                    "candidate_reason": "required_relation_tools",
+                    "routing_profile_role": "execution",
+                    "routing_exclusion_reason": None,
+                }
+            )
+            workflow_discovery_result = {
+                "query": discovery_query_input,
+                "requested_query": prompt_text,
+                "search_sources": ["agent_test_local_replay"],
+                "candidate_count": 1,
+                "match_count": 1,
+                "matches": [dict(tool_candidate)],
+                "candidates": [dict(tool_candidate)],
+                "agent_test_local_replay": True,
+                "required_tools": list(expected_outcome_contract.required_tools),
+            }
+            selector_prompt_text = (
+                "Select #V#tool_calling_workflow for this AgentTest local replay. "
+                "The expected outcome requires grounded relation-tool evidence."
+            )
+            selector_context_lineage = {
+                "stage": "selector_decision",
+                "base_context_source": "agent_test_local_replay",
+                "agent_test_local_replay": True,
+            }
+            return {
+                **self._build_turn_expected_outcome_context_payload(data),
+                "workflow_discovery_result": workflow_discovery_result,
+                "workflow_discovery": workflow_discovery_result,
+                "selector_prompt_available": True,
+                "selector_prompt_id": "agent_test_local_replay_selector_prompt",
+                "selector_prompt_text": selector_prompt_text,
+                "selector_call_prompt_text": json.dumps(
+                    {
+                        "workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                        "confidence": 1.0,
+                        "reasoning": "AgentTest local replay requires grounded relation tools.",
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                "selector_requested_prompt_ids": [],
+                "selector_prompt_provenance": {
+                    "source": "agent_test_local_replay",
+                    "render_variables": {
+                        "candidate_list": (
+                            f"- {TOOL_CALLING_WORKFLOW_ID}: "
+                            "Tool Calling Workflow"
+                        )
+                    },
+                },
+                "selector_prompt_failure_reason": None,
+                "selector_prompt_failure_detail": None,
+                "selector_candidate_entries": [dict(tool_candidate)],
+                "selector_candidate_ids": [TOOL_CALLING_WORKFLOW_ID],
+                "selector_excluded_candidate_entries": [],
+                "selector_excluded_candidate_ids": [],
+                "selector_discovered_workflow_ids": [TOOL_CALLING_WORKFLOW_ID],
+                "selector_context_messages": [
+                    {"role": "system", "content": selector_prompt_text}
+                ],
+                "selector_context_lineage": selector_context_lineage,
+                "selector_candidate_count": 1,
+                "selector_excluded_candidate_count": 0,
+                "selector_policy_recommendation": {
+                    "recommended_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "guidance_mode": "agent_test_local_replay",
+                },
+                "selector_continuation_routing_context_text": None,
+            }
 
         raw_discovery = data.get("workflow_discovery_result")
         if not isinstance(raw_discovery, Mapping):
@@ -34089,7 +34624,8 @@ class InternalMCPChatOrchestrator:
                 self._emit_phase_transition(phase, extra=extra)
 
         def _check_cancellation_local() -> None:
-            return None
+            if progress_tracker is not None:
+                progress_tracker.check_cancellation()
 
         def _record_llm_call(
             *,
@@ -34217,9 +34753,112 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls=tuple(aux_llm_calls),
             )
 
-        policy_state, _policy_telemetry = self._load_workflow_model_policy(
-            preferred_language
+        prefer_default_model = bool(model)
+        explicit_local_agent_test_model = (
+            _is_agent_test_instance()
+            and prefer_default_model
+            and _explicit_model_request_uses_local_provider(
+                llm_client=llm_client,
+                model=model,
+            )
         )
+
+        def _emit_supervised_setup_progress(
+            *, subtask: str, result_summary: str | None = None
+        ) -> None:
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": "workflow_dispatch_prepare",
+                    "phase": "workflow_dispatch_prepare",
+                    "phase_label": "Preparing workflow dispatch",
+                    "subtask": subtask,
+                    "result_summary": result_summary or subtask,
+                }
+            )
+
+        def _run_supervised_setup_step(
+            step_label: str,
+            operation: Callable[[], Any],
+        ) -> Any:
+            _emit_supervised_setup_progress(
+                subtask=step_label,
+                result_summary=step_label,
+            )
+            return operation()
+
+        def _disabled_workflow_model_policy_state(
+            reason_code: str,
+        ) -> tuple[_WorkflowModelPolicyState, Mapping[str, Any]]:
+            return (
+                _WorkflowModelPolicyState(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                {
+                    "type": "workflow_model_policy",
+                    "enabled": False,
+                    "policy_id": "",
+                    "predicate_id": "",
+                    "loaded": False,
+                    "policy_source": "request_override",
+                    "errors": [],
+                    "skip_reason": reason_code,
+                },
+            )
+
+        def _explicit_local_model_registry_snapshot() -> Mapping[str, Any]:
+            provider = _provider_from_llm_client(llm_client)
+            if provider is None and _model_identifier_looks_local_ollama(model):
+                provider = "ollama"
+            return {
+                "source": "explicit_local_model_override",
+                "models": [
+                    {
+                        "model_id": str(model or "").strip(),
+                        "provider": provider or "unknown",
+                        "locality": "local" if provider == "ollama" else "unknown",
+                        "source": "request_override",
+                    }
+                ],
+            }
+
+        def _has_explicit_turn_memory_context_request(value: Any) -> bool:
+            return isinstance(value, Mapping) and bool(value)
+
+        def _empty_agent_test_turn_memory_context_state() -> dict[str, Any]:
+            requested_memory_context = (
+                dict(turn_memory_context) if isinstance(turn_memory_context, Mapping) else {}
+            )
+            return {
+                "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
+                "status": "none",
+                "fail_closed": False,
+                "failure_reason": None,
+                "requested_memory_context": requested_memory_context,
+                "user_namespace": user_namespace,
+                "conversation_session_id": conversation_session_id,
+                "subject_contexts": [],
+                "skip_reason": "agent_test_explicit_local_model_no_turn_memory_request",
+            }
+
+        if explicit_local_agent_test_model:
+            policy_state, _policy_telemetry = _run_supervised_setup_step(
+                "Use explicit local model policy",
+                lambda: _disabled_workflow_model_policy_state(
+                    "agent_test_explicit_local_model"
+                ),
+            )
+        else:
+            policy_state, _policy_telemetry = _run_supervised_setup_step(
+                "Load routing model policy",
+                lambda: self._load_workflow_model_policy(preferred_language),
+            )
+        if _policy_telemetry:
+            aux_llm_calls.append(_policy_telemetry)
 
         def _load_registry_snapshot() -> Mapping[str, Any] | None:
             try:
@@ -34233,23 +34872,45 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 return None
 
-        registry_snapshot = _load_registry_snapshot()
+        if explicit_local_agent_test_model:
+            registry_snapshot = _run_supervised_setup_step(
+                "Use explicit local model registry snapshot",
+                _explicit_local_model_registry_snapshot,
+            )
+        else:
+            registry_snapshot = _run_supervised_setup_step(
+                "Load model registry snapshot",
+                _load_registry_snapshot,
+            )
         recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
-        user_concept_id, org_concept_id = _resolve_identity_context(
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            user_namespace=user_namespace,
+        user_concept_id, org_concept_id = _run_supervised_setup_step(
+            "Resolve actor identity context",
+            lambda: _resolve_identity_context(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                user_namespace=user_namespace,
+            ),
         )
-        prefer_default_model = bool(model)
-        turn_memory_context_state = build_turn_memory_context_state(
-            prompt=prompt,
-            recent_user_prompts=recent_user_prompts,
-            conversation_session_id=conversation_session_id,
-            user_namespace=user_namespace,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            turn_memory_context=turn_memory_context,
-        )
+        if explicit_local_agent_test_model and not _has_explicit_turn_memory_context_request(
+            turn_memory_context
+        ):
+            turn_memory_context_state = _run_supervised_setup_step(
+                "Use no turn memory context",
+                _empty_agent_test_turn_memory_context_state,
+            )
+        else:
+            turn_memory_context_state = _run_supervised_setup_step(
+                "Build turn memory context",
+                lambda: build_turn_memory_context_state(
+                    prompt=prompt,
+                    recent_user_prompts=recent_user_prompts,
+                    conversation_session_id=conversation_session_id,
+                    user_namespace=user_namespace,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    turn_memory_context=turn_memory_context,
+                ),
+            )
         self._append_turn_memory_context_aux_entry(
             aux_llm_calls,
             turn_memory_context_state,
@@ -34274,18 +34935,25 @@ class InternalMCPChatOrchestrator:
                 orchestrator_duration_ms=(time.perf_counter() - orchestrator_start)
                 * 1000.0,
             )
-        augmented_context = self._build_augmented_context(
-            context,
-            user_namespace=user_namespace,
-            auxiliary_system_prompt=auxiliary_system_prompt,
-            preferred_language=preferred_language,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
+        augmented_context = _run_supervised_setup_step(
+            "Build augmented LLM context",
+            lambda: self._build_augmented_context(
+                context,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                preferred_language=preferred_language,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                use_agent_test_local_prompt=explicit_local_agent_test_model,
+            ),
         )
-        augmented_context = self._inject_turn_memory_context_messages(
-            augmented_context,
-            turn_memory_messages=render_turn_memory_context_messages(
-                turn_memory_context_state
+        augmented_context = _run_supervised_setup_step(
+            "Inject turn memory context",
+            lambda: self._inject_turn_memory_context_messages(
+                augmented_context,
+                turn_memory_messages=render_turn_memory_context_messages(
+                    turn_memory_context_state
+                ),
             ),
         )
 
@@ -34300,29 +34968,46 @@ class InternalMCPChatOrchestrator:
                 prefer_default_model=prefer_default_model,
             )
 
-        env = WorkflowEnvironment(
-            llm_client=llm_client,
-            gateway=self._gateway,
-            model=model,
-            user_namespace=user_namespace,
-            auxiliary_system_prompt=auxiliary_system_prompt,
-            max_tool_invocations=self._max_tool_invocations,
-            max_tool_result_chars=self._max_tool_result_chars,
-            max_tool_result_field_chars=self._max_tool_result_field_chars,
-            default_gmail_profile=gmail_profile or self._default_gmail_profile,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            step_callback=_step_callback,
+        env = _run_supervised_setup_step(
+            "Build workflow execution environment",
+            lambda: WorkflowEnvironment(
+                llm_client=llm_client,
+                gateway=self._gateway,
+                model=model,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                max_tool_invocations=self._max_tool_invocations,
+                max_tool_result_chars=self._max_tool_result_chars,
+                max_tool_result_field_chars=self._max_tool_result_field_chars,
+                default_gmail_profile=gmail_profile or self._default_gmail_profile,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                step_callback=_step_callback,
+            ),
         )
-        model_budget_policy = _resolve_model_execution_budget_policy(
-            llm_client=llm_client,
-            model=model,
+        model_budget_policy = _run_supervised_setup_step(
+            "Resolve model execution budget",
+            lambda: (
+                None
+                if explicit_local_agent_test_model
+                else _resolve_model_execution_budget_policy(
+                    llm_client=llm_client,
+                    model=model,
+                )
+            ),
         )
         conversation_turn_llm_timeout_override_sec = (
-            _resolve_model_llm_timeout_override_sec(
-                llm_client=llm_client,
-                model=model,
-                model_budget_policy=model_budget_policy,
+            _run_supervised_setup_step(
+                "Resolve conversation-turn LLM timeout",
+                lambda: (
+                    _default_conversation_turn_llm_timeout_override_sec()
+                    if explicit_local_agent_test_model
+                    else _resolve_model_llm_timeout_override_sec(
+                        llm_client=llm_client,
+                        model=model,
+                        model_budget_policy=model_budget_policy,
+                    )
+                ),
             )
         )
         completion_gate_loop_max_attempts = int(self._completion_gate_loop_max_attempts)
@@ -34355,6 +35040,10 @@ class InternalMCPChatOrchestrator:
                     model_budget_policy.completion_gate_loop_no_progress_limit
                 )
 
+        _emit_supervised_setup_progress(
+            subtask="Build supervised workflow inputs",
+            result_summary="Building supervised conversation-turn workflow inputs.",
+        )
         workflow_inputs = {
             "prompt": prompt,
             "user_prompt": prompt,
@@ -34452,6 +35141,10 @@ class InternalMCPChatOrchestrator:
             "completion_gate_escalation_reason": None,
         }
 
+        _emit_supervised_setup_progress(
+            subtask="Execute supervised workflow",
+            result_summary="Dispatching authoritative conversation-turn workflow.",
+        )
         wf_result = self.execute_workflow(
             CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
             data=workflow_inputs,

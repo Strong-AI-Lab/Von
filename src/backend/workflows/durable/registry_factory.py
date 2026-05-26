@@ -38,6 +38,7 @@ from ..vontology_loader import (
     resolve_workflow_description,
 )
 from ..workflow_concept_authority_service import (
+    build_seed_canonical_workflow_definitions,
     build_workflow_concept_authority_report,
 )
 from ..workflow_description_quality_service import (
@@ -56,6 +57,36 @@ _shared_workflow_registry_lock = Lock()
 _shared_workflow_registry: WorkflowRegistry | None = None
 _shared_action_registry_lock = Lock()
 _shared_action_registry: ActionRegistry | None = None
+
+
+def _truthy_env_value(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
+@lru_cache(maxsize=1)
+def _agent_test_seed_workflow_definitions() -> Dict[str, WorkflowDefinition]:
+    return build_seed_canonical_workflow_definitions()
+
+
+def _load_agent_test_seed_workflow_definition(
+    workflow_id: str,
+) -> WorkflowDefinition | None:
+    workflow_id_clean = str(workflow_id or "").strip()
+    if not workflow_id_clean:
+        return None
+    return _agent_test_seed_workflow_definitions().get(workflow_id_clean)
+
+
+def _runtime_workflow_definition_loader(
+    workflow_id: str,
+) -> WorkflowDefinition | None:
+    if _is_agent_test_instance():
+        return _load_agent_test_seed_workflow_definition(workflow_id)
+    return load_workflow_definition_from_vontology(workflow_id)
 
 _EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#file_copy_typing_workflow",
@@ -1164,11 +1195,28 @@ def _build_workflow_registry(
             come from already-materialised Vontology artefacts.
     """
     registry = WorkflowRegistry(
-        definition_loader=load_workflow_definition_from_vontology,
+        definition_loader=_runtime_workflow_definition_loader,
     )
     requested_bootstrap = bool(allow_bootstrap)
 
     _register_python_defined_workflows(registry)
+
+    if _is_agent_test_instance():
+        seed_definitions = _agent_test_seed_workflow_definitions()
+        for workflow_id, definition in seed_definitions.items():
+            registry.register_if_absent(
+                WorkflowRegistration(
+                    workflow_id=workflow_id,
+                    definition=definition,
+                    purpose=definition.purpose,
+                    source="repo_seed_agent_test",
+                )
+            )
+        logger.info(
+            "Workflow registry built from repo seed for AgentTest: %d eager.",
+            len(seed_definitions),
+        )
+        return registry
 
     # 3. Vontology-discovered workflows — lazy registration
     #    (JVNAUTOSCI-1424 Phase 1: defer expensive per-workflow DB loads)
@@ -1562,5 +1610,8 @@ def _resolve_subworkflow_definition(workflow_id: str):
             return definition
     except Exception:
         definition = None
+
+    if _is_agent_test_instance():
+        return _load_agent_test_seed_workflow_definition(workflow_id_clean)
 
     return load_workflow_definition_from_vontology(workflow_id_clean)

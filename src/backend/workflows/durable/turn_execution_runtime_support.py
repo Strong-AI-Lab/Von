@@ -47,6 +47,14 @@ def _safe_str(value: Any) -> str | None:
     return cleaned or None
 
 
+def _truthy_env_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
 def _coerce_non_negative_int(
     value: Any,
     *,
@@ -3142,12 +3150,17 @@ def run_turn_execution_completion_gate(
     )
 
     introspection_autotrigger: dict[str, Any] | None = None
-    from ...services.workflow_event_integration_service import (
-        episode_evaluation_autotrigger_enabled,
-        maybe_launch_episode_evaluation_for_turn_completion_gate,
-    )
+    maybe_launch_episode_evaluation_for_turn_completion_gate = None
+    agent_test_instance = _is_agent_test_instance()
+    if agent_test_instance:
+        autotrigger_enabled = False
+    else:
+        from ...services.workflow_event_integration_service import (
+            episode_evaluation_autotrigger_enabled,
+            maybe_launch_episode_evaluation_for_turn_completion_gate,
+        )
 
-    autotrigger_enabled = episode_evaluation_autotrigger_enabled()
+        autotrigger_enabled = episode_evaluation_autotrigger_enabled()
     already_autotriggered = bool(
         data.get("workflow_introspection_autotriggered")
         or data.get("episode_evaluation_autotriggered")
@@ -3236,7 +3249,9 @@ def run_turn_execution_completion_gate(
         introspection_autotrigger = {
             "attempted": False,
             "enabled": False,
-            "reason": "autotrigger_disabled",
+            "reason": (
+                "agent_test_instance" if agent_test_instance else "autotrigger_disabled"
+            ),
             "workflow_id": "#V#episode_evaluation_workflow",
         }
 

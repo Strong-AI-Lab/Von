@@ -313,6 +313,24 @@ class BackgroundTaskRegistry:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def update_progress(self, task_id: str, progress: Mapping[str, Any]) -> bool:
+        """Update progress for an active task.
+
+        Args:
+            task_id: The task identifier.
+            progress: Latest progress payload to expose via task status.
+
+        Returns:
+            True when an active task was updated.
+        """
+        progress_payload = dict(progress) if isinstance(progress, Mapping) else {}
+        with self._lock:
+            status = self._tasks.get(task_id)
+            if status is None or not _is_active_status(status.status):
+                return False
+            status.progress = progress_payload
+            return True
+
     def get_task_result(self, task_id: str) -> Any:
         """Get the result of a completed task.
 
