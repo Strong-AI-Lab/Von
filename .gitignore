@@ -41,6 +41,9 @@ docs/copilot_histories/
 # Temporary/private paper draft workspaces
 docs/papers/
 
+# Generated replay-suite validation artefacts
+docs/generated/validation_reports/replay_suite_*
+
 # Ignore directories and sensitive files
 ignore/
 token.*
