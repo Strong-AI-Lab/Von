@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -35115,12 +35116,65 @@ class InternalMCPChatOrchestrator:
         def _run_supervised_setup_step(
             step_label: str,
             operation: Callable[[], Any],
+            *,
+            timeout_seconds: float | None = None,
+            timeout_fallback: Callable[[float], Any] | None = None,
         ) -> Any:
             _emit_supervised_setup_progress(
                 subtask=step_label,
                 result_summary=step_label,
             )
-            return operation()
+            step_start = time.perf_counter()
+            if timeout_seconds is None or timeout_seconds <= 0:
+                return operation()
+
+            result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+            def _worker() -> None:
+                try:
+                    result_queue.put(("result", operation()))
+                except Exception as exc:
+                    result_queue.put(("exception", exc))
+
+            thread = threading.Thread(
+                target=_worker,
+                name="workflow-dispatch-prepare-supervised",
+                daemon=True,
+            )
+            thread.start()
+            try:
+                kind, payload = result_queue.get(timeout=timeout_seconds)
+            except queue.Empty:
+                duration_ms = int((time.perf_counter() - step_start) * 1000)
+                aux_llm_calls.append(
+                    {
+                        "type": "workflow_dispatch_prepare_step",
+                        "step_label": step_label,
+                        "stage": "workflow_dispatch_prepare",
+                        "status": "timed_out",
+                        "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                        "timeout_seconds": timeout_seconds,
+                        "duration_ms": duration_ms,
+                    }
+                )
+                if timeout_fallback is not None:
+                    return timeout_fallback(timeout_seconds)
+                raise TimeoutError(
+                    f"{step_label} timed out after {timeout_seconds:.1f}s"
+                )
+            if kind == "exception":
+                raise payload
+            return payload
+
+        def _supervised_setup_timeout_seconds(env_name: str, default: float) -> float:
+            raw_value = os.getenv(env_name)
+            try:
+                parsed = float(raw_value) if raw_value is not None else default
+            except (TypeError, ValueError):
+                parsed = default
+            if parsed <= 0:
+                return default
+            return parsed
 
         def _disabled_workflow_model_policy_state(
             reason_code: str,
@@ -35180,6 +35234,59 @@ class InternalMCPChatOrchestrator:
                 "skip_reason": "agent_test_explicit_local_model_no_turn_memory_request",
             }
 
+        def _timeout_registry_snapshot(timeout_seconds: float) -> Mapping[str, Any]:
+            return {
+                "source": "timeout",
+                "models": [],
+                "loaded": False,
+                "errors": [
+                    {
+                        "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                        "step_id": "model_registry_snapshot",
+                        "timeout_seconds": timeout_seconds,
+                    }
+                ],
+            }
+
+        def _timeout_turn_memory_context_state(timeout_seconds: float) -> dict[str, Any]:
+            return {
+                "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
+                "status": "unavailable",
+                "fail_closed": False,
+                "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                "failed_substep": "build_turn_memory_context_state",
+                "timeout_seconds": timeout_seconds,
+                "subject_contexts": [],
+                "requested_memory_context": {},
+                "user_namespace": user_namespace,
+                "conversation_session_id": conversation_session_id,
+            }
+
+        def _timeout_augmented_context(timeout_seconds: float) -> list[Mapping[str, Any]]:
+            fallback_context: list[Mapping[str, Any]] = []
+            if isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+                fallback_context.append(
+                    {"role": "system", "content": auxiliary_system_prompt.strip()}
+                )
+            if isinstance(context, Sequence) and not isinstance(
+                context,
+                (str, bytes, bytearray),
+            ):
+                for message in context:
+                    if isinstance(message, Mapping):
+                        fallback_context.append(dict(message))
+            aux_llm_calls.append(
+                {
+                    "type": "augmented_context",
+                    "stage": "workflow_dispatch_prepare",
+                    "status": "timed_out",
+                    "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                    "timeout_seconds": timeout_seconds,
+                    "fallback_message_count": len(fallback_context),
+                }
+            )
+            return self._limit_context_for_llm(fallback_context)
+
         if explicit_local_agent_test_model:
             policy_state, _policy_telemetry = _run_supervised_setup_step(
                 "Use explicit local model policy",
@@ -35216,6 +35323,11 @@ class InternalMCPChatOrchestrator:
             registry_snapshot = _run_supervised_setup_step(
                 "Load model registry snapshot",
                 _load_registry_snapshot,
+                timeout_seconds=_supervised_setup_timeout_seconds(
+                    "VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS",
+                    12.0,
+                ),
+                timeout_fallback=_timeout_registry_snapshot,
             )
         recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
         user_concept_id, org_concept_id = _run_supervised_setup_step(
@@ -35245,6 +35357,11 @@ class InternalMCPChatOrchestrator:
                     org_concept_id=org_concept_id,
                     turn_memory_context=turn_memory_context,
                 ),
+                timeout_seconds=_supervised_setup_timeout_seconds(
+                    "VON_TURN_MEMORY_CONTEXT_STEP_TIMEOUT_SECONDS",
+                    30.0,
+                ),
+                timeout_fallback=_timeout_turn_memory_context_state,
             )
         self._append_turn_memory_context_aux_entry(
             aux_llm_calls,
@@ -35281,6 +35398,11 @@ class InternalMCPChatOrchestrator:
                 org_concept_id=org_concept_id,
                 use_agent_test_local_prompt=explicit_local_agent_test_model,
             ),
+            timeout_seconds=_supervised_setup_timeout_seconds(
+                "VON_AUGMENTED_CONTEXT_TIMEOUT_SECONDS",
+                20.0,
+            ),
+            timeout_fallback=_timeout_augmented_context,
         )
         augmented_context = _run_supervised_setup_step(
             "Inject turn memory context",
@@ -35930,6 +36052,9 @@ class InternalMCPChatOrchestrator:
             step_id: str,
             step_label: str,
             operation: Callable[[], Any],
+            *,
+            timeout_seconds: float | None = None,
+            timeout_fallback: Callable[[float], Any] | None = None,
         ) -> Any:
             _emit_dispatch_prepare_progress(
                 subtask=step_label,
@@ -35937,7 +36062,45 @@ class InternalMCPChatOrchestrator:
             )
             step_start = time.perf_counter()
             try:
-                result = operation()
+                if timeout_seconds is not None and timeout_seconds > 0:
+                    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+                    def _worker() -> None:
+                        try:
+                            result_queue.put(("result", operation()))
+                        except Exception as exc:
+                            result_queue.put(("exception", exc))
+
+                    thread = threading.Thread(
+                        target=_worker,
+                        name=f"workflow-dispatch-prepare-{step_id}",
+                        daemon=True,
+                    )
+                    thread.start()
+                    try:
+                        kind, payload = result_queue.get(timeout=timeout_seconds)
+                    except queue.Empty:
+                        duration_ms = int((time.perf_counter() - step_start) * 1000)
+                        _record_dispatch_prepare_step(
+                            step_id=step_id,
+                            step_label=step_label,
+                            duration_ms=duration_ms,
+                            status="timed_out",
+                            extra={
+                                "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                                "timeout_seconds": timeout_seconds,
+                            },
+                        )
+                        if timeout_fallback is not None:
+                            return timeout_fallback(timeout_seconds)
+                        raise TimeoutError(
+                            f"{step_label} timed out after {timeout_seconds:.1f}s"
+                        )
+                    if kind == "exception":
+                        raise payload
+                    result = payload
+                else:
+                    result = operation()
             except Exception as exc:
                 duration_ms = int((time.perf_counter() - step_start) * 1000)
                 _record_dispatch_prepare_step(
@@ -35958,6 +36121,69 @@ class InternalMCPChatOrchestrator:
                 duration_ms=duration_ms,
             )
             return result
+
+        def _dispatch_prepare_timeout_seconds(env_name: str, default: float) -> float:
+            raw_value = os.getenv(env_name)
+            try:
+                parsed = float(raw_value) if raw_value is not None else default
+            except (TypeError, ValueError):
+                parsed = default
+            if parsed <= 0:
+                return default
+            return parsed
+
+        def _timeout_registry_snapshot(timeout_seconds: float) -> Mapping[str, Any]:
+            return {
+                "source": "timeout",
+                "models": [],
+                "loaded": False,
+                "errors": [
+                    {
+                        "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                        "step_id": "model_registry_snapshot",
+                        "timeout_seconds": timeout_seconds,
+                    }
+                ],
+            }
+
+        def _timeout_turn_memory_context_state(timeout_seconds: float) -> dict[str, Any]:
+            return {
+                "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
+                "status": "unavailable",
+                "fail_closed": False,
+                "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                "failed_substep": "build_turn_memory_context_state",
+                "timeout_seconds": timeout_seconds,
+                "subject_contexts": [],
+                "requested_memory_context": {},
+                "user_namespace": user_namespace,
+                "conversation_session_id": conversation_session_id,
+            }
+
+        def _timeout_augmented_context(timeout_seconds: float) -> list[Mapping[str, str]]:
+            fallback_context: list[Mapping[str, str]] = []
+            if isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+                fallback_context.append(
+                    {"role": "system", "content": auxiliary_system_prompt.strip()}
+                )
+            if isinstance(context, Sequence) and not isinstance(
+                context,
+                (str, bytes, bytearray),
+            ):
+                for message in context:
+                    if isinstance(message, Mapping):
+                        fallback_context.append(dict(message))
+            aux_llm_calls.append(
+                {
+                    "type": "augmented_context",
+                    "stage": "workflow_dispatch_prepare",
+                    "status": "timed_out",
+                    "failure_reason": "workflow_dispatch_prepare_step_timeout",
+                    "timeout_seconds": timeout_seconds,
+                    "fallback_message_count": len(fallback_context),
+                }
+            )
+            return self._limit_context_for_llm(fallback_context)
 
         def _record_dispatch_prepare_note(
             *,
@@ -36328,6 +36554,11 @@ class InternalMCPChatOrchestrator:
             "model_registry_snapshot",
             "Load model registry snapshot",
             _load_registry_snapshot,
+            timeout_seconds=_dispatch_prepare_timeout_seconds(
+                "VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS",
+                12.0,
+            ),
+            timeout_fallback=_timeout_registry_snapshot,
         )
 
         if isinstance(registry_snapshot, Mapping):
@@ -36352,14 +36583,23 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
         )
         prefer_default_model = bool(model)
-        turn_memory_context_state = build_turn_memory_context_state(
-            prompt=prompt,
-            recent_user_prompts=recent_user_prompts,
-            conversation_session_id=conversation_session_id,
-            user_namespace=user_namespace,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            turn_memory_context=turn_memory_context,
+        turn_memory_context_state = _run_dispatch_prepare_step(
+            "turn_memory_context",
+            "Build turn memory context",
+            lambda: build_turn_memory_context_state(
+                prompt=prompt,
+                recent_user_prompts=recent_user_prompts,
+                conversation_session_id=conversation_session_id,
+                user_namespace=user_namespace,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                turn_memory_context=turn_memory_context,
+            ),
+            timeout_seconds=_dispatch_prepare_timeout_seconds(
+                "VON_TURN_MEMORY_CONTEXT_STEP_TIMEOUT_SECONDS",
+                30.0,
+            ),
+            timeout_fallback=_timeout_turn_memory_context_state,
         )
         self._append_turn_memory_context_aux_entry(
             aux_llm_calls,
@@ -36712,6 +36952,11 @@ class InternalMCPChatOrchestrator:
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
             ),
+            timeout_seconds=_dispatch_prepare_timeout_seconds(
+                "VON_AUGMENTED_CONTEXT_TIMEOUT_SECONDS",
+                20.0,
+            ),
+            timeout_fallback=_timeout_augmented_context,
         )
         augmented_context = self._inject_turn_memory_context_messages(
             augmented_context,

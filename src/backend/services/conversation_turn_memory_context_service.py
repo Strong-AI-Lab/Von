@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import queue
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -26,6 +30,7 @@ _MAX_RECENT_USER_PROMPTS = 3
 _MAX_OPEN_QUESTIONS = 3
 _MAX_IMMEDIATE_CONTEXT_ITEMS = 4
 _MAX_POLICY_SUGGESTIONS = 3
+_DEFAULT_SUBJECT_CONTEXT_TIMEOUT_SECONDS = 12.0
 
 
 def _safe_str(value: Any) -> str | None:
@@ -51,6 +56,89 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def _coerce_positive_float(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def _subject_context_timeout_seconds() -> float:
+    return _coerce_positive_float(
+        os.getenv("VON_TURN_MEMORY_CONTEXT_SUBJECT_TIMEOUT_SECONDS"),
+        default=_DEFAULT_SUBJECT_CONTEXT_TIMEOUT_SECONDS,
+    )
+
+
+def _subject_context_fail_closed(
+    *,
+    subject_spec: Mapping[str, Any],
+    turn_memory_context: Mapping[str, Any] | None,
+) -> bool:
+    spec = _coerce_turn_memory_context_spec(turn_memory_context)
+    strict = _coerce_bool(spec.get("strict"), default=False)
+    is_primary = bool(subject_spec.get("is_primary"))
+    if not is_primary:
+        return strict
+    return bool(
+        strict
+        or _normalise_strings(spec.get("effective_context_bundle_ids"))
+        or _safe_str(spec.get("context_dossier_id"))
+        or _safe_str(spec.get("report_revision_id"))
+        or _coerce_bool(spec.get("materialise_context_dossier"), default=False)
+    )
+
+
+def _timeout_subject_context(
+    *,
+    subject_spec: Mapping[str, Any],
+    turn_memory_context: Mapping[str, Any] | None,
+    timeout_seconds: float,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "subject_kind": (_safe_str(subject_spec.get("subject_kind")) or "").lower(),
+        "subject_id": _safe_str(subject_spec.get("subject_id")),
+        "subject_role": _safe_str(subject_spec.get("subject_role")) or "subject",
+        "status": "unavailable",
+        "fail_closed": _subject_context_fail_closed(
+            subject_spec=subject_spec,
+            turn_memory_context=turn_memory_context,
+        ),
+        "failure_reason": "turn_memory_context_subject_timeout",
+        "failed_substep": "resolve_subject_memory_context",
+        "timeout_seconds": timeout_seconds,
+        "elapsed_ms": round(elapsed_seconds * 1000.0, 1),
+    }
+
+
+def _exception_subject_context(
+    *,
+    subject_spec: Mapping[str, Any],
+    turn_memory_context: Mapping[str, Any] | None,
+    exc: BaseException,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "subject_kind": (_safe_str(subject_spec.get("subject_kind")) or "").lower(),
+        "subject_id": _safe_str(subject_spec.get("subject_id")),
+        "subject_role": _safe_str(subject_spec.get("subject_role")) or "subject",
+        "status": "unavailable",
+        "fail_closed": _subject_context_fail_closed(
+            subject_spec=subject_spec,
+            turn_memory_context=turn_memory_context,
+        ),
+        "failure_reason": "turn_memory_context_subject_exception",
+        "failed_substep": "resolve_subject_memory_context",
+        "exception_type": type(exc).__name__,
+        "error": str(exc),
+        "elapsed_ms": round(elapsed_seconds * 1000.0, 1),
+    }
 
 
 def _normalise_strings(values: Any, *, limit: int | None = None) -> list[str]:
@@ -544,6 +632,76 @@ def _resolve_subject_memory_context(
     }
 
 
+def _resolve_subject_memory_context_bounded(
+    *,
+    subject_spec: Mapping[str, Any],
+    turn_memory_context: Mapping[str, Any] | None,
+    prompt: str,
+    recent_user_prompts: Sequence[str],
+    conversation_session_id: str | None,
+    namespace: str | None,
+    user_concept_id: str | None,
+    org_concept_id: str | None,
+) -> dict[str, Any]:
+    timeout_seconds = _subject_context_timeout_seconds()
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            result_queue.put(
+                (
+                    "result",
+                    _resolve_subject_memory_context(
+                        subject_spec=subject_spec,
+                        turn_memory_context=turn_memory_context,
+                        prompt=prompt,
+                        recent_user_prompts=recent_user_prompts,
+                        conversation_session_id=conversation_session_id,
+                        namespace=namespace,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                    ),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - exercised through wrapper tests
+            result_queue.put(("exception", exc))
+
+    started_at = time.monotonic()
+    thread = threading.Thread(
+        target=_worker,
+        name="turn-memory-context-subject",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        kind, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty:
+        elapsed = time.monotonic() - started_at
+        return _timeout_subject_context(
+            subject_spec=subject_spec,
+            turn_memory_context=turn_memory_context,
+            timeout_seconds=timeout_seconds,
+            elapsed_seconds=elapsed,
+        )
+
+    elapsed = time.monotonic() - started_at
+    if kind == "exception":
+        return _exception_subject_context(
+            subject_spec=subject_spec,
+            turn_memory_context=turn_memory_context,
+            exc=payload,
+            elapsed_seconds=elapsed,
+        )
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return _exception_subject_context(
+        subject_spec=subject_spec,
+        turn_memory_context=turn_memory_context,
+        exc=TypeError("subject memory context resolver returned non-mapping result"),
+        elapsed_seconds=elapsed,
+    )
+
+
 def build_turn_memory_context_state(
     *,
     prompt: str,
@@ -573,7 +731,7 @@ def build_turn_memory_context_state(
         }
 
     subject_contexts = [
-        _resolve_subject_memory_context(
+        _resolve_subject_memory_context_bounded(
             subject_spec=subject_spec,
             turn_memory_context=spec,
             prompt=prompt,
@@ -599,10 +757,15 @@ def build_turn_memory_context_state(
     available_subjects = [
         item for item in subject_contexts if item.get("status") == "available"
     ]
+    unavailable_subjects = [
+        item for item in subject_contexts if item.get("status") == "unavailable"
+    ]
     if fail_closed:
         status = "unavailable"
     elif available_subjects:
         status = "available"
+    elif unavailable_subjects:
+        status = "unavailable"
     else:
         status = "none"
 

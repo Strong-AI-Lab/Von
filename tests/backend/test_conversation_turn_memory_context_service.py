@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import src.backend.services.conversation_turn_memory_context_service as memory_service
 
 
@@ -122,6 +124,46 @@ def test_build_turn_memory_context_state_fails_closed_for_missing_explicit_dossi
     assert state["requested_memory_context"] == {
         "context_dossier_id": "#V#missing_dossier"
     }
+    assert memory_service.render_turn_memory_context_messages(state) == []
+
+
+def test_build_turn_memory_context_state_times_out_slow_subject_resolution(
+    monkeypatch,
+) -> None:
+    def slow_subject_resolution(**_kwargs):
+        time.sleep(0.2)
+        return {"status": "available"}
+
+    monkeypatch.setattr(
+        memory_service,
+        "_subject_context_timeout_seconds",
+        lambda: 0.01,
+    )
+    monkeypatch.setattr(
+        memory_service,
+        "_resolve_subject_memory_context",
+        slow_subject_resolution,
+    )
+
+    started_at = time.monotonic()
+    state = memory_service.build_turn_memory_context_state(
+        prompt="Use represented memory if it is available.",
+        user_namespace="#V#test_user",
+        user_concept_id="#V#test_user",
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.15
+    assert state["status"] == "unavailable"
+    assert state["fail_closed"] is False
+    assert state["failure_reason"] is None
+    subject_context = state["subject_contexts"][0]
+    assert subject_context["subject_id"] == "#V#test_user"
+    assert subject_context["status"] == "unavailable"
+    assert subject_context["fail_closed"] is False
+    assert subject_context["failure_reason"] == "turn_memory_context_subject_timeout"
+    assert subject_context["failed_substep"] == "resolve_subject_memory_context"
+    assert subject_context["timeout_seconds"] == 0.01
     assert memory_service.render_turn_memory_context_messages(state) == []
 
 
