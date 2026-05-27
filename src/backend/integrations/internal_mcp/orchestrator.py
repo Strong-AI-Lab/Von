@@ -3495,6 +3495,13 @@ class InternalMCPChatOrchestrator:
         }
         self._workflow_selector = WorkflowSelector(**selector_kwargs)
         self._last_base_system_prompt_telemetry: dict[str, Any] | None = None
+        # JVNAUTOSCI-2373: per-turn dead-candidate cache. Stored on a
+        # ``threading.local`` so concurrent Flask requests do not see one
+        # another's failures. Set in ``run()`` and cleared in its
+        # ``finally`` block. Internal ``_run_llm_with_fallbacks`` callers
+        # pick it up implicitly; external/nested callers may pass it as an
+        # explicit kwarg via ``data["turn_model_failures"]``.
+        self._turn_model_failures_local = threading.local()
 
     def configure_execution_caps(
         self,
@@ -17133,6 +17140,10 @@ class InternalMCPChatOrchestrator:
         timeout_override_sec: float | None = None,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
+        turn_model_failures: dict[
+            tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]
+        ]
+        | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: ``workflow_stage_id`` is the canonical
         # workflow-path stage identifier (e.g. ``tool_plan``,
@@ -17160,9 +17171,28 @@ class InternalMCPChatOrchestrator:
             prefer_default_model=prefer_default_model,
         )
 
+        # JVNAUTOSCI-2373: per-turn dead-candidate cache. Skip candidates that
+        # already terminally failed earlier in the same turn (auth, 404,
+        # quota_exhausted, probe-unreachable). The cache is owned by the
+        # outer turn (run() master data dict) and threaded through nested
+        # orchestrators so workflow LLM steps share the same view. Internal
+        # ``_action_*`` callers do not need to pass it explicitly: ``run()``
+        # sets a thread-local cache and we fall back to it here when the
+        # explicit kwarg is omitted (concurrent Flask requests stay isolated).
+        if turn_model_failures is None:
+            turn_model_failures = getattr(
+                self._turn_model_failures_local, "cache", None
+            )
+        _dead_cache = (
+            turn_model_failures if isinstance(turn_model_failures, dict) else None
+        )
+        skipped_candidates: list[dict[str, Any]] = []
+
         errors: list[Mapping[str, Any]] = []
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
+        last_failure_class: Optional[str] = None
+        last_failure_kind: Optional[str] = None
         total_candidates = len(candidates)
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
@@ -17197,13 +17227,70 @@ class InternalMCPChatOrchestrator:
                 if isinstance(telemetry, Mapping) and telemetry.get("provider")
                 else None
             )
+            host = (
+                str(telemetry.get("host")).strip().lower()
+                if isinstance(telemetry, Mapping) and telemetry.get("host")
+                else (str(candidate.host).strip().lower() if candidate.host else None)
+            )
+            normalised_model = (
+                model_name.strip() if isinstance(model_name, str) and model_name else None
+            )
+            cache_key = (provider, normalised_model, host)
 
+            # JVNAUTOSCI-2373: model-resolution telemetry shared across all
+            # attempts. ``model_source`` records why this candidate was tried
+            # (active_llm, enabled_settings, policy primary/fallback, ...);
+            # ``requested_model`` and ``effective_model`` distinguish what the
+            # caller asked for from what the fallback chain actually used;
+            # ``model_switch_reason`` explains divergence (dead-candidate
+            # skip, previous-attempt failure class).
             attempt_meta: dict[str, Any] = {
                 "fallback_attempt_no": attempt_no,
                 "fallback_candidate_count": total_candidates,
+                "model_source": candidate.source,
+                "requested_model": default_model,
+                "effective_model": model_name,
             }
             if provider:
                 attempt_meta["provider"] = provider
+
+            if _dead_cache is not None and cache_key in _dead_cache:
+                dead_entry = _dead_cache[cache_key]
+                skip_record = {
+                    "attempt_no": attempt_no,
+                    "provider": provider,
+                    "model": model_name,
+                    "host": host,
+                    "source": candidate.source,
+                    "reason": dead_entry.get("reason"),
+                    "error_class": dead_entry.get("error_class"),
+                    "first_failed_stage": dead_entry.get("first_failed_stage"),
+                    "first_failed_source": dead_entry.get("source"),
+                }
+                skipped_candidates.append(skip_record)
+                attempt_meta["model_switch_reason"] = (
+                    f"dead_candidate_skipped:{dead_entry.get('reason') or 'unknown'}"
+                )
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_candidate_skipped",
+                            "stage": stage,
+                            "model": model_name,
+                            "provider": provider,
+                            "source": candidate.source,
+                            "reason": dead_entry.get("reason"),
+                            "error_class": dead_entry.get("error_class"),
+                            **_stage_extra,
+                            **attempt_meta,
+                        }
+                    )
+                continue
+
+            if attempt_no > 1 and last_failure_class:
+                attempt_meta["model_switch_reason"] = (
+                    f"previous_attempt_failed:{last_failure_class}"
+                )
 
             reachability = self._probe_model_candidate_reachability(
                 telemetry=telemetry,
@@ -17254,6 +17341,18 @@ class InternalMCPChatOrchestrator:
                     "failure_kind": "provider_unreachable",
                 }
                 errors.append(error_entry)
+                last_failure_class = probe_error_class
+                last_failure_kind = "provider_unreachable"
+                if _dead_cache is not None:
+                    _dead_cache[cache_key] = {
+                        "reason": "provider_unreachable",
+                        "error_class": probe_error_class,
+                        "source": candidate.source,
+                        "first_failed_stage": stage,
+                        "provider": provider,
+                        "model": model_name,
+                        "host": host,
+                    }
                 fallback_attempts.append(
                     {
                         "attempt_no": attempt_no,
@@ -17426,6 +17525,11 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        "skipped_candidates": list(skipped_candidates),
+                        "skipped_candidate_count": len(skipped_candidates),
+                        "requested_model": default_model,
+                        "effective_model": model_name,
+                        "model_source": candidate.source,
                         **_stage_extra,
                         **selection_metadata,
                     }
@@ -17433,11 +17537,43 @@ class InternalMCPChatOrchestrator:
                 return response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                exc_text = str(exc)
+                exc_class = type(exc).__name__
                 _fk = (
                     "quota_exhausted"
-                    if "insufficient_quota" in str(exc)
+                    if "insufficient_quota" in exc_text
                     else "candidate_error"
                 )
+                # JVNAUTOSCI-2373: classify terminal failures so we do not
+                # retry obviously dead candidates at later stages within the
+                # same turn. Transient failures (timeouts, generic errors)
+                # are NOT cached.
+                terminal_dead = False
+                terminal_reason: Optional[str] = None
+                if _fk == "quota_exhausted":
+                    terminal_dead = True
+                    terminal_reason = "quota_exhausted"
+                else:
+                    _exc_lower = exc_text.lower()
+                    _cls_lower = exc_class.lower()
+                    if (
+                        "authentication" in _cls_lower
+                        or "permissiondenied" in _cls_lower
+                        or "forbidden" in _cls_lower
+                        or "invalid_api_key" in _exc_lower
+                        or " 401" in _exc_lower
+                        or "401 unauthorized" in _exc_lower
+                    ):
+                        terminal_dead = True
+                        terminal_reason = "auth_failed"
+                    elif (
+                        "notfound" in _cls_lower
+                        or "model_not_found" in _exc_lower
+                        or " 404" in _exc_lower
+                        or "not found" in _exc_lower
+                    ):
+                        terminal_dead = True
+                        terminal_reason = "model_not_found"
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -17482,6 +17618,18 @@ class InternalMCPChatOrchestrator:
                     "failure_kind": _fk,
                 }
                 errors.append(error_entry)
+                last_failure_class = exc_class
+                last_failure_kind = _fk
+                if terminal_dead and _dead_cache is not None:
+                    _dead_cache[cache_key] = {
+                        "reason": terminal_reason,
+                        "error_class": exc_class,
+                        "source": candidate.source,
+                        "first_failed_stage": stage,
+                        "provider": provider,
+                        "model": model_name,
+                        "host": host,
+                    }
                 fallback_attempts.append(
                     {
                         "attempt_no": attempt_no,
@@ -17523,6 +17671,9 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    "skipped_candidates": list(skipped_candidates),
+                    "skipped_candidate_count": len(skipped_candidates),
+                    "requested_model": default_model,
                     **_stage_extra,
                     **selection_metadata,
                 }
@@ -17530,6 +17681,15 @@ class InternalMCPChatOrchestrator:
 
         if last_exception:
             raise last_exception
+        # JVNAUTOSCI-2373: if every candidate was a dead-cache skip and no
+        # exception was ever raised in this stage, surface a clear error
+        # rather than the generic "no candidates" message.
+        if skipped_candidates and not errors:
+            raise RuntimeError(
+                "All model candidates for stage "
+                f"{stage!r} were skipped because they failed terminally earlier "
+                "in this turn (dead-candidate cache); no live model available."
+            )
         raise RuntimeError("No model candidates available for stage")
 
     @staticmethod
@@ -17809,6 +17969,10 @@ class InternalMCPChatOrchestrator:
         prefer_default_model: bool = False,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
+        turn_model_failures: dict[
+            tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]
+        ]
+        | None = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: see ``_run_llm_with_fallbacks`` for the
         # rationale on ``workflow_stage_id`` vs the orchestrator-internal
@@ -17828,9 +17992,21 @@ class InternalMCPChatOrchestrator:
             prefer_default_model=prefer_default_model,
         )
 
+        # JVNAUTOSCI-2373: per-turn dead-candidate cache (tool-call path).
+        if turn_model_failures is None:
+            turn_model_failures = getattr(
+                self._turn_model_failures_local, "cache", None
+            )
+        _dead_cache = (
+            turn_model_failures if isinstance(turn_model_failures, dict) else None
+        )
+        skipped_candidates: list[dict[str, Any]] = []
+
         errors: list[Mapping[str, Any]] = []
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
+        last_failure_class: Optional[str] = None
+        last_failure_kind: Optional[str] = None
         total_candidates = len(candidates)
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
@@ -17868,12 +18044,67 @@ class InternalMCPChatOrchestrator:
                 if isinstance(telemetry, Mapping) and telemetry.get("provider")
                 else None
             )
+            host = (
+                str(telemetry.get("host")).strip().lower()
+                if isinstance(telemetry, Mapping) and telemetry.get("host")
+                else (str(candidate.host).strip().lower() if candidate.host else None)
+            )
+            normalised_model = (
+                model_name.strip() if isinstance(model_name, str) and model_name else None
+            )
+            normalised_provider = provider.lower() if provider else None
+            cache_key = (normalised_provider, normalised_model, host)
+
+            # JVNAUTOSCI-2373: model-resolution telemetry shared across all
+            # attempts in this tool-call stage; see _run_llm_with_fallbacks
+            # for field semantics.
             attempt_meta: dict[str, Any] = {
                 "fallback_attempt_no": attempt_no,
                 "fallback_candidate_count": total_candidates,
+                "model_source": candidate.source,
+                "requested_model": default_model,
+                "effective_model": model_name,
             }
             if provider:
                 attempt_meta["provider"] = provider
+
+            if _dead_cache is not None and cache_key in _dead_cache:
+                dead_entry = _dead_cache[cache_key]
+                skip_record = {
+                    "attempt_no": attempt_no,
+                    "provider": normalised_provider,
+                    "model": model_name,
+                    "host": host,
+                    "source": candidate.source,
+                    "reason": dead_entry.get("reason"),
+                    "error_class": dead_entry.get("error_class"),
+                    "first_failed_stage": dead_entry.get("first_failed_stage"),
+                    "first_failed_source": dead_entry.get("source"),
+                }
+                skipped_candidates.append(skip_record)
+                attempt_meta["model_switch_reason"] = (
+                    f"dead_candidate_skipped:{dead_entry.get('reason') or 'unknown'}"
+                )
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_candidate_skipped",
+                            "stage": stage,
+                            "model": model_name,
+                            "provider": normalised_provider,
+                            "source": candidate.source,
+                            "reason": dead_entry.get("reason"),
+                            "error_class": dead_entry.get("error_class"),
+                            **_stage_extra,
+                            **attempt_meta,
+                        }
+                    )
+                continue
+
+            if attempt_no > 1 and last_failure_class:
+                attempt_meta["model_switch_reason"] = (
+                    f"previous_attempt_failed:{last_failure_class}"
+                )
 
             supports_structured = (
                 hasattr(client, "generate_with_tools")
@@ -18286,6 +18517,11 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        "skipped_candidates": list(skipped_candidates),
+                        "skipped_candidate_count": len(skipped_candidates),
+                        "requested_model": default_model,
+                        "effective_model": model_name,
+                        "model_source": candidate.source,
                         **_stage_extra,
                         **selection_metadata,
                     }
@@ -18309,11 +18545,40 @@ class InternalMCPChatOrchestrator:
                 return llm_response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                exc_text = str(exc)
+                exc_class = type(exc).__name__
                 _fk = (
                     "quota_exhausted"
-                    if "insufficient_quota" in str(exc)
+                    if "insufficient_quota" in exc_text
                     else "candidate_error"
                 )
+                # JVNAUTOSCI-2373: classify terminal failures (tool-call path).
+                terminal_dead = False
+                terminal_reason: Optional[str] = None
+                if _fk == "quota_exhausted":
+                    terminal_dead = True
+                    terminal_reason = "quota_exhausted"
+                else:
+                    _exc_lower = exc_text.lower()
+                    _cls_lower = exc_class.lower()
+                    if (
+                        "authentication" in _cls_lower
+                        or "permissiondenied" in _cls_lower
+                        or "forbidden" in _cls_lower
+                        or "invalid_api_key" in _exc_lower
+                        or " 401" in _exc_lower
+                        or "401 unauthorized" in _exc_lower
+                    ):
+                        terminal_dead = True
+                        terminal_reason = "auth_failed"
+                    elif (
+                        "notfound" in _cls_lower
+                        or "model_not_found" in _exc_lower
+                        or " 404" in _exc_lower
+                        or "not found" in _exc_lower
+                    ):
+                        terminal_dead = True
+                        terminal_reason = "model_not_found"
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -18359,6 +18624,18 @@ class InternalMCPChatOrchestrator:
                         "failure_kind": _fk,
                     }
                 )
+                last_failure_class = exc_class
+                last_failure_kind = _fk
+                if terminal_dead and _dead_cache is not None:
+                    _dead_cache[cache_key] = {
+                        "reason": terminal_reason,
+                        "error_class": exc_class,
+                        "source": candidate.source,
+                        "first_failed_stage": stage,
+                        "provider": normalised_provider,
+                        "model": model_name,
+                        "host": host,
+                    }
                 fallback_attempts.append(
                     {
                         "attempt_no": attempt_no,
@@ -18400,6 +18677,9 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    "skipped_candidates": list(skipped_candidates),
+                    "skipped_candidate_count": len(skipped_candidates),
+                    "requested_model": default_model,
                     **_stage_extra,
                     **selection_metadata,
                 }
@@ -18407,6 +18687,12 @@ class InternalMCPChatOrchestrator:
 
         if last_exception:
             raise last_exception
+        if skipped_candidates and not errors:
+            raise RuntimeError(
+                "All structured model candidates for stage "
+                f"{stage!r} were skipped because they failed terminally earlier "
+                "in this turn (dead-candidate cache); no live model available."
+            )
         raise RuntimeError("No structured model candidates available for stage")
 
     def _inject_prompt_variable(self, prompt_text: str, *, key: str, value: str) -> str:
@@ -34628,6 +34914,20 @@ class InternalMCPChatOrchestrator:
         aux_llm_calls: list[dict[str, Any]] = []
         tool_invocations: list[dict[str, Any]] = []
         tool_messages: list[dict[str, Any]] = []
+        # JVNAUTOSCI-2373: per-turn dead-candidate cache shared across all
+        # stages and nested orchestrators. Keyed by
+        # ``(provider, model, host)``; populated by ``_run_llm_with_fallbacks``
+        # on terminal failures (auth, 404, quota, probe-unreachable). Lives
+        # in ``data`` so workflow LLM steps that construct fresh nested
+        # orchestrators see the same view.
+        turn_model_failures: dict[
+            tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]
+        ] = {}
+        # Publish on the thread-local so internal ``_action_*`` handlers
+        # reach it without needing per-call-site plumbing. Concurrent Flask
+        # requests get their own cache. Cleared in the ``finally`` block
+        # below.
+        self._turn_model_failures_local.cache = turn_model_failures
 
         def _step_callback(envelope: Mapping[str, Any]) -> None:
             if progress_tracker:
@@ -35119,6 +35419,8 @@ class InternalMCPChatOrchestrator:
             "workflow_episode_source": "conversation_turn_supervised",
             "workflow_episode_stage": "conversation_turn",
             "prefer_default_model": prefer_default_model,
+            # JVNAUTOSCI-2373: per-turn dead-candidate cache (see run() init).
+            "turn_model_failures": turn_model_failures,
             # JVNAUTOSCI-2130: Expose the user's thinking-card display mode
             # ("default" | "expert" | "debug") to the workflow runtime so
             # VWL workflows and Vontology-authored prompts can branch on it
@@ -35468,6 +35770,12 @@ class InternalMCPChatOrchestrator:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
         orchestrator_start = time.perf_counter()
+        # JVNAUTOSCI-2373: per-turn dead-candidate cache for the legacy
+        # ``run()`` entry. Same shape as the one in
+        # ``execute_conversation_turn_supervised``; published on the
+        # thread-local so internal ``_run_llm_with_fallbacks`` callers can
+        # see it without explicit plumbing.
+        self._turn_model_failures_local.cache = {}
         recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
 
         # JVNAUTOSCI-1038: Request-scoped progress helpers

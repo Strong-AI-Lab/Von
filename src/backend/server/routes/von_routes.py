@@ -2588,6 +2588,106 @@ def _build_turn_execution_mcp_access(
     return access
 
 
+def _build_model_resolution_summary(
+    aux_llm_calls: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """JVNAUTOSCI-2373: aggregate per-stage model fallback telemetry.
+
+    Walks `workflow_model_policy_stage` aux entries and surfaces:
+    - dead-candidate cache contents (skipped per stage, with reasons)
+    - per-stage requested vs effective model
+    - count of attempts that were skipped due to prior-turn failures
+
+    Also emits ``user_settings_warning`` when a candidate originating from
+    user-settings (``active_llm`` source) was classified dead, since that
+    is the user-visible "your selected model is broken" signal.
+    """
+    if not isinstance(aux_llm_calls, list):
+        return None
+
+    stage_entries: list[dict[str, Any]] = []
+    skipped_summary: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+    total_skipped = 0
+    user_settings_dead: list[dict[str, Any]] = []
+
+    for entry in aux_llm_calls:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "workflow_model_policy_stage":
+            continue
+        stage_name = entry.get("stage")
+        requested_model = entry.get("requested_model")
+        effective_model = entry.get("effective_model")
+        model_source = entry.get("model_source")
+        skipped = entry.get("skipped_candidates")
+        skipped_list = skipped if isinstance(skipped, list) else []
+        stage_entries.append(
+            {
+                "stage": stage_name,
+                "requested_model": requested_model,
+                "effective_model": effective_model,
+                "model_source": model_source,
+                "fallback_used": bool(entry.get("fallback_used")),
+                "fallback_attempt_count": entry.get("fallback_attempt_count"),
+                "skipped_candidate_count": len(skipped_list),
+            }
+        )
+        for sk in skipped_list:
+            if not isinstance(sk, dict):
+                continue
+            total_skipped += 1
+            key = (sk.get("provider"), sk.get("model"))
+            existing = skipped_summary.get(key)
+            if existing is None:
+                skipped_summary[key] = {
+                    "provider": sk.get("provider"),
+                    "model": sk.get("model"),
+                    "host": sk.get("host"),
+                    "failure_class": sk.get("failure_class"),
+                    "failure_kind": sk.get("failure_kind"),
+                    "source": sk.get("source"),
+                    "skipped_in_stages": [stage_name] if stage_name else [],
+                }
+            else:
+                stages_list = existing.setdefault("skipped_in_stages", [])
+                if stage_name and stage_name not in stages_list:
+                    stages_list.append(stage_name)
+            if sk.get("source") == "active_llm":
+                user_settings_dead.append(
+                    {
+                        "provider": sk.get("provider"),
+                        "model": sk.get("model"),
+                        "failure_class": sk.get("failure_class"),
+                    }
+                )
+
+    if not stage_entries:
+        return None
+
+    summary: dict[str, Any] = {
+        "stages": stage_entries,
+        "dead_candidates": list(skipped_summary.values()),
+        "total_skipped_attempts": total_skipped,
+    }
+    if user_settings_dead:
+        seen: set[tuple[Any, Any]] = set()
+        unique: list[dict[str, Any]] = []
+        for item in user_settings_dead:
+            key = (item.get("provider"), item.get("model"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        summary["user_settings_warning"] = {
+            "message": (
+                "Your selected default model is currently unavailable; "
+                "Von used a fallback model for this turn."
+            ),
+            "dead_active_llm_candidates": unique,
+        }
+    return summary
+
+
 def _build_turn_execution_diagnostics(
     *,
     request_id: str | None,
@@ -2785,6 +2885,9 @@ def _build_turn_execution_diagnostics(
         "stage_diagnostics": stage_diagnostics,
         "timing_breakdown": timing_breakdown,
         "mcp_access": (dict(mcp_access) if isinstance(mcp_access, Mapping) else None),
+        "model_resolution_summary": _build_model_resolution_summary(
+            routing_aux_llm_calls
+        ),
     }
 
 

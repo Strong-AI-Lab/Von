@@ -1340,6 +1340,16 @@ def _build_gateway_runtime(
     user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
     policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
     registry_snapshot = get_model_registry_snapshot()
+    # JVNAUTOSCI-2373: propagate the parent turn's dead-candidate cache into
+    # this nested orchestrator so workflow LLM steps skip the same dead
+    # provider/model combinations rather than re-discovering them stage by
+    # stage. The parent stashes the cache in ``request.data`` under
+    # ``turn_model_failures``; we install it on the nested orchestrator's
+    # thread-local so its internal ``_run_llm_with_fallbacks`` callers find
+    # it without extra plumbing.
+    parent_turn_model_failures = request.data.get("turn_model_failures")
+    if isinstance(parent_turn_model_failures, dict):
+        orchestrator._turn_model_failures_local.cache = parent_turn_model_failures
     return (
         orchestrator,
         policy_state,
