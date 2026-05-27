@@ -555,7 +555,9 @@ class WorkflowCapabilityIndex:
         """Build capability entries from a ``WorkflowRegistry`` without syncing RAG.
 
         Only indexes workflows whose routing text is already authoritative:
-        Vontology-sourced registrations with non-empty narrative text.
+        Vontology-sourced registrations with non-empty narrative text, plus
+        the AgentTest repo-seed registrations whose registered ``purpose`` is
+        the authority surface for that environment.
         Non-authoritative registrations and textless workflows are skipped so
         discovery fails closed instead of routing on guessed fallback prose.
         """
@@ -915,6 +917,11 @@ def _normalise_capability_text(value: Any) -> str:
     return value.strip()
 
 
+_AUTHORITATIVE_CAPABILITY_SOURCES: frozenset[str] = frozenset(
+    {"vontology", "repo_seed_agent_test"}
+)
+
+
 def _resolve_authoritative_capability_text(
     *,
     workflow_id: str,
@@ -925,7 +932,7 @@ def _resolve_authoritative_capability_text(
     """Return authoritative routing text or a deterministic skip reason."""
 
     source_token = str(source or "").strip().lower()
-    if source_token != "vontology":
+    if source_token not in _AUTHORITATIVE_CAPABILITY_SOURCES:
         return None, "non_authoritative_source"
 
     relation_text = ""
@@ -941,7 +948,7 @@ def _resolve_authoritative_capability_text(
         discovery_exemplars_source = str(
             routing_metadata.get("discovery_exemplars_source") or ""
         ).strip()
-    else:
+    elif source_token == "vontology":
         try:
             from ..workflows.vontology_loader import (
                 resolve_workflow_description,
