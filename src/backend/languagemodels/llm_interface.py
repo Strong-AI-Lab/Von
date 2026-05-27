@@ -172,7 +172,18 @@ def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
     return max(minimum, value)
 
 
-_OLLAMA_AUTO_PULL_ENABLED = _bool_env("VON_OLLAMA_AUTO_PULL_ENABLED", True)
+def _resolve_ollama_auto_pull_config() -> tuple[bool, str]:
+    raw_enabled = os.getenv("VON_OLLAMA_AUTO_PULL_ENABLED")
+    if raw_enabled is not None:
+        return _bool_env("VON_OLLAMA_AUTO_PULL_ENABLED", True), "explicit_env"
+    if _bool_env("VON_AGENT_TEST_INSTANCE", False):
+        return False, "agent_test_instance"
+    return True, "default"
+
+
+_OLLAMA_AUTO_PULL_ENABLED, _OLLAMA_AUTO_PULL_ENABLED_REASON = (
+    _resolve_ollama_auto_pull_config()
+)
 _OLLAMA_AUTO_PULL_COOLDOWN_SECONDS = _float_env(
     "VON_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS", 300.0
 )
@@ -231,6 +242,7 @@ def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
             }
     return {
         "enabled": bool(_OLLAMA_AUTO_PULL_ENABLED),
+        "enabled_reason": str(_OLLAMA_AUTO_PULL_ENABLED_REASON),
         "cooldown_seconds": float(_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS),
         "timeout_seconds": float(_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS),
         "retry_budget": int(_OLLAMA_AUTO_PULL_RETRY_BUDGET),
@@ -1222,7 +1234,12 @@ class OllamaClient(LLMInterface):
             return result
 
         if not _OLLAMA_AUTO_PULL_ENABLED:
-            result["retry_outcome"] = "auto_pull_disabled"
+            result.update(
+                {
+                    "retry_outcome": "auto_pull_disabled",
+                    "disabled_reason": str(_OLLAMA_AUTO_PULL_ENABLED_REASON),
+                }
+            )
             return result
 
         with _OLLAMA_AUTO_PULL_LOCK:

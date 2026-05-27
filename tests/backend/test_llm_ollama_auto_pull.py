@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import src.backend.services  # noqa: F401
@@ -19,6 +21,72 @@ def test_model_not_found_detection_from_response_error_shape() -> None:
     assert not mod._is_ollama_model_not_found_error(
         _FakeResponseError("upstream unavailable", 503)
     )
+
+
+def test_agent_test_disables_auto_pull_by_default(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    monkeypatch.delenv("VON_OLLAMA_AUTO_PULL_ENABLED", raising=False)
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+
+    enabled, reason = mod._resolve_ollama_auto_pull_config()
+
+    assert enabled is False
+    assert reason == "agent_test_instance"
+
+
+def test_explicit_env_can_enable_auto_pull_in_agent_test(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_OLLAMA_AUTO_PULL_ENABLED", "1")
+
+    enabled, reason = mod._resolve_ollama_auto_pull_config()
+
+    assert enabled is True
+    assert reason == "explicit_env"
+
+
+def test_generate_does_not_pull_missing_model_when_auto_pull_disabled(monkeypatch) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    class _FakeResponseError(Exception):
+        def __init__(self, message: str, status_code: int) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    class _FakeClient:
+        def chat(self, *, model: str, messages, options=None):
+            raise _FakeResponseError(f"model '{model}' not found", 404)
+
+    client = mod.OllamaClient.__new__(mod.OllamaClient)
+    client.client = _FakeClient()
+    client.default_model = "llama3.3:70b"
+    client.host = "http://127.0.0.1:11434"
+
+    pull_calls = {"count": 0}
+
+    def _unexpected_pull(model_name: str) -> None:
+        pull_calls["count"] += 1
+        raise AssertionError("auto-pull should not be called")
+
+    monkeypatch.setattr(
+        mod,
+        "_import_ollama",
+        lambda: SimpleNamespace(ResponseError=_FakeResponseError),
+    )
+    monkeypatch.setattr(mod, "_OLLAMA_AUTO_PULL_ENABLED", False)
+    monkeypatch.setattr(mod, "_OLLAMA_AUTO_PULL_ENABLED_REASON", "agent_test_instance")
+    monkeypatch.setattr(client, "_pull_model", _unexpected_pull)
+    monkeypatch.setattr(client, "_is_model_available", lambda model_name: False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        client.generate("hello", model="llama3.3:70b")
+
+    message = str(exc_info.value)
+    assert "auto_pull_disabled" in message
+    assert "agent_test_instance" in message
+    assert pull_calls["count"] == 0
 
 
 def test_get_embedding_retries_once_after_successful_auto_pull(monkeypatch) -> None:
