@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo import MongoClient, ASCENDING, DESCENDING, monitoring
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure
@@ -12,6 +12,123 @@ import datetime  # Added for type hinting and __main__ example
 from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
 
 logger = logging.getLogger(__name__)
+
+
+def _coll_and_shape_from_started_command(event) -> tuple[str, str]:
+    """Extract collection name and a short filter-shape signature.
+
+    The collection name is the value at ``command[command_name]`` for the vast
+    majority of CRUD commands (find, aggregate, insert, update, delete, count,
+    distinct, findAndModify, listIndexes, ...); ``getMore`` uses ``collection``.
+    The filter shape lists the top-level keys of the ``filter``/``query``
+    document so timeouts identify the kind of read without leaking values.
+    """
+
+    try:
+        cmd_name = getattr(event, "command_name", "") or ""
+        body = getattr(event, "command", None)
+        if not isinstance(body, dict):
+            return "", ""
+        if cmd_name == "getMore":
+            coll = body.get("collection") or ""
+        else:
+            coll_val = body.get(cmd_name)
+            coll = coll_val if isinstance(coll_val, str) else ""
+        filter_doc = body.get("filter") or body.get("query") or {}
+        if isinstance(filter_doc, dict):
+            shape = ",".join(sorted(k for k in filter_doc.keys() if isinstance(k, str)))
+        else:
+            shape = ""
+        return coll, shape
+    except Exception:
+        return "", ""
+
+
+class _VonMongoFailureLogger(monitoring.CommandListener):
+    """Emit a structured warning whenever a Mongo command fails.
+
+    PyMongo raises ``NetworkTimeout`` / ``ServerSelectionTimeoutError`` with
+    only the host:port and configured timeouts; the offending command name,
+    database, collection, and slow-query shape are visible to the driver but
+    not to call-site catch blocks. A global command listener captures that
+    context for every failure with zero call-site changes and no overhead on
+    the success path.
+    """
+
+    _SLOW_COMMAND_DURATION_MS = 1000
+    _MAX_IN_FLIGHT = 4096  # cap to prevent unbounded growth on listener bugs
+
+    def __init__(self) -> None:
+        self._in_flight: dict[int, tuple[str, str]] = {}
+        self._lock = threading.Lock()
+
+    def started(self, event):
+        if len(self._in_flight) >= self._MAX_IN_FLIGHT:
+            # Drop silently rather than block traffic; capacity loss is logged
+            # only as missing context on subsequent failures.
+            return
+        coll, shape = _coll_and_shape_from_started_command(event)
+        with self._lock:
+            self._in_flight[event.request_id] = (coll, shape)
+
+    def _pop_context(self, request_id: int) -> tuple[str, str]:
+        with self._lock:
+            return self._in_flight.pop(request_id, ("", ""))
+
+    def succeeded(self, event):
+        coll, shape = self._pop_context(getattr(event, "request_id", -1))
+        try:
+            duration_ms = float(event.duration_micros) / 1000.0
+        except Exception:
+            return
+        if duration_ms < self._SLOW_COMMAND_DURATION_MS:
+            return
+        logger.warning(
+            "[mongo_slow] cmd=%s db=%s coll=%s filter_shape=%s duration_ms=%.1f "
+            "request_id=%s",
+            getattr(event, "command_name", ""),
+            getattr(event, "database_name", ""),
+            coll,
+            shape,
+            duration_ms,
+            getattr(event, "request_id", ""),
+        )
+
+    def failed(self, event):
+        coll, shape = self._pop_context(getattr(event, "request_id", -1))
+        try:
+            duration_ms = float(event.duration_micros) / 1000.0
+        except Exception:
+            duration_ms = -1.0
+        logger.warning(
+            "[mongo_command_failed] cmd=%s db=%s coll=%s filter_shape=%s "
+            "duration_ms=%.1f request_id=%s failure=%r",
+            getattr(event, "command_name", ""),
+            getattr(event, "database_name", ""),
+            coll,
+            shape,
+            duration_ms,
+            getattr(event, "request_id", ""),
+            getattr(event, "failure", ""),
+        )
+
+
+_VON_MONGO_LISTENER_REGISTERED = False
+
+
+def _ensure_mongo_failure_listener_registered() -> None:
+    global _VON_MONGO_LISTENER_REGISTERED
+    if _VON_MONGO_LISTENER_REGISTERED:
+        return
+    try:
+        monitoring.register(_VonMongoFailureLogger())
+        _VON_MONGO_LISTENER_REGISTERED = True
+        logger.info("[mongo_monitor] Registered structured failure listener.")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[mongo_monitor] Failed to register listener: %s", exc)
+
+
+_ensure_mongo_failure_listener_registered()
 
 
 def _debug_mongo_enabled() -> bool:
