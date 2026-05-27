@@ -56,7 +56,7 @@ from src.backend.services import (
 )
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
-DEFAULT_MODEL = "gemma4:26b"
+DEFAULT_MODEL = "gemma4:31b"
 DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE = 0.95
 DEFAULT_REPLAY_SET_ID = "JVNAUTOSCI-1894"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
@@ -3271,7 +3271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_MODEL,
         help=(
             "Explicit model override for the replay. Defaults to Ollama "
-            "`gemma4:26b` for the JVNAUTOSCI-1894 replay programme. Pass an "
+            "`gemma4:31b` for the JVNAUTOSCI-1894 replay programme. Pass an "
             "empty string to omit the override and let /von/generate use the "
             "active user-facing model for the authenticated session."
         ),

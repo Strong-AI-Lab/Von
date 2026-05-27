@@ -1639,6 +1639,14 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
     with _INDEX_STATE_LOCK:
         startup_report = _INDEX_REBUILD_STATE.get("startup_last_report")
 
+    ollama_auto_pull_state: Dict[str, Any] | None = None
+    try:
+        from ..languagemodels.llm_interface import get_ollama_auto_pull_state_snapshot
+
+        ollama_auto_pull_state = get_ollama_auto_pull_state_snapshot()
+    except Exception:
+        ollama_auto_pull_state = None
+
     report: Dict[str, Any] = {
         **runtime_state,
         "status": status,
@@ -1649,6 +1657,8 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         "auto_rebuild": auto_rebuild_state,
         "checked_at_utc": _utc_now_iso(),
     }
+    if isinstance(ollama_auto_pull_state, dict):
+        report["ollama_model_auto_pull"] = ollama_auto_pull_state
     if isinstance(startup_report, dict):
         report["startup_check"] = dict(startup_report)
     else:

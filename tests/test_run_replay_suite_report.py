@@ -133,3 +133,19 @@ def test_extract_prompt_sampler_failure_reason_prefers_nested_failure_message() 
     )
 
     assert reason == "Background generate task did not complete before timeout"
+
+
+def test_extract_prompt_sampler_failure_reason_strips_note_wrapped_json_error() -> None:
+    reason = replay_suite._extract_prompt_sampler_failure_reason(
+        {
+            "error": (
+                "NOTE: Use this random prompt sampler together with "
+                "docs/engineering/real_path_server_replay_and_telemetry_loop.md\n"
+                "{\"status\": \"error\", \"error\": \"model 'gemma4:26b' not found\"}"
+            )
+        },
+        stderr_text="",
+        fallback="default fallback",
+    )
+
+    assert reason == "model 'gemma4:26b' not found"

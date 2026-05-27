@@ -37,7 +37,7 @@ ARXIV_WORKFLOW_SCRIPT_PATH = (
 SEED_BUNDLE_DIR = PROJECT_ROOT / "src" / "backend" / "workflows" / "repo_seed_bundles"
 
 REPORT_SCHEMA_VERSION = "replay_suite_report.v1"
-DEFAULT_PROMPT_MODEL = "gemma4:26b"
+DEFAULT_PROMPT_MODEL = "gemma4:31b"
 PREMIUM_MODEL_PREFIXES = (
     "gpt-",
     "gpt4",
@@ -385,13 +385,52 @@ def _parse_json_from_stdout(stdout_text: str) -> dict[str, Any]:
         return {}
 
 
+def _clean_sampler_note_prefix(message: str) -> str:
+    text = _safe_text(message)
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    cleaned_lines = [line for line in lines if not line.startswith("NOTE:")]
+    return "\n".join(cleaned_lines).strip()
+
+
+def _extract_error_from_embedded_json(message: str) -> str:
+    text = _safe_text(message)
+    if not text:
+        return ""
+    start = text.find("{")
+    if start < 0:
+        return ""
+    try:
+        payload = _as_mapping(json.loads(text[start:]))
+    except Exception:
+        return ""
+    return _safe_text(payload.get("error"))
+
+
+def _normalise_prompt_sampler_error_text(message: str) -> str:
+    raw_text = _safe_text(message)
+    if not raw_text:
+        return ""
+    embedded = _extract_error_from_embedded_json(raw_text)
+    if embedded:
+        return embedded
+    cleaned = _clean_sampler_note_prefix(raw_text)
+    embedded_after_clean = _extract_error_from_embedded_json(cleaned)
+    if embedded_after_clean:
+        return embedded_after_clean
+    return cleaned or raw_text
+
+
 def _extract_prompt_sampler_failure_reason(
     payload: Mapping[str, Any],
     *,
     stderr_text: str,
     fallback: str,
 ) -> str:
-    direct_error = _safe_text(payload.get("error"))
+    direct_error = _normalise_prompt_sampler_error_text(
+        _safe_text(payload.get("error"))
+    )
     if direct_error:
         return direct_error
 
@@ -410,7 +449,7 @@ def _extract_prompt_sampler_failure_reason(
     if reasons:
         return reasons[0]
 
-    stderr_clean = _safe_text(stderr_text)
+    stderr_clean = _normalise_prompt_sampler_error_text(stderr_text)
     if stderr_clean:
         return stderr_clean
     return fallback

@@ -10,7 +10,7 @@ import os
 # ---------------------------------------------------------------------------
 # Ollama
 # ---------------------------------------------------------------------------
-DEFAULT_OLLAMA_MODEL: str = os.getenv("VON_DEFAULT_OLLAMA_MODEL", "gemma4:26b")
+DEFAULT_OLLAMA_MODEL: str = os.getenv("VON_DEFAULT_OLLAMA_MODEL", "gemma4:31b")
 
 # ---------------------------------------------------------------------------
 # OpenAI

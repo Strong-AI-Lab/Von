@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
+import json
 import logging
 import os
+import subprocess
+import threading
 import time
 import warnings
 from typing import (
@@ -133,6 +136,106 @@ _MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
 _MODEL_FAIL_BACKOFF: Dict[str, float] = defaultdict(float)
 _MODEL_CACHE_TTL = int(os.getenv("LLM_MODEL_CACHE_TTL", "300"))  # seconds
 _MODEL_FAIL_BACKOFF_SECONDS = int(os.getenv("LLM_MODEL_FAIL_BACKOFF", "60"))
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    token = str(raw).strip().lower()
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, int(default))
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return max(minimum, int(default))
+    return max(minimum, value)
+
+
+def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, float(default))
+    try:
+        value = float(str(raw).strip())
+    except Exception:
+        return max(minimum, float(default))
+    return max(minimum, value)
+
+
+_OLLAMA_AUTO_PULL_ENABLED = _bool_env("VON_OLLAMA_AUTO_PULL_ENABLED", True)
+_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS = _float_env(
+    "VON_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS", 300.0
+)
+_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS = _float_env(
+    "VON_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS", 600.0,
+    minimum=1.0,
+)
+_OLLAMA_AUTO_PULL_RETRY_BUDGET = _int_env(
+    "VON_OLLAMA_AUTO_PULL_RETRY_BUDGET", 1,
+    minimum=0,
+)
+
+_OLLAMA_AUTO_PULL_LOCK = threading.Lock()
+_OLLAMA_AUTO_PULL_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _is_ollama_model_not_found_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "not found" not in text:
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 404:
+        return True
+    return "model '" in text or 'model "' in text
+
+
+def _build_auto_pull_error_message(
+    *,
+    model_name: str,
+    base_error: Exception,
+    auto_pull_result: Mapping[str, Any],
+) -> str:
+    details = json.dumps(dict(auto_pull_result), ensure_ascii=True, sort_keys=True)
+    return (
+        f"Ollama model '{model_name}' is unavailable: {base_error}. "
+        f"Auto-pull outcome: {details}"
+    )
+
+
+def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
+    """Return diagnostics for recent Ollama model auto-pull activity."""
+    with _OLLAMA_AUTO_PULL_LOCK:
+        models: Dict[str, Any] = {}
+        for model_name, state in _OLLAMA_AUTO_PULL_STATE.items():
+            models[str(model_name)] = {
+                "in_flight": bool(state.get("in_flight", False)),
+                "last_status": state.get("last_status"),
+                "last_error": state.get("last_error"),
+                "last_elapsed_seconds": state.get("last_elapsed_seconds"),
+                "last_attempt_at_monotonic": state.get("last_attempt_at_monotonic"),
+                "window_started_at_monotonic": state.get(
+                    "window_started_at_monotonic"
+                ),
+                "attempts_in_window": int(state.get("attempts_in_window", 0) or 0),
+                "last_waiter_count": int(state.get("last_waiter_count", 0) or 0),
+            }
+    return {
+        "enabled": bool(_OLLAMA_AUTO_PULL_ENABLED),
+        "cooldown_seconds": float(_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS),
+        "timeout_seconds": float(_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS),
+        "retry_budget": int(_OLLAMA_AUTO_PULL_RETRY_BUDGET),
+        "models": models,
+    }
 
 #############################################
 # Internal message schema & adapters
@@ -756,6 +859,7 @@ class OllamaClient(LLMInterface):
 
         max_retries = 3
         base_delay = 1  # seconds
+        auto_pull_retry_consumed = False
 
         for attempt in range(max_retries):
             try:
@@ -790,6 +894,39 @@ class OllamaClient(LLMInterface):
                     logger.warning(
                         f"Ollama ResponseError on attempt {attempt + 1}/{max_retries}: {e} (Status: {getattr(e,'status_code','n/a')})"
                     )
+                    if (
+                        _is_ollama_model_not_found_error(e)
+                        and not auto_pull_retry_consumed
+                    ):
+                        auto_pull_retry_consumed = True
+                        auto_pull_result = self._attempt_model_auto_pull(target_model)
+                        if bool(auto_pull_result.get("succeeded")):
+                            logger.info(
+                                "Ollama auto-pull recovered missing model for generation model=%s details=%s",
+                                target_model,
+                                json.dumps(
+                                    dict(auto_pull_result),
+                                    ensure_ascii=True,
+                                    sort_keys=True,
+                                ),
+                            )
+                            continue
+                        logger.error(
+                            "Ollama auto-pull failed for generation model=%s details=%s",
+                            target_model,
+                            json.dumps(
+                                dict(auto_pull_result),
+                                ensure_ascii=True,
+                                sort_keys=True,
+                            ),
+                        )
+                        raise RuntimeError(
+                            _build_auto_pull_error_message(
+                                model_name=target_model,
+                                base_error=e,
+                                auto_pull_result=auto_pull_result,
+                            )
+                        ) from e
                     if (
                         "CUDA error" in str(e)
                         and getattr(e, "status_code", None) == 500
@@ -845,16 +982,52 @@ class OllamaClient(LLMInterface):
         if not target_model:
             raise ValueError("No Ollama model specified for embedding.")
 
-        try:
-            response = self.client.embeddings(model=target_model, prompt=text)
-            return response["embedding"]
-        except Exception as e:
-            logger.error(
-                f"Failed to generate embedding with Ollama model {target_model}: {e}"
-            )
-            raise RuntimeError(f"Ollama embedding error: {str(e)}") from e
+        auto_pull_retry_consumed = False
+        while True:
+            try:
+                response = self.client.embeddings(model=target_model, prompt=text)
+                return response["embedding"]
+            except Exception as e:
+                if (
+                    _is_ollama_model_not_found_error(e)
+                    and not auto_pull_retry_consumed
+                ):
+                    auto_pull_retry_consumed = True
+                    auto_pull_result = self._attempt_model_auto_pull(target_model)
+                    if bool(auto_pull_result.get("succeeded")):
+                        logger.info(
+                            "Ollama auto-pull recovered missing model for embedding model=%s details=%s",
+                            target_model,
+                            json.dumps(
+                                dict(auto_pull_result),
+                                ensure_ascii=True,
+                                sort_keys=True,
+                            ),
+                        )
+                        continue
+                    logger.error(
+                        "Ollama auto-pull failed for embedding model=%s details=%s",
+                        target_model,
+                        json.dumps(
+                            dict(auto_pull_result),
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                    )
+                    raise RuntimeError(
+                        _build_auto_pull_error_message(
+                            model_name=target_model,
+                            base_error=e,
+                            auto_pull_result=auto_pull_result,
+                        )
+                    ) from e
 
-    def list_models(self) -> List[str]:
+                logger.error(
+                    f"Failed to generate embedding with Ollama model {target_model}: {e}"
+                )
+                raise RuntimeError(f"Ollama embedding error: {str(e)}") from e
+
+    def list_models(self, force_refresh: bool = False) -> List[str]:
         """List available Ollama models (cached with backoff)."""
         now = time.time()
         cache_key = f"ollama|{self.host}"
@@ -867,7 +1040,11 @@ class OllamaClient(LLMInterface):
                 return cached["models"]
             return []
         cached = _MODEL_CACHE.get(cache_key)
-        if cached and (now - cached["ts"]) < _MODEL_CACHE_TTL:
+        if (
+            not force_refresh
+            and cached
+            and (now - cached["ts"]) < _MODEL_CACHE_TTL
+        ):
             logger.debug(
                 "Ollama model cache hit host=%s age=%.1fs",
                 self.host,
@@ -990,6 +1167,193 @@ class OllamaClient(LLMInterface):
         except Exception as e:
             logger.error(f"Failed to pull Ollama model {model_name}: {e}")
             # Decide if you want to raise the error or just log it
+
+    def _is_model_available(self, model_name: str) -> bool:
+        model_token = str(model_name or "").strip()
+        if not model_token:
+            return False
+        models = self.list_models(force_refresh=True)
+        if model_token in models:
+            return True
+        token_prefix = model_token.split(":", 1)[0]
+        return any(str(item).split(":", 1)[0] == token_prefix for item in models)
+
+    def _pull_model(self, model_name: str) -> None:
+        command = ["ollama", "pull", model_name]
+        try:
+            process = subprocess.run(  # noqa: S603
+                command,
+                capture_output=True,
+                text=True,
+                timeout=_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError:
+            # Fall back to Python client pull if CLI is unavailable.
+            self.client.pull(model_name)
+            return
+        except Exception:
+            self.client.pull(model_name)
+            return
+
+        if process.returncode != 0:
+            stderr_text = str(process.stderr or "").strip()
+            stdout_text = str(process.stdout or "").strip()
+            detail = stderr_text or stdout_text or f"return_code={process.returncode}"
+            raise RuntimeError(f"ollama pull failed for {model_name}: {detail}")
+
+    def _attempt_model_auto_pull(self, model_name: str) -> Dict[str, Any]:
+        model_token = str(model_name or "").strip()
+        now = time.monotonic()
+        result: Dict[str, Any] = {
+            "attempted": False,
+            "succeeded": False,
+            "failed": False,
+            "model": model_token,
+            "elapsed_seconds": 0.0,
+            "retry_outcome": "not_attempted",
+        }
+        if not model_token:
+            result.update({
+                "failed": True,
+                "retry_outcome": "invalid_model",
+                "error": "missing model name",
+            })
+            return result
+
+        if not _OLLAMA_AUTO_PULL_ENABLED:
+            result["retry_outcome"] = "auto_pull_disabled"
+            return result
+
+        with _OLLAMA_AUTO_PULL_LOCK:
+            state = _OLLAMA_AUTO_PULL_STATE.setdefault(
+                model_token,
+                {
+                    "in_flight": False,
+                    "event": threading.Event(),
+                    "window_started_at_monotonic": now,
+                    "attempts_in_window": 0,
+                    "last_status": None,
+                    "last_error": None,
+                    "last_elapsed_seconds": 0.0,
+                    "last_attempt_at_monotonic": None,
+                    "last_waiter_count": 0,
+                },
+            )
+
+            in_flight = bool(state.get("in_flight", False))
+            event = state.get("event")
+            if not isinstance(event, threading.Event):
+                event = threading.Event()
+                state["event"] = event
+
+            if in_flight:
+                state["last_waiter_count"] = int(state.get("last_waiter_count", 0) or 0) + 1
+                waiter_event = event
+            else:
+                waiter_event = None
+
+        if waiter_event is not None:
+            waiter_started = time.monotonic()
+            waiter_event.wait(timeout=_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS)
+            wait_elapsed = round(time.monotonic() - waiter_started, 3)
+            with _OLLAMA_AUTO_PULL_LOCK:
+                state_after_wait = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
+                status_after_wait = str(state_after_wait.get("last_status") or "")
+                last_error = state_after_wait.get("last_error")
+                last_elapsed = float(state_after_wait.get("last_elapsed_seconds") or 0.0)
+            result.update(
+                {
+                    "attempted": True,
+                    "elapsed_seconds": wait_elapsed,
+                    "retry_outcome": "joined_single_flight",
+                    "succeeded": status_after_wait == "succeeded",
+                    "failed": status_after_wait != "succeeded",
+                    "joined_single_flight": True,
+                    "pull_elapsed_seconds": round(last_elapsed, 3),
+                }
+            )
+            if last_error:
+                result["error"] = str(last_error)
+            return result
+
+        with _OLLAMA_AUTO_PULL_LOCK:
+            state = _OLLAMA_AUTO_PULL_STATE[model_token]
+            window_started = float(state.get("window_started_at_monotonic") or now)
+            attempts_in_window = int(state.get("attempts_in_window", 0) or 0)
+            if (now - window_started) >= _OLLAMA_AUTO_PULL_COOLDOWN_SECONDS:
+                window_started = now
+                attempts_in_window = 0
+
+            if attempts_in_window >= _OLLAMA_AUTO_PULL_RETRY_BUDGET:
+                state["window_started_at_monotonic"] = window_started
+                state["attempts_in_window"] = attempts_in_window
+                state["last_status"] = "skipped_retry_budget"
+                state["last_error"] = (
+                    "Auto-pull retry budget exhausted; wait for cooldown or "
+                    "increase VON_OLLAMA_AUTO_PULL_RETRY_BUDGET."
+                )
+                result.update(
+                    {
+                        "attempted": True,
+                        "failed": True,
+                        "retry_outcome": "retry_budget_exhausted",
+                        "error": state["last_error"],
+                    }
+                )
+                return result
+
+            state["window_started_at_monotonic"] = window_started
+            state["attempts_in_window"] = attempts_in_window + 1
+            state["last_attempt_at_monotonic"] = now
+            state["in_flight"] = True
+            event = state.get("event")
+            if not isinstance(event, threading.Event):
+                event = threading.Event()
+                state["event"] = event
+            event.clear()
+
+        pull_started = time.monotonic()
+        pull_error: str | None = None
+        pull_succeeded = False
+        try:
+            if not self._is_model_available(model_token):
+                self._pull_model(model_token)
+            pull_succeeded = self._is_model_available(model_token)
+            if not pull_succeeded:
+                pull_error = (
+                    f"Model '{model_token}' still unavailable after auto-pull attempt."
+                )
+        except Exception as exc:
+            pull_error = str(exc)
+            pull_succeeded = False
+        pull_elapsed = round(time.monotonic() - pull_started, 3)
+
+        with _OLLAMA_AUTO_PULL_LOCK:
+            state = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
+            state["in_flight"] = False
+            state["last_status"] = "succeeded" if pull_succeeded else "failed"
+            state["last_error"] = pull_error
+            state["last_elapsed_seconds"] = pull_elapsed
+            event = state.get("event")
+            if isinstance(event, threading.Event):
+                event.set()
+
+        result.update(
+            {
+                "attempted": True,
+                "succeeded": pull_succeeded,
+                "failed": not pull_succeeded,
+                "elapsed_seconds": pull_elapsed,
+                "retry_outcome": "retried_after_pull" if pull_succeeded else "pull_failed",
+                "auto_pull_attempted": True,
+                "auto_pull_succeeded": pull_succeeded,
+                "auto_pull_failed": not pull_succeeded,
+            }
+        )
+        if pull_error:
+            result["error"] = pull_error
+        return result
 
 
 class OpenAIClient(LLMInterface):

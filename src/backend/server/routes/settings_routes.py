@@ -82,7 +82,7 @@ from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
-from ...languagemodels.llm_interface import OpenAIClient
+from ...languagemodels.llm_interface import OpenAIClient, get_ollama_auto_pull_state_snapshot
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
 from pymongo.errors import BulkWriteError
@@ -801,6 +801,7 @@ def get_all_settings():
         settings["workflow_capability_index"] = (
             get_workflow_capability_index_readiness_report()
         )
+        settings["ollama_model_auto_pull"] = get_ollama_auto_pull_state_snapshot()
         settings["available_mutation_authority_levels"] = [
             MUTATION_AUTHORITY_LEVEL_READ_ONLY,
             MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY,
