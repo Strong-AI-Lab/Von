@@ -1758,7 +1758,11 @@ def discover_workflows_for_turn(
             allow_non_executable=effective_allow_non_executable,
             workflow_registry=workflow_registry,
         )
-        return result.to_dict()
+        payload = result.to_dict()
+        # Self-describing telemetry: every discovery payload records where it
+        # came from so downstream diagnostics can explain empty results.
+        payload.setdefault("discovery_payload_origin", "discover_workflows_for_turn")
+        return payload
 
     except Exception as e:
         logger.warning(f"Workflow discovery for turn failed: {e}")
@@ -1814,4 +1818,10 @@ def discover_workflows_for_turn(
                     "error": type(e).__name__,
                 }
             ],
-        ).to_dict()
+        ).to_dict() | {
+            "discovery_payload_origin": (
+                "discover_workflows_for_turn_budget_exhausted"
+                if budget_exhausted
+                else "discover_workflows_for_turn_error"
+            ),
+        }

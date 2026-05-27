@@ -1166,6 +1166,57 @@ def test_build_workflow_routing_diagnostics_surfaces_discovery_stage_timings() -
     assert slowest[0]["elapsed_ms"] == 45123.7
 
 
+def test_build_workflow_routing_diagnostics_surfaces_discovery_payload_origin() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery={
+            "query": "who am i in this conversation",
+            "discovery_payload_origin": "discover_workflows_for_turn",
+            "candidates": [],
+            "candidate_count": 0,
+            "match_count": 0,
+        },
+        workflow_routing={},
+        turn_execution_diagnostics={},
+        aux_llm_calls=[],
+    )
+    discovery_block = diagnostics["discovery"]
+    assert (
+        discovery_block["discovery_payload_origin"]
+        == "discover_workflows_for_turn"
+    )
+
+
+def test_build_workflow_routing_diagnostics_marks_missing_discovery_payload() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=None,
+        workflow_routing={},
+        turn_execution_diagnostics={},
+        aux_llm_calls=[],
+    )
+    assert (
+        diagnostics["discovery"]["discovery_payload_origin"]
+        == "missing_discovery_payload"
+    )
+
+
+def test_build_workflow_routing_diagnostics_marks_unstamped_discovery_payload() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery={
+            "query": "who am i",
+            "candidates": [],
+            "candidate_count": 0,
+            "match_count": 0,
+        },
+        workflow_routing={},
+        turn_execution_diagnostics={},
+        aux_llm_calls=[],
+    )
+    assert (
+        diagnostics["discovery"]["discovery_payload_origin"]
+        == "unstamped_discovery_payload"
+    )
+
+
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> (
     None
 ):

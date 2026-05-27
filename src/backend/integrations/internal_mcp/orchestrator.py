@@ -32699,6 +32699,7 @@ class InternalMCPChatOrchestrator:
                 "candidates": [dict(tool_candidate)],
                 "agent_test_local_replay": True,
                 "required_tools": list(expected_outcome_contract.required_tools),
+                "discovery_payload_origin": "agent_test_local_replay_synthetic",
             }
             selector_prompt_text = (
                 "Select #V#tool_calling_workflow for this AgentTest local replay. "
@@ -32709,6 +32710,12 @@ class InternalMCPChatOrchestrator:
                 "base_context_source": "agent_test_local_replay",
                 "agent_test_local_replay": True,
             }
+            # Persist the populated discovery payload onto request.data so it
+            # survives downstream code paths that bypass the action-output
+            # merge (failed-step branches, early-exit OrchestratorResults).
+            if isinstance(data, dict):
+                data["workflow_discovery_result"] = workflow_discovery_result
+                data["workflow_discovery"] = workflow_discovery_result
             return {
                 **self._build_turn_expected_outcome_context_payload(data),
                 "workflow_discovery_result": workflow_discovery_result,
@@ -32780,6 +32787,17 @@ class InternalMCPChatOrchestrator:
                 discovery_query_input=discovery_query_input,
                 expected_outcome_contract=expected_outcome_contract,
             )
+            prior_origin = None
+            if isinstance(raw_discovery, Mapping):
+                prior_origin = raw_discovery.get("discovery_payload_origin")
+            if isinstance(workflow_discovery_result, dict):
+                if isinstance(prior_origin, str) and prior_origin.strip():
+                    workflow_discovery_result.setdefault(
+                        "discovery_payload_origin_prior", prior_origin
+                    )
+                workflow_discovery_result["discovery_payload_origin"] = (
+                    "reused_cached_workflow_discovery"
+                )
         elif prompt_text:
             if callable(progress_note):
                 progress_note(
@@ -32807,8 +32825,18 @@ class InternalMCPChatOrchestrator:
                 expected_outcome_contract=expected_outcome_contract,
                 refreshed=refresh_discovery,
             )
+            if isinstance(workflow_discovery_result, dict):
+                # `discover_workflows_for_turn` already stamps origin on its
+                # own returns; preserve that stamp here if present, otherwise
+                # name the prepare-path branch so origin is never blank.
+                workflow_discovery_result.setdefault(
+                    "discovery_payload_origin",
+                    "prepare_turn_selector_context_refresh",
+                )
         else:
-            workflow_discovery_result = {}
+            workflow_discovery_result = {
+                "discovery_payload_origin": "prepare_turn_selector_context_skipped_no_query",
+            }
 
         continuation_routing_context_text = None
         raw_continuation_context = data.get("continuation_context")
@@ -32957,6 +32985,13 @@ class InternalMCPChatOrchestrator:
             if isinstance(item.get("concept_id"), str)
             and str(item.get("concept_id")).strip()
         ]
+
+        # Persist the populated discovery payload onto request.data so it
+        # survives downstream code paths that bypass the action-output merge
+        # (failed-step branches, early-exit OrchestratorResults).
+        if isinstance(data, dict):
+            data["workflow_discovery_result"] = workflow_discovery_result
+            data["workflow_discovery"] = workflow_discovery_result
 
         return {
             **self._build_turn_expected_outcome_context_payload(data),

@@ -288,7 +288,14 @@ def _discover_turn_workflows_for_durable_action(
     if not isinstance(discovery, Mapping) or not discovery:
         discovery = request.data.get("workflow_discovery")
     if isinstance(discovery, Mapping) and discovery:
-        return dict(discovery)
+        reused = dict(discovery)
+        prior_origin = reused.get("discovery_payload_origin")
+        if isinstance(prior_origin, str) and prior_origin.strip():
+            reused.setdefault("discovery_payload_origin_prior", prior_origin)
+        reused["discovery_payload_origin"] = (
+            "durable_action_reused_cached_workflow_discovery"
+        )
+        return reused
 
     from ...services.workflow_discovery_service import discover_workflows_for_turn
 
@@ -306,7 +313,11 @@ def _discover_turn_workflows_for_durable_action(
 
     def _run_discovery(query: str, *, query_source: str) -> dict[str, Any]:
         if not query.strip():
-            return {}
+            return {
+                "discovery_payload_origin": (
+                    "durable_action_skipped_no_query"
+                ),
+            }
         result = discover_workflows_for_turn(
             query,
             namespace=request.environment.user_namespace,
@@ -317,6 +328,12 @@ def _discover_turn_workflows_for_durable_action(
             discovery_result.setdefault("query", query)
             discovery_result.setdefault("requested_query", query)
             discovery_result["query_source"] = query_source
+            # `discover_workflows_for_turn` already stamps origin on its own
+            # returns; fall back to this branch name if missing.
+            discovery_result.setdefault(
+                "discovery_payload_origin",
+                "durable_action_discover_workflows_for_turn",
+            )
         return discovery_result
 
     discovery_result = _run_discovery(
@@ -355,6 +372,7 @@ def _discover_turn_workflows_for_durable_action(
         "match_absence_reason": discovery_result.get("match_absence_reason")
         or "durable_workflow_discovery_no_match",
         "errors": discovery_result.get("errors"),
+        "discovery_payload_origin": "durable_action_no_match_fallback",
     }
 
 
@@ -375,6 +393,11 @@ def _build_turn_execution_route_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         """Resolve the workflow routing for the current turn."""
         discovery = _discover_turn_workflows_for_durable_action(request)
+        # Persist on request.data so downstream early-exit paths still see
+        # the populated discovery payload.
+        if isinstance(request.data, dict):
+            request.data["workflow_discovery_result"] = discovery
+            request.data["workflow_discovery"] = discovery
         selected_workflow_id = _select_workflow_from_discovery(discovery)
         candidate_entries = _discovery_candidate_entries(discovery)
         candidate_ids = [
@@ -491,6 +514,11 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             )
         outputs["workflow_discovery_result"] = discovery
         outputs["workflow_discovery"] = discovery
+        # Persist on request.data so downstream early-exit paths still see
+        # the populated discovery payload.
+        if isinstance(request.data, dict):
+            request.data["workflow_discovery_result"] = discovery
+            request.data["workflow_discovery"] = discovery
         outputs.setdefault("selector_prompt_available", False)
         outputs.setdefault("selector_prompt_id", "durable_selector_prompt_unavailable")
         outputs.setdefault(

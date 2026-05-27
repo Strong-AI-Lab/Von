@@ -10741,6 +10741,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if isinstance(workflow_discovery_raw, Mapping)
                     else None
                 )
+                if workflow_discovery_result is None:
+                    # Self-describing telemetry: if discovery never reached the
+                    # route, stamp a sentinel origin so diagnostics surface the
+                    # missing payload instead of all-empty defaults that look
+                    # indistinguishable from a real empty discovery.
+                    workflow_discovery_result = {
+                        "discovery_payload_origin": (
+                            "missing_from_orchestrator_result"
+                        ),
+                    }
                 workflow_routing_raw = getattr(
                     orchestrator_result, "workflow_routing", None
                 )

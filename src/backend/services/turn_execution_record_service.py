@@ -3367,6 +3367,19 @@ def build_workflow_routing_diagnostics(
             "requested_query": _safe_str(
                 workflow_discovery_payload.get("requested_query")
             ),
+            "discovery_payload_origin": (
+                _safe_str(
+                    workflow_discovery_payload.get("discovery_payload_origin")
+                )
+                or (
+                    "missing_discovery_payload"
+                    if not workflow_discovery_payload
+                    else "unstamped_discovery_payload"
+                )
+            ),
+            "discovery_payload_origin_prior": _safe_str(
+                workflow_discovery_payload.get("discovery_payload_origin_prior")
+            ),
             "search_time_ms": _safe_float(
                 workflow_discovery_payload.get("search_time_ms")
             ),
