@@ -17,7 +17,7 @@
 			}
 		},
 		"explorer.confirmDragAndDrop": false,
-		"workbench.editor.enablePreview": false,
+		"workbench.editor.enablePreview": true,
 		"workbench.tree.expandMode": "singleClick",
 		"terminal.integrated.defaultProfile.windows": "PowerShell",
 		"typescript.enablePromptUseWorkspaceTsdk": true
