@@ -369,6 +369,16 @@ def _ensure_indexes() -> None:
                 [("reward", DESCENDING), ("timestamp", DESCENDING)],
                 name="reward_timestamp_desc",
             )
+        if "outcome_timestamp_desc" not in existing:
+            # Supports list_selection_experiences(completed_only=True), which
+            # filters on {outcome: {$ne: None}} and sorts by timestamp DESC.
+            # Without this index Atlas does a full collection scan plus an
+            # in-memory sort, which exceeded the 10s socket budget during
+            # policy refresh and surfaced as an opaque NetworkTimeout.
+            coll.create_index(
+                [("outcome", ASCENDING), ("timestamp", DESCENDING)],
+                name="outcome_timestamp_desc",
+            )
     except OperationFailure as exc:
         logger.warning(
             "[workflow_selection_experience] index creation partially failed: %s",
@@ -757,8 +767,14 @@ def list_selection_experiences(
         query["outcome"] = {"$ne": None}
 
     safe_limit = max(1, min(limit, 5000))
+    # Server-side time budget: a long-running scan should fail fast with
+    # ExecutionTimeout (which names the collection and operation) rather than
+    # be killed by the opaque socketTimeout at the driver layer.
     cursor = (
-        coll.find(query, {"_id": 0}).sort("timestamp", DESCENDING).limit(safe_limit)
+        coll.find(query, {"_id": 0})
+        .sort("timestamp", DESCENDING)
+        .limit(safe_limit)
+        .max_time_ms(8000)
     )
     entries: list[SelectionExperienceTuple] = []
     for payload in cursor:
