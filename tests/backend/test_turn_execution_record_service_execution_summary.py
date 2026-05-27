@@ -1131,6 +1131,41 @@ def test_turn_record_preserves_first_class_turn_expected_outcome_contract_snapsh
     ] == len(expected_contract)
 
 
+def test_build_workflow_routing_diagnostics_surfaces_discovery_stage_timings() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery={
+            "query": "who am i in this conversation",
+            "candidate_count": 0,
+            "match_count": 0,
+            "candidates": [],
+            "stage_timings": [
+                {"stage": "capability_index_search", "status": "ok", "elapsed_ms": 12000.5},
+                {"stage": "semantic_search", "status": "ok", "elapsed_ms": 45123.7},
+                {"stage": "vontology_search", "status": "ok", "elapsed_ms": 800.2},
+                {"stage": "enrich_matches", "status": "ok", "elapsed_ms": 50.0},
+            ],
+        },
+        workflow_routing={},
+        turn_execution_diagnostics={},
+        aux_llm_calls=[],
+    )
+    discovery_block = diagnostics["discovery"]
+    assert discovery_block["stage_timing_count"] == 4
+    stage_timings = discovery_block["stage_timings"]
+    assert [entry["stage"] for entry in stage_timings] == [
+        "capability_index_search",
+        "semantic_search",
+        "vontology_search",
+        "enrich_matches",
+    ]
+    slowest = discovery_block["slowest_stages"]
+    assert [entry["stage"] for entry in slowest[:2]] == [
+        "semantic_search",
+        "capability_index_search",
+    ]
+    assert slowest[0]["elapsed_ms"] == 45123.7
+
+
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> (
     None
 ):

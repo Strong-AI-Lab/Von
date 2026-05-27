@@ -2871,6 +2871,75 @@ def _resolve_turn_expected_outcome_contract_snapshot(
     return TurnExpectedOutcomeContract.merge_preferred(*resolved_sources)
 
 
+def _normalise_discovery_stage_timings(
+    raw_stage_timings: Any,
+    *,
+    max_entries: int = 64,
+    slowest_limit: int = 5,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (bounded stage_timings list, slowest_stages summary).
+
+    Stage timings are emitted by ``_record_discovery_stage_timing`` in the
+    workflow discovery service. Surfacing them in routing diagnostics turns
+    every replay/turn record into a self-describing latency report so that
+    discovery slowness can be diagnosed without trawling server logs.
+    """
+
+    if not isinstance(raw_stage_timings, Sequence) or isinstance(
+        raw_stage_timings, (str, bytes)
+    ):
+        return [], []
+
+    cleaned: list[dict[str, Any]] = []
+    for entry in raw_stage_timings:
+        if not isinstance(entry, Mapping):
+            continue
+        normalised: dict[str, Any] = {}
+        for key, value in entry.items():
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                normalised[key_text] = value
+            elif isinstance(value, Mapping):
+                scalar_map: dict[str, Any] = {}
+                for map_key, map_value in value.items():
+                    if (
+                        isinstance(map_value, (str, int, float, bool))
+                        or map_value is None
+                    ):
+                        scalar_map[str(map_key)[:120]] = map_value
+                if scalar_map:
+                    normalised[key_text] = scalar_map
+            elif isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes)
+            ):
+                normalised[key_text] = [str(item)[:240] for item in list(value)[:20]]
+        if normalised:
+            cleaned.append(normalised)
+        if len(cleaned) >= max_entries:
+            break
+
+    def _elapsed(entry: Mapping[str, Any]) -> float:
+        value = entry.get("elapsed_ms")
+        try:
+            return float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    slowest = sorted(cleaned, key=_elapsed, reverse=True)[:slowest_limit]
+    slowest_summary = [
+        {
+            "stage": entry.get("stage"),
+            "status": entry.get("status"),
+            "elapsed_ms": _elapsed(entry),
+        }
+        for entry in slowest
+        if _elapsed(entry) > 0.0
+    ]
+    return cleaned, slowest_summary
+
+
 def build_workflow_routing_diagnostics(
     *,
     workflow_discovery: Mapping[str, Any] | None,
@@ -3146,6 +3215,11 @@ def build_workflow_routing_diagnostics(
     discovery_errors = _dedupe_string_sequence(
         workflow_discovery_payload.get("errors") or []
     )
+    discovery_stage_timings, discovery_slowest_stages = (
+        _normalise_discovery_stage_timings(
+            workflow_discovery_payload.get("stage_timings")
+        )
+    )
     discovery_match_absence_reason = _derive_discovery_match_absence_reason(
         discovery_candidates=discovery_candidates,
         routing_matches=routing_matches,
@@ -3332,6 +3406,9 @@ def build_workflow_routing_diagnostics(
             "candidates": discovery_candidates,
             "routing_matches": routing_matches,
             "excluded_candidates": excluded_candidates,
+            "stage_timings": discovery_stage_timings,
+            "stage_timing_count": len(discovery_stage_timings),
+            "slowest_stages": discovery_slowest_stages,
         },
         "selector": {
             "prompt_id": _safe_str(workflow_routing_payload.get("prompt_id"))
