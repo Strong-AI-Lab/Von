@@ -8,7 +8,7 @@ import requests
 from scripts import run_live_kb_tool_prompt_sampler as sampler
 
 
-def test_prompt_bank_file_matches_embedded_payload() -> None:
+def test_prompt_bank_payload_is_loaded_from_file() -> None:
     file_payload = json.loads(sampler.PROMPT_BANK_PATH.read_text(encoding="utf-8"))
     assert file_payload == sampler.PROMPT_BANK_PAYLOAD
 
@@ -22,7 +22,7 @@ def test_write_json_output_creates_parent_directories(tmp_path) -> None:
 
 
 def test_default_model_override_is_ollama_gemma4() -> None:
-    assert sampler.DEFAULT_MODEL == "gemma4:26b"
+    assert sampler.DEFAULT_MODEL == "gemma4:31b"
 
 
 def test_infer_provider_from_model_identifier_treats_ollama_tags_as_local() -> None:
@@ -871,11 +871,7 @@ def test_prompt_bank_includes_trivial_text_relation_replay_case() -> None:
     prompt = by_id["text_relations_for_michael_witbrock_concept"]
     assert prompt["category"] == "represented_relation_lookup"
     assert prompt["complexity_class"] == "vontology_grounded"
-    assert prompt["likely_tools"] == [
-        "search_concepts",
-        "get_text_relations_summary",
-        "get_text_relations",
-    ]
+    assert prompt["likely_tools"] == ["get_text_relations_summary"]
     assert prompt["requires_tool_use"] is True
 
 
@@ -912,6 +908,26 @@ def test_prompt_bank_includes_jira_replay_regressions() -> None:
         "gmail_get_message",
     ]
     assert gmail_listing["requires_tool_use"] is True
+
+    email_arxiv_titles = by_id["list_arxiv_titles_from_zhan_gmail_messages"]
+    assert email_arxiv_titles["category"] == "multi_tool_gmail_arxiv_title_lookup"
+    assert email_arxiv_titles["complexity_class"] == "tool_augmented"
+    assert email_arxiv_titles["knowledge_surfaces"] == [
+        "turn_context",
+        "gmail",
+        "arxiv",
+    ]
+    assert email_arxiv_titles["likely_tools"] == [
+        "gmail_list_messages",
+        "gmail_get_message",
+        "get_paper_metadata",
+        "search_arxiv",
+    ]
+    assert email_arxiv_titles["required_workflows"] == [
+        "#V#general_mail_review_workflow"
+    ]
+    assert email_arxiv_titles["requires_tool_use"] is True
+    assert email_arxiv_titles["allows_grounded_empty_result"] is True
 
 
 def test_run_generate_background_omits_model_when_not_requested(

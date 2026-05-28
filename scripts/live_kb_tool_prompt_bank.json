@@ -370,6 +370,28 @@
       "requires_tool_use": true
     },
     {
+      "id": "list_arxiv_titles_from_zhan_gmail_messages",
+      "category": "multi_tool_gmail_arxiv_title_lookup",
+      "complexity_class": "tool_augmented",
+      "prompt": "Check recent messages for the zhanvonwitbrock@gmail.com zhan-gmail identity for arXiv links or PDF/file references. For each arXiv reference you find, retrieve the paper metadata/title where possible and return a concise list with the arXiv ID or URL, retrieved title, and source email subject/date; say if none are found after checking.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "gmail",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "gmail_list_messages",
+        "gmail_get_message",
+        "get_paper_metadata",
+        "search_arxiv"
+      ],
+      "required_workflows": [
+        "#V#general_mail_review_workflow"
+      ],
+      "requires_tool_use": true,
+      "allows_grounded_empty_result": true
+    },
+    {
       "id": "what_research_interests_of_mine_are_explicitly_represented_here",
       "category": "single_tool_rag_lookup",
       "complexity_class": "vontology_plus_single_tool",

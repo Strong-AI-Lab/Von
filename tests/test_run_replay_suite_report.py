@@ -27,6 +27,40 @@ def test_discovery_includes_prompt_bank_and_workflow_seed_cases() -> None:
     assert isinstance(prompt_case.get("required_tools"), list)
 
 
+def test_email_arxiv_prompt_bank_replay_is_discoverable() -> None:
+    cases = replay_suite.discover_replay_cases(
+        prompt_ids={"list_arxiv_titles_from_zhan_gmail_messages"}
+    )
+    case = next(
+        case
+        for case in cases
+        if case.get("replay_id")
+        == "prompt-bank:list_arxiv_titles_from_zhan_gmail_messages"
+    )
+
+    assert case["source_category"] == "prompt-bank"
+    assert case["surface_exercised"] == "/von/generate"
+    assert case["required_tools"] == [
+        "get_paper_metadata",
+        "gmail_get_message",
+        "gmail_list_messages",
+        "search_arxiv",
+    ]
+    assert case["required_workflows"] == ["#V#general_mail_review_workflow"]
+
+    row = replay_suite._build_table_row(
+        case,
+        {
+            "result": "dry_run",
+            "health": "n/a",
+            "failure_stall_reason": "",
+            "evidence": [],
+        },
+    )
+    assert "get_paper_metadata" in row["required_tools_workflows"]
+    assert "#V#general_mail_review_workflow" in row["required_tools_workflows"]
+
+
 def test_markdown_table_rendering_contains_expected_columns() -> None:
     markdown = replay_suite.render_markdown_table(
         [

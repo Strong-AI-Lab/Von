@@ -7,9 +7,9 @@ verdict about whether the resulting answer would likely satisfy a user.
 Use `--complexity-class` to constrain random selection to easier direct
 questions, KB-grounded questions, or harder tool-augmented questions.
 
-The prompt bank is intentionally embedded here and also checked into
-`scripts/live_kb_tool_prompt_bank.json`. The script fails closed if the two
-copies drift.
+The prompt bank lives in `scripts/live_kb_tool_prompt_bank.json`. Runtime
+selection loads that file so replay cases remain data artefacts rather than
+task-specific Python policy.
 
 Use this sampler together with
 `docs/engineering/real_path_server_replay_and_telemetry_loop.md`.
@@ -773,6 +773,18 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
     ],
 }
 
+EMBEDDED_PROMPT_BANK_PAYLOAD = PROMPT_BANK_PAYLOAD
+
+
+def _load_prompt_bank_payload_from_file() -> dict[str, Any]:
+    payload = json.loads(PROMPT_BANK_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("Prompt bank file must contain a JSON object.")
+    return payload
+
+
+PROMPT_BANK_PAYLOAD = _load_prompt_bank_payload_from_file()
+
 
 def _safe_text(value: Any) -> str:
     if isinstance(value, str):
@@ -1314,13 +1326,13 @@ def _request_json(
 
 
 def _load_prompt_bank() -> dict[str, Any]:
-    payload = json.loads(PROMPT_BANK_PATH.read_text(encoding="utf-8"))
+    payload = _load_prompt_bank_payload_from_file()
     if payload != PROMPT_BANK_PAYLOAD:
         raise RuntimeError(
-            "Prompt bank file is out of sync with the embedded prompt bank. "
-            "Update both copies together."
+            "Prompt bank file changed after the sampler module was imported. "
+            "Re-run the sampler so replay selection uses a single prompt-bank snapshot."
         )
-    return json.loads(json.dumps(PROMPT_BANK_PAYLOAD))
+    return json.loads(json.dumps(payload))
 
 
 def _write_json_output(output_json: str, payload: Mapping[str, Any]) -> None:

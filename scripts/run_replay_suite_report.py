@@ -220,6 +220,14 @@ def discover_prompt_bank_cases(
             continue
         if prompt_complexity_classes and complexity_class not in prompt_complexity_classes:
             continue
+        required_concepts = {
+            "#V#live_prompt_sampler_replay_evaluation_rubric_v1",
+            *(
+                _safe_text(item)
+                for item in _as_list(prompt.get("required_concepts"))
+                if _safe_text(item)
+            ),
+        }
         discovered.append(
             {
                 "replay_id": f"prompt-bank:{prompt_id}",
@@ -236,10 +244,14 @@ def discover_prompt_bank_cases(
                         if _safe_text(item)
                     }
                 ),
-                "required_workflows": [],
-                "required_concepts": [
-                    "#V#live_prompt_sampler_replay_evaluation_rubric_v1"
-                ],
+                "required_workflows": sorted(
+                    {
+                        _safe_text(item)
+                        for item in _as_list(prompt.get("required_workflows"))
+                        if _safe_text(item)
+                    }
+                ),
+                "required_concepts": sorted(required_concepts),
                 "mode_environment": "AgentTest/local model",
                 "prompt_id": prompt_id,
                 "prompt_text": _safe_text(prompt.get("prompt")),
