@@ -198,7 +198,7 @@ class TestBackgroundTaskRegistry:
         registry.shutdown(wait=True)
 
     def test_request_cancellation_sets_flag(self) -> None:
-        """request_cancellation() should set the cancellation_requested flag."""
+        """request_cancellation() should terminally mark the task cancelled."""
         registry = BackgroundTaskRegistry(max_workers=1)
 
         def _slow_task() -> str:
@@ -217,8 +217,43 @@ class TestBackgroundTaskRegistry:
         status = registry.get_task_status("task-cancel")
         assert status is not None
         assert status.cancellation_requested is True
+        assert status.status == "cancelled"
+        assert status.completed_at is not None
+        assert status.progress.get("status") == "cancelled"
 
         registry.shutdown(wait=False)
+
+    def test_request_cancellation_resists_late_worker_completion(self) -> None:
+        """A cancelled task should not be overwritten by a late worker result."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _late_completing_task() -> str:
+            started.set()
+            release.wait(timeout=2)
+            return "done"
+
+        registry.submit_task(task_id="late-cancel", callable=_late_completing_task)
+        assert started.wait(timeout=2)
+
+        success = registry.request_cancellation("late-cancel")
+        assert success is True
+        release.set()
+
+        for _ in range(50):
+            status = registry.get_task_status("late-cancel")
+            if status and status.completed_at is not None:
+                break
+            time.sleep(0.05)
+
+        status = registry.get_task_status("late-cancel")
+        assert status is not None
+        assert status.status == "cancelled"
+        assert status.result is None
+        assert status.error == "Cancellation requested for task late-cancel"
+
+        registry.shutdown(wait=True)
 
     def test_request_cancellation_returns_false_for_completed(self) -> None:
         """request_cancellation() should return False for completed tasks."""

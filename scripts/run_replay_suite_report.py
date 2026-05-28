@@ -440,17 +440,35 @@ def _extract_prompt_sampler_failure_reason(
     stderr_text: str,
     fallback: str,
 ) -> str:
+    def _with_background_cancellation_summary(reason: str) -> str:
+        response = _as_mapping(payload.get("response"))
+        failure = _as_mapping(response.get("failure"))
+        background_task = _as_mapping(failure.get("background_task"))
+        cancellation = _as_mapping(background_task.get("cancellation_payload"))
+        if not cancellation:
+            return reason
+        status_payload = _as_mapping(cancellation.get("post_cancellation_status_payload"))
+        post_status = _safe_text(status_payload.get("status"))
+        if not post_status:
+            return reason
+        terminal = cancellation.get("post_cancellation_terminal")
+        terminal_text = "true" if terminal is True else "false" if terminal is False else "unknown"
+        summary = f"post-cancellation status={post_status} terminal={terminal_text}"
+        if summary in reason:
+            return reason
+        return f"{reason}; {summary}"
+
     direct_error = _normalise_prompt_sampler_error_text(
         _safe_text(payload.get("error"))
     )
     if direct_error:
-        return direct_error
+        return _with_background_cancellation_summary(direct_error)
 
     response = _as_mapping(payload.get("response"))
     failure = _as_mapping(response.get("failure"))
     failure_message = _safe_text(failure.get("message"))
     if failure_message:
-        return failure_message
+        return _with_background_cancellation_summary(failure_message)
 
     evaluation = _as_mapping(payload.get("evaluation"))
     reasons = [
@@ -459,12 +477,12 @@ def _extract_prompt_sampler_failure_reason(
         if _safe_text(item)
     ]
     if reasons:
-        return reasons[0]
+        return _with_background_cancellation_summary(reasons[0])
 
     stderr_clean = _normalise_prompt_sampler_error_text(stderr_text)
     if stderr_clean:
-        return stderr_clean
-    return fallback
+        return _with_background_cancellation_summary(stderr_clean)
+    return _with_background_cancellation_summary(fallback)
 
 
 def _run_prompt_sampler_case(
@@ -503,7 +521,7 @@ def _run_prompt_sampler_case(
         command,
         capture_output=True,
         text=True,
-        timeout=max(timeout_seconds + 5.0, 5.0),
+        timeout=max(timeout_seconds + 20.0, 20.0),
         cwd=str(PROJECT_ROOT),
     )
     payload = _read_json_file_if_present(output_path)

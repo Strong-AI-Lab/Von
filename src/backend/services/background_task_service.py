@@ -178,6 +178,15 @@ class BackgroundTaskRegistry:
                             pass
 
                 try:
+                    with self._lock:
+                        task_status = self._tasks.get(task_id)
+                        if (
+                            task_status
+                            and task_status.status == "cancelled"
+                            and task_status.cancellation_requested
+                        ):
+                            raise CancellationRequested(task_id=task_id)
+
                     # Inject progress callback if supported
                     if "progress_callback" in kwargs or hasattr(callable, "__code__"):
                         # Try to pass progress via kwargs if the callable accepts it
@@ -374,7 +383,24 @@ class BackgroundTaskRegistry:
             if status.status not in ("pending", "running"):
                 return False
             status.cancellation_requested = True
-            _logger.info("[background_task] Cancellation requested for %s", task_id)
+            status.status = "cancelled"
+            if status.started_at is None:
+                status.started_at = datetime.now(timezone.utc)
+            status.completed_at = datetime.now(timezone.utc)
+            status.error = f"Cancellation requested for task {task_id}"
+            progress_payload = dict(status.progress)
+            progress_payload.update(
+                {
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "phase_label": "Cancelled",
+                    "result_summary": (
+                        "Cancellation requested for the background generate task."
+                    ),
+                }
+            )
+            status.progress = progress_payload
+            _logger.info("[background_task] Task %s marked cancelled", task_id)
             return True
 
     def is_cancellation_requested(self, task_id: str) -> bool:

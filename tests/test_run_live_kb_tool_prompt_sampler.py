@@ -1038,13 +1038,22 @@ def test_run_generate_background_cancels_task_after_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    status_calls = 0
 
     def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal status_calls
         url = str(args[2])
         calls.append(url)
         if url.endswith("/von/generate"):
             return {"task_id": "task-stalled"}
         if url.endswith("/von/api/task/status/task-stalled"):
+            status_calls += 1
+            if status_calls >= 2:
+                return {
+                    "status": "cancelled",
+                    "task_id": "task-stalled",
+                    "progress": {"status": "cancelled"},
+                }
             return {
                 "status": "running",
                 "task_id": "task-stalled",
@@ -1074,8 +1083,14 @@ def test_run_generate_background_cancels_task_after_timeout(
     assert exc_info.value.cancellation_payload == {
         "success": True,
         "task_id": "task-stalled",
+        "post_cancellation_terminal": True,
+        "post_cancellation_status_payload": {
+            "status": "cancelled",
+            "task_id": "task-stalled",
+            "progress": {"status": "cancelled"},
+        },
     }
-    assert calls[-1].endswith("/von/api/task/cancel/task-stalled")
+    assert any(call.endswith("/von/api/task/cancel/task-stalled") for call in calls)
 
 
 def test_main_writes_single_attempt_failure_summary(

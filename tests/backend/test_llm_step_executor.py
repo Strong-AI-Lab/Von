@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
+import pytest
+
+from src.backend.integrations.internal_mcp.orchestrator import CancellationRequested
 from src.backend.services import prompt_template_service as pts
+from src.backend.workflows import llm_step_executor as lse
 from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
     WorkflowEnvironment,
@@ -454,6 +459,7 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
             captured["context"] = kwargs.get("context")
             captured["context_telemetry"] = kwargs.get("context_telemetry")
             captured["prefer_default_model"] = kwargs.get("prefer_default_model")
+            captured["check_cancellation"] = kwargs.get("check_cancellation")
             return ('{"ok": true}', "test-model", None)
 
     monkeypatch.setattr(
@@ -502,6 +508,88 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
         "stage_added_message_count": 1,
     }
     assert captured["prefer_default_model"] is True
+    assert captured["check_cancellation"] is None
+
+
+def test_execute_llm_step_passes_cancellation_to_gateway_llm(
+    monkeypatch,
+) -> None:
+    def check_cancellation() -> None:
+        raise CancellationRequested(task_id="task-cancelled")
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            check = kwargs.get("check_cancellation")
+            assert callable(check)
+            check()
+            raise AssertionError("cancellation check should raise")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {}, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={"check_cancellation": check_cancellation},
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    with pytest.raises(CancellationRequested):
+        execute_llm_step(request)
+
+
+def test_gateway_runtime_reuses_parent_policy_and_registry_snapshot(
+    monkeypatch,
+) -> None:
+    policy_state = object()
+    registry_snapshot = {"source": "parent_turn_snapshot", "models": []}
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            self._turn_model_failures_local = threading.local()
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            raise AssertionError("parent policy_state should be reused")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("parent registry_snapshot should be reused")
+        ),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=object()),
+        data={
+            "policy_state": policy_state,
+            "registry_snapshot": registry_snapshot,
+            "turn_model_failures": {},
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+    )
+
+    orchestrator, resolved_policy, resolved_registry, _, _ = lse._build_gateway_runtime(
+        request
+    )
+
+    assert isinstance(orchestrator, _StubOrchestrator)
+    assert resolved_policy is policy_state
+    assert resolved_registry is registry_snapshot
 
 
 def test_execute_llm_step_honours_explicit_prefer_default_model_flag(

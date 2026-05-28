@@ -1585,9 +1585,11 @@ def _request_task_cancellation(
     session: requests.Session,
     base_url: str,
     task_id: str,
+    await_terminal_seconds: float = 10.0,
+    poll_interval_seconds: float = 0.5,
 ) -> dict[str, Any]:
     try:
-        return _request_json(
+        cancellation_payload = _request_json(
             session,
             "POST",
             f"{base_url}/von/api/task/cancel/{task_id}",
@@ -1599,6 +1601,35 @@ def _request_task_cancellation(
             "task_id": task_id,
             "error": str(exc),
         }
+
+    result = dict(cancellation_payload)
+    deadline = time.monotonic() + max(float(await_terminal_seconds), 0.0)
+    last_status_payload: dict[str, Any] | None = None
+    while time.monotonic() <= deadline:
+        try:
+            status_payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}/von/api/task/status/{task_id}",
+                timeout_seconds=15.0,
+            )
+        except Exception as exc:
+            result["post_cancellation_status_error"] = str(exc)
+            break
+        last_status_payload = status_payload
+        status = _safe_text(status_payload.get("status"))
+        if status in {"completed", "failed", "cancelled"}:
+            result["post_cancellation_terminal"] = True
+            result["post_cancellation_status_payload"] = status_payload
+            return result
+        if await_terminal_seconds <= 0:
+            break
+        time.sleep(max(float(poll_interval_seconds), 0.2))
+
+    if last_status_payload is not None:
+        result["post_cancellation_terminal"] = False
+        result["post_cancellation_status_payload"] = last_status_payload
+    return result
 
 
 def _run_generate_background(
@@ -1667,6 +1698,7 @@ def _run_generate_background(
             session=session,
             base_url=base_url,
             task_id=task_id,
+            poll_interval_seconds=poll_interval_seconds,
         )
         raise BackgroundGenerateTaskError(
             "Background generate task did not complete before timeout: "

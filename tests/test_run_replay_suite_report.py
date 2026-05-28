@@ -127,6 +127,82 @@ def test_timeout_is_classified_when_subprocess_expires(monkeypatch: pytest.Monke
     assert "timeout" in result["failure_stall_reason"].lower()
 
 
+def test_prompt_sampler_subprocess_timeout_allows_post_cancel_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = kwargs.get("timeout")
+        command = args[0]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"status":"ok","repeat":{"successful_attempt_count":1,'
+                '"attempt_count":1,"meets_minimum_success_rate":true}}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = replay_suite.execute_replay_case(
+        case={
+            "replay_id": "prompt-bank:who_am_i_in_this_conversation",
+            "runnable": True,
+            "execution_kind": "prompt_sampler",
+            "prompt_id": "who_am_i_in_this_conversation",
+        },
+        base_url="http://127.0.0.1:5010",
+        timeout_seconds=5.0,
+        dry_run=False,
+        model="gemma4:26b",
+        allow_premium_model=False,
+        allow_non_agent_test_server=False,
+    )
+
+    assert result["result"] == "passed"
+    assert captured["timeout"] == pytest.approx(25.0)
+
+
+def test_prompt_sampler_failure_reason_reports_post_cancel_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command = args[0]
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=(
+                '{"status":"error","response":{"failure":{"message":"Background generate task did not complete before timeout",'
+                '"background_task":{"cancellation_payload":{"post_cancellation_terminal":true,'
+                '"post_cancellation_status_payload":{"status":"cancelled"}}}}}}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = replay_suite.execute_replay_case(
+        case={
+            "replay_id": "prompt-bank:who_am_i_in_this_conversation",
+            "runnable": True,
+            "execution_kind": "prompt_sampler",
+            "prompt_id": "who_am_i_in_this_conversation",
+        },
+        base_url="http://127.0.0.1:5010",
+        timeout_seconds=5.0,
+        dry_run=False,
+        model="gemma4:26b",
+        allow_premium_model=False,
+        allow_non_agent_test_server=False,
+    )
+
+    assert result["result"] == "failed"
+    assert "post-cancellation status=cancelled terminal=true" in result[
+        "failure_stall_reason"
+    ]
+
+
 def test_local_only_policy_blocks_premium_model_without_opt_in() -> None:
     with pytest.raises(RuntimeError, match="Local-only policy blocks premium model"):
         replay_suite._enforce_local_only_policy("gpt-5.4-mini", False)

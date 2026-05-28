@@ -17047,6 +17047,7 @@ class InternalMCPChatOrchestrator:
         emit_progress: Callable[[Mapping[str, Any]], None] | None,
         attempt_meta: Mapping[str, Any] | None = None,
         timeout_override_sec: float | None = None,
+        check_cancellation: Callable[[], None] | None = None,
     ) -> Any:
         if not callable(emit_progress):
             return call()
@@ -17109,6 +17110,8 @@ class InternalMCPChatOrchestrator:
             if isinstance(attempt_meta, Mapping):
                 heartbeat_payload.update(dict(attempt_meta))
             emit_progress(heartbeat_payload)
+            if callable(check_cancellation):
+                check_cancellation()
             if timeout_sec > 0 and (elapsed_ms / 1000.0) >= timeout_sec:
                 raise TimeoutError(
                     f"LLM call timed out after {int(timeout_sec)}s (stage={stage_name}, model={model_name or 'default'})"
@@ -17139,6 +17142,7 @@ class InternalMCPChatOrchestrator:
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
         timeout_override_sec: float | None = None,
+        check_cancellation: Callable[[], None] | None = None,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
         turn_model_failures: dict[
@@ -17181,8 +17185,11 @@ class InternalMCPChatOrchestrator:
         # sets a thread-local cache and we fall back to it here when the
         # explicit kwarg is omitted (concurrent Flask requests stay isolated).
         if turn_model_failures is None:
+            turn_model_failures_local = getattr(
+                self, "_turn_model_failures_local", None
+            )
             turn_model_failures = getattr(
-                self._turn_model_failures_local, "cache", None
+                turn_model_failures_local, "cache", None
             )
         _dead_cache = (
             turn_model_failures if isinstance(turn_model_failures, dict) else None
@@ -17408,6 +17415,7 @@ class InternalMCPChatOrchestrator:
                     emit_progress=_progress_cb,
                     attempt_meta=attempt_meta,
                     timeout_override_sec=timeout_override_sec,
+                    check_cancellation=check_cancellation,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 first_output_at_utc = self._utc_now_iso()
@@ -17536,6 +17544,45 @@ class InternalMCPChatOrchestrator:
                     }
                 )
                 return response, model_name, telemetry
+            except CancellationRequested as exc:
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": False,
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                            "failure_kind": "cancelled",
+                            **_stage_extra,
+                            **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="cancelled",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                            ),
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="llm.generate cancelled",
+                    stage=stage,
+                    provider=(
+                        telemetry.get("provider")
+                        if isinstance(telemetry, Mapping)
+                        else None
+                    ),
+                    candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
+                )
+                raise
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 exc_text = str(exc)
@@ -17995,8 +18042,11 @@ class InternalMCPChatOrchestrator:
 
         # JVNAUTOSCI-2373: per-turn dead-candidate cache (tool-call path).
         if turn_model_failures is None:
+            turn_model_failures_local = getattr(
+                self, "_turn_model_failures_local", None
+            )
             turn_model_failures = getattr(
-                self._turn_model_failures_local, "cache", None
+                turn_model_failures_local, "cache", None
             )
         _dead_cache = (
             turn_model_failures if isinstance(turn_model_failures, dict) else None
@@ -33353,6 +33403,12 @@ class InternalMCPChatOrchestrator:
             if callable(emit_progress_raw)
             else None
         )
+        check_cancellation_raw = data.get("check_cancellation")
+        check_cancellation = (
+            cast(Callable[[], None], check_cancellation_raw)
+            if callable(check_cancellation_raw)
+            else None
+        )
 
         def _emit_prepare_progress(subtask: str, result_summary: str) -> None:
             if not callable(emit_progress):
@@ -34608,6 +34664,7 @@ class InternalMCPChatOrchestrator:
                             context_telemetry=context_telemetry,
                             prefer_default_model=bool(default_model),
                             timeout_override_sec=timeout_override_sec,
+                            check_cancellation=check_cancellation,
                             workflow_stage_id="response_finalising",
                         )
                     )
@@ -36692,6 +36749,7 @@ class InternalMCPChatOrchestrator:
                     record_llm_call=_record_llm_call,
                     emit_progress=_emit_progress_local,
                     prefer_default_model=prefer_default_model,
+                    check_cancellation=_check_cancellation_local,
                     workflow_stage_id="response_finalising",
                 )
             except Exception as exc:
@@ -36848,6 +36906,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call=_record_llm_call,
                 emit_progress=_emit_progress_local,
                 prefer_default_model=prefer_default_model,
+                check_cancellation=_check_cancellation_local,
                 workflow_stage_id="response_finalising",
             )
             if trace_enabled and trace is not None:
@@ -37667,6 +37726,7 @@ class InternalMCPChatOrchestrator:
                             emit_progress=_emit_selector_progress,
                             context_telemetry=selector_context_telemetry,
                             prefer_default_model=prefer_default_model,
+                            check_cancellation=_check_cancellation_local,
                             workflow_stage_id="selector_preparation",
                         )
                     )
@@ -43450,6 +43510,7 @@ class InternalMCPChatOrchestrator:
                 emit_progress=_emit_progress_local,
                 context_telemetry=plain_response_context_telemetry,
                 prefer_default_model=prefer_default_model,
+                check_cancellation=_check_cancellation_local,
                 workflow_stage_id="response_finalising",
             )
             if trace_enabled and trace is not None:

@@ -8,6 +8,7 @@ from typing import Any, Mapping, cast
 import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
+    CancellationRequested,
     InternalMCPChatOrchestrator,
     _ModelCandidate,
     _WorkflowModelPolicyState,
@@ -814,6 +815,126 @@ def test_invoke_with_llm_heartbeat_prefers_explicit_timeout_override(
     assert progress_events[-1]["status"] == "heartbeat"
     assert progress_events[-1]["stage"] == "classifier"
     assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+
+
+def test_invoke_with_llm_heartbeat_checks_cancellation(monkeypatch) -> None:
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    monkeypatch.setenv("VON_LLM_HEARTBEAT_INTERVAL_SEC", "1")
+    monkeypatch.delenv("VON_LLM_CALL_TIMEOUT_SEC", raising=False)
+
+    progress_events: list[dict[str, Any]] = []
+
+    def _slow_call() -> str:
+        time.sleep(2.0)
+        return "done"
+
+    def _cancel() -> None:
+        raise CancellationRequested(task_id="task-123")
+
+    with pytest.raises(CancellationRequested) as exc_info:
+        orchestrator._invoke_with_llm_heartbeat(
+            call=_slow_call,
+            stage_name="plain_response",
+            model_name="gemma4:31b",
+            emit_progress=lambda payload: progress_events.append(dict(payload)),
+            check_cancellation=_cancel,
+        )
+
+    assert exc_info.value.task_id == "task-123"
+    assert progress_events, "expected heartbeat progress before cancellation"
+    assert progress_events[-1]["status"] == "heartbeat"
+    assert progress_events[-1]["stage"] == "plain_response"
+    assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+
+
+def test_run_llm_with_fallbacks_stops_fallback_chain_on_cancellation(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidates = [
+        _ModelCandidate(
+            provider="ollama",
+            model="gemma4:31b",
+            raw="ollama:gemma4:31b",
+            source="active_llm",
+            host="http://localhost:11434",
+        ),
+        _ModelCandidate(
+            provider="openai",
+            model="gpt-5.4-mini",
+            raw="openai:gpt-5.4-mini",
+            source="settings_fallback",
+        ),
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        return (
+            _SuccessfulClient(),
+            candidate.model or "",
+            {
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "host": candidate.host,
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    attempted_models: list[str | None] = []
+
+    def _cancel_llm_call(**kwargs: Any) -> str:
+        attempted_models.append(kwargs.get("model_name"))
+        raise CancellationRequested(task_id="task-123")
+
+    monkeypatch.setattr(orchestrator, "_invoke_with_llm_heartbeat", _cancel_llm_call)
+
+    progress_events: list[dict[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    with pytest.raises(CancellationRequested):
+        orchestrator._run_llm_with_fallbacks(
+            stage="plain_response",
+            policy_stage="planner",
+            prompt="Answer directly.",
+            context=[],
+            default_client=object(),
+            default_model="gemma4:31b",
+            policy_state=_active_llm_policy_state(),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=[],
+            record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+            emit_progress=lambda payload: progress_events.append(dict(payload)),
+            turn_model_failures={},
+        )
+
+    assert attempted_models == ["gemma4:31b"]
+    cancelled_event = next(
+        event for event in progress_events if event.get("failure_kind") == "cancelled"
+    )
+    assert cancelled_event["status"] == "llm_call_end"
+    assert cancelled_event["success"] is False
+    assert recorded_calls[-1]["note"] == "llm.generate cancelled"
 
 
 def test_limit_context_preserves_leading_system_messages() -> None:

@@ -464,8 +464,20 @@ def build_db_independent_orchestrator(
         )(),
     )
     monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.load_minimal_imposition_runtime_profile",
+        lambda **_kw: (
+            None,
+            {"status": "skipped_db_independent_test_harness"},
+        ),
+    )
+    monkeypatch.setattr(
         orchestrator,
         "_resolve_concept_id_by_name",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_get_missing_tool_call_detector",
         lambda *_a, **_kw: None,
     )
     monkeypatch.setattr(

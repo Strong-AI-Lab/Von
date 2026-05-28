@@ -1311,8 +1311,16 @@ def _llm_stage(llm_policy: Mapping[str, Any], request: WorkflowActionRequest) ->
     return "llm_step"
 
 
+def _check_request_cancellation(request: WorkflowActionRequest) -> None:
+    check_cancellation = request.data.get("check_cancellation")
+    if callable(check_cancellation):
+        check_cancellation()
+
+
 def _build_gateway_runtime(
     request: WorkflowActionRequest,
+    *,
+    max_tool_invocations: int | None = None,
 ) -> tuple[Any, Any, Mapping[str, Any], str | None, str | None]:
     from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
     from ..services.model_registry_service import get_model_registry_snapshot
@@ -1321,10 +1329,13 @@ def _build_gateway_runtime(
     if gateway is None:
         raise RuntimeError("workflow_llm_step_gateway_unavailable")
 
+    _check_request_cancellation(request)
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
         max_tool_invocations=(
-            int(request.environment.max_tool_invocations)
+            int(max_tool_invocations)
+            if max_tool_invocations is not None
+            else int(request.environment.max_tool_invocations)
             if request.environment.max_tool_invocations is not None
             else 1
         ),
@@ -1338,8 +1349,19 @@ def _build_gateway_runtime(
         default_gmail_profile=request.environment.default_gmail_profile,
     )
     user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
-    policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
-    registry_snapshot = get_model_registry_snapshot()
+    policy_state = request.data.get("policy_state")
+    if policy_state is None:
+        policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
+    registry_snapshot_raw = request.data.get("registry_snapshot")
+    if isinstance(registry_snapshot_raw, Mapping):
+        registry_snapshot = registry_snapshot_raw
+    else:
+        registry_snapshot_result = get_model_registry_snapshot()
+        registry_snapshot = (
+            registry_snapshot_result
+            if isinstance(registry_snapshot_result, Mapping)
+            else {}
+        )
     # JVNAUTOSCI-2373: propagate the parent turn's dead-candidate cache into
     # this nested orchestrator so workflow LLM steps skip the same dead
     # provider/model combinations rather than re-discovering them stage by
@@ -1350,6 +1372,7 @@ def _build_gateway_runtime(
     parent_turn_model_failures = request.data.get("turn_model_failures")
     if isinstance(parent_turn_model_failures, dict):
         orchestrator._turn_model_failures_local.cache = parent_turn_model_failures
+    _check_request_cancellation(request)
     return (
         orchestrator,
         policy_state,
@@ -1685,6 +1708,11 @@ def _run_gateway_llm_step_no_tools(
         if callable(request.data.get("emit_progress"))
         else None
     )
+    check_cancellation = (
+        request.data.get("check_cancellation")
+        if callable(request.data.get("check_cancellation"))
+        else None
+    )
 
     def _record_llm_call(
         *,
@@ -1747,6 +1775,7 @@ def _run_gateway_llm_step_no_tools(
                 context_telemetry=context_telemetry,
                 prefer_default_model=prefer_default_model,
                 timeout_override_sec=timeout_override_sec,
+                check_cancellation=check_cancellation,
             )
         )
     except TimeoutError as exc:
@@ -1934,7 +1963,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     method_catalogue = request.environment.gateway.describe_methods()
 
     from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
-    from ..services.model_registry_service import get_model_registry_snapshot
 
     infer_turn_contract_required_tools = getattr(
         InternalMCPChatOrchestrator,
@@ -1975,22 +2003,9 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         required_obligation_tools=required_obligation_tools,
     )
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=request.environment.gateway,
-        max_tool_invocations=max_tool_invocations,
-        max_tool_result_chars=request.environment.max_tool_result_chars,
-        max_tool_result_field_chars=request.environment.max_tool_result_field_chars,
-        tool_batch_cap=(
-            max(1, int(request.inputs.get("tool_batch_cap") or 4))
-            if request.inputs.get("tool_batch_cap") is not None
-            else 4
-        ),
-        default_gmail_profile=request.environment.default_gmail_profile,
+    orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
+        _build_gateway_runtime(request, max_tool_invocations=max_tool_invocations)
     )
-
-    user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
-    policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
-    registry_snapshot = get_model_registry_snapshot()
 
     llm_calls = cast(
         list[dict[str, Any]],
