@@ -42,7 +42,7 @@ Treat it as non-authoritative and prefer current docs where they differ.
 - Prefer canonical control surfaces over ad-hoc workarounds.
 - Treat failures in Von's own tooling paths as product bugs, not as permission
   to create shadow pathways.
-- Prefer bounded, inspectable, PowerShell-first commands.
+- Prefer bounded, inspectable commands in the native shell for the current OS.
 - If a problem appears to be transport, host, or tool-session related, fix or
   restart that layer rather than debugging the repository blindly.
 - When a workflow/prompt/Vontology dependency fails, fix that dependency path
@@ -50,15 +50,23 @@ Treat it as non-authoritative and prefer current docs where they differ.
 
 ## 4. Shell and Host Defaults
 
-### 4.1 PowerShell first
+### 4.1 Host-appropriate shell first
 
-Von's default shell is PowerShell. Prefer:
+Choose the shell for the host and the thing being tested:
 
-- `$env:VAR = 'value'`
-- `$var = (Get-Content file.txt)`
-- here-strings for larger inline snippets
+- On Windows, default to PowerShell. Prefer:
+  - `$env:VAR = 'value'`
+  - `$var = (Get-Content file.txt)`
+  - here-strings for larger inline snippets
+- On macOS and Linux, default to the native POSIX shell (`zsh`/`sh`), especially
+  for PATH-sensitive probes and standard package-manager commands. Prefer:
+  - `VAR=value command`
+  - `export VAR=value`
+  - `rg`, `sed`, `awk`, and normal POSIX path syntax where appropriate
 
-Avoid Bash-only syntax unless the user explicitly asks for Bash.
+Use PowerShell on macOS/Linux when invoking `.ps1` scripts or deliberately
+testing PowerShell behaviour. Use `zsh`/Bash syntax on Windows only when the user
+explicitly asks for it or the command is running inside a known POSIX layer.
 
 ### 4.2 Keep commands bounded
 

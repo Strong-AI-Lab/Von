@@ -17,6 +17,11 @@ Consult this note only when investigating prior operational failure modes,
 trying to recover historical context for an implementation/debugging issue, or
 mining it for lessons that should be promoted into current docs.
 
+Shell policy note: preserved entries below that say PowerShell is the default or
+PowerShell-first are superseded. Current guidance is platform-specific: use
+PowerShell on Windows, and use the native POSIX shell (`zsh`/`sh`) on macOS and
+Linux unless invoking `.ps1` scripts or deliberately testing PowerShell.
+
 ## Preserved source
 
 ### AI Agent Guide (Trimmed)

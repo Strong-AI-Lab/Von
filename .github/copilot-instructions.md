@@ -13,11 +13,16 @@ Follow these instructions to be productive and compliant with project standards.
 - **Data**: MongoDB is the persistence layer (`von_db` or `test_von_db`).
 
 ## 2. Development Workflow
-- **Shell**: **PowerShell** is mandatory. Do not use Bash syntax (`export`, `ls`, etc.).
+- **Shell**: Use the native shell for the current host. On Windows, default to
+  PowerShell and do not use Bash-only syntax (`export`, POSIX path assumptions,
+  etc.) unless explicitly asked. On macOS/Linux, prefer the native POSIX shell
+  (`zsh`/`sh`) for shell probes and PATH-sensitive commands; use PowerShell only
+  when invoking `.ps1` scripts or testing Windows/PowerShell behaviour.
 - **Package Manager**:
   - Python: `pdm` (e.g., `pdm run pytest`).
   - JS: `npm` (e.g., `npm run test`).
-- **Running the App**: `./run.ps1` (starts Flask + frontend).
+- **Running the App**: Windows/PowerShell: `./run.ps1`; macOS/Linux: `./run.sh`
+  unless specifically validating the PowerShell launcher.
 - **Testing**:
   - Backend: `pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal`, then run the suggested lane(s) or direct targets. Use `pdm run python scripts/pytest_lanes.py aggregate-plan` for broader shard coverage.
   - Frontend: `npm run test:frontend`.

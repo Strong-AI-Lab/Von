@@ -65,7 +65,7 @@ For frontend/browser user-view validation practice, also see
 ## 3. Core operating rules
 
 1. Use New Zealand English spelling by default.
-2. PowerShell is the default shell. Do not emit Bash-only syntax unless explicitly asked for Bash.
+2. Use host-appropriate shell idioms. On Windows, default to PowerShell and do not emit Bash/zsh-only syntax unless explicitly asked. On macOS and Linux, default to the native POSIX shell (`zsh`/`sh`) for shell probes and PATH-sensitive commands; use PowerShell there only when invoking `.ps1` scripts or testing Windows/PowerShell behaviour.
 3. Never clobber `.env`. Only touch it when explicitly required, and never print secrets.
 4. Vontology is a first-class engineered authority surface, and the authoritative source of truth for persistent knowledge, prompts, workflow artefacts, predicates, types, and other enduring represented state unless an exception is explicitly justified.
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
@@ -303,8 +303,8 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 - Use the Atlassian recovery runbook rather than inventing Jira REST workarounds.
 - When the user asks for "recently closed" `JVNAUTOSCI` issues, interpret that by default as `project = JVNAUTOSCI AND statusCategory = Done AND resolved >= -48h ORDER BY resolved DESC` unless they explicitly ask for a narrower terminal status such as `Closed`.
 - Use workflow MCP tools as the default control surface for workflow behaviour.
-- Use host-neutral, PowerShell-first, bounded shell commands unless the environment clearly requires otherwise.
-- For local Von backend restarts, use the repo launcher path (`.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180`) rather than manually spawning `src/workflows/von/main.py`. For automated replay or coding-agent acceptance that should not disturb a user-facing local server, always use the isolated launcher path (`.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`). Maintained live testing scripts default to `http://127.0.0.1:5010` and require `/health` to report `agent_test_instance=true`; if you deliberately use a different `-AgentTest -Port`, set `VON_AGENT_TEST_BASE_URL` or pass the matching `--base-url`. Use `--allow-non-agent-test-server` only when intentionally testing the interactive/user-facing server.
+- Use host-neutral, bounded shell commands in the native shell for the current OS unless the task specifically exercises another shell: PowerShell on Windows; `zsh`/`sh` on macOS and Linux.
+- For local Von backend restarts, use the repo launcher path rather than manually spawning `src/workflows/von/main.py`: `.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180` on Windows/PowerShell, or `./run.sh restart -NoBrowser -HealthTimeoutSec 180` on macOS/Linux unless specifically validating the PowerShell launcher. For automated replay or coding-agent acceptance that should not disturb a user-facing local server, always use the isolated launcher path: `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180` on Windows/PowerShell, or `./run.sh restart -AgentTest -NoBrowser -HealthTimeoutSec 180` on macOS/Linux. Maintained live testing scripts default to `http://127.0.0.1:5010` and require `/health` to report `agent_test_instance=true`; if you deliberately use a different `-AgentTest -Port`, set `VON_AGENT_TEST_BASE_URL` or pass the matching `--base-url`. Use `--allow-non-agent-test-server` only when intentionally testing the interactive/user-facing server.
 - When adding credential or service-critical environment variables, register them in `_apply_dotenv_overrides()` (`src/workflows/von/main.py`), verify `.env` provides them, and emit clear resolution diagnostics.
 - Where tool friction is discovered, improve Von's own tooling path and document the gap.
 
