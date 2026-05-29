@@ -34489,6 +34489,12 @@ class InternalMCPChatOrchestrator:
             if callable(emit_progress_raw)
             else None
         )
+        check_cancellation_raw = data.get("check_cancellation")
+        check_cancellation = (
+            cast(Callable[[], None], check_cancellation_raw)
+            if callable(check_cancellation_raw)
+            else None
+        )
 
         def _append_dispatch_boundary(
             *,

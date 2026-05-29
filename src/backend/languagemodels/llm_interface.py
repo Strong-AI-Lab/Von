@@ -14,6 +14,7 @@ from typing import (
     Any,
     TypedDict,
     Literal,
+    Mapping,
     Sequence,
     cast,
 )

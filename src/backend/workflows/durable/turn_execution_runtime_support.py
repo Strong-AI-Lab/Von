@@ -3167,6 +3167,7 @@ def run_turn_execution_completion_gate(
     )
     if (
         autotrigger_enabled
+        and callable(maybe_launch_episode_evaluation_for_turn_completion_gate)
         and requires_follow_up
         and not repeat_iteration
         and not already_autotriggered

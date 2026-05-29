@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 
 import pytest
@@ -28,6 +29,94 @@ def test_default_model_override_is_ollama_gemma4() -> None:
 def test_infer_provider_from_model_identifier_treats_ollama_tags_as_local() -> None:
     assert sampler._infer_provider_from_model_identifier("gemma4:e4b") == "ollama"
     assert sampler._infer_provider_from_model_identifier("ollama:llama3.1:8b") == "ollama"
+
+
+def test_build_local_ollama_generate_model_override_prefixes_ambiguous_gpt_oss() -> None:
+    assert (
+        sampler._build_local_ollama_generate_model_override("gpt-oss:20b")
+        == "ollama:gpt-oss:20b"
+    )
+    assert (
+        sampler._build_local_ollama_generate_model_override("ollama:gpt-oss:20b")
+        == "ollama:gpt-oss:20b"
+    )
+
+
+def test_parse_ollama_list_output_extracts_installed_models() -> None:
+    installed = sampler._parse_ollama_list_output(
+        """NAME              ID              SIZE      MODIFIED
+granite3.3:2b      abc123          1.5 GB    1 day ago
+gemma4:e4b         def456          4.0 GB    2 days ago
+"""
+    )
+
+    assert installed == {"granite3.3:2b", "gemma4:e4b"}
+
+
+def test_build_local_ollama_replay_model_candidates_uses_registry_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sampler,
+        "get_model_registry_snapshot",
+        lambda: {
+            "source": "vontology_graph",
+            "models": [
+                {
+                    "model_id": "llama3:latest",
+                    "provider": "ollama",
+                    "locality": "local",
+                    "strength_rank": 30,
+                    "relative_cost_rank": 20,
+                    "concept_id": "#V#llama3_latest",
+                },
+                {
+                    "model_id": "granite3.3:2b",
+                    "provider": "ollama",
+                    "locality": "local",
+                    "strength_rank": 10,
+                    "relative_cost_rank": 10,
+                    "concept_id": "#V#granite_3_3_2b",
+                },
+            ],
+        },
+    )
+
+    candidates = sampler._build_local_ollama_replay_model_candidates(
+        requested_candidates=[],
+        installed_models={"llama3:latest", "granite3.3:2b"},
+        pull_missing_models=False,
+    )
+
+    assert [candidate["model"] for candidate in candidates] == [
+        "granite3.3:2b",
+        "llama3:latest",
+    ]
+    assert candidates[0]["catalogue_source"] == "vontology_model_registry"
+    assert candidates[0]["concept_id"] == "#V#granite_3_3_2b"
+
+
+def test_build_local_ollama_replay_model_candidates_can_pull_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pulled: list[str] = []
+
+    def fake_pull(model_name: str) -> dict[str, object]:
+        pulled.append(model_name)
+        return {"status": "ok", "model": model_name}
+
+    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
+    monkeypatch.setattr(sampler, "_pull_ollama_model", fake_pull)
+
+    candidates = sampler._build_local_ollama_replay_model_candidates(
+        requested_candidates=["granite3.3:2b"],
+        installed_models=set(),
+        pull_missing_models=True,
+    )
+
+    assert pulled == ["granite3.3:2b"]
+    assert candidates[0]["model"] == "granite3.3:2b"
+    assert candidates[0]["pull_result"] == {"status": "ok", "model": "granite3.3:2b"}
 
 
 def test_model_policy_rejects_premium_model_without_explicit_opt_in() -> None:
@@ -1157,6 +1246,164 @@ def test_main_writes_single_attempt_failure_summary(
         "success": True,
         "task_id": "task-stalled",
     }
+
+
+def test_run_local_ollama_model_probe_stops_at_first_threshold_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_models: list[str] = []
+
+    @contextmanager
+    def fake_temporary_scoped_active_llm(**_kwargs: object):
+        yield {"provider": "openai", "model": "gpt-5.4-mini", "scope": "user"}
+
+    def fake_run_suite(**kwargs: object) -> dict[str, object]:
+        requested_model = str(kwargs["requested_model"])
+        requested_models.append(requested_model)
+        if requested_model == "ollama:gemma4:e4b":
+            return {"status": "ok", "evaluation": {"should_user_be_happy": True}}
+        return {"status": "failed", "evaluation": {"should_user_be_happy": False}}
+
+    monkeypatch.setattr(sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b", "gemma4:e4b"})
+    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
+    monkeypatch.setattr(sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm)
+    monkeypatch.setattr(sampler, "_run_sampler_subprocess_replay_suite", fake_run_suite)
+
+    summary = sampler._run_local_ollama_model_probe(
+        prompt_entry={"id": "case-1", "prompt": "What text relations are used?"},
+        base_url="http://127.0.0.1:5010",
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="university_of_auckland_strong_ai_lab",
+        session_name="probe",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=[],
+        seed=None,
+        presenter_mode=False,
+        allow_non_agent_test_server=False,
+        repeat_count=1,
+        screen_repeat_count=1,
+        attempt_process_timeout_seconds=60.0,
+        minimum_success_rate=0.95,
+        requested_candidates=["granite3.3:2b", "gemma4:e4b"],
+        pull_missing_models=False,
+        cache_path=None,
+    )
+
+    assert requested_models == ["ollama:granite3.3:2b", "ollama:gemma4:e4b"]
+    probe = summary["local_model_probe"]
+    assert probe["selected_model"] == "gemma4:e4b"
+    assert probe["no_local_model_succeeded"] is False
+
+
+def test_run_local_ollama_model_probe_reports_no_working_local_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def fake_temporary_scoped_active_llm(**_kwargs: object):
+        yield {"provider": "openai", "model": "gpt-5.4-mini", "scope": "user"}
+
+    monkeypatch.setattr(sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b"})
+    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
+    monkeypatch.setattr(sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm)
+    monkeypatch.setattr(
+        sampler,
+        "_run_sampler_subprocess_replay_suite",
+        lambda **_kwargs: {"status": "failed", "evaluation": {"should_user_be_happy": False}},
+    )
+
+    summary = sampler._run_local_ollama_model_probe(
+        prompt_entry={"id": "case-1", "prompt": "What text relations are used?"},
+        base_url="http://127.0.0.1:5010",
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="university_of_auckland_strong_ai_lab",
+        session_name="probe",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=[],
+        seed=None,
+        presenter_mode=False,
+        allow_non_agent_test_server=False,
+        repeat_count=1,
+        screen_repeat_count=1,
+        attempt_process_timeout_seconds=60.0,
+        minimum_success_rate=0.95,
+        requested_candidates=["granite3.3:2b"],
+        pull_missing_models=False,
+        cache_path=None,
+    )
+
+    assert summary["status"] == "failed"
+    probe = summary["local_model_probe"]
+    assert probe["selected_model"] is None
+    assert probe["no_local_model_succeeded"] is True
+
+
+def test_main_runs_local_model_probe_and_writes_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "probe.json"
+
+    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
+    monkeypatch.setattr(
+        sampler,
+        "_load_prompt_bank",
+        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_collect_run_environment",
+        lambda **kwargs: {
+            "base_url": kwargs["base_url"],
+            "requested_model": kwargs["requested_model"],
+            "session_name": kwargs["session_name"],
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_server_diag",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_agent_test_instance": True,
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_run_local_ollama_model_probe",
+        lambda **_kwargs: {
+            "status": "ok",
+            "mode": "local_ollama_replay_model_probe",
+            "prompt": {"id": "case-1"},
+            "local_model_probe": {
+                "selected_model": "gemma4:e4b",
+                "no_local_model_succeeded": False,
+            },
+        },
+    )
+
+    exit_code = sampler.main(
+        [
+            "--prompt-text",
+            "What text relations are used with Michael Witbrock?",
+            "--probe-local-models",
+            "--success-threshold",
+            "0.95",
+            "--output-json",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output == written
+    assert written["local_model_probe"]["selected_model"] == "gemma4:e4b"
 
 
 def test_replay_session_creation_payload_marks_sampler_chat_as_test_run() -> None:

@@ -18,6 +18,7 @@ Use this sampler together with
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -49,6 +51,7 @@ from src.backend.services.model_registry_service import (
     MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
     assess_model_stage_certification,
     build_model_stage_suitability_evidence,
+    get_model_registry_snapshot,
 )
 from src.backend.services import (
     replay_arm_planning_service,
@@ -80,6 +83,13 @@ PREMIUM_MODEL_PREFIXES = (
     "text-davinci",
 )
 MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION = "model_portfolio_replay_report.v1"
+LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE_SCHEMA_VERSION = (
+    "local_ollama_replay_model_catalogue.v1"
+)
+LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION = "local_ollama_replay_probe.v1"
+DEFAULT_LOCAL_MODEL_PROBE_CACHE_PATH = Path(
+    "artifacts/local_ollama_replay_model_probe_cache.json"
+)
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
 CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
 CHAT_SESSION_CREATED_BY_ACTOR_TYPE = "#V#coding_agent"
@@ -96,6 +106,62 @@ REAL_PATH_REPLAY_GUIDE_NOTE = (
 )
 SERVER_METADATA_TIMEOUT_SECONDS = 15.0
 ACTIVE_LLM_INFO_TIMEOUT_SECONDS = 15.0
+LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE: tuple[dict[str, Any], ...] = (
+    {
+        "model": "granite3.3:2b",
+        "strength_rank": 10,
+        "relative_cost_rank": 10,
+        "notes": "Small local smoke-test candidate; often too weak for workflow selection.",
+    },
+    {
+        "model": "llama3.2:latest",
+        "strength_rank": 20,
+        "relative_cost_rank": 15,
+        "notes": "Small local general-purpose candidate.",
+    },
+    {
+        "model": "llama3:latest",
+        "strength_rank": 35,
+        "relative_cost_rank": 25,
+        "notes": "Mid-small local general-purpose candidate.",
+    },
+    {
+        "model": "gemma4:e4b",
+        "strength_rank": 50,
+        "relative_cost_rank": 40,
+        "notes": "Default replay-local candidate observed in prior Von replay work.",
+    },
+    {
+        "model": "gpt-oss:20b",
+        "strength_rank": 65,
+        "relative_cost_rank": 55,
+        "notes": "Local Ollama open-weight candidate; not an OpenAI API model.",
+    },
+    {
+        "model": "gemma4:26b",
+        "strength_rank": 75,
+        "relative_cost_rank": 65,
+        "notes": "Stronger local replay candidate; slower but useful for workflow reasoning.",
+    },
+    {
+        "model": "gemma4:31b",
+        "strength_rank": 78,
+        "relative_cost_rank": 68,
+        "notes": "Current default local replay candidate on origin/main.",
+    },
+    {
+        "model": "qwen3.5:27b",
+        "strength_rank": 80,
+        "relative_cost_rank": 70,
+        "notes": "Stronger local reasoning candidate when installed.",
+    },
+    {
+        "model": "llama3.3:70b",
+        "strength_rank": 95,
+        "relative_cost_rank": 95,
+        "notes": "High-cost local fallback; use only after cheaper installed candidates fail.",
+    },
+)
 PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
     "direct_context_or_background": (
         "Questions that a capable direct-response LLM should usually answer from "
@@ -1343,6 +1409,281 @@ def _write_json_output(output_json: str, payload: Mapping[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _normalise_ollama_model_name(model_name: str | None) -> str:
+    provider, bare_model = _split_model_provider_prefix(model_name)
+    if provider == LOCAL_MODEL_PROVIDER_NAME:
+        return bare_model.lower()
+    return _safe_text(model_name).lower()
+
+
+def _build_local_ollama_generate_model_override(model_name: str | None) -> str:
+    cleaned = _safe_text(model_name)
+    if not cleaned:
+        return ""
+    provider, _bare_model = _split_model_provider_prefix(cleaned)
+    if provider == LOCAL_MODEL_PROVIDER_NAME:
+        return cleaned
+    return f"{LOCAL_MODEL_PROVIDER_NAME}:{cleaned}"
+
+
+def _parse_ollama_list_output(output: str) -> set[str]:
+    installed: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("name"):
+            continue
+        model_name = line.split()[0].strip()
+        if model_name:
+            installed.add(_normalise_ollama_model_name(model_name))
+    return installed
+
+
+def _list_installed_ollama_models() -> set[str]:
+    try:
+        completed = subprocess.run(
+            ["ollama", "list"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return _parse_ollama_list_output(completed.stdout)
+
+
+def _pull_ollama_model(model_name: str) -> dict[str, Any]:
+    started = time.time()
+    try:
+        completed = subprocess.run(
+            ["ollama", "pull", model_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=3600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "model": model_name,
+            "status": "error",
+            "error": str(exc),
+            "duration_seconds": round(time.time() - started, 3),
+        }
+    return {
+        "model": model_name,
+        "status": "ok" if completed.returncode == 0 else "failed",
+        "exit_code": completed.returncode,
+        "stdout_tail": completed.stdout[-1000:],
+        "stderr_tail": completed.stderr[-1000:],
+        "duration_seconds": round(time.time() - started, 3),
+    }
+
+
+def _coerce_rank(value: Any, *, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return fallback
+
+
+def _registry_local_ollama_model_entries() -> list[dict[str, Any]]:
+    try:
+        snapshot = get_model_registry_snapshot()
+    except Exception:
+        return []
+    snapshot_source = _safe_text(snapshot.get("source")) or "model_registry"
+    entries: list[dict[str, Any]] = []
+    for index, entry in enumerate(_as_list(snapshot.get("models"))):
+        if not isinstance(entry, Mapping):
+            continue
+        provider = _safe_text(entry.get("provider")).lower()
+        locality = _safe_text(entry.get("locality")).lower()
+        if provider != LOCAL_MODEL_PROVIDER_NAME and locality != "local":
+            continue
+        model = _safe_text(entry.get("model_id"))
+        if not model:
+            aliases = _as_list(entry.get("model_aliases"))
+            model = _safe_text(aliases[0]) if aliases else ""
+        if not model:
+            continue
+        entries.append(
+            {
+                "model": _normalise_ollama_model_name(model),
+                "provider": LOCAL_MODEL_PROVIDER_NAME,
+                "registry_source": snapshot_source,
+                "registry_entry_id": _safe_text(entry.get("registry_entry_id")) or None,
+                "concept_id": _safe_text(entry.get("concept_id")) or None,
+                "strength_rank": _coerce_rank(
+                    entry.get("strength_rank")
+                    or entry.get("replay_strength_rank")
+                    or entry.get("capability_rank"),
+                    fallback=1000 + index,
+                ),
+                "relative_cost_rank": _coerce_rank(
+                    entry.get("relative_cost_rank")
+                    or entry.get("cost_rank")
+                    or entry.get("replay_cost_rank"),
+                    fallback=1000 + index,
+                ),
+                "notes": _safe_text(entry.get("notes")) or None,
+            }
+        )
+    return entries
+
+
+def _build_local_ollama_replay_model_candidates(
+    *,
+    requested_candidates: Sequence[str],
+    installed_models: set[str] | None,
+    pull_missing_models: bool,
+) -> list[dict[str, Any]]:
+    requested = [_safe_text(entry) for entry in requested_candidates]
+    requested = [entry for entry in requested if entry]
+    installed = installed_models if installed_models is not None else _list_installed_ollama_models()
+    catalogue_by_model = {
+        _normalise_ollama_model_name(entry.get("model")): dict(entry)
+        for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE
+    }
+    registry_by_model = {
+        _normalise_ollama_model_name(entry.get("model")): dict(entry)
+        for entry in _registry_local_ollama_model_entries()
+    }
+    if requested:
+        source_models = requested
+    elif registry_by_model:
+        source_models = list(registry_by_model)
+    else:
+        source_models = [entry["model"] for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE]
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    pull_results: dict[str, Any] = {}
+    for index, model_name in enumerate(source_models):
+        cleaned_model = _safe_text(model_name)
+        model_key = _normalise_ollama_model_name(cleaned_model)
+        if not cleaned_model or model_key in seen:
+            continue
+        seen.add(model_key)
+        registry_entry = registry_by_model.get(model_key, {})
+        catalogue_entry = catalogue_by_model.get(model_key, {})
+        installed_now = model_key in installed if installed else False
+        if not installed_now and pull_missing_models:
+            pull_result = _pull_ollama_model(cleaned_model)
+            pull_results[model_key] = pull_result
+            if pull_result.get("status") == "ok":
+                installed.add(model_key)
+                installed_now = True
+        if not installed_now:
+            continue
+        strength_rank = registry_entry.get("strength_rank", catalogue_entry.get("strength_rank"))
+        relative_cost_rank = registry_entry.get(
+            "relative_cost_rank", catalogue_entry.get("relative_cost_rank")
+        )
+        candidates.append(
+            {
+                "schema_version": LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE_SCHEMA_VERSION,
+                "model": model_key,
+                "provider": LOCAL_MODEL_PROVIDER_NAME,
+                "installed": installed_now,
+                "strength_rank": _coerce_rank(strength_rank, fallback=1000 + index),
+                "relative_cost_rank": _coerce_rank(relative_cost_rank, fallback=1000 + index),
+                "catalogue_source": (
+                    "vontology_model_registry" if registry_entry else "replay_local_catalogue"
+                ),
+                "registry_source": registry_entry.get("registry_source"),
+                "registry_entry_id": registry_entry.get("registry_entry_id"),
+                "concept_id": registry_entry.get("concept_id"),
+                "notes": _safe_text(registry_entry.get("notes") or catalogue_entry.get("notes"))
+                or None,
+                "pull_result": pull_results.get(model_key),
+            }
+        )
+    return sorted(
+        candidates,
+        key=lambda entry: (
+            int(entry.get("strength_rank") or 10_000),
+            int(entry.get("relative_cost_rank") or 10_000),
+            _safe_text(entry.get("model")),
+        ),
+    )
+
+
+def _resolve_scoped_active_llm_setting(
+    *, user_concept_id: str | None, organisation_concept_id: str | None
+) -> Mapping[str, Any] | None:
+    from src.backend.services.settings_service import resolve_llm_setting
+
+    resolved = resolve_llm_setting(
+        user_concept_id=_safe_text(user_concept_id) or None,
+        org_concept_id=_safe_text(organisation_concept_id) or None,
+    )
+    return dict(resolved) if isinstance(resolved, Mapping) else None
+
+
+def _set_scoped_active_llm_setting(
+    *,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    provider: str,
+    model: str,
+) -> bool:
+    from src.backend.services.settings_service import (
+        set_org_llm_setting,
+        set_user_llm_setting,
+    )
+
+    user_id = _safe_text(user_concept_id) or None
+    organisation_id = _safe_text(organisation_concept_id) or None
+    if user_id:
+        return bool(set_user_llm_setting(user_id, provider, model))
+    if organisation_id:
+        return bool(set_org_llm_setting(organisation_id, provider, model))
+    raise RuntimeError("A user or organisation concept id is required to override scoped active LLM.")
+
+
+@contextmanager
+def _temporary_scoped_active_llm(
+    *,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    provider: str,
+    model: str,
+) -> Any:
+    previous = _resolve_scoped_active_llm_setting(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+    )
+    if not previous:
+        raise RuntimeError(
+            "Cannot safely restore scoped active LLM because no previous setting resolved."
+        )
+    if not _set_scoped_active_llm_setting(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        provider=provider,
+        model=model,
+    ):
+        raise RuntimeError(f"Failed to set scoped active LLM to {provider}:{model}.")
+    try:
+        yield previous
+    finally:
+        previous_provider = _safe_text(previous.get("provider"))
+        previous_model = _safe_text(previous.get("model"))
+        if previous_provider and previous_model:
+            _set_scoped_active_llm_setting(
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                provider=previous_provider,
+                model=previous_model,
+            )
 
 
 def _git_capture(*args: str) -> str | None:
@@ -3281,6 +3622,363 @@ def _build_repeated_replay_summary(
     }
 
 
+def _extract_trailing_json_mapping(text: str) -> dict[str, Any] | None:
+    if not isinstance(text, str) or "{" not in text:
+        return None
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] != "{":
+            continue
+        try:
+            parsed = json.loads(text[index:])
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if platform.system().lower().startswith("win"):
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    process.kill()
+
+
+def _summary_meets_success_threshold(summary: Mapping[str, Any]) -> bool:
+    repeat = _as_mapping(summary.get("repeat"))
+    if repeat:
+        return bool(repeat.get("meets_minimum_success_rate"))
+    if _safe_text(summary.get("status")) != "ok":
+        return False
+    return bool(_as_mapping(summary.get("evaluation")).get("should_user_be_happy"))
+
+
+def _run_sampler_subprocess_replay_suite(
+    *,
+    prompt_entry: Mapping[str, Any],
+    base_url: str,
+    requested_model: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    user_concept_id: str,
+    organisation_concept_id: str,
+    session_name: str,
+    presenter_mode: bool,
+    allow_non_agent_test_server: bool,
+    repeat_count: int,
+    minimum_success_rate: float,
+    process_timeout_seconds: float,
+) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc).isoformat()
+    prompt_text = _safe_text(prompt_entry.get("prompt"))
+    replay_case_id = _safe_text(prompt_entry.get("id"))
+    with tempfile.TemporaryDirectory(prefix="von_replay_probe_") as temp_dir:
+        output_path = Path(temp_dir) / "attempt.json"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--base-url",
+            base_url,
+            "--prompt-text",
+            prompt_text,
+            "--timeout-seconds",
+            str(timeout_seconds),
+            "--poll-interval-seconds",
+            str(poll_interval_seconds),
+            "--user-concept-id",
+            user_concept_id,
+            "--organisation-concept-id",
+            organisation_concept_id,
+            "--session-name",
+            session_name,
+            "--model",
+            requested_model,
+            "--repeat-count",
+            str(max(int(repeat_count), 1)),
+            "--minimum-success-rate",
+            str(min(max(float(minimum_success_rate), 0.0), 1.0)),
+            "--output-json",
+            str(output_path),
+        ]
+        if replay_case_id:
+            command.extend(["--replay-case-id", replay_case_id])
+        if presenter_mode:
+            command.append("--presenter-mode")
+        if allow_non_agent_test_server:
+            command.append("--allow-non-agent-test-server")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        try:
+            stdout, stderr = process.communicate(
+                timeout=max(float(process_timeout_seconds), 1.0)
+            )
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            return {
+                "status": "error",
+                "started_at_utc": started_at,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "error": "replay_attempt_process_timeout",
+                "timeout_seconds": process_timeout_seconds,
+                "stdout_tail": stdout[-2000:],
+                "stderr_tail": stderr[-2000:],
+            }
+        summary: dict[str, Any]
+        if output_path.exists():
+            try:
+                parsed_output = json.loads(output_path.read_text(encoding="utf-8"))
+                summary = dict(parsed_output) if isinstance(parsed_output, Mapping) else {}
+            except Exception as exc:
+                summary = {
+                    "status": "error",
+                    "error": f"invalid_attempt_output_json: {exc}",
+                }
+        else:
+            recovered_summary = (
+                _extract_trailing_json_mapping(stderr)
+                or _extract_trailing_json_mapping(stdout)
+                or {"status": "error", "error": "attempt_output_json_missing"}
+            )
+            summary = dict(recovered_summary)
+        if not summary:
+            summary = {"status": "error", "error": "attempt_output_json_not_object"}
+        summary["subprocess"] = {
+            "exit_code": process.returncode,
+            "stdout_tail": stdout[-2000:],
+            "stderr_tail": stderr[-2000:],
+            "process_timeout_seconds": process_timeout_seconds,
+        }
+        return summary
+
+
+def _build_local_model_probe_summary(
+    *,
+    prompt_entry: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    run_environment: Mapping[str, Any],
+    candidate_results: Sequence[Mapping[str, Any]],
+    selected_candidate: Mapping[str, Any] | None,
+    minimum_success_rate: float,
+) -> dict[str, Any]:
+    selected_model = (
+        _safe_text(selected_candidate.get("model"))
+        if isinstance(selected_candidate, Mapping)
+        else None
+    )
+    return {
+        "status": "ok" if selected_model else "failed",
+        "mode": "local_ollama_replay_model_probe",
+        "schema_version": LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION,
+        "guidance": {
+            "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
+            "replay_guide_note": REAL_PATH_REPLAY_GUIDE_NOTE,
+        },
+        "environment": dict(run_environment),
+        "selection": _build_selection_summary(
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            requested_model=selected_model,
+        ),
+        "prompt": _build_prompt_summary(prompt_entry),
+        "local_model_probe": {
+            "minimum_success_rate": minimum_success_rate,
+            "selected_model": selected_model,
+            "candidate_count": len(candidate_results),
+            "candidates": [dict(entry) for entry in candidate_results],
+            "no_local_model_succeeded": selected_model is None,
+        },
+    }
+
+
+def _write_local_model_probe_cache(
+    *, cache_path: Path, probe_summary: Mapping[str, Any]
+) -> None:
+    payload: dict[str, Any] = {}
+    if cache_path.exists():
+        try:
+            parsed = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, Mapping):
+            payload = dict(parsed)
+    payload["schema_version"] = LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION
+    payload["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    payload.setdefault("runs", [])
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        runs = []
+        payload["runs"] = runs
+    run_record = {
+        "prompt_id": _safe_text(_as_mapping(probe_summary.get("prompt")).get("id"))
+        or None,
+        "selected_model": _safe_text(
+            _as_mapping(probe_summary.get("local_model_probe")).get("selected_model")
+        )
+        or None,
+        "status": _safe_text(probe_summary.get("status")) or None,
+        "recorded_at_utc": payload["updated_at_utc"],
+    }
+    runs.append(run_record)
+    payload["last_run"] = run_record
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _run_local_ollama_model_probe(
+    *,
+    prompt_entry: Mapping[str, Any],
+    base_url: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    user_concept_id: str,
+    organisation_concept_id: str,
+    session_name: str,
+    run_environment: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    presenter_mode: bool,
+    allow_non_agent_test_server: bool,
+    repeat_count: int,
+    screen_repeat_count: int,
+    attempt_process_timeout_seconds: float,
+    minimum_success_rate: float,
+    requested_candidates: Sequence[str],
+    pull_missing_models: bool,
+    cache_path: Path | None,
+) -> dict[str, Any]:
+    installed_models = _list_installed_ollama_models()
+    candidates = _build_local_ollama_replay_model_candidates(
+        requested_candidates=requested_candidates,
+        installed_models=installed_models,
+        pull_missing_models=pull_missing_models,
+    )
+    candidate_results: list[dict[str, Any]] = []
+    selected_candidate: Mapping[str, Any] | None = None
+    probe_environment = {
+        **run_environment,
+        "local_model_probe_enabled": True,
+        "local_model_probe_schema_version": LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION,
+        "local_model_probe_installed_models": sorted(installed_models),
+        "local_model_probe_candidate_order": [
+            _safe_text(candidate.get("model")) for candidate in candidates
+        ],
+    }
+    for candidate in candidates:
+        model_name = _safe_text(candidate.get("model"))
+        if not model_name:
+            continue
+        requested_model = _build_local_ollama_generate_model_override(model_name)
+        candidate_environment = {
+            **probe_environment,
+            "requested_model": model_name,
+            "requested_generate_model_override": requested_model,
+            "scoped_active_llm_temporarily_overridden": True,
+            "scoped_active_llm_temporary_provider": LOCAL_MODEL_PROVIDER_NAME,
+            "scoped_active_llm_temporary_model": model_name,
+            "local_model_probe_candidate": dict(candidate),
+        }
+        try:
+            with _temporary_scoped_active_llm(
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                provider=LOCAL_MODEL_PROVIDER_NAME,
+                model=model_name,
+            ) as previous_active_llm:
+                candidate_environment["scoped_active_llm_previous"] = dict(
+                    previous_active_llm
+                )
+                summary = _run_sampler_subprocess_replay_suite(
+                    prompt_entry=prompt_entry,
+                    base_url=base_url,
+                    requested_model=requested_model,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                    user_concept_id=user_concept_id,
+                    organisation_concept_id=organisation_concept_id,
+                    session_name=f"{session_name} [{model_name}] screening",
+                    presenter_mode=presenter_mode,
+                    allow_non_agent_test_server=allow_non_agent_test_server,
+                    repeat_count=max(int(screen_repeat_count), 1),
+                    minimum_success_rate=minimum_success_rate,
+                    process_timeout_seconds=attempt_process_timeout_seconds,
+                )
+                if _summary_meets_success_threshold(summary) and max(int(repeat_count), 1) > max(
+                    int(screen_repeat_count), 1
+                ):
+                    screen_summary = summary
+                    summary = _run_sampler_subprocess_replay_suite(
+                        prompt_entry=prompt_entry,
+                        base_url=base_url,
+                        requested_model=requested_model,
+                        timeout_seconds=timeout_seconds,
+                        poll_interval_seconds=poll_interval_seconds,
+                        user_concept_id=user_concept_id,
+                        organisation_concept_id=organisation_concept_id,
+                        session_name=f"{session_name} [{model_name}] confirmation",
+                        presenter_mode=presenter_mode,
+                        allow_non_agent_test_server=allow_non_agent_test_server,
+                        repeat_count=max(int(repeat_count), 1),
+                        minimum_success_rate=minimum_success_rate,
+                        process_timeout_seconds=attempt_process_timeout_seconds,
+                    )
+                    summary["screening"] = screen_summary
+        except Exception as exc:
+            summary = {
+                "status": "error",
+                "requested_model": model_name,
+                "error": str(exc),
+            }
+        threshold_met = _summary_meets_success_threshold(summary)
+        candidate_result = {
+            "candidate": dict(candidate),
+            "model": model_name,
+            "status": _safe_text(summary.get("status")) or "unknown",
+            "threshold_met": threshold_met,
+            "suite": summary,
+        }
+        candidate_results.append(candidate_result)
+        if threshold_met:
+            selected_candidate = candidate
+            break
+    probe_summary = _build_local_model_probe_summary(
+        prompt_entry=prompt_entry,
+        prompt_bank_schema_version=prompt_bank_schema_version,
+        requested_complexity_classes=requested_complexity_classes,
+        seed=seed,
+        run_environment=probe_environment,
+        candidate_results=candidate_results,
+        selected_candidate=selected_candidate,
+        minimum_success_rate=minimum_success_rate,
+    )
+    if cache_path is not None:
+        _write_local_model_probe_cache(cache_path=cache_path, probe_summary=probe_summary)
+    return probe_summary
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -3357,9 +4055,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--minimum-success-rate",
+        "--success-threshold",
+        dest="minimum_success_rate",
         type=float,
         default=DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE,
-        help="Required repeated-suite success rate; default 0.95.",
+        help="Required repeated-suite or probe success rate; default 0.95.",
+    )
+    parser.add_argument(
+        "--probe-local-models",
+        action="store_true",
+        help=(
+            "Search installed local Ollama models from weakest/cheapest to "
+            "strongest and report the first model that meets the success rate."
+        ),
+    )
+    parser.add_argument(
+        "--local-model-candidate",
+        dest="local_model_candidates",
+        action="append",
+        default=[],
+        help=(
+            "Restrict --probe-local-models to one local Ollama model candidate. "
+            "Repeat to provide an ordered candidate set."
+        ),
+    )
+    parser.add_argument(
+        "--model-probe-screen-repeat-count",
+        type=int,
+        default=1,
+        help="Number of cheap screening repeats per candidate before confirmation.",
+    )
+    parser.add_argument(
+        "--model-probe-attempt-timeout-seconds",
+        type=float,
+        default=900.0,
+        help="Wall-clock timeout for each subprocess-isolated candidate replay suite.",
+    )
+    parser.add_argument(
+        "--pull-missing-local-models",
+        action="store_true",
+        help="Allow the probe to run `ollama pull` for missing local candidates.",
+    )
+    parser.add_argument(
+        "--local-model-probe-cache-json",
+        default=str(DEFAULT_LOCAL_MODEL_PROBE_CACHE_PATH),
+        help="Path for appending local model probe cache metadata. Pass an empty string to disable.",
     )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
@@ -3689,6 +4429,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     repeat_count = max(int(args.repeat_count or 1), 1)
     minimum_success_rate = min(max(float(args.minimum_success_rate), 0.0), 1.0)
+    if bool(args.probe_local_models):
+        probe_cache_raw = _safe_text(args.local_model_probe_cache_json)
+        summary = _run_local_ollama_model_probe(
+            prompt_entry=prompt_entry,
+            base_url=base_url,
+            timeout_seconds=float(args.timeout_seconds),
+            poll_interval_seconds=float(args.poll_interval_seconds),
+            user_concept_id=authenticated_user_concept_id,
+            organisation_concept_id=authenticated_organisation_concept_id,
+            session_name=session_name,
+            run_environment=run_environment,
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=args.seed,
+            presenter_mode=bool(args.presenter_mode),
+            allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
+            repeat_count=repeat_count,
+            screen_repeat_count=max(int(args.model_probe_screen_repeat_count or 1), 1),
+            attempt_process_timeout_seconds=float(args.model_probe_attempt_timeout_seconds),
+            minimum_success_rate=minimum_success_rate,
+            requested_candidates=[
+                entry
+                for entry in _as_list(args.local_model_candidates)
+                if isinstance(entry, str)
+            ],
+            pull_missing_models=bool(args.pull_missing_local_models),
+            cache_path=Path(probe_cache_raw) if probe_cache_raw else None,
+        )
+        if failure_case_intake is not None:
+            summary["failure_case_intake"] = failure_case_intake
+        output_json = _safe_text(args.output_json)
+        if output_json:
+            _write_json_output(output_json, summary)
+        print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
+        return 0 if _safe_text(summary.get("status")) == "ok" else 1
     if repeat_count == 1:
         try:
             summary, should_user_be_happy = _run_replay_plan(
