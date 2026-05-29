@@ -2080,6 +2080,25 @@ class WorkflowExecutor:
                     action_inputs=action.inputs,
                     context=context,
                 )
+                if environment.step_callback:
+                    try:
+                        environment.step_callback(
+                            {
+                                "schema_version": "workflow_step_event.v1",
+                                "status": "workflow_step_start",
+                                "workflow_id": definition.workflow_id,
+                                "state_id": state_id,
+                                "action_id": action_id,
+                                "state_attempt": state_attempt,
+                                "execution_mode": action.execution_mode,
+                            }
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[workflow_engine] Step callback failed for %s",
+                            definition.workflow_id,
+                            exc_info=True,
+                        )
                 result, action_outcome, action_output_snapshot, approval_blocked = (
                     self._execute_action_with_runtime_policies(
                         definition=definition,

@@ -34496,6 +34496,44 @@ class InternalMCPChatOrchestrator:
             else None
         )
 
+        def _emit_selected_workflow_execution_event(
+            *,
+            status: str,
+            event_kind: str,
+            final_state_value: str | None = None,
+            completed_value: bool | None = None,
+            error: str | None = None,
+        ) -> None:
+            if not callable(emit_progress) or not selected_workflow_id:
+                return
+            event: dict[str, Any] = {
+                "status": status,
+                "event_kind": event_kind,
+                "workflow_id": selected_workflow_id,
+                "selected_workflow_id": selected_workflow_id,
+                "selected_execution_mode": selected_execution_mode or "custom_workflow",
+            }
+            if isinstance(final_state_value, str) and final_state_value.strip():
+                event["final_state"] = final_state_value.strip()
+            if isinstance(completed_value, bool):
+                event["outcome"] = "success" if completed_value else "failure"
+            if isinstance(error, str) and error.strip():
+                event["error"] = error.strip()
+            emit_progress(
+                {
+                    "status": status,
+                    "stage": "selected_workflow_execution",
+                    "phase": "selected_workflow_execution",
+                    "phase_label": "Selected workflow execution",
+                    "workflow_stage_id": "selected_workflow_execution",
+                    "selected_workflow_id": selected_workflow_id,
+                    "workflow_id": selected_workflow_id,
+                    "selected_execution_mode": selected_execution_mode
+                    or "custom_workflow",
+                    "selected_workflow_execution_event": event,
+                }
+            )
+
         def _append_dispatch_boundary(
             *,
             boundary: str,
@@ -34530,6 +34568,10 @@ class InternalMCPChatOrchestrator:
                 boundary="execution_mode_selected",
                 status="selected",
             )
+            _emit_selected_workflow_execution_event(
+                status="workflow_execution_selected",
+                event_kind="workflow_execution_selected",
+            )
 
         continuation_context = child_workflow_data.get("continuation_context")
         if isinstance(continuation_context, Mapping) and bool(
@@ -34556,6 +34598,10 @@ class InternalMCPChatOrchestrator:
                     child_workflow_data.setdefault(key, value)
 
         if selected_workflow_id and selected_execution_mode == "direct_response":
+            _emit_selected_workflow_execution_event(
+                status="workflow_execution_start",
+                event_kind="workflow_execution_start",
+            )
             prompt_text = (
                 data.get("user_prompt")
                 if isinstance(data.get("user_prompt"), str)
@@ -34748,6 +34794,12 @@ class InternalMCPChatOrchestrator:
                         final_state_value="plain_response",
                         completed_value=True,
                     )
+                    _emit_selected_workflow_execution_event(
+                        status="workflow_execution_complete",
+                        event_kind="workflow_execution_terminal",
+                        final_state_value="plain_response",
+                        completed_value=True,
+                    )
                 else:
                     completed = False
                     child_outputs = {
@@ -34764,6 +34816,13 @@ class InternalMCPChatOrchestrator:
                     _append_dispatch_boundary(
                         boundary="workflow_terminal",
                         status="failed",
+                        final_state_value=final_state,
+                        completed_value=False,
+                        error=failure_detail,
+                    )
+                    _emit_selected_workflow_execution_event(
+                        status="workflow_execution_failed",
+                        event_kind="workflow_execution_terminal",
                         final_state_value=final_state,
                         completed_value=False,
                         error=failure_detail,
@@ -34790,6 +34849,13 @@ class InternalMCPChatOrchestrator:
                     completed_value=False,
                     error=failure_detail,
                 )
+                _emit_selected_workflow_execution_event(
+                    status="workflow_execution_failed",
+                    event_kind="workflow_execution_terminal",
+                    final_state_value=final_state,
+                    completed_value=False,
+                    error=failure_detail,
+                )
                 child_result_snapshot = {
                     "selected_execution_mode": "direct_response",
                     "final_state": final_state,
@@ -34799,6 +34865,10 @@ class InternalMCPChatOrchestrator:
             _append_dispatch_boundary(
                 boundary="workflow_handoff",
                 status="started",
+            )
+            _emit_selected_workflow_execution_event(
+                status="workflow_execution_start",
+                event_kind="workflow_execution_start",
             )
             try:
                 child_result = self.execute_workflow(
@@ -34876,6 +34946,17 @@ class InternalMCPChatOrchestrator:
             _append_dispatch_boundary(
                 boundary="workflow_terminal",
                 status="completed" if completed else "failed",
+                final_state_value=final_state,
+                completed_value=completed,
+                error=failure_detail if not completed else None,
+            )
+            _emit_selected_workflow_execution_event(
+                status=(
+                    "workflow_execution_complete"
+                    if completed
+                    else "workflow_execution_failed"
+                ),
+                event_kind="workflow_execution_terminal",
                 final_state_value=final_state,
                 completed_value=completed,
                 error=failure_detail if not completed else None,
@@ -35004,16 +35085,58 @@ class InternalMCPChatOrchestrator:
 
         def _step_callback(envelope: Mapping[str, Any]) -> None:
             if progress_tracker:
-                progress_tracker.emit(
-                    {
-                        "status": "workflow_step_complete",
-                        "workflow_id": envelope.get("workflow_id"),
-                        "state_id": envelope.get("state_id"),
-                        "action_id": envelope.get("action_id"),
-                        "action_status": envelope.get("action_status"),
-                        "outcome": envelope.get("action_outcome"),
-                    }
+                workflow_id = envelope.get("workflow_id")
+                selected_workflow_id = None
+                try:
+                    selected_workflow_id = workflow_inputs.get("selected_workflow_id")
+                except Exception:
+                    selected_workflow_id = None
+                status = (
+                    envelope.get("status")
+                    if isinstance(envelope.get("status"), str)
+                    else "workflow_step_complete"
                 )
+                payload: dict[str, Any] = {
+                    "status": status,
+                    "workflow_id": workflow_id,
+                    "state_id": envelope.get("state_id"),
+                    "action_id": envelope.get("action_id"),
+                    "action_status": envelope.get("action_status"),
+                    "outcome": envelope.get("action_outcome") or envelope.get("outcome"),
+                    "execution_mode": envelope.get("execution_mode"),
+                    "state_attempt": envelope.get("state_attempt"),
+                    "duration_ms": envelope.get("duration_ms"),
+                }
+                if (
+                    isinstance(selected_workflow_id, str)
+                    and selected_workflow_id.strip()
+                    and workflow_id == selected_workflow_id
+                ):
+                    payload.update(
+                        {
+                            "stage": "selected_workflow_execution",
+                            "phase": "selected_workflow_execution",
+                            "phase_label": "Selected workflow execution",
+                            "workflow_stage_id": "selected_workflow_execution",
+                            "selected_workflow_id": selected_workflow_id,
+                            "selected_execution_mode": "custom_workflow",
+                            "selected_workflow_execution_event": {
+                                "status": status,
+                                "event_kind": status,
+                                "workflow_id": workflow_id,
+                                "selected_workflow_id": selected_workflow_id,
+                                "state_id": envelope.get("state_id"),
+                                "action_id": envelope.get("action_id"),
+                                "action_status": envelope.get("action_status"),
+                                "action_outcome": envelope.get("action_outcome")
+                                or envelope.get("outcome"),
+                                "execution_mode": envelope.get("execution_mode"),
+                                "state_attempt": envelope.get("state_attempt"),
+                                "duration_ms": envelope.get("duration_ms"),
+                            },
+                        }
+                    )
+                progress_tracker.emit(payload)
 
         def _emit_progress_local(info: Mapping[str, Any]) -> None:
             if progress_tracker is not None:

@@ -154,6 +154,7 @@ _TOOL_PROGRESS_TERMINAL_PHASES = {
 }
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
 _TOOL_PROGRESS_PHASE_HISTORY_LIMIT = 80
+_TOOL_PROGRESS_SELECTED_WORKFLOW_EVENT_LIMIT = 80
 
 _ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
 _ONBOARDING_WORKFLOW_KEYWORDS = ("onboard", "onboarding")
@@ -270,6 +271,97 @@ def _progress_number(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _normalise_selected_workflow_execution_event(
+    update: Mapping[str, Any],
+    *,
+    sequence_no: int,
+    at_utc: str,
+) -> dict[str, Any] | None:
+    raw_event = update.get("selected_workflow_execution_event")
+    if not isinstance(raw_event, Mapping):
+        return None
+
+    event = {str(key): value for key, value in raw_event.items() if isinstance(key, str)}
+    status = _progress_str(event.get("status")) or _progress_str(update.get("status"))
+    event_kind = _progress_str(event.get("event_kind")) or status
+    workflow_id = (
+        _progress_str(event.get("workflow_id"))
+        or _progress_str(update.get("workflow_id"))
+        or _progress_str(update.get("selected_workflow_id"))
+    )
+    if not status or not event_kind or not workflow_id:
+        return None
+
+    normalised: dict[str, Any] = {
+        "schema_version": "selected_workflow_execution_event.v1",
+        "sequence_no": sequence_no,
+        "at_utc": at_utc,
+        "status": status,
+        "event_kind": event_kind,
+        "workflow_id": workflow_id,
+    }
+    for key in (
+        "selected_workflow_id",
+        "selected_workflow_name",
+        "selected_execution_mode",
+        "state_id",
+        "action_id",
+        "action_status",
+        "action_outcome",
+        "outcome",
+        "final_state",
+        "error",
+        "execution_mode",
+        "result_summary",
+    ):
+        value = _progress_str(event.get(key)) or _progress_str(update.get(key))
+        if value:
+            normalised[key] = value
+    state_attempt = _progress_number(event.get("state_attempt"))
+    if state_attempt is not None:
+        normalised["state_attempt"] = int(max(0.0, state_attempt))
+    duration_ms = _progress_number(event.get("duration_ms"))
+    if duration_ms is not None:
+        normalised["duration_ms"] = int(max(0.0, duration_ms))
+    return normalised
+
+
+def _append_selected_workflow_execution_event(
+    existing_execution: Any,
+    event: Mapping[str, Any],
+) -> dict[str, Any]:
+    existing_payload = existing_execution if isinstance(existing_execution, Mapping) else {}
+    existing_events = existing_payload.get("events")
+    events = (
+        [dict(item) for item in existing_events if isinstance(item, Mapping)]
+        if isinstance(existing_events, list)
+        else []
+    )
+    events.append(dict(event))
+    events = events[-_TOOL_PROGRESS_SELECTED_WORKFLOW_EVENT_LIMIT:]
+
+    workflow_id = (
+        _progress_str(event.get("selected_workflow_id"))
+        or _progress_str(event.get("workflow_id"))
+        or _progress_str(existing_payload.get("selected_workflow_id"))
+        or _progress_str(existing_payload.get("workflow_id"))
+    )
+    payload: dict[str, Any] = {
+        "schema_version": "selected_workflow_execution.v1",
+        "workflow_id": workflow_id,
+        "selected_workflow_id": workflow_id,
+        "event_count": int(_progress_number(existing_payload.get("event_count")) or 0)
+        + 1,
+        "latest_event": dict(event),
+        "events": events,
+    }
+    for key in ("selected_workflow_name", "selected_execution_mode"):
+        value = _progress_str(event.get(key)) or _progress_str(existing_payload.get(key))
+        if value:
+            payload[key] = value
+    return payload
 
 
 def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any, int]:
@@ -4272,6 +4364,21 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         if workflow_candidate_count is not None:
             event_entry["workflow_candidate_count"] = int(
                 max(0.0, workflow_candidate_count)
+            )
+        selected_workflow_execution_event = _normalise_selected_workflow_execution_event(
+            safe_update,
+            sequence_no=sequence_no,
+            at_utc=now_utc,
+        )
+        if selected_workflow_execution_event is not None:
+            event_entry["selected_workflow_execution_event"] = dict(
+                selected_workflow_execution_event
+            )
+            merged["selected_workflow_execution"] = (
+                _append_selected_workflow_execution_event(
+                    existing.get("selected_workflow_execution"),
+                    selected_workflow_execution_event,
+                )
             )
         trimmed_events = [
             *existing_events[-(_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT - 1) :],

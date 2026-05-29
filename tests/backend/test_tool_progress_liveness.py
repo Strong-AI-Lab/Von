@@ -81,6 +81,74 @@ def test_heartbeat_updates_sequence_and_keeps_stage(monkeypatch) -> None:
     )
 
 
+def test_selected_workflow_execution_events_survive_finalising_progress(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=1000.0)
+
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
+            "status": "workflow_execution_start",
+            "stage": "selected_workflow_execution",
+            "phase": "selected_workflow_execution",
+            "selected_workflow_id": "#V#example_workflow",
+            "selected_workflow_execution_event": {
+                "status": "workflow_execution_start",
+                "event_kind": "workflow_execution_start",
+                "workflow_id": "#V#example_workflow",
+                "selected_workflow_id": "#V#example_workflow",
+            },
+        },
+    )
+    clock["now"] += 1.0
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
+            "status": "workflow_step_complete",
+            "stage": "selected_workflow_execution",
+            "phase": "selected_workflow_execution",
+            "selected_workflow_id": "#V#example_workflow",
+            "selected_workflow_execution_event": {
+                "status": "workflow_step_complete",
+                "event_kind": "workflow_step_complete",
+                "workflow_id": "#V#example_workflow",
+                "selected_workflow_id": "#V#example_workflow",
+                "state_id": "fetch_identity",
+                "action_id": "fetch_concept",
+                "action_status": "success",
+                "action_outcome": "success",
+                "duration_ms": 17,
+            },
+        },
+    )
+    clock["now"] += 1.0
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
+            "status": "heartbeat",
+            "stage": "response_finalising",
+            "phase": "response_finalising",
+            "result_summary": "Assembling the final response payload.",
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-workflow", "req-workflow")
+    assert state is not None
+    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+
+    selected_execution = serialised["selected_workflow_execution"]
+    assert selected_execution["schema_version"] == "selected_workflow_execution.v1"
+    assert selected_execution["selected_workflow_id"] == "#V#example_workflow"
+    assert [event["status"] for event in selected_execution["events"]] == [
+        "workflow_execution_start",
+        "workflow_step_complete",
+    ]
+    assert selected_execution["latest_event"]["action_id"] == "fetch_concept"
+    assert serialised["stage"] == "response_finalising"
+
+
 def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     monkeypatch,
 ) -> None:

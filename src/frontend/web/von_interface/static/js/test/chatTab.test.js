@@ -3489,6 +3489,87 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Assembling the final response payload.');
     });
 
+    test('prioritises live selected workflow execution over finalising progress', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'expert',
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'response_finalising', stage_label: 'Finalising response' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#mail_identity_lookup_workflow',
+                        name: 'Mail identity lookup workflow'
+                    }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'response_finalising',
+                    stage_label: 'Finalising response',
+                    latest_status: 'heartbeat',
+                    latest_result_summary: 'Assembling the final response payload.'
+                }
+            ],
+            latestProgress: {
+                phase: 'response_finalising',
+                status: 'heartbeat',
+                result_summary: 'Assembling the final response payload.',
+                selected_workflow_execution: {
+                    schema_version: 'selected_workflow_execution.v1',
+                    selected_workflow_id: '#V#mail_identity_lookup_workflow',
+                    event_count: 3,
+                    latest_event: {
+                        status: 'workflow_step_start',
+                        event_kind: 'workflow_step_start',
+                        workflow_id: '#V#mail_identity_lookup_workflow',
+                        selected_workflow_id: '#V#mail_identity_lookup_workflow',
+                        state_id: 'fetch_mail_identities',
+                        action_id: 'fetch_concept'
+                    },
+                    events: [
+                        {
+                            status: 'workflow_execution_selected',
+                            event_kind: 'workflow_execution_selected',
+                            workflow_id: '#V#mail_identity_lookup_workflow',
+                            selected_workflow_id: '#V#mail_identity_lookup_workflow'
+                        },
+                        {
+                            status: 'workflow_execution_start',
+                            event_kind: 'workflow_execution_start',
+                            workflow_id: '#V#mail_identity_lookup_workflow',
+                            selected_workflow_id: '#V#mail_identity_lookup_workflow'
+                        },
+                        {
+                            status: 'workflow_step_start',
+                            event_kind: 'workflow_step_start',
+                            workflow_id: '#V#mail_identity_lookup_workflow',
+                            selected_workflow_id: '#V#mail_identity_lookup_workflow',
+                            state_id: 'fetch_mail_identities',
+                            action_id: 'fetch_concept'
+                        }
+                    ]
+                }
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Selected workflow execution');
+        expect(text).toContain('Mail identity lookup workflow (#V#mail_identity_lookup_workflow)');
+        expect(text).toContain('Running Fetch concept');
+        expect(text).toContain('Finalising response');
+        expect(text.indexOf('Selected workflow execution')).toBeLessThan(
+            text.indexOf('Finalising response')
+        );
+        expect(html).toContain('Workflow execution events');
+    });
+
     test('preserves selected custom workflow identity through finalising render stages', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             thinkingCardMode: 'debug',

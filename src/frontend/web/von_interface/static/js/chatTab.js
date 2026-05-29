@@ -5997,6 +5997,17 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         data.workflow_selection_narrative_html = stageRoutingNarrative.html || null;
     }
 
+    if (cleanStageId === 'selected_workflow_execution') {
+        const selectedWorkflowExecution = getThinkingSelectedWorkflowExecution(request);
+        data.selected_workflow_execution = selectedWorkflowExecution;
+        data.selected_workflow_id = selectedWorkflowExecution?.selected_workflow_id || null;
+        data.selected_workflow_name = selectedWorkflowExecution?.selected_workflow_name || null;
+        data.selected_workflow_event_count = Number.isFinite(selectedWorkflowExecution?.event_count)
+            ? Number(selectedWorkflowExecution.event_count)
+            : 0;
+        data.latest_selected_workflow_event = selectedWorkflowExecution?.latest_event || null;
+    }
+
     data.latest_subtask = normaliseThinkingActivityString(stageDiagnostic?.latest_subtask)
         || normaliseThinkingActivityString(latestStageEvent?.subtask)
         || null;
@@ -6343,7 +6354,39 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
     ];
     const sections = [];
 
-    if (data.stage_id === 'workflow_discovery') {
+    if (data.stage_id === 'selected_workflow_execution') {
+        const selectedWorkflowHtml = renderWorkflowDisplayHtml(
+            data.selected_workflow_id,
+            data.selected_workflow_name,
+            workflowDiscovery
+        );
+        facts.push(
+            {
+                label: 'Selected workflow',
+                value: formatWorkflowDisplayText(
+                    data.selected_workflow_id,
+                    data.selected_workflow_name,
+                    workflowDiscovery
+                ),
+                html: selectedWorkflowHtml
+            },
+            { label: 'Workflow execution updates', value: data.selected_workflow_event_count },
+            {
+                label: 'Latest workflow event',
+                value: formatThinkingSelectedWorkflowExecutionEvent(
+                    data.latest_selected_workflow_event,
+                    workflowDiscovery
+                )
+            }
+        );
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Workflow execution events',
+            buildThinkingSelectedWorkflowExecutionEventLines(
+                data.selected_workflow_execution,
+                workflowDiscovery
+            )
+        ));
+    } else if (data.stage_id === 'workflow_discovery') {
         facts.push(
             {
                 label: 'Requested search',
@@ -6823,7 +6866,26 @@ function renderThinkingWorkflowStageExpertDataHTML(data, workflowDiscovery = nul
         }
     };
 
-    if (data.stage_id === 'workflow_discovery') {
+    if (data.stage_id === 'selected_workflow_execution') {
+        addSelectedWorkflowFact();
+        facts.push(
+            { label: 'Workflow execution updates', value: data.selected_workflow_event_count },
+            {
+                label: 'Latest workflow event',
+                value: formatThinkingSelectedWorkflowExecutionEvent(
+                    data.latest_selected_workflow_event,
+                    workflowDiscovery
+                )
+            }
+        );
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Workflow execution events',
+            buildThinkingSelectedWorkflowExecutionEventLines(
+                data.selected_workflow_execution,
+                workflowDiscovery
+            )
+        ));
+    } else if (data.stage_id === 'workflow_discovery') {
         facts.push(
             { label: 'Search sources', value: data.search_sources },
             { label: 'Routing matches', value: data.match_count },
@@ -7129,6 +7191,131 @@ function normaliseThinkingStageDiagnosticSnapshotEntry(entry) {
     };
 }
 
+function getThinkingSelectedWorkflowExecution(request) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const candidates = [
+        request?.selectedWorkflowExecution,
+        request?.selected_workflow_execution,
+        latestProgress?.selected_workflow_execution,
+        latestProgress?.progress_view_model?.selected_workflow_execution,
+        latestProgress?.progress_view_model?.workflow_execution_summary,
+    ];
+    for (const candidate of candidates) {
+        if (candidate && typeof candidate === 'object') {
+            return normaliseThinkingSelectedWorkflowExecution(candidate, request?.workflowDiscovery || null);
+        }
+    }
+    return null;
+}
+
+function normaliseThinkingSelectedWorkflowExecution(rawExecution, workflowDiscovery = null) {
+    if (!rawExecution || typeof rawExecution !== 'object') {
+        return null;
+    }
+    const rawEvents = Array.isArray(rawExecution.events)
+        ? rawExecution.events
+        : [];
+    const events = rawEvents
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => ({
+            status: normaliseThinkingActivityString(entry.status) || null,
+            event_kind: normaliseThinkingActivityString(entry.event_kind) || null,
+            workflow_id: normaliseThinkingActivityString(entry.workflow_id) || null,
+            selected_workflow_id: normaliseThinkingActivityString(entry.selected_workflow_id) || null,
+            selected_workflow_name: normaliseThinkingActivityString(entry.selected_workflow_name) || null,
+            selected_execution_mode: normaliseThinkingActivityString(entry.selected_execution_mode) || null,
+            state_id: normaliseThinkingActivityString(entry.state_id) || null,
+            action_id: normaliseThinkingActivityString(entry.action_id) || null,
+            action_status: normaliseThinkingActivityString(entry.action_status) || null,
+            action_outcome: normaliseThinkingActivityString(entry.action_outcome || entry.outcome) || null,
+            final_state: normaliseThinkingActivityString(entry.final_state) || null,
+            error: normaliseThinkingActivityString(entry.error) || null,
+            execution_mode: normaliseThinkingActivityString(entry.execution_mode) || null,
+            duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
+            sequence_no: Number.isFinite(entry.sequence_no) ? Number(entry.sequence_no) : null,
+            at_utc: normaliseThinkingActivityString(entry.at_utc) || null,
+        }));
+    const latestEvent = events.length > 0
+        ? events[events.length - 1]
+        : (
+            rawExecution.latest_event && typeof rawExecution.latest_event === 'object'
+                ? normaliseThinkingSelectedWorkflowExecution({ events: [rawExecution.latest_event] }, workflowDiscovery)?.latest_event
+                : null
+        );
+    const workflowId = normaliseThinkingActivityString(rawExecution.selected_workflow_id)
+        || normaliseThinkingActivityString(rawExecution.workflow_id)
+        || normaliseThinkingActivityString(latestEvent?.selected_workflow_id)
+        || normaliseThinkingActivityString(latestEvent?.workflow_id)
+        || null;
+    if (!workflowId && events.length === 0) {
+        return null;
+    }
+    const workflowName = normaliseThinkingActivityString(rawExecution.selected_workflow_name)
+        || normaliseThinkingActivityString(latestEvent?.selected_workflow_name)
+        || normaliseThinkingActivityString(
+            resolveWorkflowDisplayDescriptor(workflowId, null, workflowDiscovery).workflowName
+        )
+        || null;
+    return {
+        schema_version: 'selected_workflow_execution.v1',
+        workflow_id: workflowId,
+        selected_workflow_id: workflowId,
+        selected_workflow_name: workflowName,
+        selected_execution_mode: normaliseThinkingActivityString(rawExecution.selected_execution_mode)
+            || normaliseThinkingActivityString(latestEvent?.selected_execution_mode)
+            || null,
+        event_count: Number.isFinite(rawExecution.event_count)
+            ? Number(rawExecution.event_count)
+            : events.length,
+        latest_event: latestEvent,
+        events,
+        summary_text: normaliseThinkingActivityString(rawExecution.summary_text)
+            || formatThinkingSelectedWorkflowExecutionEvent(latestEvent, workflowDiscovery)
+            || null,
+    };
+}
+
+function formatThinkingSelectedWorkflowExecutionEvent(event, workflowDiscovery = null) {
+    if (!event || typeof event !== 'object') {
+        return '';
+    }
+    const workflowText = formatWorkflowDisplayText(
+        event.selected_workflow_id || event.workflow_id,
+        event.selected_workflow_name,
+        workflowDiscovery
+    );
+    const stateText = event.state_id ? formatThinkingActivityFallbackLabel(event.state_id) : '';
+    const actionText = event.action_id ? formatThinkingActivityFallbackLabel(event.action_id) : '';
+    const outcome = event.action_outcome || event.action_status || event.outcome || '';
+    const outcomeText = outcome ? formatThinkingActivityFallbackLabel(outcome) : '';
+    const durationText = formatThinkingDiagnosticDuration(event.duration_ms);
+    switch (event.status) {
+    case 'workflow_execution_selected':
+        return workflowText ? `Selected ${workflowText}` : 'Selected workflow';
+    case 'workflow_execution_start':
+        return workflowText ? `Started ${workflowText}` : 'Started selected workflow';
+    case 'workflow_execution_complete':
+        return [workflowText ? `Completed ${workflowText}` : 'Completed selected workflow', event.final_state].filter(Boolean).join(' · ');
+    case 'workflow_execution_failed':
+        return [workflowText ? `Failed ${workflowText}` : 'Selected workflow failed', event.final_state || event.error].filter(Boolean).join(' · ');
+    case 'workflow_step_start':
+        return [actionText ? `Running ${actionText}` : 'Running workflow step', stateText].filter(Boolean).join(' · ');
+    case 'workflow_step_complete':
+        return [actionText ? `Finished ${actionText}` : 'Finished workflow step', stateText, outcomeText, durationText].filter(Boolean).join(' · ');
+    default:
+        return [formatThinkingActivityFallbackLabel(event.status), actionText || stateText || workflowText, outcomeText].filter(Boolean).join(' · ');
+    }
+}
+
+function buildThinkingSelectedWorkflowExecutionEventLines(execution, workflowDiscovery = null) {
+    const events = Array.isArray(execution?.events) ? execution.events : [];
+    return events
+        .map((event) => formatThinkingSelectedWorkflowExecutionEvent(event, workflowDiscovery))
+        .filter(Boolean);
+}
+
 function buildWorkflowStageDetailPresentation(stageId, request) {
     const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? request.workflowDiscovery
@@ -7149,6 +7336,26 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
     const routingNarrative = buildWorkflowRoutingNarrative(canonicalRoutingProgress, workflowDiscovery, {
         includeNoMatchTransition: true,
     });
+
+    if (cleanStageId === 'selected_workflow_execution') {
+        const execution = getThinkingSelectedWorkflowExecution(request);
+        const latestLine = formatThinkingSelectedWorkflowExecutionEvent(
+            execution?.latest_event,
+            workflowDiscovery
+        );
+        if (latestLine) {
+            return {
+                text: latestLine,
+                html: escapeHtml(latestLine)
+            };
+        }
+        if (execution?.summary_text) {
+            return {
+                text: execution.summary_text,
+                html: escapeHtml(execution.summary_text)
+            };
+        }
+    }
 
     if (cleanStageId === 'workflow_discovery') {
         const errors = Array.isArray(workflowDiscovery?.errors)
@@ -7523,6 +7730,8 @@ function buildThinkingWorkflowStageRows(request) {
     const selectedWorkflowExecutionSummary = normaliseThinkingCardWorkflowExecutionSummary(
         deriveThinkingCardWorkflowExecutionSummary(request)
     );
+    const liveSelectedWorkflowExecution = getThinkingSelectedWorkflowExecution(request);
+    const selectedWorkflowExecution = liveSelectedWorkflowExecution || selectedWorkflowExecutionSummary;
 
     const workflowStagePath = (request.workflowStagePath && typeof request.workflowStagePath === 'object')
         ? request.workflowStagePath
@@ -7550,6 +7759,19 @@ function buildThinkingWorkflowStageRows(request) {
         : null;
     if (path.length === 0) {
         if (preservedRows.length > 0) {
+            const preservedHasSelectedWorkflowExecution = preservedRows.some((entry) => (
+                canonicaliseThinkingDiagnosticStageId(entry.stageId || entry.stage_id || entry.label)
+                === 'selected_workflow_execution'
+            ));
+            if (selectedWorkflowExecution && !preservedHasSelectedWorkflowExecution) {
+                return [
+                    buildSelectedWorkflowExecutionStageRow(
+                        selectedWorkflowExecution,
+                        workflowDiscovery
+                    ),
+                    ...preservedRows,
+                ];
+            }
             return preservedRows;
         }
         if (workflowDiscovery) {
@@ -7574,13 +7796,16 @@ function buildThinkingWorkflowStageRows(request) {
                 diagnosticKey: buildThinkingDiagnosticKey('stage', 'workflow_discovery'),
                 diagnosticData
             }];
-            if (selectedWorkflowExecutionSummary) {
-                discoveryRows.unshift(buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary));
+            if (selectedWorkflowExecution) {
+                discoveryRows.unshift(buildSelectedWorkflowExecutionStageRow(
+                    selectedWorkflowExecution,
+                    workflowDiscovery
+                ));
             }
             return discoveryRows;
         }
-        return selectedWorkflowExecutionSummary
-            ? [buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary)]
+        return selectedWorkflowExecution
+            ? [buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecution, workflowDiscovery)]
             : [];
     }
 
@@ -7644,8 +7869,15 @@ function buildThinkingWorkflowStageRows(request) {
         };
     });
 
-    if (selectedWorkflowExecutionSummary) {
-        stageRows.unshift(buildSelectedWorkflowExecutionStageRow(selectedWorkflowExecutionSummary));
+    const pathHasSelectedWorkflowExecution = path.some((entry) => (
+        canonicaliseThinkingDiagnosticStageId(entry.stage_id || entry.runtime_stage_normalised)
+        === 'selected_workflow_execution'
+    ));
+    if (selectedWorkflowExecution && !pathHasSelectedWorkflowExecution) {
+        stageRows.unshift(buildSelectedWorkflowExecutionStageRow(
+            selectedWorkflowExecution,
+            workflowDiscovery
+        ));
     }
 
     if (preservedRows.length === 0) {
@@ -7671,17 +7903,32 @@ function buildThinkingWorkflowStageRows(request) {
     return mergedRows;
 }
 
-function buildSelectedWorkflowExecutionStageRow(summary) {
-    const workflowId = normaliseThinkingActivityString(summary?.workflow_id);
+function buildSelectedWorkflowExecutionStageRow(summary, workflowDiscovery = null) {
+    const workflowId = normaliseThinkingActivityString(summary?.workflow_id || summary?.selected_workflow_id);
     const instanceId = normaliseThinkingActivityString(summary?.workflow_instance_id);
+    const eventLine = formatThinkingSelectedWorkflowExecutionEvent(
+        summary?.latest_event,
+        workflowDiscovery
+    );
+    const workflowText = formatWorkflowDisplayText(
+        workflowId,
+        summary?.selected_workflow_name,
+        workflowDiscovery
+    );
     const detailBits = [
-        workflowId ? `Workflow: ${workflowId}` : '',
+        workflowText ? `Workflow: ${workflowText}` : '',
         instanceId ? `Instance: ${instanceId}` : '',
-        summary?.summary_text || ''
+        eventLine || summary?.summary_text || ''
     ].filter(Boolean);
-    const state = summary?.action_failure_count > 0
+    const latestStatus = normaliseThinkingActivityString(summary?.latest_event?.status);
+    const state = summary?.action_failure_count > 0 || latestStatus === 'workflow_execution_failed'
         ? 'failure'
-        : (summary?.terminal_status === 'completed' ? 'success' : 'pending');
+        : (
+            summary?.terminal_status === 'completed'
+            || latestStatus === 'workflow_execution_complete'
+                ? 'success'
+                : 'pending'
+        );
     return {
         stageId: 'selected_workflow_execution',
         label: 'Selected workflow execution',
@@ -7693,7 +7940,9 @@ function buildSelectedWorkflowExecutionStageRow(summary) {
             stage_id: 'selected_workflow_execution',
             stage_label: 'Selected workflow execution',
             selected_workflow_id: workflowId || null,
+            selected_workflow_name: normaliseThinkingActivityString(summary?.selected_workflow_name) || null,
             workflow_instance_id: instanceId || null,
+            selected_workflow_execution: summary?.events ? { ...summary } : null,
             custom_workflow_execution: { ...summary }
         }
     };

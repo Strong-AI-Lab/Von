@@ -89,6 +89,57 @@ def test_approval_gate_routes_to_blocked_state_without_running_action() -> None:
     assert approval_events[0]["decision"] == "approval_required"
 
 
+def test_step_callback_observes_action_start_and_completion() -> None:
+    transition_spec, transition_condition = build_transition_condition({"kind": "always"})
+    observed_events: list[dict[str, object]] = []
+
+    def _handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(status="success", outputs={"done": True})
+
+    definition = WorkflowDefinition(
+        workflow_id="#V#observable_workflow",
+        initial_state="work",
+        states={
+            "work": WorkflowStateSpec(
+                state_id="work",
+                actions=(WorkflowActionInvocation(action_id="observable.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        reason="next_step",
+                        condition=transition_condition,
+                        condition_spec=transition_spec,
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+    registry = ActionRegistry()
+    registry.register(ActionSpec(action_id="observable.action", handler=_handler))
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            step_callback=lambda event: observed_events.append(dict(event)),
+        ),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert [event.get("status", "workflow_step_complete") for event in observed_events] == [
+        "workflow_step_start",
+        "workflow_step_complete",
+    ]
+    assert observed_events[0]["workflow_id"] == "#V#observable_workflow"
+    assert observed_events[0]["state_id"] == "work"
+    assert observed_events[0]["action_id"] == "observable.action"
+    assert observed_events[1]["action_status"] == "success"
+
+
 def test_retry_policy_retries_until_success(monkeypatch) -> None:
     next_spec, next_condition = build_transition_condition({"kind": "always"})
     calls = {"count": 0}
