@@ -327,12 +327,12 @@
             </div>
 
             <!-- Per-model LLM call timeout -->
-            <div class="inline-form inline-form-tight mb-2 mt-3">
+            <div class="inline-form inline-form-tight model-llm-timeout-form mb-2 mt-3">
                 <label for="modelLlmTimeoutSec">LLM call timeout (seconds):</label>
                 <input type="number" id="modelLlmTimeoutSec" min="5" max="600"
                        placeholder="45 (default)"
                        aria-describedby="modelLlmTimeoutSecHelp" />
-                <button id="saveModelLlmTimeoutButton" class="btn-azure">Save timeout</button>
+                <button id="saveModelLlmTimeoutButton" class="btn-azure" type="button" aria-label="Save LLM call timeout">Save</button>
             </div>
             <div>
                 <small id="modelLlmTimeoutSecHelp" class="settings-note">

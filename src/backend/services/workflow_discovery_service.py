@@ -77,6 +77,7 @@ SEARCH_TIMEOUT_SECONDS = _coerce_discovery_timeout_seconds(
 # search when the authoritative primary substrate is not yet sufficient.
 DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.75
 DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION = 0.5
+DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS = 1.0
 
 # Executability reason codes (JVNAUTOSCI-1088).
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
@@ -502,6 +503,13 @@ def _derive_capability_index_unavailability_errors(
     if isinstance(last_error, str) and last_error.strip():
         errors.append(f"capability_index_build_error:{last_error.strip()}")
     return errors
+
+
+def _get_latency_sensitive_capability_index_runtime_state() -> Mapping[str, Any]:
+    try:
+        return get_workflow_capability_index_runtime_state(latency_sensitive=True)
+    except TypeError:
+        return get_workflow_capability_index_runtime_state()
 
 
 def _derive_discovery_result_match_absence_reason(
@@ -1459,7 +1467,7 @@ def discover_workflows(
             ),
             workflow_registry=workflow_registry,
         )
-        capability_index_state = get_workflow_capability_index_runtime_state()
+        capability_index_state = _get_latency_sensitive_capability_index_runtime_state()
         capability_elapsed = time.perf_counter() - capability_started_at
         all_matches.extend(capability_matches)
         capability_matches_sufficient = _has_enough_capability_matches(
@@ -1558,6 +1566,30 @@ def discover_workflows(
                 f"could start (budget={effective_timeout_seconds:.3f}s)."
             ),
         )
+    elif (
+        not capability_matches_sufficient
+        and semantic_budget_remaining
+        < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
+    ):
+        _record_budget_exhaustion(
+            "semantic_search",
+            (
+                "Discovery skipped semantic_search because the remaining budget "
+                "was too small for the unbounded secondary search substrate "
+                f"(remaining={semantic_budget_remaining:.3f}s, "
+                f"minimum={DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS:.3f}s)."
+            ),
+        )
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="semantic_search",
+            started_at=time.perf_counter(),
+            status="skipped_budget_insufficient",
+            budget_seconds=round(semantic_budget_remaining, 3),
+            minimum_budget_seconds=round(
+                DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS, 3
+            ),
+        )
     elif not capability_matches_sufficient:
         try:
             search_sources.append("semantic")
@@ -1608,6 +1640,30 @@ def discover_workflows(
             (
                 "Discovery timeout budget was exhausted before vontology_search "
                 f"could start (budget={effective_timeout_seconds:.3f}s)."
+            ),
+        )
+    elif (
+        not capability_matches_sufficient
+        and vontology_budget_remaining
+        < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
+    ):
+        _record_budget_exhaustion(
+            "vontology_search",
+            (
+                "Discovery skipped vontology_search because the remaining budget "
+                "was too small for the unbounded secondary search substrate "
+                f"(remaining={vontology_budget_remaining:.3f}s, "
+                f"minimum={DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS:.3f}s)."
+            ),
+        )
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="vontology_search",
+            started_at=time.perf_counter(),
+            status="skipped_budget_insufficient",
+            budget_seconds=round(vontology_budget_remaining, 3),
+            minimum_budget_seconds=round(
+                DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS, 3
             ),
         )
     elif not capability_matches_sufficient:

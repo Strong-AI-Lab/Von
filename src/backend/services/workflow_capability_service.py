@@ -1437,10 +1437,69 @@ def _warm_workflow_capability_query_surface(
     )
 
 
-def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
+def get_workflow_capability_index_runtime_state(
+    *,
+    latency_sensitive: bool = False,
+) -> Dict[str, Any]:
     """Return lightweight runtime state for capability-index diagnostics."""
 
     index = get_workflow_capability_index()
+    if latency_sensitive:
+        with _INDEX_STATE_LOCK:
+            query_surface_ready = bool(
+                _INDEX_REBUILD_STATE.get("query_surface_ready", False)
+            )
+            build_in_progress = bool(
+                _INDEX_REBUILD_STATE.get("build_in_progress", False)
+            )
+            return {
+                "surface": "workflow_retrieval",
+                "backend": "llamaindex",
+                "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
+                "size": int(index.size),
+                "ready": bool(
+                    index.size > 0 and query_surface_ready and not build_in_progress
+                ),
+                "build_in_progress": build_in_progress,
+                "last_error": _INDEX_REBUILD_STATE.get("last_error"),
+                "last_mode": _INDEX_REBUILD_STATE.get("last_mode"),
+                "last_attempt_monotonic": float(
+                    _INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0)
+                ),
+                "last_success_monotonic": float(
+                    _INDEX_REBUILD_STATE.get("last_success_monotonic", 0.0)
+                ),
+                "last_built_size": int(_INDEX_REBUILD_STATE.get("last_built_size", 0)),
+                "last_invalidation_reason": _INDEX_REBUILD_STATE.get(
+                    "last_invalidation_reason"
+                ),
+                "last_invalidated_at_utc": _INDEX_REBUILD_STATE.get(
+                    "last_invalidated_at_utc"
+                ),
+                "query_surface_ready": query_surface_ready,
+                "query_surface_last_error": _INDEX_REBUILD_STATE.get(
+                    "query_surface_last_error"
+                ),
+                "query_surface_last_warm_monotonic": float(
+                    _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
+                ),
+                "last_manifest_status": _INDEX_REBUILD_STATE.get(
+                    "last_manifest_status"
+                ),
+                "last_manifest_detail": _INDEX_REBUILD_STATE.get(
+                    "last_manifest_detail"
+                ),
+                "last_manifest_path": _INDEX_REBUILD_STATE.get("last_manifest_path"),
+                "last_manifest_digest": _INDEX_REBUILD_STATE.get(
+                    "last_manifest_digest"
+                ),
+                "last_manifest_checked_at_utc": _INDEX_REBUILD_STATE.get(
+                    "last_manifest_checked_at_utc"
+                ),
+                "auto_rebuild": _snapshot_workflow_capability_auto_rebuild_state_locked(),
+                "namespace_state": None,
+                "latency_sensitive": True,
+            }
     namespace_state = None
     try:
         rag_service = _get_workflow_capability_rag_service()
@@ -1911,11 +1970,16 @@ def ensure_workflow_capability_index_populated(
     """
 
     index = get_workflow_capability_index()
-    runtime_state = get_workflow_capability_index_runtime_state()
-    if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
-        return index
-
     if not block:
+        with _INDEX_STATE_LOCK:
+            ready = bool(
+                index.size > 0
+                and _INDEX_REBUILD_STATE.get("query_surface_ready", False)
+                and not _INDEX_REBUILD_STATE.get("build_in_progress", False)
+            )
+        if ready and not force_refresh:
+            return index
+
         _start_background_workflow_capability_index_build(
             force_refresh=force_refresh,
             workflow_registry=workflow_registry,
@@ -1924,6 +1988,10 @@ def ensure_workflow_capability_index_populated(
         if wait_seconds > 0.0:
             _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
         return get_workflow_capability_index()
+
+    runtime_state = get_workflow_capability_index_runtime_state()
+    if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
+        return index
 
     if bool(get_workflow_capability_index_runtime_state().get("build_in_progress", False)):
         wait_seconds = None if max_wait_seconds is None else max(0.0, float(max_wait_seconds))
@@ -1973,10 +2041,13 @@ def search_workflow_capabilities(
         workflow_registry=workflow_registry,
     )
     if non_blocking:
-        runtime_state = get_workflow_capability_index_runtime_state()
-        if not bool(runtime_state.get("ready", False)) or bool(
-            runtime_state.get("build_in_progress", False)
-        ):
+        with _INDEX_STATE_LOCK:
+            ready = bool(
+                index.size > 0
+                and _INDEX_REBUILD_STATE.get("query_surface_ready", False)
+                and not _INDEX_REBUILD_STATE.get("build_in_progress", False)
+            )
+        if not ready:
             return []
     try:
         results = index.search(query, max_results=max_results, min_score=min_score)

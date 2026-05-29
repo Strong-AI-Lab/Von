@@ -843,11 +843,23 @@ class TestDiscoverWorkflowsForTurn:
             result.match_absence_reason
             == "capability_index_wait_timed_out_build_in_progress"
         )
-        assert mock_semantic.called is True
-        assert mock_vontology.called is True
+        assert result.budget_exhausted is True
+        assert result.budget_exhaustion_stage == "semantic_search"
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
         assert any(
             timing.get("stage") == "contract_direct_workflow_resolution"
             and timing.get("match_count") == 0
+            for timing in result.stage_timings
+        )
+        assert any(
+            timing.get("stage") == "semantic_search"
+            and timing.get("status") == "skipped_budget_insufficient"
+            for timing in result.stage_timings
+        )
+        assert any(
+            timing.get("stage") == "vontology_search"
+            and timing.get("status") == "skipped_budget_insufficient"
             for timing in result.stage_timings
         )
 
@@ -1085,7 +1097,7 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_hard_timeboxes_blocking_semantic_search(
+    def test_skips_blocking_semantic_search_when_budget_insufficient(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
@@ -1093,17 +1105,15 @@ class TestDiscoverWorkflowsForTurn:
         mock_vontology: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
-        def _blocking_semantic(*_args, **_kwargs):
-            time.sleep(0.2)
-            return []
-
         mock_capability.return_value = []
         mock_capability_state.return_value = {
             "ready": True,
             "build_in_progress": False,
             "last_error": None,
         }
-        mock_semantic.side_effect = _blocking_semantic
+        mock_semantic.side_effect = AssertionError(
+            "semantic search should not run when too little budget remains"
+        )
         mock_vontology.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
@@ -1115,9 +1125,10 @@ class TestDiscoverWorkflowsForTurn:
 
         assert result.budget_exhausted is True
         assert result.budget_exhaustion_stage == "semantic_search"
-        assert "semantic_search exceeded" in str(result.budget_exhaustion_detail)
-        assert result.search_time_ms >= 200.0
+        assert "skipped semantic_search" in str(result.budget_exhaustion_detail)
+        assert result.search_time_ms < 100.0
         assert result.timeout_budget_seconds == 0.06
+        assert mock_semantic.called is False
         assert mock_vontology.called is False
 
     @patch(

@@ -130,16 +130,58 @@ def _agent_test_represented_relation_required_tools(
     return []
 
 
+def _agent_test_external_surface_required_tools(
+    request: WorkflowActionRequest,
+) -> list[str]:
+    prompt_text = _context_string(
+        request.data.get("user_prompt")
+        or request.data.get("prompt")
+        or request.data.get("prompt_for_requirements")
+    ).lower()
+    if not prompt_text:
+        return []
+
+    required_tools: list[str] = []
+    gmail_requested = bool(
+        re.search(r"\b(?:gmail|e-?mail|mail|inbox|messages?)\b", prompt_text)
+        or re.search(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", prompt_text)
+    ) and bool(
+        re.search(r"\b(?:check|find|list|look|read|recent|retrieve|search)\b", prompt_text)
+    )
+    if gmail_requested:
+        required_tools.extend(["gmail_list_messages", "gmail_get_message"])
+
+    if "arxiv" in prompt_text:
+        if re.search(r"\b(?:metadata|title|paper|reference|references?|pdf|url|link)\b", prompt_text):
+            required_tools.append("get_paper_metadata")
+        if re.search(r"\b(?:search|find|lookup|look up|retrieve|recent|title)\b", prompt_text):
+            required_tools.append("search_arxiv")
+
+    return _merge_required_prompt_tools(required_tools)
+
+
+def _agent_test_required_tools(request: WorkflowActionRequest) -> list[str]:
+    return _merge_required_prompt_tools(
+        _agent_test_represented_relation_required_tools(request),
+        _agent_test_external_surface_required_tools(request),
+    )
+
+
 def _build_agent_test_expected_outcome_response(
     request: WorkflowActionRequest,
 ) -> str:
-    required_tools = _agent_test_represented_relation_required_tools(request)
+    required_tools = _agent_test_required_tools(request)
     user_prompt = _context_string(request.data.get("user_prompt") or request.data.get("prompt"))
     if required_tools:
-        summary = "Answer the represented-relation request using grounded Vontology tool evidence."
-        selector_guidance = "Use the generic tool-calling workflow so the required relation tools can run."
-        answering_guidance = "Report the text relation predicates and counts found by the relation-summary tool."
-        grounding_requirement = "Use authoritative Vontology text relation summary evidence."
+        selector_guidance = "Use the generic tool-calling workflow so the required evidence tools can run."
+        if "get_text_relations_summary" in required_tools:
+            summary = "Answer the represented-relation request using grounded Vontology tool evidence."
+            answering_guidance = "Report the text relation predicates and counts found by the relation-summary tool."
+            grounding_requirement = "Use authoritative Vontology text relation summary evidence."
+        else:
+            summary = "Answer the user's request using grounded evidence from the requested external surfaces."
+            answering_guidance = "Use the required tools before finalising; report unavailable evidence clearly."
+            grounding_requirement = "Use the requested external evidence tools; avoid answering from unsupported memory."
     else:
         summary = "Answer the user's request accurately using available context and grounded evidence."
         selector_guidance = "Choose the route most likely to answer the request with grounded evidence."
@@ -168,7 +210,7 @@ def _build_agent_test_selector_response(request: WorkflowActionRequest) -> str:
     required_tools = _merge_required_prompt_tools(
         request.data.get("required_prompt_tools"),
         request.data.get("turn_expected_required_tools"),
-        _agent_test_represented_relation_required_tools(request),
+        _agent_test_required_tools(request),
     )
     workflow_id = TOOL_CALLING_WORKFLOW_ID if required_tools else CHAT_ASSISTANT_WORKFLOW_ID
     payload = {

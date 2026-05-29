@@ -778,6 +778,14 @@ def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
             started.append((bool(force_refresh), workflow_registry)) or True
         ),
     )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "non-blocking cold search must not probe the slow runtime state"
+            )
+        ),
+    )
 
     results = search_workflow_capabilities(
         "general tool-calling workflows for external APIs",

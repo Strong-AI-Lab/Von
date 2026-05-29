@@ -12495,6 +12495,33 @@ body.settings-body {
     width: 90px;
 }
 
+.model-llm-timeout-form {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.settings-container .model-llm-timeout-form label {
+    margin: 0;
+}
+
+#modelLlmTimeoutSec {
+    box-sizing: border-box;
+    flex: 0 0 96px;
+    margin-bottom: 0;
+    padding: 8px 10px;
+    width: 96px;
+}
+
+.settings-container .model-llm-timeout-form #saveModelLlmTimeoutButton {
+    flex: 0 0 auto;
+    margin-bottom: 0;
+    min-width: 64px;
+    padding: 8px 12px;
+    white-space: nowrap;
+    width: auto;
+}
+
 #dbInfoContent {
     font-size: 0.95em;
     color: #333;

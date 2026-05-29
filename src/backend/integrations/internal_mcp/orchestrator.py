@@ -32972,6 +32972,11 @@ class InternalMCPChatOrchestrator:
         expected_outcome_contract = self._build_turn_expected_outcome_contract_object(
             data
         )
+        expected_required_tools = tuple(
+            str(tool_name or "").strip()
+            for tool_name in expected_outcome_contract.required_tools
+            if isinstance(tool_name, str) and str(tool_name or "").strip()
+        )
         discovery_query_text = self._build_turn_discovery_query_text(
             turn_text=prompt_text,
             expected_outcome_contract=expected_outcome_contract,
@@ -32984,15 +32989,7 @@ class InternalMCPChatOrchestrator:
                 model=getattr(env, "model", None),
             )
             and (
-                any(
-                    str(tool_name or "").strip()
-                    in {
-                        "search_concepts",
-                        "get_text_relations_summary",
-                        "get_text_relations",
-                    }
-                    for tool_name in expected_outcome_contract.required_tools
-                )
+                bool(expected_required_tools)
                 or "text relation" in prompt_text.lower()
                 or "represented relation" in prompt_text.lower()
             )
@@ -33000,7 +32997,7 @@ class InternalMCPChatOrchestrator:
             if callable(progress_note):
                 progress_note(
                     "Use AgentTest selector defaults",
-                    "Using a deterministic local selector candidate for grounded relation tools.",
+                    "Using a deterministic local selector candidate for grounded tool evidence.",
                 )
             tool_candidate = next(
                 (
@@ -33021,7 +33018,7 @@ class InternalMCPChatOrchestrator:
             tool_candidate.update(
                 {
                     "candidate_source": "agent_test_local_replay",
-                    "candidate_reason": "required_relation_tools",
+                    "candidate_reason": "required_turn_tools",
                     "routing_profile_role": "execution",
                     "routing_exclusion_reason": None,
                 }
@@ -33035,12 +33032,12 @@ class InternalMCPChatOrchestrator:
                 "matches": [dict(tool_candidate)],
                 "candidates": [dict(tool_candidate)],
                 "agent_test_local_replay": True,
-                "required_tools": list(expected_outcome_contract.required_tools),
+                "required_tools": list(expected_required_tools),
                 "discovery_payload_origin": "agent_test_local_replay_synthetic",
             }
             selector_prompt_text = (
                 "Select #V#tool_calling_workflow for this AgentTest local replay. "
-                "The expected outcome requires grounded relation-tool evidence."
+                "The expected outcome requires grounded tool evidence."
             )
             selector_context_lineage = {
                 "stage": "selector_decision",
@@ -33064,7 +33061,7 @@ class InternalMCPChatOrchestrator:
                     {
                         "workflow_id": TOOL_CALLING_WORKFLOW_ID,
                         "confidence": 1.0,
-                        "reasoning": "AgentTest local replay requires grounded relation tools.",
+                        "reasoning": "AgentTest local replay requires grounded tool evidence.",
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -33149,6 +33146,18 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw_discovery_timeout_seconds, (int, float, str))
                 else None
             )
+            if (
+                discovery_timeout_seconds is None
+                and _is_agent_test_instance()
+                and _explicit_model_request_uses_local_provider(
+                    llm_client=env.llm_client,
+                    model=getattr(env, "model", None),
+                )
+            ):
+                discovery_timeout_seconds = os.getenv(
+                    "VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
+                    "1.0",
+                )
             discovered = discover_workflows_for_turn(
                 discovery_query_input,
                 namespace=env.user_namespace,

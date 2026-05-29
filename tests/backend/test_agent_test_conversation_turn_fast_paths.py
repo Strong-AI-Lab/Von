@@ -180,6 +180,42 @@ def test_agent_test_expected_outcome_fast_path_marks_relation_tools(
     assert "tool-calling workflow" in payload["selector_guidance"]
 
 
+def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_prompt": (
+                "Check recent messages for the zhanvonwitbrock@gmail.com zhan-gmail "
+                "identity for arXiv links or PDF/file references. For each arXiv "
+                "reference you find, retrieve the paper metadata/title where possible."
+            ),
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+        },
+        llm_policy={"policy_stage": "planner"},
+        validation_policy=_expected_outcome_validation_policy(),
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="expected_outcome_inference",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    payload = result.outputs["validated_json"]
+    assert payload["required_tools"] == [
+        "gmail_list_messages",
+        "gmail_get_message",
+        "get_paper_metadata",
+        "search_arxiv",
+    ]
+    assert "tool-calling workflow" in payload["selector_guidance"]
+
+
 def test_agent_test_selector_fast_path_routes_relation_prompt_to_tools(
     monkeypatch,
 ) -> None:
@@ -193,6 +229,34 @@ def test_agent_test_selector_fast_path_routes_relation_prompt_to_tools(
             "requested_model": "gemma4:e4b",
             "selected_model_provider": "ollama",
             "turn_expected_required_tools": ["get_text_relations"],
+        },
+        llm_policy={"policy_stage": "classifier"},
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="selector_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    selector_payload = json.loads(result.outputs["final_response"])
+    assert selector_payload["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+
+def test_agent_test_selector_fast_path_routes_gmail_arxiv_prompt_to_tools(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_prompt": (
+                "Check recent messages for zhanvonwitbrock@gmail.com and retrieve "
+                "titles for any arXiv paper links."
+            ),
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
         },
         llm_policy={"policy_stage": "classifier"},
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -250,6 +314,61 @@ def test_agent_test_selector_preparation_uses_local_tool_candidate(
     assert outputs["selector_prompt_available"] is True
     assert outputs["selector_candidate_ids"] == [TOOL_CALLING_WORKFLOW_ID]
     assert outputs["workflow_discovery_result"]["agent_test_local_replay"] is True
+
+
+def test_agent_test_selector_preparation_bounds_local_discovery_timeout(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS", "0.75")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    calls: list[dict[str, Any]] = []
+
+    def _capturing_discovery(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "mail arxiv prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        _capturing_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": (
+                    "Check recent zhan-gmail messages for arXiv links and list "
+                    "retrieved paper titles."
+                ),
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace=None,
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert calls
+    assert calls[0]["timeout_seconds"] == "0.75"
+    assert outputs["workflow_discovery_result"]["candidate_count"] == 0
 
 
 def test_agent_test_narration_fast_path_reuses_selected_workflow_response(
