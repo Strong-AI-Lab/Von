@@ -61,6 +61,7 @@ def test_persist_generate_turn_messages_offloads_tool_message_content(
     store = _FakeBlobStore()
     captured_messages: list[dict[str, Any]] = []
 
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
     monkeypatch.setenv("VON_DEBUG_TOOL_MESSAGE_BLOB_THRESHOLD_BYTES", "512")
     monkeypatch.setattr(
         "src.backend.services.blob_store.get_blob_store_from_env",

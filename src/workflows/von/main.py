@@ -157,6 +157,12 @@ _apply_dotenv_overrides(
         "VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES",
         "VON_DEBUG_TOOL_MESSAGE_BLOB_THRESHOLD_BYTES",
         "VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES",
+        # Async blob spillway (JVNAUTOSCI-2382): decouples response finalisation
+        # from remote object-storage latency by buffering to local disk first.
+        "VON_BLOB_SPILLWAY_ENABLED",
+        "VON_BLOB_SPILLWAY_DIR",
+        "VON_BLOB_SPILLWAY_MAX_RETRIES",
+        "VON_BLOB_SPILLWAY_MIGRATE_INTERVAL_SECONDS",
         "VON_SWIFT_CONTAINER",
         "VON_SWIFT_PREFIX",
         "VON_SWIFT_PUBLIC_BASE_URL",

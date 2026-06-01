@@ -200,7 +200,25 @@ def load_debug_payload_blob_ref(
 
     from .blob_store import get_blob_store_from_env
 
-    compressed = get_blob_store_from_env().get_bytes(key.strip())
+    # Try remote blob store first; fall back to local spillway when the blob
+    # has been enqueued but not yet migrated (backend == "spillway").
+    blob_backend = (
+        blob_ref.get("backend")
+        if isinstance(blob_ref, Mapping)
+        else None
+    )
+    try:
+        compressed = get_blob_store_from_env().get_bytes(key.strip())
+    except Exception as remote_exc:
+        if blob_backend == "spillway":
+            try:
+                from .blob_spillway import get_blob_spillway_queue
+
+                compressed = get_blob_spillway_queue().get_local_bytes(key.strip())
+            except KeyError:
+                raise remote_exc from None
+        else:
+            raise
     if ref_payload.get("compression") == "gzip":
         raw_bytes = gzip.decompress(compressed)
     else:
@@ -325,14 +343,28 @@ def _offload_value(
     }
 
     try:
-        stored = put_bytes_durable(
-            key=key,
-            data=compressed,
-            content_type="application/json",
-            metadata=metadata,
-            sha256=compressed_sha256,
-            size_bytes=len(compressed),
-        )
+        from .blob_spillway import is_spillway_enabled
+
+        if is_spillway_enabled():
+            from .blob_uploads import enqueue_bytes_via_spillway
+
+            stored = enqueue_bytes_via_spillway(
+                key=key,
+                data=compressed,
+                content_type="application/json",
+                metadata=metadata,
+                sha256=compressed_sha256,
+                size_bytes=len(compressed),
+            )
+        else:
+            stored = put_bytes_durable(
+                key=key,
+                data=compressed,
+                content_type="application/json",
+                metadata=metadata,
+                sha256=compressed_sha256,
+                size_bytes=len(compressed),
+            )
     except BlobUploadError as exc:
         if not fail_soft:
             raise

@@ -61,6 +61,7 @@ class _FakeBlobStore:
 
 def test_compact_debug_payload_offloads_oversized_field(monkeypatch) -> None:
     store = _FakeBlobStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
     monkeypatch.setattr(
         "src.backend.services.blob_store.get_blob_store_from_env",
         lambda: store,
@@ -95,6 +96,8 @@ def test_compact_debug_payload_offloads_oversized_field(monkeypatch) -> None:
 def test_compact_debug_payload_degrades_without_reinlining_on_blob_failure(
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
+
     def _raise_store():
         raise RuntimeError("blob store unavailable")
 
@@ -120,6 +123,7 @@ def test_compact_debug_payload_degrades_without_reinlining_on_blob_failure(
 
 def test_hydrate_debug_payload_blob_refs_restores_nested_payload(monkeypatch) -> None:
     store = _FakeBlobStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
     monkeypatch.setattr(
         "src.backend.services.blob_store.get_blob_store_from_env",
         lambda: store,

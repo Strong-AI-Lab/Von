@@ -2077,6 +2077,11 @@ def create_flask_app(
     # when app.testing already true, or when disabled via env/config.
     _register_optional_prewarm(app)
 
+    # Optional background blob-spillway migrator (JVNAUTOSCI-2382).
+    # Uploads pending local-spillway blobs to remote object storage in the background
+    # so response finalisation is not blocked by slow/degraded remote blob writes.
+    _register_optional_blob_spillway_migrator(app)
+
     return app
 
 
@@ -3844,6 +3849,83 @@ def _register_optional_prewarm(app: Flask) -> None:
 
         except Exception:
             _start_prewarm(app)
+
+
+def _register_optional_blob_spillway_migrator(app: Flask) -> None:
+    """Register a daemon thread that periodically migrates pending spillway blobs to remote.
+
+    Skipped under pytest, agent-test mode, or when VON_BLOB_SPILLWAY_ENABLED=false.
+    The migrator polls at VON_BLOB_SPILLWAY_MIGRATE_INTERVAL_SECONDS (default 30).
+    JVNAUTOSCI-2382.
+    """
+    if _is_agent_test_instance():
+        app.logger.info(
+            "[spillway] AgentTest mode: skipping blob-spillway migrator."
+        )
+        return
+    if app.testing or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+
+    try:
+        from ..services.blob_spillway import get_blob_spillway_queue, is_spillway_enabled
+    except Exception as exc:
+        app.logger.warning("[spillway] Could not import spillway module: %s", exc)
+        return
+
+    if not is_spillway_enabled():
+        app.logger.info(
+            "[spillway] VON_BLOB_SPILLWAY_ENABLED=false: skipping migrator."
+        )
+        return
+
+    try:
+        interval = float(
+            os.environ.get("VON_BLOB_SPILLWAY_MIGRATE_INTERVAL_SECONDS", "30")
+        )
+    except (ValueError, TypeError):
+        interval = 30.0
+
+    def _migrator_loop() -> None:
+        import time
+
+        from ..services.blob_store import get_blob_store_from_env
+
+        with app.app_context():
+            while True:
+                try:
+                    queue = get_blob_spillway_queue()
+                    pending = queue.list_pending_keys()
+                    if pending:
+                        queue.migrate_pending(
+                            get_blob_store_from_env,
+                            max_per_run=_DEFAULT_SPILLWAY_MAX_PER_RUN,
+                        )
+                except Exception as exc:
+                    try:
+                        app.logger.warning(
+                            "[spillway] Migrator error: %s", exc
+                        )
+                    except Exception:
+                        pass
+                time.sleep(interval)
+
+    try:
+        t = threading.Thread(
+            target=_migrator_loop,
+            name="blob-spillway-migrator",
+            daemon=True,
+        )
+        t.start()
+        app.logger.info(
+            "[spillway] Blob-spillway migrator started (interval=%.0fs)", interval
+        )
+    except Exception as exc:
+        app.logger.warning(
+            "[spillway] Failed to start blob-spillway migrator: %s", exc
+        )
+
+
+_DEFAULT_SPILLWAY_MAX_PER_RUN = 50
 
 
 # Example usage (if running this file directly for testing)
