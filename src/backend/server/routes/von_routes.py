@@ -42,6 +42,10 @@ from ...integrations.internal_mcp import (
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services.background_task_service import background_task_registry
+from ...services.live_request_load import (
+    decrement_live_turns,
+    increment_live_turns,
+)
 from ...services.coding_agent_identity_bootstrap_service import (
     CODING_AGENT_TYPE_ID,
     VON_SYSTEM_ID,
@@ -131,6 +135,42 @@ _TEMPLATE_DIR = os.path.abspath(
     )
 )
 von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
+
+
+# --- Live request-load signal (JVNAUTOSCI-2383) ---------------------------
+#
+# Track in-flight *foreground* /von/generate turns so the in-process durable
+# workflow worker can defer heavy background evaluation work while a user is
+# actively waiting for an answer. Only the synchronous (non-background) generate
+# path is counted: background submissions return immediately and are executed by
+# their own machinery, so they do not represent a user blocked on the request
+# thread. The teardown hook always runs, so the counter is balanced even when a
+# handler raises.
+
+_LIVE_TURN_FLAG_ATTR = "_von_live_turn_counted"
+
+
+@von_bp.before_request
+def _mark_live_foreground_turn() -> None:
+    if request.endpoint != "von.generate" or request.method != "POST":
+        return
+    try:
+        payload = request.get_json(silent=True)
+    except Exception:
+        payload = None
+    background_mode = bool(payload.get("background", False)) if isinstance(
+        payload, Mapping
+    ) else False
+    if background_mode:
+        return
+    increment_live_turns()
+    setattr(request, _LIVE_TURN_FLAG_ATTR, True)
+
+
+@von_bp.teardown_request
+def _clear_live_foreground_turn(_exc: BaseException | None = None) -> None:
+    if getattr(request, _LIVE_TURN_FLAG_ATTR, False):
+        decrement_live_turns()
 
 
 # ----------------- Tool progress (JVNAUTOSCI-942) -----------------

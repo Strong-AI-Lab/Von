@@ -344,6 +344,68 @@ def _write_cached_ollama_models(models: list) -> None:
         )
 
 
+# --- DB-location info cache (JVNAUTOSCI-2383) -----------------------------
+#
+# /api/settings/db/info is one of the hottest pollers (observed ~367 calls in a
+# single log window) and each call issued a live Mongo ping plus, in fallback
+# mode, an outbound ipify HTTP lookup. The reported state (URI classification,
+# ping, fallback, public IP) changes very rarely, so a short global TTL cache
+# removes that per-poll Mongo/IO cost without changing what users see. The
+# response is identical for all callers, so a single global slot is correct.
+_DB_INFO_CACHE_LOCK = threading.Lock()
+_DB_INFO_CACHE: dict = {}
+_DB_INFO_CACHE_TTL_SECONDS_DEFAULT = 10.0
+
+
+def _read_db_info_cache_ttl_seconds() -> float:
+    raw = os.getenv(
+        "VON_DB_INFO_CACHE_TTL_SECONDS",
+        str(_DB_INFO_CACHE_TTL_SECONDS_DEFAULT),
+    )
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return _DB_INFO_CACHE_TTL_SECONDS_DEFAULT
+    return max(0.0, ttl)
+
+
+def _read_cached_db_info(*, bypass_cache: bool) -> Optional[dict]:
+    if bypass_cache:
+        return None
+    ttl_seconds = _read_db_info_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return None
+    now_monotonic = time.monotonic()
+    with _DB_INFO_CACHE_LOCK:
+        expires_at = _DB_INFO_CACHE.get("expires_at_monotonic")
+        payload = _DB_INFO_CACHE.get("payload")
+        if (
+            not isinstance(expires_at, (int, float))
+            or now_monotonic >= float(expires_at)
+            or not isinstance(payload, dict)
+        ):
+            _DB_INFO_CACHE.clear()
+            return None
+        return dict(payload)
+
+
+def _write_cached_db_info(payload: dict) -> None:
+    ttl_seconds = _read_db_info_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return
+    now_monotonic = time.monotonic()
+    with _DB_INFO_CACHE_LOCK:
+        _DB_INFO_CACHE.clear()
+        _DB_INFO_CACHE.update(
+            {
+                "payload": dict(payload),
+                "stored_at_monotonic": now_monotonic,
+                "expires_at_monotonic": now_monotonic + ttl_seconds,
+            }
+        )
+
+
+
 def _utc_now_iso() -> str:
     """Return timezone-aware UTC ISO string (trailing Z) for metrics."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -496,6 +558,11 @@ def _sanitize_mongo_uri_for_display(uri: str) -> str:
 def get_db_location_info():
     """API endpoint to report the MongoDB location (without credentials)."""
     try:
+        bypass_cache = request.args.get("nocache") in {"1", "true", "yes", "on"}
+        cached_payload = _read_cached_db_info(bypass_cache=bypass_cache)
+        if cached_payload is not None:
+            return jsonify(cached_payload), 200
+
         # Use effective URI (may be fallback) for display classification
         effective_uri = get_effective_mongo_uri()
         sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
@@ -540,25 +607,25 @@ def get_db_location_info():
                         public_ip = txt
             except Exception:  # pragma: no cover - non-critical
                 public_ip = None
-        return (
-            jsonify(
-                {
-                    "sanitized_uri": sanitized_uri,
-                    "database_name": DATABASE_NAME,
-                    "ping_ok": ping_ok,
-                    "error": error_message,
-                    "classification": classification,
-                    "using_fallback": using_fallback,
-                    "primary_uri_sanitized": (
-                        _sanitize_mongo_uri_for_display(MONGO_URI)
-                        if using_fallback
-                        else None
-                    ),
-                    "server_public_ip": public_ip,
-                }
+        payload = {
+            "sanitized_uri": sanitized_uri,
+            "database_name": DATABASE_NAME,
+            "ping_ok": ping_ok,
+            "error": error_message,
+            "classification": classification,
+            "using_fallback": using_fallback,
+            "primary_uri_sanitized": (
+                _sanitize_mongo_uri_for_display(MONGO_URI)
+                if using_fallback
+                else None
             ),
-            200,
-        )
+            "server_public_ip": public_ip,
+        }
+        # Only cache healthy responses so a transient ping failure is not pinned
+        # for the whole TTL window.
+        if ping_ok:
+            _write_cached_db_info(payload)
+        return jsonify(payload), 200
     except Exception as e:
         current_app.logger.error(f"Error retrieving DB info: {e}", exc_info=True)
         return jsonify({"error": "Failed to retrieve DB info."}), 500

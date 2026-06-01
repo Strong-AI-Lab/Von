@@ -3692,6 +3692,81 @@ def _handle_admin_policy_comparison_request():
         return jsonify(error=str(exc), status="error"), 500
 
 
+# --- Chat-critical workflow warm (JVNAUTOSCI-2383) -------------------------
+#
+# The live chat turn lazily resolves a small set of workflow definitions from
+# Vontology on first use (tool calling, narration, buttonify, chat assistant).
+# Each cold lazy-load is a multi-second Atlas round trip that, under a busy
+# Waitress pool, blocks a request thread and contributes to turn stalls. Warming
+# these definitions in the background prewarm thread promotes them to eager
+# registrations so the first real user turn does not pay that cost on the
+# request thread.
+_CHAT_CRITICAL_WORKFLOW_IDS = (
+    "#V#tool_calling_workflow",
+    "#V#chat_narration_workflow",
+    "#V#chat_buttonify_workflow",
+    "#V#chat_assistant_workflow",
+)
+
+
+def _prewarm_chat_critical_workflows(app: Flask) -> None:
+    """Eagerly resolve chat-critical workflow definitions in the background.
+
+    Controlled by ``VON_EAGER_WARM_CHAT_WORKFLOWS`` (default on). Skipped under
+    pytest/agent-test instances where startup should stay minimal.
+    """
+
+    if os.getenv("VON_EAGER_WARM_CHAT_WORKFLOWS", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        app.logger.info("[prewarm] Chat-workflow warm disabled by env flag.")
+        return
+    if "PYTEST_CURRENT_TEST" in os.environ or _is_agent_test_instance():
+        return
+
+    try:
+        from ..workflows.durable.registry_factory import (
+            get_shared_workflow_registry_read_only,
+        )
+
+        registry = get_shared_workflow_registry_read_only(
+            defer_parity_work=True,
+            start_deferred_registry_work=False,
+        )
+    except Exception as exc:
+        app.logger.warning(
+            "[prewarm] Could not obtain workflow registry for warm: %s", exc
+        )
+        return
+
+    warmed = 0
+    for workflow_id in _CHAT_CRITICAL_WORKFLOW_IDS:
+        try:
+            if not registry.has(workflow_id):
+                continue
+            t0 = time.monotonic()
+            definition = registry.get(workflow_id)
+            if definition is not None:
+                warmed += 1
+                app.logger.info(
+                    "[prewarm] Warmed chat workflow %s (%.0fms)",
+                    workflow_id,
+                    (time.monotonic() - t0) * 1000,
+                )
+        except Exception as exc:
+            app.logger.warning(
+                "[prewarm] Failed to warm chat workflow %s: %s", workflow_id, exc
+            )
+    app.logger.info(
+        "[prewarm] Chat-workflow warm complete (%d/%d warmed).",
+        warmed,
+        len(_CHAT_CRITICAL_WORKFLOW_IDS),
+    )
+
+
 def _start_prewarm(app: Flask) -> None:
     try:
         if os.getenv("VON_PREWARM_DISABLE") in {
@@ -3731,6 +3806,12 @@ def _start_prewarm(app: Flask) -> None:
                             )
                 except Exception as exc:
                     app.logger.warning("[prewarm] Tree build failed: %s", exc)
+                try:
+                    _prewarm_chat_critical_workflows(app)
+                except Exception as exc:
+                    app.logger.warning(
+                        "[prewarm] Chat-workflow warm failed: %s", exc
+                    )
             finally:
                 app.logger.info("[prewarm] Completed in %.2fs", time.time() - t0)
 

@@ -32,6 +32,21 @@ logger = logging.getLogger(__name__)
 WorkflowDefinitionLoader = Callable[[str], WorkflowDefinition | None]
 
 
+def _default_live_load_getter() -> int:
+    """Return the process-global in-flight live foreground turn count.
+
+    Imported lazily so the durable worker has no import-time dependency on the
+    Flask request layer, and so a failure to read the signal never wedges the
+    worker (it simply reports "no live load").
+    """
+    try:
+        from ...services.live_request_load import get_live_turn_count
+
+        return int(get_live_turn_count())
+    except Exception:
+        return 0
+
+
 class DurableWorkflowWorker:
     """Background worker that processes durable workflow instances.
 
@@ -54,6 +69,7 @@ class DurableWorkflowWorker:
         batch_size: int = 5,
         heartbeat_interval_seconds: float = 60.0,
         max_transitions: int = 50,
+        live_load_getter: Callable[[], int] | None = None,
     ) -> None:
         """Initialise the worker.
 
@@ -66,6 +82,9 @@ class DurableWorkflowWorker:
             batch_size: Maximum concurrent instances.
             heartbeat_interval_seconds: Interval for lock heartbeat.
             max_transitions: Maximum state transitions per instance.
+            live_load_getter: Optional callable returning the number of in-flight
+                live foreground turns. Injected for testing; defaults to the
+                process-global live-request-load signal.
         """
         self._worker_id = worker_id or self._generate_worker_id()
         self._instance_manager = instance_manager
@@ -77,6 +96,11 @@ class DurableWorkflowWorker:
         self._priority_reserved_slots = self._load_priority_reserved_slots(
             batch_size=batch_size
         )
+        self._live_load_getter = live_load_getter or _default_live_load_getter
+        self._pause_background_under_live_load = (
+            self._load_pause_background_under_live_load()
+        )
+        self._live_load_pause_threshold = self._load_live_load_pause_threshold()
 
         self._executor = DurableWorkflowExecutor(
             registry=registry,
@@ -113,6 +137,46 @@ class DurableWorkflowWorker:
         if batch_size <= 1:
             return 0
         return min(max(configured, 0), batch_size - 1)
+
+    @staticmethod
+    def _load_pause_background_under_live_load() -> bool:
+        """Whether to defer background workflow claims while a user turn is live.
+
+        Enabled by default (JVNAUTOSCI-2383): heavy background evaluation
+        workflows (episode/paper-recommendation evaluation) lazy-load large
+        definitions and contend for the shared Mongo pool, which can starve the
+        live chat/progress path. Deferring — not dropping — that work while a
+        user is actively waiting keeps the live path responsive. Disable with
+        VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD=0.
+        """
+        raw = os.getenv("VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD", "1")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _load_live_load_pause_threshold() -> int:
+        """Number of in-flight live turns at/above which background work pauses."""
+        try:
+            configured = int(
+                os.getenv("VON_DURABLE_WORKER_LIVE_LOAD_THRESHOLD", "1")
+            )
+        except (TypeError, ValueError):
+            configured = 1
+        return max(configured, 1)
+
+    def _should_defer_background_work(self) -> bool:
+        """Return True when background claims should be skipped this poll cycle.
+
+        Fresh user-turn (priority) instances are always claimed; only general
+        background instances are deferred. The deferral is transient — the next
+        poll cycle re-evaluates once the live turn(s) complete.
+        """
+        if not self._pause_background_under_live_load:
+            return False
+        try:
+            live = int(self._live_load_getter())
+        except Exception:
+            return False
+        return live >= self._live_load_pause_threshold
 
     @property
     def worker_id(self) -> str:
@@ -261,6 +325,12 @@ class DurableWorkflowWorker:
             0,
             self._batch_size - self._priority_reserved_slots - active_count - started_count,
         )
+        # JVNAUTOSCI-2383: yield background evaluation capacity to the live chat
+        # path while a user turn is in flight. Priority (fresh user-turn)
+        # instances above were already claimed; only defer general background
+        # work, and only for this cycle.
+        if self._should_defer_background_work():
+            background_capacity = 0
         general_slots = min(available_slots, background_capacity)
         for _ in range(general_slots):
             if not self._running:

@@ -130,6 +130,105 @@ def test_worker_reserves_capacity_for_priority_claims(
     assert len(manager.general_instances) == 1
 
 
+def test_worker_defers_general_claims_under_live_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While a user turn is live, only the priority claim is attempted."""
+    monkeypatch.setenv("VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKER_LIVE_LOAD_THRESHOLD", "1")
+    general_instances = [
+        _build_pending_instance("#V#episode_evaluation_workflow", f"background-{index}")
+        for index in range(5)
+    ]
+    manager = _PollManagerStub(general_instances)
+    worker = DurableWorkflowWorker(
+        worker_id="worker-live-load",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id: None,
+        batch_size=5,
+        live_load_getter=lambda: 1,
+    )
+    worker._running = True
+    worker._process_instance = cast(Any, lambda _instance: None)
+
+    worker._poll_once()
+
+    # Only the priority-only claim is attempted; no general/background claims.
+    assert [call["priority_only"] for call in manager.calls] == [True]
+    assert len(worker._current_instances) == 0
+    assert len(manager.general_instances) == 5
+
+
+def test_worker_does_not_defer_when_no_live_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no live turn in flight, background claims proceed normally."""
+    monkeypatch.setenv("VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKER_LIVE_LOAD_THRESHOLD", "1")
+    general_instances = [
+        _build_pending_instance("#V#episode_evaluation_workflow", f"background-{index}")
+        for index in range(3)
+    ]
+    manager = _PollManagerStub(general_instances)
+    worker = DurableWorkflowWorker(
+        worker_id="worker-no-live-load",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id: None,
+        batch_size=5,
+        live_load_getter=lambda: 0,
+    )
+    worker._running = True
+    worker._process_instance = cast(Any, lambda _instance: None)
+
+    worker._poll_once()
+
+    assert any(call["priority_only"] is False for call in manager.calls)
+    assert len(worker._current_instances) == 3
+
+
+def test_worker_deferral_disabled_by_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferral can be turned off entirely via env."""
+    monkeypatch.setenv("VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD", "0")
+    general_instances = [
+        _build_pending_instance("#V#episode_evaluation_workflow", "background-0")
+    ]
+    manager = _PollManagerStub(general_instances)
+    worker = DurableWorkflowWorker(
+        worker_id="worker-deferral-off",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id: None,
+        batch_size=5,
+        live_load_getter=lambda: 10,
+    )
+    assert worker._should_defer_background_work() is False
+
+
+def test_worker_live_load_getter_failure_is_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A throwing live-load getter must not block background work."""
+    monkeypatch.setenv("VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD", "1")
+
+    def _boom() -> int:
+        raise RuntimeError("signal unavailable")
+
+    manager = _PollManagerStub([])
+    worker = DurableWorkflowWorker(
+        worker_id="worker-getter-fail",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id: None,
+        batch_size=5,
+        live_load_getter=_boom,
+    )
+    assert worker._should_defer_background_work() is False
+
+
 def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:
     manager = _WorkerManagerStub()
     manager.release_lock_error = RuntimeError("mongo_timeout")

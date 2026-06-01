@@ -124,6 +124,17 @@ _apply_dotenv_overrides(
         # Durable workflow runtime control must resolve from .env because the
         # local launcher and VS Code hosts do not reliably inherit it.
         "VON_DURABLE_WORKFLOWS_ENABLE",
+        # Turn-stall / thread-starvation performance controls (JVNAUTOSCI-2383).
+        # These shape Waitress thread sizing, durable-worker pacing, live-load
+        # deferral, hot-poller caching, and chat-workflow warm. The launcher and
+        # VS Code hosts do not reliably inherit them, so resolve from .env.
+        "VON_WAITRESS_THREADS",
+        "VON_DURABLE_WORKER_POLL_INTERVAL",
+        "VON_DURABLE_WORKER_PRIORITY_RESERVED_SLOTS",
+        "VON_DURABLE_WORKER_PAUSE_BACKGROUND_UNDER_LIVE_LOAD",
+        "VON_DURABLE_WORKER_LIVE_LOAD_THRESHOLD",
+        "VON_DB_INFO_CACHE_TTL_SECONDS",
+        "VON_EAGER_WARM_CHAT_WORKFLOWS",
         "VON_TURN_PIPELINE_MONITORING_SCHEDULE_ENABLE",
         "VON_TURN_PIPELINE_MONITORING_INTERVAL_SECONDS",
         "VON_TURN_PIPELINE_TIER1_REGRESSION_INTERVAL_SECONDS",
