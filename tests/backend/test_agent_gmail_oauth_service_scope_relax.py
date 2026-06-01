@@ -62,7 +62,9 @@ def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) 
     )
 
     class TestService(AgentGmailOAuthService):
-        def _build_flow(self, *, profile_id: str):  # type: ignore[override]
+        def _build_flow(  # type: ignore[override]
+            self, *, profile_id: str, code_verifier: str | None = None
+        ):
             return DummyFlow()
 
         def _get_profile(self, profile_id: str):  # type: ignore[override]
@@ -112,12 +114,21 @@ def test_agent_gmail_oauth_allows_localhost_redirect(
 
     captured: dict[str, object] = {}
 
-    def fake_from_client_secrets_file(path, *, scopes, redirect_uri):
+    monkeypatch.setattr(
+        AgentGmailOAuthService,
+        "_resolve_scopes",
+        lambda self, *, profile_id, profile: list(profile.scopes),
+    )
+
+    def fake_from_client_secrets_file(
+        path, *, scopes, redirect_uri, code_verifier
+    ):
         captured.update(
             {
                 "path": path,
                 "scopes": list(scopes),
                 "redirect_uri": redirect_uri,
+                "code_verifier": code_verifier,
             }
         )
         return object()
@@ -136,4 +147,5 @@ def test_agent_gmail_oauth_allows_localhost_redirect(
         "path": str(secret_path),
         "scopes": ["https://www.googleapis.com/auth/gmail.send"],
         "redirect_uri": "http://localhost:5000/von/api/agent/gmail/oauth/callback",
+        "code_verifier": None,
     }

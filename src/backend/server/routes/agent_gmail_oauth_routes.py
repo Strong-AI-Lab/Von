@@ -155,15 +155,22 @@ def start_agent_gmail_oauth():
 
     service = _get_service()
     try:
-        authorisation_url, state = service.get_authorisation_url(profile_id=profile_id)
+        authorisation_url, state, code_verifier = service.get_authorisation_url(
+            profile_id=profile_id
+        )
     except AgentGmailOAuthError as exc:
         return jsonify({"error": "oauth_config_error", "detail": str(exc)}), 400
 
-    session["agent_gmail_oauth_state"] = {"state": state, "profile_id": profile_id}
+    session["agent_gmail_oauth_state"] = {
+        "state": state,
+        "profile_id": profile_id,
+        "code_verifier": code_verifier,
+    }
     _agent_oauth_states[state] = {
         "timestamp": time.time(),
         "used": False,
         "profile_id": profile_id,
+        "code_verifier": code_verifier,
     }
 
     return redirect(authorisation_url)
@@ -200,7 +207,7 @@ def agent_gmail_oauth_callback():
                 <h2>✗ {safe_title}</h2>
                 <p>{safe_message}</p>
                 {f'<p class="detail"><code>{safe_detail}</code></p>' if safe_detail else ''}
-                <p>This window will close automatically...</p>
+                <p>You can close this window after reading the details.</p>
             </div>
 
             <script>
@@ -214,9 +221,8 @@ def agent_gmail_oauth_callback():
                             detail: '{safe_detail}'
                         }}, window.location.origin);
                     }}
-                    setTimeout(() => window.close(), 1500);
                 }} catch (e) {{
-                    setTimeout(() => window.close(), 2000);
+                    console.error(e);
                 }}
             </script>
         </body>
@@ -242,14 +248,20 @@ def agent_gmail_oauth_callback():
     session_state = session.get("agent_gmail_oauth_state")
     session_state_value: Optional[str] = None
     session_profile_id: Optional[str] = None
+    session_code_verifier: Optional[str] = None
     if isinstance(session_state, dict):
         raw_state = session_state.get("state")
         raw_profile = session_state.get("profile_id")
+        raw_code_verifier = session_state.get("code_verifier")
         session_state_value = raw_state if isinstance(raw_state, str) else None
         session_profile_id = raw_profile if isinstance(raw_profile, str) else None
+        session_code_verifier = (
+            raw_code_verifier if isinstance(raw_code_verifier, str) else None
+        )
 
     valid_state = False
     profile_id: Optional[str] = None
+    code_verifier: Optional[str] = None
 
     state_info = _agent_oauth_states.get(received_state) if received_state else None
     if state_info is not None:
@@ -280,6 +292,7 @@ def agent_gmail_oauth_callback():
     if session_state_value and received_state and session_state_value == received_state:
         valid_state = True
         profile_id = session_profile_id
+        code_verifier = session_code_verifier
         if state_info is not None:
             state_info["used"] = True
         session.pop("agent_gmail_oauth_state", None)
@@ -287,7 +300,11 @@ def agent_gmail_oauth_callback():
         valid_state = True
         state_info["used"] = True
         raw_profile = state_info.get("profile_id")
+        raw_code_verifier = state_info.get("code_verifier")
         profile_id = raw_profile if isinstance(raw_profile, str) else None
+        code_verifier = (
+            raw_code_verifier if isinstance(raw_code_verifier, str) else None
+        )
         session.pop("agent_gmail_oauth_state", None)
 
     if not valid_state or not profile_id:
@@ -301,6 +318,7 @@ def agent_gmail_oauth_callback():
         result = service.exchange_code_for_tokens(
             profile_id=profile_id,
             authorisation_response_url=request.url,
+            code_verifier=code_verifier,
         )
     except Exception as exc:
         logger.exception(

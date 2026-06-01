@@ -48,6 +48,19 @@ def _first_non_empty_env(*names: str) -> str | None:
     return None
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}")
+    return value
+
+
 def _swift_config_present() -> bool:
     if not _first_non_empty_env("VON_SWIFT_CONTAINER"):
         return False
@@ -783,6 +796,9 @@ class S3BlobStore:
         secret_access_key: str,
         session_token: str | None = None,
         addressing_style: str = "path",
+        connect_timeout_seconds: int = 10,
+        read_timeout_seconds: int = 30,
+        max_attempts: int = 3,
     ):
         self._bucket = bucket
         self._endpoint_url = endpoint_url.rstrip("/")
@@ -793,6 +809,9 @@ class S3BlobStore:
         self._secret_access_key = secret_access_key
         self._session_token = session_token
         self._addressing_style = addressing_style.strip().lower() or "path"
+        self._connect_timeout_seconds = connect_timeout_seconds
+        self._read_timeout_seconds = read_timeout_seconds
+        self._max_attempts = max_attempts
 
         self._client = self._create_client()
 
@@ -820,6 +839,9 @@ class S3BlobStore:
             aws_session_token=self._session_token,
             config=Config(
                 signature_version="s3v4",
+                connect_timeout=self._connect_timeout_seconds,
+                read_timeout=self._read_timeout_seconds,
+                retries={"max_attempts": self._max_attempts, "mode": "standard"},
                 s3={"addressing_style": self._addressing_style},
             ),
         )
@@ -872,8 +894,43 @@ class S3BlobStore:
         response = self._client.get_object(Bucket=self._bucket, Key=full_key)
         body = response.get("Body")
         if hasattr(body, "read"):
-            return bytes(body.read())
+            try:
+                data = bytes(body.read())
+                expected_size = response.get("ContentLength")
+                if not isinstance(expected_size, int) or len(data) == expected_size:
+                    return data
+            except Exception:
+                pass
+            return self._get_bytes_by_range(full_key)
         raise RuntimeError("S3 get_object response did not include a readable Body")
+
+    def _get_bytes_by_range(self, full_key: str, *, chunk_size: int = 64 * 1024) -> bytes:
+        head = self._client.head_object(Bucket=self._bucket, Key=full_key)
+        content_length = head.get("ContentLength")
+        if not isinstance(content_length, int) or content_length < 0:
+            raise RuntimeError("S3 head_object response did not include ContentLength")
+
+        chunks: list[bytes] = []
+        start = 0
+        while start < content_length:
+            end = min(content_length - 1, start + max(1, int(chunk_size)) - 1)
+            response = self._client.get_object(
+                Bucket=self._bucket,
+                Key=full_key,
+                Range=f"bytes={start}-{end}",
+            )
+            body = response.get("Body")
+            if not hasattr(body, "read"):
+                raise RuntimeError("S3 ranged get_object response did not include a readable Body")
+            chunks.append(bytes(body.read()))
+            start = end + 1
+        data = b"".join(chunks)
+        if len(data) != content_length:
+            raise RuntimeError(
+                "S3 ranged get_object returned an unexpected byte count: "
+                f"expected {content_length}, got {len(data)}"
+            )
+        return data
 
     def exists(self, key: str) -> bool:
         full_key = self._full_key(key)
@@ -1060,6 +1117,9 @@ def _build_s3_blob_store_from_env() -> S3BlobStore:
     )
     session_token = _first_non_empty_env("VON_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN")
     addressing_style = _first_non_empty_env("VON_S3_ADDRESSING_STYLE") or "path"
+    connect_timeout_seconds = _positive_int_env("VON_S3_CONNECT_TIMEOUT_SECONDS", 10)
+    read_timeout_seconds = _positive_int_env("VON_S3_READ_TIMEOUT_SECONDS", 30)
+    max_attempts = _positive_int_env("VON_S3_MAX_ATTEMPTS", 3)
 
     return S3BlobStore(
         bucket=bucket,
@@ -1071,6 +1131,9 @@ def _build_s3_blob_store_from_env() -> S3BlobStore:
         secret_access_key=secret_access_key,
         session_token=session_token,
         addressing_style=addressing_style,
+        connect_timeout_seconds=connect_timeout_seconds,
+        read_timeout_seconds=read_timeout_seconds,
+        max_attempts=max_attempts,
     )
 
 
@@ -1153,3 +1216,39 @@ def get_blob_store_from_env() -> BlobStore:
         "Unsupported VON_BLOB_STORE_BACKEND. Expected 'local', 'swift', or 's3'. "
         f"Got: {backend!r}"
     )
+
+
+def get_blob_store_for_backend_from_env(backend: str) -> BlobStore:
+    """Build a blob store for a concrete backend recorded in a blob reference.
+
+    A deployment may use ``FailoverBlobStore`` for writes, where a successful
+    write can return ``backend='s3'`` even though the configured primary backend
+    is Swift.  Readers that already have a backend-specific reference should be
+    able to go directly to that backend instead of retrying the primary first.
+    """
+
+    cleaned = str(backend or "").strip().lower()
+    if cleaned == "local":
+        root = os.environ.get("VON_BLOB_STORE_LOCAL_ROOT")
+        if root:
+            root_dir = Path(root)
+        else:
+            workspace_root = Path(__file__).parent.parent.parent.parent
+            root_dir = workspace_root / "data" / "blob_store"
+        return LocalBlobStore(root_dir)
+
+    if cleaned == "s3":
+        return _build_s3_blob_store_from_env()
+
+    if cleaned == "swift":
+        container = os.environ.get("VON_SWIFT_CONTAINER")
+        if not container:
+            raise ValueError("VON_SWIFT_CONTAINER is required when backend=swift")
+        return SwiftBlobStore(
+            container=container,
+            prefix=os.environ.get("VON_SWIFT_PREFIX", ""),
+            public_base_url=os.environ.get("VON_SWIFT_PUBLIC_BASE_URL"),
+            cloud=_first_non_empty_env("OS_CLOUD", "OS_CLOUD_NAME"),
+        )
+
+    return get_blob_store_from_env()

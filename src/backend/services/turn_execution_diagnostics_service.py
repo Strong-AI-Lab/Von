@@ -1402,3 +1402,330 @@ def get_turn_execution_diagnostics_payload(
     )
     payload["success"] = True
     return payload
+
+
+def _safe_non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(max(0.0, float(value)))
+    return None
+
+
+def _extract_text_capture(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        return {
+            "text": text,
+            "char_count": len(text),
+            "is_truncated": False,
+        }
+
+    if not isinstance(value, Mapping):
+        return None
+
+    text_value = _safe_str(value.get("text"))
+    preview_value = _safe_str(value.get("preview"))
+    content_value = _safe_str(value.get("content"))
+    chosen_text = text_value or preview_value or content_value
+    if not chosen_text:
+        return None
+
+    char_count = _safe_non_negative_int(value.get("char_count"))
+    if char_count is None:
+        char_count = _safe_non_negative_int(value.get("content_char_count"))
+    if char_count is None:
+        char_count = len(chosen_text)
+
+    is_truncated = bool(
+        value.get("is_truncated") is True
+        or value.get("truncated") is True
+        or value.get("preview_truncated") is True
+        or (char_count > len(chosen_text))
+    )
+
+    return {
+        "text": chosen_text,
+        "char_count": char_count,
+        "is_truncated": is_truncated,
+    }
+
+
+def _extract_prompt_capture_from_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    direct = _extract_text_capture(entry.get("prompt"))
+    if direct:
+        return direct
+
+    llm_request = entry.get("llm_request")
+    if isinstance(llm_request, Mapping):
+        request_prompt = _extract_text_capture(llm_request.get("prompt"))
+        if request_prompt:
+            return request_prompt
+
+    request_payload = entry.get("request")
+    if isinstance(request_payload, Mapping):
+        request_prompt = _extract_text_capture(request_payload.get("prompt"))
+        if request_prompt:
+            return request_prompt
+
+    return None
+
+
+def _extract_response_capture_from_entry(
+    entry: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    direct = _extract_text_capture(entry.get("response"))
+    if direct:
+        return direct
+
+    selected = entry.get("selected")
+    if isinstance(selected, Mapping):
+        selected_response = _extract_text_capture(selected.get("response"))
+        if selected_response:
+            return selected_response
+
+    return None
+
+
+def _normalise_llm_exchange_entry(
+    entry: Mapping[str, Any],
+    *,
+    source: str,
+    source_index: int,
+) -> dict[str, Any]:
+    prompt_capture = _extract_prompt_capture_from_entry(entry)
+    response_capture = _extract_response_capture_from_entry(entry)
+
+    call_type = _safe_str(entry.get("type")) or _safe_str(entry.get("call_type"))
+    stage = _safe_str(entry.get("stage")) or _safe_str(entry.get("phase"))
+    workflow_stage_id = _safe_str(entry.get("workflow_stage_id"))
+    model = _safe_str(entry.get("model")) or _safe_str(entry.get("model_name"))
+    provider = _safe_str(entry.get("provider"))
+    duration_ms = _safe_non_negative_int(entry.get("duration_ms"))
+
+    exchange_blob_ref = entry.get("exchange_blob_ref")
+    exchange_blob_ref_payload = (
+        {
+            str(key): item
+            for key, item in exchange_blob_ref.items()
+            if isinstance(key, str)
+        }
+        if isinstance(exchange_blob_ref, Mapping)
+        else None
+    )
+
+    prompt_recorded = prompt_capture is not None
+    response_recorded = response_capture is not None
+
+    unavailable_reason = None
+    if not prompt_recorded or not response_recorded:
+        if exchange_blob_ref_payload is not None:
+            unavailable_reason = "exchange_in_blob_ref"
+        elif call_type and call_type.startswith("workflow_model_policy"):
+            unavailable_reason = "model_policy_call_without_exchange"
+        elif call_type:
+            unavailable_reason = "exchange_not_recorded"
+
+    payload = {
+        "schema_version": "turn_llm_exchange_entry.v1",
+        "source": source,
+        "source_index": source_index,
+        "call_type": call_type,
+        "stage": stage,
+        "workflow_stage_id": workflow_stage_id,
+        "model": model,
+        "provider": provider,
+        "duration_ms": duration_ms,
+        "prompt": prompt_capture,
+        "response": response_capture,
+        "prompt_recorded": prompt_recorded,
+        "response_recorded": response_recorded,
+        "exchange_blob_ref": exchange_blob_ref_payload,
+        "unavailable_reason": unavailable_reason,
+    }
+    return {key: item for key, item in payload.items() if item is not None}
+
+
+def _collect_llm_exchange_entries(
+    *,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+
+    def _append_from_sequence(value: Any, source: str) -> None:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return
+        for index, raw in enumerate(value):
+            if not isinstance(raw, Mapping):
+                continue
+            rows.append(
+                _normalise_llm_exchange_entry(
+                    raw,
+                    source=source,
+                    source_index=index,
+                )
+            )
+
+    if isinstance(llm_debug, Mapping):
+        llm_interaction = llm_debug.get("llm_interaction")
+        if isinstance(llm_interaction, Mapping):
+            _append_from_sequence(
+                llm_interaction.get("calls"),
+                "chat_history.llm_debug_data.llm_interaction.calls",
+            )
+        _append_from_sequence(llm_debug.get("llm_calls"), "chat_history.llm_debug_data.llm_calls")
+
+    if isinstance(turn_record, Mapping):
+        execution = turn_record.get("execution")
+        if isinstance(execution, Mapping):
+            _append_from_sequence(
+                execution.get("llm_calls"),
+                "mongo.turn_execution_records.execution.llm_calls",
+            )
+        _append_from_sequence(
+            turn_record.get("llm_calls"),
+            "mongo.turn_execution_records.llm_calls",
+        )
+
+    aux_entries = _collect_routing_aux_entries(
+        payload=None,
+        llm_debug=llm_debug,
+        turn_record=turn_record,
+    )
+    for index, aux_entry in enumerate(aux_entries):
+        if not isinstance(aux_entry, Mapping):
+            continue
+        has_exchange = (
+            aux_entry.get("prompt") is not None
+            or aux_entry.get("response") is not None
+            or aux_entry.get("request") is not None
+            or aux_entry.get("selected") is not None
+        )
+        aux_type = _safe_str(aux_entry.get("type")) or ""
+        if not has_exchange and not aux_type.startswith("workflow_"):
+            continue
+        rows.append(
+            _normalise_llm_exchange_entry(
+                aux_entry,
+                source="chat_history_or_projection.aux_llm_calls",
+                source_index=index,
+            )
+        )
+
+    for index, row in enumerate(rows):
+        row["sequence_no"] = index + 1
+    return rows
+
+
+def get_turn_llm_call_log_payload(
+    *,
+    request_id: str,
+    namespace: str | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> dict[str, Any] | None:
+    request_id_value = _safe_str(request_id)
+    if not request_id_value:
+        return None
+
+    safe_namespace = _safe_str(namespace)
+    history_context = _resolve_history_context(
+        request_id=request_id_value,
+        namespace=safe_namespace,
+    )
+    turn_record = _load_turn_execution_record(
+        request_id=request_id_value,
+        namespace=safe_namespace
+        or (
+            _safe_str(history_context.get("namespace"))
+            if isinstance(history_context, Mapping)
+            else None
+        ),
+    )
+    if not isinstance(history_context, Mapping) and not isinstance(turn_record, Mapping):
+        return None
+
+    llm_debug = (
+        history_context.get("target_llm_debug")
+        if isinstance(history_context, Mapping)
+        else None
+    )
+    llm_debug_mapping = _safe_mapping(llm_debug) if isinstance(llm_debug, Mapping) else None
+
+    all_entries = _collect_llm_exchange_entries(
+        llm_debug=llm_debug_mapping,
+        turn_record=turn_record,
+    )
+
+    bounded_limit = int(max(1, min(200, int(limit))))
+    bounded_offset = int(max(0, int(offset)))
+
+    total_count = len(all_entries)
+    page = all_entries[bounded_offset : bounded_offset + bounded_limit]
+    next_offset = bounded_offset + len(page)
+    has_more = next_offset < total_count
+
+    truncated_entry_count = sum(
+        1
+        for entry in all_entries
+        if (
+            isinstance(entry.get("prompt"), Mapping)
+            and entry.get("prompt", {}).get("is_truncated") is True
+        )
+        or (
+            isinstance(entry.get("response"), Mapping)
+            and entry.get("response", {}).get("is_truncated") is True
+        )
+    )
+
+    return {
+        "schema_version": "turn_llm_call_log.v1",
+        "request_id": request_id_value,
+        "namespace": safe_namespace
+        or (
+            _safe_str(history_context.get("namespace"))
+            if isinstance(history_context, Mapping)
+            else None
+        )
+        or (
+            _safe_str(turn_record.get("namespace"))
+            if isinstance(turn_record, Mapping)
+            else None
+        ),
+        "chat_session_id": (
+            _safe_str(history_context.get("session_id"))
+            if isinstance(history_context, Mapping)
+            else None
+        )
+        or (
+            _safe_str(turn_record.get("session_id"))
+            if isinstance(turn_record, Mapping)
+            else None
+        ),
+        "derived_user_concept_id": (
+            _safe_str(history_context.get("user_id"))
+            if isinstance(history_context, Mapping)
+            else None
+        )
+        or (
+            _safe_str(turn_record.get("user_id"))
+            if isinstance(turn_record, Mapping)
+            else None
+        ),
+        "offset": bounded_offset,
+        "limit": bounded_limit,
+        "returned_count": len(page),
+        "total_count": total_count,
+        "has_more": has_more,
+        "next_offset": (next_offset if has_more else None),
+        "truncated_entry_count": truncated_entry_count,
+        "entries": page,
+        "diagnostics_source": (
+            "chat_history.llm_debug_data"
+            if isinstance(history_context, Mapping)
+            else "mongo.turn_execution_records"
+        ),
+    }

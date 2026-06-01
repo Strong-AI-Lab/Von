@@ -899,6 +899,9 @@ def _serialise_tool_progress_state(
         stage_diagnostics=stage_diagnostics,
         latest_progress=payload,
     )
+    payload["thinking_interpretability"] = _build_thinking_interpretability_payload(
+        payload
+    )
     payload.pop("_workflow_runtime_stages", None)
     payload.pop("_phase_history", None)
     payload.pop("_stage_summaries", None)
@@ -939,6 +942,157 @@ def _build_tool_progress_compact_summary(
         },
         "waiting_threshold_sec": state.get("waiting_threshold_sec"),
         "stall_threshold_sec": state.get("stall_threshold_sec"),
+    }
+
+
+def _extract_selected_workflow_identity_from_progress(
+    payload: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    selected_workflow_id = _progress_str(payload.get("selected_workflow_id"))
+    selected_workflow_name = _progress_str(payload.get("selected_workflow_name"))
+
+    routing_diagnostics = payload.get("workflow_routing_diagnostics")
+    if isinstance(routing_diagnostics, Mapping):
+        selected_workflow_id = selected_workflow_id or _progress_str(
+            routing_diagnostics.get("selected_workflow_id")
+        )
+        selected_workflow_name = selected_workflow_name or _progress_str(
+            routing_diagnostics.get("selected_workflow_name")
+        )
+        dispatch = routing_diagnostics.get("dispatch")
+        if isinstance(dispatch, Mapping):
+            selected_workflow_id = selected_workflow_id or _progress_str(
+                dispatch.get("dispatch_workflow_id")
+            )
+
+    selected_execution = payload.get("selected_workflow_execution")
+    if isinstance(selected_execution, Mapping):
+        selected_workflow_id = selected_workflow_id or _progress_str(
+            selected_execution.get("selected_workflow_id")
+        ) or _progress_str(selected_execution.get("workflow_id"))
+        selected_workflow_name = selected_workflow_name or _progress_str(
+            selected_execution.get("selected_workflow_name")
+        )
+
+    return selected_workflow_id, selected_workflow_name
+
+
+def _latest_non_finalising_stage_from_path(payload: Mapping[str, Any]) -> str | None:
+    workflow_stage_path = payload.get("workflow_stage_path")
+    if not isinstance(workflow_stage_path, Mapping):
+        return None
+
+    path = workflow_stage_path.get("path")
+    if not isinstance(path, list):
+        return None
+
+    finalising_stages = {
+        "response_finalising",
+        "completed",
+        "follow_up_required",
+        "error",
+    }
+    for entry in reversed(path):
+        if not isinstance(entry, Mapping):
+            continue
+        stage_id = _progress_str(entry.get("stage_id"))
+        if not stage_id:
+            continue
+        if stage_id in finalising_stages:
+            continue
+        return stage_id
+    return None
+
+
+def _build_thinking_interpretability_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    stage = _progress_str(payload.get("stage")) or _progress_str(payload.get("phase"))
+    stage_label = _progress_str(payload.get("stage_label")) or _progress_str(
+        payload.get("phase_label")
+    )
+    stage_label = stage_label or (_default_stage_label(stage) if stage else None)
+    subtask = _progress_str(payload.get("subtask")) or _progress_str(
+        payload.get("workflow_task")
+    )
+    result_summary = _progress_str(payload.get("result_summary"))
+
+    selected_workflow_id, selected_workflow_name = (
+        _extract_selected_workflow_identity_from_progress(payload)
+    )
+
+    tool_history = payload.get("tool_history")
+    tool_names: list[str] = []
+    if isinstance(tool_history, list):
+        for entry in tool_history:
+            if not isinstance(entry, Mapping):
+                continue
+            tool_name = _progress_str(entry.get("tool")) or _progress_str(
+                entry.get("workflow_task")
+            )
+            if tool_name and tool_name not in tool_names:
+                tool_names.append(tool_name)
+
+    tool_count = _coerce_non_negative_int(payload.get("tool_call_count"))
+    has_tool_evidence = bool(tool_names) or tool_count > 0 or bool(
+        stage and stage.startswith("tool_")
+    )
+
+    if selected_workflow_id:
+        execution_family = "selected_workflow"
+        progress_kind = "workflow_execution"
+        identity_summary = (
+            f"Selected workflow: {selected_workflow_name} ({selected_workflow_id})"
+            if selected_workflow_name
+            else f"Selected workflow: {selected_workflow_id}"
+        )
+    elif has_tool_evidence:
+        execution_family = "tool_orchestration"
+        progress_kind = "tool_execution"
+        if tool_names:
+            preview = ", ".join(tool_names[:3])
+            suffix = f" +{len(tool_names) - 3} more" if len(tool_names) > 3 else ""
+            identity_summary = f"General tool use: {preview}{suffix}"
+        else:
+            identity_summary = "General tool use"
+    else:
+        execution_family = "chat_response"
+        progress_kind = "chat_generation"
+        identity_summary = "Direct chat response"
+
+    latest_core_stage = _latest_non_finalising_stage_from_path(payload)
+    latest_core_stage_label = (
+        _default_stage_label(latest_core_stage) if latest_core_stage else None
+    )
+    if stage == "response_finalising" and latest_core_stage_label:
+        progress_kind = "post_processing"
+        step_summary = f"Finalising response after {latest_core_stage_label}."
+        if result_summary:
+            step_summary = f"{step_summary} {result_summary}"
+    else:
+        step_bits = [stage_label, subtask, result_summary]
+        step_summary = " · ".join(bit for bit in step_bits if bit)
+
+    blocker_summary = _progress_str(payload.get("error"))
+    if not blocker_summary:
+        blocker_summary = _progress_str(payload.get("pending_reason"))
+    if not blocker_summary:
+        blocker_summary = _progress_str(payload.get("failure_kind"))
+
+    return {
+        "schema_version": "thinking_interpretability.v1",
+        "execution_family": execution_family,
+        "progress_kind": progress_kind,
+        "identity_summary": identity_summary,
+        "step_summary": step_summary or None,
+        "blocker_summary": blocker_summary or None,
+        "selected_workflow_id": selected_workflow_id,
+        "selected_workflow_name": selected_workflow_name,
+        "stage": stage,
+        "stage_label": stage_label,
+        "post_processing_only": bool(
+            stage == "response_finalising" and latest_core_stage is not None
+        ),
     }
 
 
@@ -13433,6 +13587,71 @@ def history_debug():
     except Exception as e:
         print(f"Error retrieving history debug data: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/llm_call_log", methods=["GET"])
+def history_llm_call_log():
+    """Return a paged persisted LLM prompt/response ledger for one request."""
+
+    from ...services.turn_execution_diagnostics_service import (
+        get_turn_llm_call_log_payload,
+    )
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated"}), 401
+
+    request_id = request.args.get("request_id", type=str)
+    if not isinstance(request_id, str) or not request_id.strip():
+        return jsonify({"error": "request_id required"}), 400
+
+    namespace = request.args.get("namespace", default=None, type=str)
+    offset = request.args.get("offset", default=0, type=int)
+    limit = request.args.get("limit", default=20, type=int)
+
+    if offset is None or offset < 0:
+        return jsonify({"error": "offset must be a non-negative integer"}), 400
+    if limit is None or limit < 1 or limit > 200:
+        return jsonify({"error": "limit must be between 1 and 200"}), 400
+
+    payload = get_turn_llm_call_log_payload(
+        request_id=request_id.strip(),
+        namespace=(namespace.strip() if isinstance(namespace, str) and namespace.strip() else None),
+        offset=offset,
+        limit=limit,
+    )
+    if not isinstance(payload, Mapping):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "not_found",
+                    "request_id": request_id.strip(),
+                }
+            ),
+            404,
+        )
+
+    owner_user_id = _progress_str(payload.get("derived_user_concept_id"))
+    if owner_user_id and owner_user_id != user_concept_id.strip():
+        session_id = _progress_str(payload.get("chat_session_id"))
+        resolved_owner = None
+        if session_id:
+            resolved_owner, _shared_invite = _resolve_shared_conversation_owner(
+                user_concept_id=user_concept_id.strip(),
+                session_id=session_id,
+            )
+        if not resolved_owner or resolved_owner != owner_user_id:
+            return jsonify({"error": "Not authorised for turn"}), 403
+
+    payload["success"] = True
+    return jsonify(payload), 200
 
 
 @von_bp.route("/history/telemetry_locator", methods=["GET"])

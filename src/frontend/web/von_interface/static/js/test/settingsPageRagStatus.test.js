@@ -1,5 +1,6 @@
 import {
     __testOnly_applyStoredSelection,
+    __testOnly_buildPersistedLlmSelections,
     __testOnly_buildServerDefaultLlmPayload,
     __testOnly_buildStoredUserContextFromOption,
     __testOnly_formatGmailOAuthStoredStatus,
@@ -13,6 +14,7 @@ import {
     __testOnly_readRuntimeModelSettingFromForm,
     __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
+    __testOnly_resolvePersistedActiveLlm,
     __testOnly_syncInitialScopedSelections,
     __testOnly_setupInternalMcpCapAutoSave,
 } from '../settingsPage.js';
@@ -143,6 +145,58 @@ describe('settingsPage RAG status summary', () => {
         );
 
         expect(result).toEqual({ provider: 'openai', model: 'gpt-5.4-mini' });
+    });
+
+    test('persists the selected Ollama model as an enabled LLM', () => {
+        document.body.innerHTML = `
+            <select id="openaiModelSelect">
+                <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+            </select>
+            <select id="globalModelSelect">
+                <option value="http://127.0.0.1:11434:gemma4:31b" data-host-url="http://127.0.0.1:11434" data-model-name="gemma4:31b" selected>gemma4:31b</option>
+            </select>
+        `;
+
+        const result = __testOnly_buildPersistedLlmSelections({
+            localModelPreference: {
+                activeSource: 'ollama',
+                requestedLlm: {
+                    provider: 'ollama',
+                    model: 'gemma4:31b',
+                    host: 'http://127.0.0.1:11434',
+                },
+            },
+        });
+
+        expect(result).toEqual([
+            { provider: 'openai', model: 'gpt-5.4-mini' },
+            { provider: 'ollama', model: 'gemma4:31b', host: 'http://127.0.0.1:11434' },
+        ]);
+    });
+
+    test('persists the active LLM from the current local Ollama selection', () => {
+        const result = __testOnly_resolvePersistedActiveLlm(
+            [
+                { provider: 'openai', model: 'gpt-5.4-mini' },
+                { provider: 'ollama', model: 'gemma4:31b', host: 'http://127.0.0.1:11434' },
+            ],
+            {
+                localModelPreference: {
+                    requestedLlm: {
+                        provider: 'ollama',
+                        model: 'gemma4:31b',
+                        host: 'http://127.0.0.1:11434',
+                    },
+                },
+                currentResolved: { provider: 'openai', model: 'gpt-5.4-mini' },
+            },
+        );
+
+        expect(result).toEqual({
+            provider: 'ollama',
+            model: 'gemma4:31b',
+            host: 'http://127.0.0.1:11434',
+        });
     });
 
     test('server default payload falls back to the current browser chat selection when the form is blank', () => {

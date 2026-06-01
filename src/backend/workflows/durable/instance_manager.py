@@ -23,6 +23,10 @@ from ...services.workflow_episode_service import (
     finalise_workflow_use_episode,
     start_workflow_use_episode,
 )
+from ...services.workflow_payload_store import (
+    compact_workflow_payload_for_storage,
+    hydrate_workflow_payload_blob_refs,
+)
 from .models import (
     EventWorkflowBinding,
     WorkflowInstance,
@@ -413,6 +417,62 @@ class WorkflowInstanceManager:
         if instance is not None:
             self._broadcast_instance(instance)
 
+    @staticmethod
+    def _compact_instance_payload_field(
+        value: Any,
+        *,
+        field: str,
+        instance_id: str | None,
+        namespace: str | None = None,
+        workflow_id: str | None = None,
+    ) -> Any:
+        try:
+            result = compact_workflow_payload_for_storage(
+                {field: value},
+                record_family=f"{WORKFLOW_INSTANCES_COLLECTION}.{field}",
+                record_id=instance_id,
+                namespace=namespace,
+                workflow_id=workflow_id,
+                fail_soft=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[durable_workflow] Workflow payload blob compaction skipped for %s.%s: %s",
+                instance_id,
+                field,
+                exc,
+            )
+            return value
+        if result.offloaded_count <= 0 or not isinstance(result.payload, dict):
+            return value
+        return result.payload.get(field, value)
+
+    @staticmethod
+    def _hydrate_instance_payloads(doc: dict[str, Any]) -> dict[str, Any]:
+        hydrated_doc = dict(doc)
+        for field in ("inputs", "workflow_data", "outputs"):
+            if field not in hydrated_doc or hydrated_doc[field] is None:
+                continue
+            hydrated = hydrate_workflow_payload_blob_refs(
+                hydrated_doc[field],
+                fail_soft=True,
+            )
+            hydrated_doc[field] = hydrated.payload
+        return hydrated_doc
+
+    @classmethod
+    def _instance_from_doc(
+        cls,
+        doc: dict[str, Any] | None,
+        *,
+        hydrate_payloads: bool = False,
+    ) -> WorkflowInstance | None:
+        if doc is None:
+            return None
+        if hydrate_payloads:
+            doc = cls._hydrate_instance_payloads(doc)
+        return WorkflowInstance.from_doc(doc)
+
     def _find_one_and_update_instance(
         self,
         query: dict[str, Any],
@@ -429,7 +489,7 @@ class WorkflowInstanceManager:
             update,
             return_document=return_document,
         )
-        return WorkflowInstance.from_doc(doc) if doc is not None else None
+        return self._instance_from_doc(doc)
 
     @staticmethod
     def _build_durable_episode_stable_key(
@@ -572,6 +632,16 @@ class WorkflowInstanceManager:
             event_idempotency_key=event_idempotency_key,
         )
 
+        compacted_inputs = self._compact_instance_payload_field(
+            instance.inputs,
+            field="inputs",
+            instance_id=instance.instance_id,
+            namespace=namespace,
+            workflow_id=workflow_id,
+        )
+        if compacted_inputs is not instance.inputs:
+            instance = replace(instance, inputs=compacted_inputs)
+
         coll.insert_one(instance.to_doc())
         logger.info(
             "[durable_workflow] Created instance %s for workflow %s",
@@ -647,7 +717,7 @@ class WorkflowInstanceManager:
             {"workflow_id": workflow_id_clean},
             sort=[("created_at", DESCENDING)],
         )
-        return WorkflowInstance.from_doc(doc) if doc else None
+        return self._instance_from_doc(doc)
 
     def get_event_instance(
         self,
@@ -679,7 +749,7 @@ class WorkflowInstanceManager:
             },
             sort=[("created_at", DESCENDING)],
         )
-        return WorkflowInstance.from_doc(doc) if doc else None
+        return self._instance_from_doc(doc)
 
     def get_instance(self, instance_id: str) -> WorkflowInstance | None:
         """Load a workflow instance by ID.
@@ -695,7 +765,7 @@ class WorkflowInstanceManager:
             return None
 
         doc = coll.find_one({"instance_id": instance_id})
-        return WorkflowInstance.from_doc(doc) if doc else None
+        return self._instance_from_doc(doc, hydrate_payloads=True)
 
     def list_instances(
         self,
@@ -751,7 +821,7 @@ class WorkflowInstanceManager:
             to_utc=to_utc,
         )
         cursor = coll.find(query).sort("created_at", -1).limit(limit)
-        return [WorkflowInstance.from_doc(doc) for doc in cursor]
+        return [instance for doc in cursor if (instance := self._instance_from_doc(doc))]
 
     def list_instance_status_dicts(
         self,
@@ -998,7 +1068,9 @@ class WorkflowInstanceManager:
             )
 
         if doc:
-            instance = WorkflowInstance.from_doc(doc)
+            instance = self._instance_from_doc(doc)
+            if instance is None:
+                return None
             logger.info(
                 "[durable_workflow] Worker %s claimed instance %s",
                 worker_id,
@@ -1097,7 +1169,20 @@ class WorkflowInstanceManager:
         update: dict[str, Any] = {
             "$set": {
                 "current_state": current_state,
-                "workflow_data": workflow_data,
+                "workflow_data": self._compact_instance_payload_field(
+                    workflow_data,
+                    field="workflow_data",
+                    instance_id=instance_id,
+                    namespace=(
+                        workflow_data.get("namespace")
+                        or workflow_data.get("user_namespace")
+                    )
+                    if isinstance(workflow_data, dict)
+                    else None,
+                    workflow_id=workflow_data.get("workflow_id")
+                    if isinstance(workflow_data, dict)
+                    else None,
+                ),
             }
         }
         if step_index is not None:
@@ -1213,7 +1298,14 @@ class WorkflowInstanceManager:
             }
         }
         if outputs is not None:
-            update["$set"]["outputs"] = outputs
+            update["$set"]["outputs"] = self._compact_instance_payload_field(
+                outputs,
+                field="outputs",
+                instance_id=instance_id,
+                workflow_id=outputs.get("workflow_id")
+                if isinstance(outputs, dict)
+                else None,
+            )
         if final_state is not None:
             update["$set"]["current_state"] = final_state
         if execution_trace_id is not None:
@@ -1298,7 +1390,14 @@ class WorkflowInstanceManager:
         if error_step:
             update["$set"]["error_step"] = error_step
         if outputs is not None:
-            update["$set"]["outputs"] = outputs
+            update["$set"]["outputs"] = self._compact_instance_payload_field(
+                outputs,
+                field="outputs",
+                instance_id=instance_id,
+                workflow_id=outputs.get("workflow_id")
+                if isinstance(outputs, dict)
+                else None,
+            )
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
         if increment_retry:

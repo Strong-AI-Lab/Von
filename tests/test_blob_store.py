@@ -146,6 +146,47 @@ def test_swift_blob_store_get_bytes_uses_download_object_obj_signature():
     assert store._conn.object_store.calls == [("demo/thing.txt", "demo-container", {})]
 
 
+def test_s3_blob_store_get_bytes_falls_back_to_ranged_reads() -> None:
+    class _Body:
+        def __init__(self, data: bytes, *, fail: bool = False) -> None:
+            self._data = data
+            self._fail = fail
+
+        def read(self) -> bytes:
+            if self._fail:
+                raise RuntimeError("response stream incomplete")
+            return self._data
+
+    class _Client:
+        def __init__(self) -> None:
+            self.data = bytes((i % 251 for i in range(90_000)))
+            self.ranges: list[str] = []
+
+        def get_object(self, **kwargs):
+            requested_range = kwargs.get("Range")
+            if not requested_range:
+                return {"Body": _Body(self.data[:64_000], fail=True), "ContentLength": len(self.data)}
+            self.ranges.append(str(requested_range))
+            prefix, raw_bounds = str(requested_range).split("=", 1)
+            assert prefix == "bytes"
+            raw_start, raw_end = raw_bounds.split("-", 1)
+            start = int(raw_start)
+            end = int(raw_end)
+            return {"Body": _Body(self.data[start : end + 1])}
+
+        def head_object(self, **kwargs):
+            return {"ContentLength": len(self.data)}
+
+    client = _Client()
+    store = S3BlobStore.__new__(S3BlobStore)
+    store._bucket = "demo-bucket"
+    store._prefix = ""
+    store._client = client
+
+    assert store.get_bytes("demo/thing.bin") == client.data
+    assert client.ranges == ["bytes=0-65535", "bytes=65536-89999"]
+
+
 def test_swift_blob_store_exists_uses_get_object_obj_signature():
     class _DummyObjectStore:
         def __init__(self):
@@ -627,6 +668,9 @@ def test_get_blob_store_from_env_s3_supports_swift_container_fallback(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "demo-secret")
     monkeypatch.setenv("OS_REGION_NAME", "nz-por-1")
     monkeypatch.setenv("VON_SWIFT_PREFIX", "von")
+    monkeypatch.setenv("VON_S3_CONNECT_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("VON_S3_READ_TIMEOUT_SECONDS", "11")
+    monkeypatch.setenv("VON_S3_MAX_ATTEMPTS", "2")
     monkeypatch.delenv("VON_S3_REGION_NAME", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -640,6 +684,13 @@ def test_get_blob_store_from_env_s3_supports_swift_container_fallback(
     )
     assert captured_client_kwargs["region_name"] == "nz-por-1"
     assert captured_client_kwargs["aws_access_key_id"] == "demo-key"
+    assert captured_client_kwargs["config"].kwargs == {
+        "signature_version": "s3v4",
+        "connect_timeout": 7,
+        "read_timeout": 11,
+        "retries": {"max_attempts": 2, "mode": "standard"},
+        "s3": {"addressing_style": "path"},
+    }
 
 
 def test_get_blob_store_from_env_swift_can_fail_over_to_s3_on_initialisation_failure(

@@ -3,12 +3,24 @@ import subprocess
 import re
 import ctypes
 import sys
+from typing import Any, cast
+
+
+def _get_windows_shell32() -> Any:
+    """Return shell32 on Windows; raise on unsupported platforms."""
+    if os.name != "nt":
+        raise OSError("Windows-only operation")
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise AttributeError("ctypes.windll is unavailable")
+    return cast(Any, windll).shell32
 
 
 def is_admin():
     """Check if the script is running with administrative privileges."""
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
+        shell32 = _get_windows_shell32()
+        return bool(shell32.IsUserAnAdmin())
     except Exception:
         return False
 
@@ -16,7 +28,8 @@ def is_admin():
 def elevate_privileges():
     """Restart the script with elevated privileges if not already running as admin."""
     if not is_admin():
-        ctypes.windll.shell32.ShellExecuteW(
+        shell32 = _get_windows_shell32()
+        shell32.ShellExecuteW(
             None, "runas", sys.executable, " ".join(sys.argv), None, 1
         )
         sys.exit(0)

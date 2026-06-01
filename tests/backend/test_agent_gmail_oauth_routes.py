@@ -201,3 +201,52 @@ def test_status_endpoint_does_not_perform_live_gmail_access(monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json()["has_tokens"] is True
+
+
+def test_oauth_callback_reuses_start_code_verifier(monkeypatch):
+    monkeypatch.setattr(
+        agent_gmail_oauth_routes.gmail_service,
+        "list_profile_ids_from_env",
+        lambda: ["vonwitbrock-gmail"],
+    )
+    agent_gmail_oauth_routes._agent_oauth_states.clear()
+    captured = {}
+
+    class FakeOAuthService:
+        def get_authorisation_url(self, *, profile_id):
+            return (
+                "https://accounts.google.com/o/oauth2/v2/auth",
+                "state-1",
+                "verifier-1",
+            )
+
+        def exchange_code_for_tokens(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                profile_id=kwargs["profile_id"],
+                authorised_email="agent@example.test",
+                scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+                expires_at=None,
+            )
+
+    monkeypatch.setattr(
+        agent_gmail_oauth_routes,
+        "_get_service",
+        lambda: FakeOAuthService(),
+    )
+
+    client = _make_app().test_client()
+    start_response = client.get(
+        "/von/api/agent/gmail/oauth/start?profile_id=vonwitbrock-gmail"
+    )
+    assert start_response.status_code == 302
+
+    callback_response = client.get(
+        "/von/api/agent/gmail/oauth/callback?state=state-1&code=abc"
+    )
+
+    assert callback_response.status_code == 200
+    assert captured["profile_id"] == "vonwitbrock-gmail"
+    assert captured["code_verifier"] == "verifier-1"
+
+    agent_gmail_oauth_routes._agent_oauth_states.clear()

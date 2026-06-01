@@ -2560,6 +2560,70 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Sent');
     });
 
+    test('renders full LLM call log toggle in expert mode', () => {
+        const request = {
+            clientRequestId: 'req-llm-log-toggle',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                request_id: 'req-llm-log-toggle',
+                status: 'pending',
+                stage: 'workflow_dispatch'
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Full LLM call log');
+        expect(html).toContain('View full LLM call log');
+        expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
+    test('renders loaded full LLM call log entries and load-more control', () => {
+        const request = {
+            clientRequestId: 'req-llm-log-loaded',
+            thinkingCardMode: 'debug',
+            latestProgress: {
+                request_id: 'req-llm-log-loaded',
+                status: 'completed',
+                stage: 'completed'
+            },
+            thinkingLlmCallLog: {
+                loading: false,
+                loaded: true,
+                error: '',
+                entries: [
+                    {
+                        sequence_no: 1,
+                        stage: 'workflow_dispatch',
+                        call_type: 'llm.generate',
+                        model: 'gpt-5-mini',
+                        provider: 'openai',
+                        duration_ms: 120,
+                        prompt: {
+                            text: 'Select workflow for this turn.',
+                            char_count: 30,
+                            is_truncated: false
+                        },
+                        response: {
+                            text: '#V#tool_calling_workflow',
+                            char_count: 24,
+                            is_truncated: false
+                        }
+                    }
+                ],
+                totalCount: 2,
+                nextOffset: 1,
+                hasMore: true,
+                requestId: 'req-llm-log-loaded'
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Refresh full LLM call log');
+        expect(html).toContain('Load more');
+        expect(html).toContain('Select workflow for this turn.');
+        expect(html).toContain('#V#tool_calling_workflow');
+    });
+
     test('renders expected-outcome and selector stages with context-lineage diagnostics', () => {
         const request = {
             clientRequestId: 'req-1888',
@@ -3568,6 +3632,87 @@ describe('thinking activity history normalisation', () => {
             text.indexOf('Finalising response')
         );
         expect(html).toContain('Workflow execution events');
+    });
+
+    test('surfaces interpretable execution path and progress meaning for selected-workflow turns', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'expert',
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' },
+                    { stage_id: 'response_finalising', stage_label: 'Finalising response' }
+                ]
+            },
+            latestProgress: {
+                phase: 'response_finalising',
+                stage: 'response_finalising',
+                stage_label: 'Finalising response',
+                selected_workflow_id: '#V#mail_identity_lookup_workflow',
+                selected_workflow_name: 'Mail identity lookup workflow',
+                result_summary: 'Assembling the final response payload.'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Execution path');
+        expect(text).toContain('Selected workflow: Mail identity lookup workflow (#V#mail_identity_lookup_workflow)');
+        expect(text).toContain('Progress meaning');
+        expect(text).toContain('Finalising response after Workflow dispatch preparation');
+    });
+
+    test('surfaces interpretable execution path for general tool-use turns', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'expert',
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'tool_execute', stage_label: 'Applying actions' }
+                ]
+            },
+            latestProgress: {
+                phase: 'tool_execute',
+                stage: 'tool_execute',
+                stage_label: 'Applying actions',
+                subtask: 'fetch concepts and verify identifiers',
+                result_summary: 'Running tool pipeline for this turn.',
+                tool_history: [
+                    { tool: 'fetch_concept' },
+                    { tool: 'task_get' }
+                ]
+            },
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Execution path');
+        expect(text).toContain('General tool use: fetch_concept, task_get');
+        expect(text).toContain('Progress meaning');
+        expect(text).toContain('Running tool pipeline for this turn.');
+    });
+
+    test('renders a useful fallback progress row for chat-only turns with no workflow path', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'default',
+            latestProgress: {
+                phase: 'context_build',
+                stage: 'context_build',
+                phase_label: 'Understanding request',
+                result_summary: 'Resolving context for a direct chat response.'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Execution path');
+        expect(text).toContain('Direct chat response');
+        expect(text).toContain('Understanding request');
+        expect(text).toContain('Resolving context for a direct chat response.');
     });
 
     test('preserves selected custom workflow identity through finalising render stages', () => {
@@ -4885,6 +5030,63 @@ describe('thinking card toggle accessibility', () => {
         expect(retained.detail.innerHTML).toContain('Turn failed');
         expect(retained.detail.innerHTML).toContain('authoritative workflow failed');
         expect(retained.detail.innerHTML).not.toContain('Active');
+    });
+
+    test('surfaces terminal progress failure when the generate request drops', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-progress-failed-network', 'Progress Failed Network');
+        document.getElementById('promptInput').value = 'why did the turn fail';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'error',
+                        phase: 'workflow_execution',
+                        phase_label: 'Turn failed',
+                        error: 'workflow_llm_step_timeout: LLM call timed out after 45s (stage=planner, model=gemma4:31b)'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.reject(new TypeError('Load failed'));
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const errorMessage = document.querySelector('.message-container.error-turn .chat-message-text');
+        const retained = getRetainedThinkingCardElements();
+
+        expect(errorMessage.textContent).toContain('workflow_llm_step_timeout');
+        expect(errorMessage.textContent).not.toContain('Network error occurred');
+        expect(retained).not.toBeNull();
+        expect(retained.detail.innerHTML).toContain('LLM call timed out after 45s');
     });
 
     test('keeps one retained thinking card per completed turn instead of replacing the previous turn', async () => {

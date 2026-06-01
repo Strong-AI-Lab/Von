@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..db.mongo_client import get_db
+from ..services.workflow_payload_store import (
+    compact_workflow_payload_for_storage,
+    hydrate_workflow_payload_blob_refs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,28 @@ def insert_workflow_execution_trace(trace_doc: Dict[str, Any]) -> Optional[str]:
         except Exception:
             trace_doc["start_time"] = datetime.now(timezone.utc)
 
+    try:
+        compacted = compact_workflow_payload_for_storage(
+            trace_doc,
+            record_family=WORKFLOW_EXECUTIONS_COLLECTION_NAME,
+            record_id=execution_id,
+            namespace=trace_doc.get("user_namespace")
+            if isinstance(trace_doc.get("user_namespace"), str)
+            else None,
+            workflow_id=trace_doc.get("workflow_id")
+            if isinstance(trace_doc.get("workflow_id"), str)
+            else None,
+            fail_soft=False,
+        )
+        if compacted.offloaded_count > 0 and isinstance(compacted.payload, dict):
+            trace_doc = compacted.payload
+    except Exception as exc:  # pragma: no cover - depends on blob backend
+        logger.warning(
+            "[workflow_trace] Workflow payload blob compaction skipped for execution_id=%s: %s",
+            execution_id,
+            exc,
+        )
+
     coll = db[WORKFLOW_EXECUTIONS_COLLECTION_NAME]
     try:
         coll.insert_one(trace_doc)
@@ -90,6 +116,9 @@ def get_workflow_execution_trace(execution_id: str) -> Optional[Dict[str, Any]]:
     coll = db[WORKFLOW_EXECUTIONS_COLLECTION_NAME]
     try:
         doc = coll.find_one({"execution_id": execution_id}, {"_id": 0})
+        if isinstance(doc, dict):
+            hydrated = hydrate_workflow_payload_blob_refs(doc, fail_soft=True)
+            doc = hydrated.payload if isinstance(hydrated.payload, dict) else doc
         return doc if isinstance(doc, dict) else None
     except Exception:  # pragma: no cover
         return None
@@ -119,6 +148,12 @@ def list_recent_workflow_execution_traces(
             .sort("start_time", -1)
             .limit(max(1, min(200, int(limit))))
         )
-        return [doc for doc in cursor if isinstance(doc, dict)]
+        docs: list[dict[str, Any]] = []
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            hydrated = hydrate_workflow_payload_blob_refs(doc, fail_soft=True)
+            docs.append(hydrated.payload if isinstance(hydrated.payload, dict) else doc)
+        return docs
     except Exception:  # pragma: no cover
         return []

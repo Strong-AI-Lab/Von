@@ -119,7 +119,9 @@ class AgentGmailOAuthService:
         )
         return env_scopes
 
-    def _build_flow(self, *, profile_id: str) -> Flow:
+    def _build_flow(
+        self, *, profile_id: str, code_verifier: Optional[str] = None
+    ) -> Flow:
         profile = self._get_profile(profile_id)
         redirect_uri = self._get_redirect_uri()
         secret_path = self._get_client_secret_path(profile_id=profile_id)
@@ -134,9 +136,12 @@ class AgentGmailOAuthService:
             secret_path,
             scopes=self._resolve_scopes(profile_id=profile_id, profile=profile),
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
 
-    def get_authorisation_url(self, *, profile_id: str) -> tuple[str, str]:
+    def get_authorisation_url(
+        self, *, profile_id: str
+    ) -> tuple[str, str, Optional[str]]:
         flow = self._build_flow(profile_id=profile_id)
         prompt = (
             os.getenv(AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR, "consent").strip() or "consent"
@@ -147,14 +152,23 @@ class AgentGmailOAuthService:
             include_granted_scopes="true",
             prompt=prompt,
         )
-        return authorisation_url, state
+        code_verifier = getattr(flow, "code_verifier", None)
+        return (
+            authorisation_url,
+            state,
+            code_verifier if isinstance(code_verifier, str) else None,
+        )
 
     def exchange_code_for_tokens(
-        self, *, profile_id: str, authorisation_response_url: str
+        self,
+        *,
+        profile_id: str,
+        authorisation_response_url: str,
+        code_verifier: Optional[str] = None,
     ) -> AgentGmailOAuthResult:
         """Exchange callback code for tokens and persist via DB token store."""
 
-        flow = self._build_flow(profile_id=profile_id)
+        flow = self._build_flow(profile_id=profile_id, code_verifier=code_verifier)
 
         @contextmanager
         def _temporary_env(var_name: str, value: str):

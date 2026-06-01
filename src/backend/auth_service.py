@@ -1,6 +1,7 @@
 """Handles Google OAuth 2.0 authentication flow."""
 
 import os
+from contextlib import contextmanager
 from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlparse
 
@@ -147,7 +148,23 @@ class GoogleAuthService:
 
     def exchange_code_for_tokens(self, authorization_response_url: str):
         """Exchanges the authorization code for tokens."""
-        self.flow.fetch_token(authorization_response=authorization_response_url)
+        @contextmanager
+        def _temporary_env(var_name: str, value: str):
+            previous = os.environ.get(var_name)
+            os.environ[var_name] = value
+            try:
+                yield
+            finally:
+                if previous is None:
+                    os.environ.pop(var_name, None)
+                else:
+                    os.environ[var_name] = previous
+
+        # Google can return a token scope set that is a superset of requested scopes
+        # (for example when include_granted_scopes is enabled). Accept this rather
+        # than failing the callback with a warning-style exception.
+        with _temporary_env("OAUTHLIB_RELAX_TOKEN_SCOPE", "1"):
+            self.flow.fetch_token(authorization_response=authorization_response_url)
         credentials = self.flow.credentials
         # Cast so static type checkers know we expect an OAuth credentials object.
         # Help static analysis: treat credentials as at least our protocol

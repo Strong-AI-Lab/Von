@@ -1044,6 +1044,73 @@ def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -
     ]
 
 
+def test_serialised_progress_includes_interpretability_payload_for_workflow_tool_and_chat() -> (
+    None
+):
+    workflow_snapshot = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-interpret-workflow",
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "stage": "workflow_dispatch",
+            "stage_label": "Selecting workflow",
+            "selected_workflow_id": "#V#mail_identity_lookup_workflow",
+            "selected_workflow_name": "Mail identity lookup workflow",
+            "workflow_stage_path": {
+                "schema_version": "conversation_turn_stage_path.v1",
+                "path": [
+                    {
+                        "stage_id": "workflow_dispatch_prepare",
+                        "stage_label": "Workflow dispatch preparation",
+                    },
+                    {"stage_id": "workflow_dispatch", "stage_label": "Selecting workflow"},
+                ],
+            },
+        }
+    )
+    workflow_interpretability = workflow_snapshot.get("thinking_interpretability")
+    assert isinstance(workflow_interpretability, dict)
+    assert workflow_interpretability.get("execution_family") == "selected_workflow"
+    assert (
+        workflow_interpretability.get("identity_summary")
+        == "Selected workflow: Mail identity lookup workflow (#V#mail_identity_lookup_workflow)"
+    )
+
+    tool_snapshot = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-interpret-tool",
+            "status": "thinking",
+            "phase": "tool_execute",
+            "stage": "tool_execute",
+            "stage_label": "Applying actions",
+            "result_summary": "Running tool pipeline.",
+            "tool_history": [
+                {"tool": "fetch_concept"},
+                {"tool": "task_get"},
+            ],
+        }
+    )
+    tool_interpretability = tool_snapshot.get("thinking_interpretability")
+    assert isinstance(tool_interpretability, dict)
+    assert tool_interpretability.get("execution_family") == "tool_orchestration"
+    assert "General tool use" in str(tool_interpretability.get("identity_summary"))
+
+    chat_snapshot = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-interpret-chat",
+            "status": "thinking",
+            "phase": "context_build",
+            "stage": "context_build",
+            "phase_label": "Understanding request",
+            "result_summary": "Preparing direct chat response.",
+        }
+    )
+    chat_interpretability = chat_snapshot.get("thinking_interpretability")
+    assert isinstance(chat_interpretability, dict)
+    assert chat_interpretability.get("execution_family") == "chat_response"
+    assert chat_interpretability.get("identity_summary") == "Direct chat response"
+
+
 def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state() -> (
     None
 ):

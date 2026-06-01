@@ -115,6 +115,7 @@ let latestRagRuntimeConfiguration = null;
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
 let availableGmailProfiles = [];
+let gmailProfileAuthorisedEmailByProfile = {};
 
 const SETTINGS_CONCERN_ORDER = Object.freeze([
   'identity',
@@ -865,17 +866,65 @@ function resolveOllamaDropdownSelectionValue(localModelPreference) {
     || null;
 }
 
-function buildPersistedLlmSelections() {
+function appendUniquePersistedLlmSelection(selections, entry) {
+  const canonical = buildCanonicalLlmEntry(entry);
+  if (!canonical) return;
+  const exists = selections.some((candidate) =>
+    candidate.provider === canonical.provider
+    && candidate.model === canonical.model
+    && (candidate.host || null) === (canonical.host || null)
+  );
+  if (!exists) selections.push(canonical);
+}
+
+function buildPersistedLlmSelections({
+  localModelPreference = getEffectiveLocalModelPreference(),
+} = {}) {
   const selections = [];
   const openaiModelSelect = document.getElementById('openaiModelSelect');
 
   const openaiModel = String(openaiModelSelect?.value || '').trim();
   if (openaiModel) {
     setStoredOpenAiSelectedModel(openaiModel);
-    selections.push({ provider: 'openai', model: openaiModel });
+    appendUniquePersistedLlmSelection(selections, { provider: 'openai', model: openaiModel });
   }
 
+  const ollamaSelection = resolveOllamaSelection(false) || localModelPreference?.ollamaSelection || null;
+  if (ollamaSelection?.model) {
+    appendUniquePersistedLlmSelection(selections, {
+      provider: 'ollama',
+      model: ollamaSelection.model,
+      ...(ollamaSelection.host ? { host: ollamaSelection.host } : {}),
+    });
+  }
+
+  appendUniquePersistedLlmSelection(selections, localModelPreference?.requestedLlm);
+
   return selections;
+}
+
+function resolvePersistedActiveLlm(
+  enabledLlms,
+  {
+    localModelPreference = getEffectiveLocalModelPreference(),
+    currentResolved = currentResolvedLlm,
+  } = {},
+) {
+  const requested = buildCanonicalLlmEntry(localModelPreference?.requestedLlm);
+  if (requested) {
+    const matchingEnabled = Array.isArray(enabledLlms)
+      ? enabledLlms.find((entry) => {
+        const candidate = buildCanonicalLlmEntry(entry);
+        return candidate
+          && candidate.provider === requested.provider
+          && candidate.model === requested.model
+          && (candidate.host || null) === (requested.host || null);
+      })
+      : null;
+    return matchingEnabled ? { ...matchingEnabled } : requested;
+  }
+
+  return resolveActiveLlmFromSelections(enabledLlms, null, currentResolved);
 }
 
 function setInlineStatusMessage(element, text, tone = null) {
@@ -1683,8 +1732,27 @@ function renderGmailProfileOptions(profiles, defaultProfile) {
     select.append(option);
   }
 
+  // Keep labels enriched with authorised emails when we already have them.
+  updateGmailProfileOptionLabels(gmailProfileAuthorisedEmailByProfile);
+
   select.value = selectedProfile;
   setStoredGmailProfile(selectedProfile);
+}
+
+function updateGmailProfileOptionLabels(authorisedEmailByProfile = {}) {
+  const select = document.getElementById('gmailProfileSelect');
+  if (!select) return;
+
+  const safeMap = authorisedEmailByProfile && typeof authorisedEmailByProfile === 'object'
+    ? authorisedEmailByProfile
+    : {};
+
+  for (const option of select.options) {
+    const profileId = String(option.value || '').trim();
+    if (!profileId) continue;
+    const email = String(safeMap[profileId] || '').trim();
+    option.textContent = email ? `${profileId} (${email})` : profileId;
+  }
 }
 
 async function refreshGmailProfileStatusList() {
@@ -1714,14 +1782,26 @@ async function refreshGmailProfileStatusList() {
           );
           const data = await response.json();
           if (!response.ok) {
-            return { profileId, status: `error (${data?.error || response.status})` };
+            return { profileId, status: `error (${data?.error || response.status})`, authorisedEmail: null };
           }
-          return { profileId, status: formatGmailOAuthStoredStatus(data) };
+          const authorisedEmail = typeof data?.authorised_email === 'string' && data.authorised_email.trim()
+            ? data.authorised_email.trim()
+            : null;
+          return { profileId, status: formatGmailOAuthStoredStatus(data), authorisedEmail };
         } catch (_) {
-          return { profileId, status: 'error (failed to fetch)' };
+          return { profileId, status: 'error (failed to fetch)', authorisedEmail: null };
         }
       })
     );
+
+    const nextEmailMap = {};
+    for (const result of results) {
+      if (result.authorisedEmail) {
+        nextEmailMap[result.profileId] = result.authorisedEmail;
+      }
+    }
+    gmailProfileAuthorisedEmailByProfile = nextEmailMap;
+    updateGmailProfileOptionLabels(gmailProfileAuthorisedEmailByProfile);
 
     container.replaceChildren();
     for (const result of results) {
@@ -2584,6 +2664,14 @@ export function __testOnly_resolveActiveLlmFromSelections(
     preferredProvider,
     currentResolved,
   );
+}
+
+export function __testOnly_buildPersistedLlmSelections(options = {}) {
+  return buildPersistedLlmSelections(options);
+}
+
+export function __testOnly_resolvePersistedActiveLlm(enabledLlms, options = {}) {
+  return resolvePersistedActiveLlm(enabledLlms, options);
 }
 
 export function __testOnly_updateOllamaModelStatusMessage() {
@@ -3881,8 +3969,9 @@ async function loadAndDisplayDbInfo() {
 
 async function saveAllSettings() {
   const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
-  const enabledLlms = buildPersistedLlmSelections();
-  let activeLlm = resolveActiveLlmFromSelections(enabledLlms, 'openai');
+  const localModelPreference = getEffectiveLocalModelPreference();
+  const enabledLlms = buildPersistedLlmSelections({ localModelPreference });
+  let activeLlm = resolvePersistedActiveLlm(enabledLlms, { localModelPreference });
 
   if (activeLlm && llmScope && llmConceptId) {
     activeLlm.scope = llmScope;
