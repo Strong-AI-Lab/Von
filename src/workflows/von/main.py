@@ -436,10 +436,27 @@ def main():
                 waitress_mod = importlib.import_module("waitress")  # type: ignore
                 serve = getattr(waitress_mod, "serve", None)
             if callable(serve):
-                # Increase threads from default 4 to handle SSE connections
-                # Each SSE connection holds a thread; 16 allows for multiple
-                # concurrent shared conversations + regular requests
-                num_threads = int(os.environ.get("VON_WAITRESS_THREADS", "16"))
+                # Increase threads from the Waitress default of 4 to handle
+                # long-lived SSE connections and concurrent polling without
+                # starving the live chat path.
+                #
+                # Each SSE subscription (e.g. /workflows/instances/stream) holds
+                # a worker thread for its whole lifetime, and the UI also issues
+                # many short Mongo-backed polls (settings/db/info, rag_status,
+                # history_sessions, capability index). With Atlas RTT of ~200ms
+                # per query these polls each occupy a thread for several hundred
+                # ms to multiple seconds. When the in-process durable worker is
+                # also busy, a 16-thread pool can be fully drained, which leaves
+                # the /von/progress endpoint unscheduled for minutes and makes
+                # turns appear to stall ("Awaiting visible progress"). A larger
+                # default keeps the live progress path schedulable under load.
+                # Tune via VON_WAITRESS_THREADS. See JVNAUTOSCI-2383.
+                try:
+                    num_threads = int(os.environ.get("VON_WAITRESS_THREADS", "32"))
+                except (TypeError, ValueError):
+                    num_threads = 32
+                if num_threads < 1:
+                    num_threads = 32
                 logger.info(
                     "Running with Waitress production server (threads=%d).", num_threads
                 )
