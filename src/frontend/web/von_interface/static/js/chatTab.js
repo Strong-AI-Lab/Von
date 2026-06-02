@@ -8648,6 +8648,187 @@ function formatThinkingLlmCallTimestamp(isoString) {
     return `${base}.${millis}`;
 }
 
+function captureTextForThinkingLlmCallLog(capture) {
+    if (!capture || typeof capture !== 'object') {
+        return '';
+    }
+    return normaliseThinkingActivityString(capture.text)
+        || normaliseThinkingActivityString(capture.preview);
+}
+
+function isThinkingLiveLlmDiagnosticEvent(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return false;
+    }
+    return Boolean(
+        entry.llm_request
+        || entry.llm_request_state
+        || entry.llm_request_sent_at_utc
+        || entry.llm_first_output_at_utc
+        || entry.llm_response_preview
+    );
+}
+
+function buildThinkingLiveLlmCallKey(entry, index) {
+    const llmRequest = (entry?.llm_request && typeof entry.llm_request === 'object')
+        ? entry.llm_request
+        : null;
+    const explicitCallId = normaliseThinkingActivityString(
+        entry?.call_id || entry?.llm_call_id || llmRequest?.call_id
+    );
+    if (explicitCallId) {
+        return `call:${explicitCallId}`;
+    }
+
+    const stage = normaliseThinkingActivityString(entry?.workflow_stage_id)
+        || normaliseThinkingActivityString(entry?.stage)
+        || normaliseThinkingActivityString(entry?.phase)
+        || 'unscoped';
+    const model = normaliseThinkingActivityString(entry?.model) || 'unknown_model';
+    const provider = normaliseThinkingActivityString(entry?.provider) || 'unknown_provider';
+    const attemptNo = Number.isFinite(entry?.fallback_attempt_no)
+        ? Number(entry.fallback_attempt_no)
+        : index;
+    const preparedAt = normaliseThinkingActivityString(entry?.llm_request_prepared_at_utc)
+        || normaliseThinkingActivityString(entry?.llm_request_sent_at_utc)
+        || normaliseThinkingActivityString(entry?.at_utc)
+        || String(index);
+    return [stage, provider, model, attemptNo, preparedAt].join('::');
+}
+
+function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
+    const llmRequest = (entry?.llm_request && typeof entry.llm_request === 'object')
+        ? entry.llm_request
+        : null;
+    const promptCapture = normaliseThinkingDiagnosticCapture(
+        entry?.prompt_preview || entry?.llm_prompt_preview || llmRequest?.prompt
+    );
+    const responseCapture = normaliseThinkingDiagnosticCapture(
+        entry?.response_preview || entry?.llm_response_preview
+    );
+    const state = normaliseThinkingActivityString(entry?.llm_request_state)
+        || normaliseThinkingActivityString(entry?.request_state)
+        || normaliseThinkingActivityString(entry?.status);
+    const sentAt = normaliseThinkingActivityString(entry?.llm_request_sent_at_utc);
+    const firstOutputAt = normaliseThinkingActivityString(entry?.llm_first_output_at_utc);
+    const completedAt = state.toLowerCase() === 'completed'
+        ? normaliseThinkingActivityString(entry?.at_utc)
+        : '';
+    const atUtc = firstOutputAt
+        || completedAt
+        || sentAt
+        || normaliseThinkingActivityString(entry?.llm_request_prepared_at_utc)
+        || normaliseThinkingActivityString(entry?.at_utc);
+
+    const promptText = captureTextForThinkingLlmCallLog(promptCapture);
+    const responseText = captureTextForThinkingLlmCallLog(responseCapture);
+    const sequenceNo = Number.isFinite(entry?.sequence_no)
+        ? Number(entry.sequence_no)
+        : (Number.isFinite(existing?.sequence_no) ? Number(existing.sequence_no) : index + 1);
+
+    return {
+        sequence_no: sequenceNo,
+        stage: normaliseThinkingActivityString(entry?.workflow_stage_id)
+            || normaliseThinkingActivityString(entry?.stage)
+            || normaliseThinkingActivityString(entry?.phase)
+            || existing?.stage
+            || 'unscoped',
+        call_type: 'live_llm_call',
+        model: normaliseThinkingActivityString(entry?.model)
+            || normaliseThinkingActivityString(entry?.selected_model)
+            || existing?.model
+            || 'unknown model',
+        provider: normaliseThinkingActivityString(entry?.provider)
+            || normaliseThinkingActivityString(entry?.selected_provider)
+            || existing?.provider
+            || '',
+        at_utc: atUtc || existing?.at_utc || '',
+        started_at_utc: sentAt || existing?.started_at_utc || '',
+        completed_at_utc: completedAt || firstOutputAt || existing?.completed_at_utc || '',
+        duration_ms: Number.isFinite(entry?.duration_ms)
+            ? Math.max(0, Number(entry.duration_ms))
+            : (Number.isFinite(existing?.duration_ms) ? Number(existing.duration_ms) : null),
+        live_state: state || existing?.live_state || '',
+        prompt: promptText
+            ? {
+                text: promptText,
+                is_truncated: promptCapture?.preview_truncated === true
+            }
+            : (existing?.prompt || null),
+        response: responseText
+            ? {
+                text: responseText,
+                is_truncated: responseCapture?.preview_truncated === true
+            }
+            : (existing?.response || null),
+        unavailable_reason: responseText
+            ? ''
+            : (state.toLowerCase() === 'sent'
+                ? 'response pending'
+                : (existing?.unavailable_reason || 'response not recorded yet'))
+    };
+}
+
+function collectThinkingLiveLlmCallLogEntries(request) {
+    const diagnosticEvents = getThinkingDiagnosticEvents(request);
+    if (diagnosticEvents.length === 0) {
+        return [];
+    }
+
+    const byKey = new Map();
+    for (const [index, entry] of diagnosticEvents.entries()) {
+        if (!isThinkingLiveLlmDiagnosticEvent(entry)) {
+            continue;
+        }
+        const key = buildThinkingLiveLlmCallKey(entry, index);
+        byKey.set(key, mergeThinkingLiveLlmCallEvent(byKey.get(key), entry, index));
+    }
+
+    return Array.from(byKey.values())
+        .filter((entry) => entry.prompt || entry.response || entry.live_state)
+        .sort((left, right) => {
+            const leftAt = Date.parse(left.at_utc || left.started_at_utc || '');
+            const rightAt = Date.parse(right.at_utc || right.started_at_utc || '');
+            if (Number.isNaN(leftAt) || Number.isNaN(rightAt) || leftAt === rightAt) {
+                return Number(left.sequence_no || 0) - Number(right.sequence_no || 0);
+            }
+            return leftAt - rightAt;
+        });
+}
+
+function combineThinkingLlmCallLogEntries(liveEntries, archivedEntries, archiveLoaded) {
+    const live = Array.isArray(liveEntries) ? liveEntries : [];
+    const archived = Array.isArray(archivedEntries) ? archivedEntries : [];
+    if (!archiveLoaded) {
+        return live;
+    }
+    if (live.length === 0) {
+        return archived;
+    }
+
+    const archivedKeys = new Set(archived.map((entry) => [
+        normaliseThinkingActivityString(entry?.stage),
+        normaliseThinkingActivityString(entry?.model),
+        normaliseThinkingActivityString(entry?.provider),
+        normaliseThinkingActivityString(entry?.started_at_utc)
+            || normaliseThinkingActivityString(entry?.at_utc)
+    ].join('::')));
+    const pendingLive = live.filter((entry) => {
+        if (entry?.response) {
+            return false;
+        }
+        const key = [
+            normaliseThinkingActivityString(entry?.stage),
+            normaliseThinkingActivityString(entry?.model),
+            normaliseThinkingActivityString(entry?.provider),
+            normaliseThinkingActivityString(entry?.started_at_utc)
+                || normaliseThinkingActivityString(entry?.at_utc)
+        ].join('::');
+        return !archivedKeys.has(key);
+    });
+    return [...archived, ...pendingLive];
+}
+
 function renderThinkingLlmCallLogEntriesHTML(entries) {
     if (!Array.isArray(entries) || entries.length === 0) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
@@ -8659,6 +8840,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
         const callType = normaliseThinkingActivityString(entry?.call_type) || 'llm_call';
         const model = normaliseThinkingActivityString(entry?.model) || 'unknown model';
         const provider = normaliseThinkingActivityString(entry?.provider);
+        const liveState = formatThinkingLlmRequestState(entry?.live_state);
         const promptText = normaliseThinkingActivityString(entry?.prompt?.text);
         const responseText = normaliseThinkingActivityString(entry?.response?.text);
         const promptTruncated = entry?.prompt?.is_truncated === true;
@@ -8675,6 +8857,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
             timestampLabel,
             formatThinkingActivityFallbackLabel(stage),
             formatThinkingActivityFallbackLabel(callType),
+            liveState,
             provider ? `${model} (${provider})` : model,
             durationMs !== null ? `${durationMs}ms` : ''
         ].filter(Boolean);
@@ -8718,6 +8901,8 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
 
     const buttonLabel = state.loaded ? 'Refresh full LLM call log' : 'View full LLM call log';
     const loadButton = `<button type="button" class="btn thinking-card-action" data-thinking-action="llm-call-log-toggle">${escapeHtml(buttonLabel)}</button>`;
+    const liveEntries = collectThinkingLiveLlmCallLogEntries(request);
+    const visibleEntries = combineThinkingLlmCallLogEntries(liveEntries, state.entries, state.loaded);
 
     const statusLine = state.loading
         ? '<div class="thinking-card-diagnostic-text">Loading full LLM call log...</div>'
@@ -8726,15 +8911,17 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
             : '');
 
     const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error))
-        ? '<div class="thinking-card-diagnostic-text">Full LLM call log not loaded yet.</div>'
+        ? (liveEntries.length > 0
+            ? '<div class="thinking-card-diagnostic-text">Showing live LLM events as they arrive. Load the full archived log for exact completed exchanges.</div>'
+            : '<div class="thinking-card-diagnostic-text">No live LLM events have arrived yet. Load the full archived log for completed exchanges.</div>')
         : '';
 
     const countLine = Number.isFinite(state.totalCount)
         ? `<div class="thinking-card-diagnostic-text">Showing ${escapeHtml(String((state.entries || []).length))} of ${escapeHtml(String(state.totalCount))} exchanges.</div>`
         : '';
 
-    const entriesHtml = state.loaded
-        ? renderThinkingLlmCallLogEntriesHTML(state.entries)
+    const entriesHtml = (state.loaded || liveEntries.length > 0)
+        ? renderThinkingLlmCallLogEntriesHTML(visibleEntries)
         : '';
 
     const loadMoreButton = state.loaded && state.hasMore

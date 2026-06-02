@@ -2857,7 +2857,7 @@ describe('thinking activity history normalisation', () => {
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
         expect(html).toContain('View full LLM call log');
-        expect(html).toContain('Full LLM call log not loaded yet.');
+        expect(html).toContain('No live LLM events have arrived yet.');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
     });
 
@@ -2874,8 +2874,110 @@ describe('thinking activity history normalisation', () => {
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
-        expect(html).toContain('Full LLM call log not loaded yet.');
+        expect(html).toContain('No live LLM events have arrived yet.');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
+    test('shows live LLM send events immediately in the interaction log', () => {
+        const request = {
+            clientRequestId: 'req-live-llm-log-sent',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                request_id: 'req-live-llm-log-sent',
+                status: 'llm_call_start',
+                stage: 'workflow_dispatch',
+                diagnostic_events: [
+                    {
+                        sequence_no: 11,
+                        at_utc: '2026-06-02T18:01:02.111000+00:00',
+                        status: 'llm_call_start',
+                        stage: 'workflow_dispatch',
+                        model: 'gpt-5.4-mini',
+                        provider: 'openai',
+                        fallback_attempt_no: 1,
+                        llm_request_state: 'sent',
+                        llm_request_prepared_at_utc: '2026-06-02T18:01:01.900000+00:00',
+                        llm_request_sent_at_utc: '2026-06-02T18:01:02.100000+00:00',
+                        llm_request: {
+                            prompt: {
+                                text: 'LIVE-PROMPT-SENT-IMMEDIATELY',
+                                char_count: 28
+                            }
+                        }
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Every LLM interaction (timestamped)');
+        expect(html).toContain('Showing live LLM events as they arrive.');
+        expect(html).toContain('LIVE-PROMPT-SENT-IMMEDIATELY');
+        expect(html).toContain('Sent');
+        expect(html).toContain('response pending');
+        expect(html).not.toContain('Full LLM call log not loaded yet.');
+    });
+
+    test('updates live LLM interaction rows when the response event arrives', () => {
+        const request = {
+            clientRequestId: 'req-live-llm-log-response',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                request_id: 'req-live-llm-log-response',
+                status: 'llm_call_chunk',
+                stage: 'workflow_dispatch',
+                diagnostic_events: [
+                    {
+                        sequence_no: 21,
+                        at_utc: '2026-06-02T18:02:01.000000+00:00',
+                        status: 'llm_call_start',
+                        stage: 'workflow_dispatch',
+                        model: 'gpt-5.4-mini',
+                        provider: 'openai',
+                        fallback_attempt_no: 1,
+                        llm_request_state: 'sent',
+                        llm_request_prepared_at_utc: '2026-06-02T18:02:00.900000+00:00',
+                        llm_request_sent_at_utc: '2026-06-02T18:02:01.000000+00:00',
+                        llm_request: {
+                            prompt: {
+                                text: 'LIVE-PROMPT-BEFORE-RESPONSE',
+                                char_count: 27
+                            }
+                        }
+                    },
+                    {
+                        sequence_no: 22,
+                        at_utc: '2026-06-02T18:02:05.250000+00:00',
+                        status: 'llm_call_chunk',
+                        stage: 'workflow_dispatch',
+                        model: 'gpt-5.4-mini',
+                        provider: 'openai',
+                        duration_ms: 4250,
+                        fallback_attempt_no: 1,
+                        llm_request_state: 'received_output',
+                        llm_request_prepared_at_utc: '2026-06-02T18:02:00.900000+00:00',
+                        llm_request_sent_at_utc: '2026-06-02T18:02:01.000000+00:00',
+                        llm_first_output_at_utc: '2026-06-02T18:02:05.250000+00:00',
+                        llm_request: {
+                            prompt: {
+                                text: 'LIVE-PROMPT-BEFORE-RESPONSE',
+                                char_count: 27
+                            }
+                        },
+                        llm_response_preview: {
+                            text: 'LIVE-RESPONSE-AFTER-OUTPUT',
+                            char_count: 26
+                        }
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('LIVE-PROMPT-BEFORE-RESPONSE');
+        expect(html).toContain('LIVE-RESPONSE-AFTER-OUTPUT');
+        expect(html).toContain('Received output');
+        expect(html).toContain('4250ms');
     });
 
     test('renders each LLM interaction with timestamp, model and exact prompt/response (JVNAUTOSCI-2385)', () => {
