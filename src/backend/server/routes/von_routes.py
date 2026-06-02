@@ -3178,6 +3178,14 @@ def _build_turn_execution_diagnostics(
         for entry in (llm_calls or [])
         if isinstance(entry, dict)
     ]
+    stage_authority_llm_entries: list[dict[str, Any]] = []
+    if isinstance(routing_aux_llm_calls, list):
+        stage_authority_llm_entries.extend(
+            cast(dict[str, Any], entry)
+            for entry in routing_aux_llm_calls
+            if isinstance(entry, dict)
+        )
+    stage_authority_llm_entries.extend(llm_call_entries)
     tool_observation_summary = derive_tool_observations_from_diagnostic_events(
         diagnostic_events,
         limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
@@ -3205,7 +3213,7 @@ def _build_turn_execution_diagnostics(
         tool_observation_summary=tool_observation_summary,
         workflow_discovery=workflow_payload,
         latest_progress=latest_progress,
-        aux_llm_calls=routing_aux_llm_calls,
+        aux_llm_calls=stage_authority_llm_entries,
         response_transformations=response_transformations,
         critic_verdict=critic_verdict,
         completion_gate_verdict=completion_gate_verdict,
@@ -3263,6 +3271,16 @@ def _build_turn_execution_diagnostics(
         ),
         "workflow_discovery": workflow_payload,
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
+        "llm_calls": llm_call_entries,
+        "aux_llm_calls": (
+            [
+                cast(dict[str, Any], entry)
+                for entry in routing_aux_llm_calls
+                if isinstance(entry, dict)
+            ]
+            if isinstance(routing_aux_llm_calls, list)
+            else []
+        ),
         "critic_verdict": (
             dict(critic_verdict) if isinstance(critic_verdict, Mapping) else None
         ),
@@ -6213,6 +6231,18 @@ def _finalise_llm_debug_info(
                 llm_debug_info.get("aux_llm_calls")
                 if isinstance(llm_debug_info.get("aux_llm_calls"), list)
                 else []
+            ),
+            llm_calls=(
+                llm_debug_info.get("llm_interaction", {}).get("calls")
+                if isinstance(llm_debug_info.get("llm_interaction"), dict)
+                and isinstance(
+                    llm_debug_info.get("llm_interaction", {}).get("calls"), list
+                )
+                else (
+                    llm_debug_info.get("llm_calls")
+                    if isinstance(llm_debug_info.get("llm_calls"), list)
+                    else []
+                )
             ),
             selected_workflow_trace=(
                 llm_debug_info.get("selected_workflow_trace")
@@ -11040,6 +11070,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
             exchange_blob_ref: Mapping[str, Any] | None = None,
+            prompt: Any = None,
+            response: Any = None,
         ) -> None:
             payload = {
                 "type": call_type,
@@ -11059,6 +11091,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["workflow_stage_id"] = workflow_stage_id.strip()
             if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
                 payload["exchange_blob_ref"] = dict(exchange_blob_ref)
+            if prompt is not None:
+                payload["prompt"] = prompt
+            if response is not None:
+                payload["response"] = response
             _stamp_llm_call_timestamps(payload, duration_ms=duration_ms)
             llm_interaction["calls"].append(payload)
 
@@ -11839,6 +11875,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 note="Screen backfill synthesis (legacy).",
                                 stage="screen_backfill",
                                 provider=_infer_provider(screen_model_used),
+                                prompt={
+                                    "text": (
+                                        "System:\n"
+                                        f"{synthesis_system}\n\nUser:\n{synthesis_user}"
+                                    ),
+                                    "char_count": len(
+                                        "System:\n"
+                                        f"{synthesis_system}\n\nUser:\n{synthesis_user}"
+                                    ),
+                                    "is_truncated": False,
+                                },
+                                response={
+                                    "text": str(synthesis_response),
+                                    "char_count": len(str(synthesis_response)),
+                                    "is_truncated": False,
+                                },
                             )
 
                         screen_candidate = _extract_screen_only(str(synthesis_response))
@@ -12779,6 +12831,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 usage=None,
                                 note="Buttonify quick-reply extraction (workflow unavailable).",
                                 stage="buttonify",
+                                prompt={
+                                    "text": buttonify_prompt,
+                                    "char_count": len(buttonify_prompt),
+                                    "is_truncated": False,
+                                },
+                                response={
+                                    "text": str(buttonify_response),
+                                    "char_count": len(str(buttonify_response)),
+                                    "is_truncated": False,
+                                },
                             )
                         except Exception as exc:
                             buttonify_error_class = type(exc).__name__
@@ -16918,17 +16980,31 @@ def _handle_orchestrator_missing_fallback(
         prompt_text, context=enhanced_context, model=model_name
     )
     llm_interaction["duration_ms"] = (time.perf_counter() - llm_start_perf) * 1000.0
-    llm_interaction["calls"] = [
-        {
-            "type": "llm.generate",
-            "model": model_name,
-            "provider": _infer_provider(model_name),
-            "duration_ms": llm_interaction["duration_ms"],
-            "usage": None,
-            "workflow": "von_generate",
-            "stage": "fallback_direct_llm",
-        }
-    ]
+    fallback_entry = {
+        "type": "llm.generate",
+        "model": model_name,
+        "provider": _infer_provider(model_name),
+        "duration_ms": llm_interaction["duration_ms"],
+        "usage": None,
+        "workflow": "von_generate",
+        "stage": "fallback_direct_llm",
+        "prompt": {
+            "text": prompt_text,
+            "char_count": len(prompt_text) if isinstance(prompt_text, str) else 0,
+            "is_truncated": False,
+        },
+        "request": {"context": enhanced_context},
+        "response": {
+            "text": str(response_text),
+            "char_count": len(str(response_text)),
+            "is_truncated": False,
+        },
+    }
+    _stamp_llm_call_timestamps(
+        fallback_entry,
+        duration_ms=llm_interaction["duration_ms"],
+    )
+    llm_interaction["calls"] = [fallback_entry]
     return response_text
 
 

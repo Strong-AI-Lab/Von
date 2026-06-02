@@ -2672,6 +2672,7 @@ describe('thinking activity history normalisation', () => {
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
         expect(html).toContain('View full LLM call log');
+        expect(html).toContain('Full LLM call log not loaded yet.');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
     });
 
@@ -2688,6 +2689,7 @@ describe('thinking activity history normalisation', () => {
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
+        expect(html).toContain('Full LLM call log not loaded yet.');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
     });
 

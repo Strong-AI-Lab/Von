@@ -1463,9 +1463,17 @@ def _extract_text_capture(value: Any) -> dict[str, Any] | None:
 def _extract_prompt_capture_from_entry(
     entry: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    direct_capture = _extract_text_capture(entry.get("prompt_capture"))
+    if direct_capture:
+        return direct_capture
+
     direct = _extract_text_capture(entry.get("prompt"))
     if direct:
         return direct
+
+    preview = _extract_text_capture(entry.get("prompt_preview"))
+    if preview:
+        return preview
 
     llm_request = entry.get("llm_request")
     if isinstance(llm_request, Mapping):
@@ -1485,9 +1493,17 @@ def _extract_prompt_capture_from_entry(
 def _extract_response_capture_from_entry(
     entry: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    direct_capture = _extract_text_capture(entry.get("response_capture"))
+    if direct_capture:
+        return direct_capture
+
     direct = _extract_text_capture(entry.get("response"))
     if direct:
         return direct
+
+    preview = _extract_text_capture(entry.get("response_preview"))
+    if preview:
+        return preview
 
     selected = entry.get("selected")
     if isinstance(selected, Mapping):
@@ -1514,11 +1530,14 @@ def _extract_llm_exchange_timestamps(
         or _safe_str(entry.get("at_utc"))
         or _safe_str(entry.get("timestamp"))
         or _safe_str(entry.get("ended_at_utc"))
+        or _safe_str(entry.get("llm_first_output_at_utc"))
     )
     started = (
         _safe_str(entry.get("started_at_utc"))
         or _safe_str(entry.get("requested_at_utc"))
         or _safe_str(entry.get("sent_at_utc"))
+        or _safe_str(entry.get("llm_request_sent_at_utc"))
+        or _safe_str(entry.get("llm_request_prepared_at_utc"))
     )
     if completed:
         timestamps["completed_at_utc"] = completed
@@ -1540,11 +1559,21 @@ def _normalise_llm_exchange_entry(
     response_capture = _extract_response_capture_from_entry(entry)
     exchange_timestamps = _extract_llm_exchange_timestamps(entry)
 
-    call_type = _safe_str(entry.get("type")) or _safe_str(entry.get("call_type"))
+    call_type = (
+        _safe_str(entry.get("type"))
+        or _safe_str(entry.get("call_type"))
+        or _safe_str(entry.get("entry_type"))
+    )
     stage = _safe_str(entry.get("stage")) or _safe_str(entry.get("phase"))
     workflow_stage_id = _safe_str(entry.get("workflow_stage_id"))
-    model = _safe_str(entry.get("model")) or _safe_str(entry.get("model_name"))
-    provider = _safe_str(entry.get("provider"))
+    model = (
+        _safe_str(entry.get("model"))
+        or _safe_str(entry.get("model_name"))
+        or _safe_str(entry.get("selected_model"))
+    )
+    provider = _safe_str(entry.get("provider")) or _safe_str(
+        entry.get("selected_provider")
+    )
     duration_ms = _safe_non_negative_int(entry.get("duration_ms"))
 
     exchange_blob_ref = entry.get("exchange_blob_ref")
@@ -1700,13 +1729,60 @@ def _collect_llm_exchange_entries(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
-    def _append_from_sequence(value: Any, source: str) -> None:
+    def _is_llm_interaction_aux_entry(entry: Mapping[str, Any]) -> bool:
+        call_type = (
+            _safe_str(entry.get("type"))
+            or _safe_str(entry.get("call_type"))
+            or _safe_str(entry.get("entry_type"))
+            or ""
+        ).lower()
+        if call_type.endswith("_skipped") or call_type.endswith("_skip"):
+            return False
+        if (
+            entry.get("prompt") is not None
+            or entry.get("prompt_preview") is not None
+            or entry.get("prompt_capture") is not None
+            or entry.get("response") is not None
+            or entry.get("response_preview") is not None
+            or entry.get("response_capture") is not None
+            or entry.get("request") is not None
+            or entry.get("selected") is not None
+            or entry.get("exchange_blob_ref") is not None
+        ):
+            return True
+        return call_type in {
+            "workflow_selector_prompt",
+            "workflow_selector",
+            "workflow_selector_override",
+            "workflow_model_policy_stage",
+            "workflow_model_policy",
+            "workflow_llm_call",
+            "workflow_llm_exchange",
+            "llm.generate",
+        }
+
+    def _append_from_sequence(
+        value: Any,
+        source: str,
+        *,
+        only_llm_interactions: bool = False,
+    ) -> None:
         if not isinstance(value, Sequence) or isinstance(
             value, (str, bytes, bytearray)
         ):
             return
         for index, raw in enumerate(value):
             if not isinstance(raw, Mapping):
+                continue
+            call_type = (
+                _safe_str(raw.get("type"))
+                or _safe_str(raw.get("call_type"))
+                or _safe_str(raw.get("entry_type"))
+                or ""
+            ).lower()
+            if call_type.endswith("_skipped") or call_type.endswith("_skip"):
+                continue
+            if only_llm_interactions and not _is_llm_interaction_aux_entry(raw):
                 continue
             rows.append(
                 _normalise_llm_exchange_entry(
@@ -1715,6 +1791,39 @@ def _collect_llm_exchange_entries(
                     source_index=index,
                 )
             )
+
+    def _append_stage_diagnostics(value: Any, source: str) -> None:
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return
+        source_counter = 0
+        for stage in value:
+            if not isinstance(stage, Mapping):
+                continue
+            stage_id = _safe_str(stage.get("stage_id"))
+            summaries = stage.get("llm_exchange_summaries")
+            if not isinstance(summaries, Sequence) or isinstance(
+                summaries, (str, bytes, bytearray)
+            ):
+                latest = stage.get("latest_llm_exchange")
+                summaries = [latest] if isinstance(latest, Mapping) else []
+            for raw in summaries:
+                if not isinstance(raw, Mapping):
+                    continue
+                entry = dict(raw)
+                if stage_id and not _safe_str(entry.get("workflow_stage_id")):
+                    entry["workflow_stage_id"] = stage_id
+                if stage_id and not _safe_str(entry.get("stage")):
+                    entry["stage"] = stage_id
+                rows.append(
+                    _normalise_llm_exchange_entry(
+                        entry,
+                        source=source,
+                        source_index=source_counter,
+                    )
+                )
+                source_counter += 1
 
     if isinstance(llm_debug, Mapping):
         llm_interaction = llm_debug.get("llm_interaction")
@@ -1726,6 +1835,21 @@ def _collect_llm_exchange_entries(
         _append_from_sequence(
             llm_debug.get("llm_calls"), "chat_history.llm_debug_data.llm_calls"
         )
+        embedded_diagnostics = llm_debug.get("turn_execution_diagnostics")
+        if isinstance(embedded_diagnostics, Mapping):
+            _append_from_sequence(
+                embedded_diagnostics.get("llm_calls"),
+                "chat_history.llm_debug_data.turn_execution_diagnostics.llm_calls",
+            )
+            _append_from_sequence(
+                embedded_diagnostics.get("aux_llm_calls"),
+                "chat_history.llm_debug_data.turn_execution_diagnostics.aux_llm_calls",
+                only_llm_interactions=True,
+            )
+            _append_stage_diagnostics(
+                embedded_diagnostics.get("stage_diagnostics"),
+                "chat_history.llm_debug_data.turn_execution_diagnostics.stage_diagnostics",
+            )
 
     if isinstance(turn_record, Mapping):
         execution = turn_record.get("execution")
@@ -1734,10 +1858,26 @@ def _collect_llm_exchange_entries(
                 execution.get("llm_calls"),
                 "mongo.turn_execution_records.execution.llm_calls",
             )
+            _append_from_sequence(
+                execution.get("aux_llm_calls"),
+                "mongo.turn_execution_records.execution.aux_llm_calls",
+                only_llm_interactions=True,
+            )
         _append_from_sequence(
             turn_record.get("llm_calls"),
             "mongo.turn_execution_records.llm_calls",
         )
+        _append_from_sequence(
+            turn_record.get("aux_llm_calls"),
+            "mongo.turn_execution_records.aux_llm_calls",
+            only_llm_interactions=True,
+        )
+        turn_record_diagnostics = turn_record.get("turn_execution_diagnostics")
+        if isinstance(turn_record_diagnostics, Mapping):
+            _append_stage_diagnostics(
+                turn_record_diagnostics.get("stage_diagnostics"),
+                "mongo.turn_execution_records.turn_execution_diagnostics.stage_diagnostics",
+            )
 
     aux_entries = _collect_routing_aux_entries(
         payload=None,
@@ -1747,14 +1887,7 @@ def _collect_llm_exchange_entries(
     for index, aux_entry in enumerate(aux_entries):
         if not isinstance(aux_entry, Mapping):
             continue
-        has_exchange = (
-            aux_entry.get("prompt") is not None
-            or aux_entry.get("response") is not None
-            or aux_entry.get("request") is not None
-            or aux_entry.get("selected") is not None
-        )
-        aux_type = _safe_str(aux_entry.get("type")) or ""
-        if not has_exchange and not aux_type.startswith("workflow_"):
+        if not _is_llm_interaction_aux_entry(aux_entry):
             continue
         rows.append(
             _normalise_llm_exchange_entry(
@@ -1764,9 +1897,35 @@ def _collect_llm_exchange_entries(
             )
         )
 
-    for index, row in enumerate(rows):
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[tuple[Any, ...]] = set()
+    for row in rows:
+        prompt = row.get("prompt")
+        response = row.get("response")
+        key = (
+            row.get("call_type"),
+            row.get("stage"),
+            row.get("workflow_stage_id"),
+            row.get("model"),
+            row.get("at_utc"),
+            (prompt.get("text") if isinstance(prompt, Mapping) else None),
+            (response.get("text") if isinstance(response, Mapping) else None),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(row)
+
+    def _sort_key(row: Mapping[str, Any]) -> tuple[int, str, int]:
+        timestamp = _safe_str(row.get("at_utc")) or ""
+        sequence = _safe_non_negative_int(row.get("source_index"))
+        return (0 if timestamp else 1, timestamp, sequence or 0)
+
+    deduped.sort(key=_sort_key)
+
+    for index, row in enumerate(deduped):
         row["sequence_no"] = index + 1
-    return rows
+    return deduped
 
 
 def get_turn_llm_call_log_payload(
@@ -1880,6 +2039,7 @@ def get_turn_llm_call_log_payload(
         "limit": bounded_limit,
         "returned_count": len(page),
         "total_count": total_count,
+        "empty_reason": "no_llm_interactions_recorded" if total_count == 0 else None,
         "has_more": has_more,
         "next_offset": (next_offset if has_more else None),
         "truncated_entry_count": truncated_entry_count,

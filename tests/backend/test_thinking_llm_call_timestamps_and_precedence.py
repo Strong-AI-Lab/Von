@@ -136,6 +136,217 @@ def test_normalise_llm_exchange_entry_surfaces_timestamps():
     assert payload["model"] == "gpt-5.4-mini"
 
 
+def test_normalise_llm_exchange_entry_accepts_preview_and_selected_model_aliases():
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _normalise_llm_exchange_entry,
+    )
+
+    entry = {
+        "entry_type": "live_llm_request",
+        "stage": "buttonify",
+        "selected_model": "gpt-5.4-mini",
+        "selected_provider": "openai",
+        "llm_request_sent_at_utc": "2026-06-02T16:45:51.542809Z",
+        "llm_first_output_at_utc": "2026-06-02T16:45:54.356959Z",
+        "prompt_preview": {
+            "text": "EXACT QUICK REPLY PROMPT",
+            "char_count": 24,
+            "is_truncated": False,
+        },
+        "response_preview": {
+            "text": "[\"Continue\", \"Stop\"]",
+            "char_count": 20,
+            "is_truncated": False,
+        },
+    }
+
+    payload = _normalise_llm_exchange_entry(entry, source="unit", source_index=0)
+
+    assert payload["call_type"] == "live_llm_request"
+    assert payload["model"] == "gpt-5.4-mini"
+    assert payload["provider"] == "openai"
+    assert payload["prompt"]["text"] == "EXACT QUICK REPLY PROMPT"
+    assert payload["response"]["text"] == "[\"Continue\", \"Stop\"]"
+    assert payload["started_at_utc"] == "2026-06-02T16:45:51.542809Z"
+    assert payload["at_utc"] == "2026-06-02T16:45:54.356959Z"
+
+
+def test_collect_llm_exchange_entries_salvages_embedded_stage_summaries():
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _collect_llm_exchange_entries,
+    )
+
+    llm_debug = {
+        "turn_execution_diagnostics": {
+            "stage_diagnostics": [
+                {
+                    "stage_id": "selected_workflow_execution",
+                    "llm_exchange_summaries": [
+                        {
+                            "entry_type": "live_llm_request",
+                            "selected_model": "gpt-5.4-mini",
+                            "prompt_preview": {"text": "PROMPT", "char_count": 6},
+                            "response_preview": {"text": "RESPONSE", "char_count": 8},
+                            "llm_first_output_at_utc": "2026-06-02T16:45:54Z",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    entries = _collect_llm_exchange_entries(llm_debug=llm_debug, turn_record=None)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["sequence_no"] == 1
+    assert entry["stage"] == "selected_workflow_execution"
+    assert entry["workflow_stage_id"] == "selected_workflow_execution"
+    assert entry["prompt"]["text"] == "PROMPT"
+    assert entry["response"]["text"] == "RESPONSE"
+
+
+def test_collect_llm_exchange_entries_filters_non_llm_embedded_aux_entries():
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _collect_llm_exchange_entries,
+    )
+
+    llm_debug = {
+        "turn_execution_diagnostics": {
+            "aux_llm_calls": [
+                {"type": "workflow_execution_trace", "workflow_id": "#V#demo"},
+                {"type": "workflow_stage", "stage": "screen_backfill"},
+                {
+                    "type": "workflow_selector",
+                    "stage": "selector_preparation",
+                    "prompt": {"text": "SELECTOR PROMPT"},
+                    "response": {"text": "SELECTOR RESPONSE"},
+                },
+            ]
+        }
+    }
+
+    entries = _collect_llm_exchange_entries(llm_debug=llm_debug, turn_record=None)
+
+    assert len(entries) == 1
+    assert entries[0]["call_type"] == "workflow_selector"
+    assert entries[0]["prompt"]["text"] == "SELECTOR PROMPT"
+
+
+def test_collect_llm_exchange_entries_filters_skipped_pseudo_calls():
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _collect_llm_exchange_entries,
+    )
+
+    llm_debug = {
+        "llm_interaction": {
+            "calls": [
+                {
+                    "type": "llm.generate_skipped",
+                    "stage": "narration",
+                    "model": "gemma4:31b",
+                },
+                {
+                    "type": "llm.generate",
+                    "stage": "narration",
+                    "model": "gemma4:31b",
+                    "prompt": {"text": "PROMPT"},
+                    "response": {"text": "RESPONSE"},
+                },
+            ]
+        }
+    }
+
+    entries = _collect_llm_exchange_entries(llm_debug=llm_debug, turn_record=None)
+
+    assert len(entries) == 1
+    assert entries[0]["call_type"] == "llm.generate"
+    assert entries[0]["prompt"]["text"] == "PROMPT"
+
+
+def test_finalise_llm_debug_info_passes_primary_llm_calls_to_record_builder(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    captured: dict = {}
+
+    def fake_build_turn_execution_record(**kwargs):
+        captured.update(kwargs)
+        return {
+            "request_id": kwargs.get("request_id"),
+            "workflow_routing_diagnostics": {},
+        }
+
+    monkeypatch.setattr(
+        von_routes,
+        "build_turn_execution_record",
+        fake_build_turn_execution_record,
+    )
+
+    llm_call = {
+        "type": "llm.generate",
+        "stage": "screen_backfill",
+        "prompt": {"text": "PROMPT"},
+        "response": {"text": "RESPONSE"},
+    }
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "req-2385",
+            "interaction_timestamp_utc": "2026-06-02T16:45:00Z",
+            "llm_interaction": {"calls": [llm_call]},
+            "aux_llm_calls": [],
+            "tool_invocations": [],
+        },
+        prompt_text="User prompt",
+        response_text="Assistant response",
+        session_id="session-1",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+    )
+
+    assert result["turn_execution_record"]["request_id"] == "req-2385"
+    assert captured["llm_calls"] == [llm_call]
+
+
+def test_build_turn_execution_record_persists_primary_and_aux_llm_logs():
+    from src.backend.services.turn_execution_record_service import (
+        build_turn_execution_record,
+    )
+
+    llm_call = {
+        "type": "llm.generate",
+        "stage": "narration",
+        "model": "gpt-5.4-mini",
+        "prompt": {"text": "PROMPT"},
+        "response": {"text": "RESPONSE"},
+    }
+    aux_call = {
+        "type": "workflow_selector",
+        "stage": "selector_preparation",
+        "prompt": {"text": "SELECTOR PROMPT"},
+        "response": {"text": "SELECTOR RESPONSE"},
+    }
+
+    record = build_turn_execution_record(
+        request_id="req-2385",
+        session_id="session-1",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="User prompt",
+        response_text="Assistant response",
+        interaction_timestamp_utc="2026-06-02T16:45:00Z",
+        llm_calls=[llm_call],
+        aux_llm_calls=[aux_call],
+        tool_invocations=[],
+    )
+
+    assert record["llm_calls"] == [llm_call]
+    assert record["aux_llm_calls"] == [aux_call]
+    assert record["execution"]["llm_calls"] == [llm_call]
+    assert record["execution"]["aux_llm_calls"] == [aux_call]
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-2381: evidence lineage + precedence contract
 # ---------------------------------------------------------------------------

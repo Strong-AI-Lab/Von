@@ -8658,6 +8658,10 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
             ? `<div class="thinking-card-diagnostic-text">${escapeHtml(state.error)}</div>`
             : '');
 
+    const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error))
+        ? '<div class="thinking-card-diagnostic-text">Full LLM call log not loaded yet.</div>'
+        : '';
+
     const countLine = Number.isFinite(state.totalCount)
         ? `<div class="thinking-card-diagnostic-text">Showing ${escapeHtml(String((state.entries || []).length))} of ${escapeHtml(String(state.totalCount))} exchanges.</div>`
         : '';
@@ -8675,6 +8679,7 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         <div class="thinking-card-diagnostic-actions">${loadButton}${loadMoreButton}</div>
         ${countLine}
         ${statusLine}
+        ${unloadedLine}
         ${entriesHtml}
     </section>`;
 }

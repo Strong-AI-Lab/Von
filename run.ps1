@@ -2357,7 +2357,18 @@ function Start-VonServer {
     if (Test-Path $NewLog) { Remove-Item $NewLog -Force -ErrorAction SilentlyContinue }
     if (Test-Path $serverErrLog) { Remove-Item $serverErrLog -Force -ErrorAction SilentlyContinue }
     try {
-        $proc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $NewLog -RedirectStandardError $serverErrLog
+        $startProcessArgs = @{
+            FilePath = $serverExe
+            ArgumentList = $serverArgs
+            WorkingDirectory = $Root
+            PassThru = $true
+            RedirectStandardOutput = $NewLog
+            RedirectStandardError = $serverErrLog
+        }
+        if ($IsWindows -or $PSVersionTable.PSEdition -eq 'Desktop') {
+            $startProcessArgs['WindowStyle'] = 'Hidden'
+        }
+        $proc = Start-Process @startProcessArgs
     }
     catch {
         Write-LauncherLog "ERROR: Failed to launch server process ($launchMode): $($_.Exception.Message)"
@@ -3635,8 +3646,14 @@ switch ($Action) {
         # Ensure Python runs in UTF-8 mode in foreground too
         $env:PYTHONUTF8 = '1'
         $env:PYTHONIOENCODING = 'utf-8'
-        $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-        & $pdm run python -u src\workflows\von\main.py
+        $projectPython = Get-ProjectPythonExecutable
+        if ($projectPython -and $projectPython -ne 'python') {
+            & $projectPython -u src/workflows/von/main.py --port "$Port"
+        }
+        else {
+            $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+            & $pdm run python -u src/workflows/von/main.py --port "$Port"
+        }
     }
     'stop' {
         if ($ExtraArgs -and $ExtraArgs.Count -ge 1) {

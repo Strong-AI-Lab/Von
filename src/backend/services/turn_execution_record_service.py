@@ -8451,6 +8451,17 @@ def build_turn_execution_record(
             effective_missing_prompt_tools
         )
 
+    llm_call_log = [
+        {str(key): value for key, value in entry.items() if isinstance(key, str)}
+        for entry in (llm_calls or ())
+        if isinstance(entry, Mapping)
+    ]
+    aux_llm_call_log = [
+        {str(key): value for key, value in entry.items() if isinstance(key, str)}
+        for entry in (aux_llm_calls or ())
+        if isinstance(entry, Mapping)
+    ]
+
     record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
         "request_id": _safe_str(request_id),
@@ -8487,10 +8498,14 @@ def build_turn_execution_record(
             else None
         ),
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
+        "llm_calls": llm_call_log,
+        "aux_llm_calls": aux_llm_call_log,
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,
             "search_evidence": search_evidence_payload,
+            "llm_calls": llm_call_log,
+            "aux_llm_calls": aux_llm_call_log,
             "summary": execution_summary_with_contract,
             "turn_expected_outcome_contract": (
                 dict(turn_expected_outcome_contract_payload)
