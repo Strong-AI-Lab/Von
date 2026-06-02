@@ -177,6 +177,10 @@ def test_e2e_dispatch_gate_falls_back_to_tool_pipeline_when_not_launchable(
         "src.backend.integrations.internal_mcp.orchestrator.get_model_registry_snapshot",
         return_value={},
         create=True,
+    ), patch.object(
+        mock_orchestrator,
+        "_resolve_workflow_id_for_action_contract",
+        return_value=TOOL_CALLING_WORKFLOW_ID,
     ), patch.object(mock_orchestrator, "execute_workflow") as mock_execute:
         _install_custom_workflow_selection(mock_orchestrator, wf_id, mock_llm)
         mock_execute.return_value = WorkflowResult(

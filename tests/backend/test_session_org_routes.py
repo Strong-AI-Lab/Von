@@ -243,6 +243,9 @@ def test_set_user_concept_accepts_real_header_authenticated_identity(app_client)
     _, client = app_client
     real_user_concept_id = "#V#person_hugues_van_assel_b0cd25a1"
 
+    with client.session_transaction() as sess:
+        sess["user_id"] = real_user_concept_id
+
     resp = client.post(
         "/von/api/session/set_user_concept",
         json={"user_concept_id": real_user_concept_id},
