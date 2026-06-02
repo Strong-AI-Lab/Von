@@ -3555,6 +3555,14 @@ export function __testOnly_renderThinkingCardBodyHTML(request = null, options = 
     return renderThinkingCardBodyHTML(request, options);
 }
 
+export function __testOnly_renderThinkingLlmCallLogEntriesHTML(entries = []) {
+    return renderThinkingLlmCallLogEntriesHTML(entries);
+}
+
+export function __testOnly_getThinkingPrecedenceTelemetry() {
+    return THINKING_PRECEDENCE_TELEMETRY;
+}
+
 export function __testOnly_refreshThinkingCardProgressUi(request, cardRoot = null) {
     return refreshThinkingCardProgressUi(request, cardRoot);
 }
@@ -3790,7 +3798,8 @@ function normaliseThinkingExecutionInterpretation(value, request = null) {
             || null,
         stage,
         stage_label: stageLabel,
-        post_processing_only: value.post_processing_only === true
+        post_processing_only: value.post_processing_only === true,
+        progress_contract: normaliseThinkingProgressContract(value.progress_contract)
     };
 }
 
@@ -3882,7 +3891,34 @@ function deriveThinkingExecutionInterpretation(request = null) {
         selected_workflow_name: selectedWorkflow?.workflow_name || null,
         stage,
         stage_label: stageLabel,
-        post_processing_only: postProcessingOnly
+        post_processing_only: postProcessingOnly,
+        progress_contract: normaliseThinkingProgressContract(latestProgress?.thinking_interpretability?.progress_contract)
+    };
+}
+
+function normaliseThinkingProgressContract(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const precedence = Array.isArray(value.default_row_precedence)
+        ? value.default_row_precedence
+            .map((item) => normaliseThinkingActivityString(item))
+            .filter(Boolean)
+        : [];
+    const sources = Array.isArray(value.selected_workflow_evidence_sources)
+        ? value.selected_workflow_evidence_sources
+            .map((item) => normaliseThinkingActivityString(item))
+            .filter(Boolean)
+        : [];
+    return {
+        schema_version: normaliseThinkingActivityString(value.schema_version) || 'thinking_progress_contract.v1',
+        precedence_rule: normaliseThinkingActivityString(value.precedence_rule)
+            || 'selected_workflow_execution_before_finalisation',
+        default_row_precedence: precedence,
+        selected_workflow_evidence_present: value.selected_workflow_evidence_present === true,
+        selected_workflow_evidence_sources: sources,
+        blocker_present: value.blocker_present === true,
+        finalisation_demoted: value.finalisation_demoted === true
     };
 }
 
@@ -4661,12 +4697,34 @@ function renderThinkingCardSynopsisItemHTML({ label, value, html = '', tone = ''
     </div>`;
 }
 
+const THINKING_PRECEDENCE_TELEMETRY = {
+    selected_workflow_execution_missing: 0,
+    last_violation: null
+};
+
+function recordThinkingPrecedenceViolation(detail = {}) {
+    THINKING_PRECEDENCE_TELEMETRY.selected_workflow_execution_missing += 1;
+    THINKING_PRECEDENCE_TELEMETRY.last_violation = {
+        at: Date.now(),
+        evidence_sources: Array.isArray(detail.evidence_sources) ? detail.evidence_sources : [],
+        finalisation_row_emitted: detail.finalisation_row_emitted === true
+    };
+    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(
+            'Thinking-card precedence violation: selected-workflow evidence present but no selected-workflow execution row was rendered in the default synopsis.',
+            THINKING_PRECEDENCE_TELEMETRY.last_violation
+        );
+    }
+}
+
 function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_MODE_DEFAULT) {
     if (!viewModel || typeof viewModel !== 'object') {
         return '';
     }
     const renderMode = normaliseThinkingCardMode(mode);
     const items = [];
+    let selectedWorkflowRowEmitted = false;
+    let finalisationRowEmitted = false;
     const addItem = (label, value, html = '', tone = '') => {
         const itemHtml = renderThinkingCardSynopsisItemHTML({ label, value, html, tone });
         if (itemHtml) {
@@ -4674,14 +4732,33 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
         }
     };
 
+    const progressContract = viewModel.execution_interpretation?.progress_contract || null;
+    const interpretationFamily = normaliseThinkingActivityString(
+        viewModel.execution_interpretation?.execution_family
+    );
+
     addItem('Objective', viewModel.objective_summary);
     addItem('Working on', viewModel.object_or_target_summary);
     addItem('Route', viewModel.route_summary, viewModel.route_summary_html);
     addItem('Evidence and context', viewModel.evidence_context_summary);
     addItem('Current activity', viewModel.current_activity);
+    if (renderThinkingCardSynopsisItemHTML({ label: 'Workflow execution', value: viewModel.workflow_execution_summary?.summary_text })) {
+        selectedWorkflowRowEmitted = true;
+    }
     addItem('Workflow execution', viewModel.workflow_execution_summary?.summary_text);
+    if (renderThinkingCardSynopsisItemHTML({ label: 'Verification', value: viewModel.workflow_verification_summary })) {
+        selectedWorkflowRowEmitted = true;
+    }
     addItem('Verification', viewModel.workflow_verification_summary);
+    if (interpretationFamily === 'selected_workflow'
+        && renderThinkingCardSynopsisItemHTML({ label: 'Execution path', value: viewModel.execution_interpretation?.identity_summary })) {
+        selectedWorkflowRowEmitted = true;
+    }
     addItem('Execution path', viewModel.execution_interpretation?.identity_summary);
+    if (viewModel.execution_interpretation?.post_processing_only === true
+        && renderThinkingCardSynopsisItemHTML({ label: 'Progress meaning', value: viewModel.execution_interpretation?.step_summary })) {
+        finalisationRowEmitted = true;
+    }
     addItem('Progress meaning', viewModel.execution_interpretation?.step_summary);
     addItem('Blocker', viewModel.execution_interpretation?.blocker_summary, '', 'warning');
 
@@ -4725,7 +4802,23 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
     if (items.length === 0) {
         return '';
     }
-    return `<section class="thinking-card-synopsis" data-thinking-progress-view-model="${escapeHtml(viewModel.schema_version || THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA)}">
+
+    const evidencePresent = progressContract?.selected_workflow_evidence_present === true
+        || interpretationFamily === 'selected_workflow';
+    const precedenceViolation = renderMode === THINKING_CARD_MODE_DEFAULT
+        && evidencePresent
+        && !selectedWorkflowRowEmitted;
+    if (precedenceViolation) {
+        recordThinkingPrecedenceViolation({
+            evidence_sources: progressContract?.selected_workflow_evidence_sources || [],
+            finalisation_row_emitted: finalisationRowEmitted
+        });
+    }
+    const violationAttr = precedenceViolation
+        ? ' data-thinking-precedence-violation="selected_workflow_execution_missing"'
+        : '';
+
+    return `<section class="thinking-card-synopsis" data-thinking-progress-view-model="${escapeHtml(viewModel.schema_version || THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA)}"${violationAttr}>
         ${items.join('')}
     </section>`;
 }
@@ -8407,7 +8500,7 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const llmCallLogHtml = renderThinkingLlmCallLogSectionHTML(request, mode);
     if (mode === THINKING_CARD_MODE_DEFAULT && synopsisHtml) {
-        return synopsisHtml + workflowStageHtml + renderToolHistoryHTML(request, mode);
+        return synopsisHtml + workflowStageHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
     const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
@@ -8471,6 +8564,23 @@ function ensureThinkingLlmCallLogState(request) {
     return request.thinkingLlmCallLog;
 }
 
+function formatThinkingLlmCallTimestamp(isoString) {
+    if (!isoString || typeof isoString !== 'string') {
+        return '';
+    }
+    const parsed = new Date(isoString);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
+    }
+    const base = parsed.toLocaleTimeString('en-NZ', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+    const millis = String(parsed.getMilliseconds()).padStart(3, '0');
+    return `${base}.${millis}`;
+}
+
 function renderThinkingLlmCallLogEntriesHTML(entries) {
     if (!Array.isArray(entries) || entries.length === 0) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
@@ -8488,9 +8598,14 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
         const responseTruncated = entry?.response?.is_truncated === true;
         const unavailableReason = normaliseThinkingActivityString(entry?.unavailable_reason);
         const durationMs = Number.isFinite(entry?.duration_ms) ? Math.max(0, Number(entry.duration_ms)) : null;
+        const atUtc = normaliseThinkingActivityString(entry?.at_utc)
+            || normaliseThinkingActivityString(entry?.completed_at_utc)
+            || normaliseThinkingActivityString(entry?.started_at_utc);
+        const timestampLabel = formatThinkingLlmCallTimestamp(atUtc);
 
         const headerBits = [
             seq !== null ? `#${seq}` : '',
+            timestampLabel,
             formatThinkingActivityFallbackLabel(stage),
             formatThinkingActivityFallbackLabel(callType),
             provider ? `${model} (${provider})` : model,
@@ -8510,7 +8625,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
             ? `<div class="thinking-card-diagnostic-section-title">Response${responseMeta}</div><pre class="thinking-card-diagnostic-pre"><code>${escapeHtml(responseText)}</code></pre>`
             : '';
 
-        return `<details class="thinking-card-diagnostic" data-thinking-diagnostic-key="llm_exchange_${escapeHtml(String(seq || 'x'))}">
+        return `<details class="thinking-card-diagnostic" data-thinking-diagnostic-key="llm_exchange_${escapeHtml(String(seq || 'x'))}" data-thinking-llm-call-at-utc="${escapeHtml(atUtc || '')}" data-thinking-llm-call-model="${escapeHtml(model)}">
             <summary>${escapeHtml(headerBits.join(' · '))}</summary>
             <div class="thinking-card-diagnostic-content">
                 ${promptBlock}
@@ -8522,10 +8637,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
 }
 
 function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
-    const renderMode = normaliseThinkingCardMode(mode);
-    if (renderMode === THINKING_CARD_MODE_DEFAULT) {
-        return '';
-    }
+    normaliseThinkingCardMode(mode);
 
     const requestId = resolveThinkingRequestIdForLlmCallLog(request);
     if (!requestId) {
@@ -8559,7 +8671,7 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         : '';
 
     return `<section class="thinking-card-diagnostic-section thinking-card-llm-call-log">
-        <div class="thinking-card-diagnostic-section-title">Full LLM call log</div>
+        <div class="thinking-card-diagnostic-section-title">Every LLM interaction (timestamped)</div>
         <div class="thinking-card-diagnostic-actions">${loadButton}${loadMoreButton}</div>
         ${countLine}
         ${statusLine}

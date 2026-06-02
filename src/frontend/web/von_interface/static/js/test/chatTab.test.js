@@ -54,6 +54,8 @@ import {
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
+    __testOnly_renderThinkingLlmCallLogEntriesHTML,
+    __testOnly_getThinkingPrecedenceTelemetry,
     __testOnly_refreshThinkingCardProgressUi,
     __testOnly_getThinkingCardMode,
     __testOnly_bindConceptSelectionClicks,
@@ -2479,6 +2481,102 @@ describe('thinking activity history normalisation', () => {
         expect(html).not.toContain('Prepared input');
     });
 
+    test('default synopsis honours the progress precedence contract without violation when evidence is rendered (JVNAUTOSCI-2381)', () => {
+        const telemetry = __testOnly_getThinkingPrecedenceTelemetry();
+        const before = telemetry.selected_workflow_execution_missing;
+        const request = {
+            clientRequestId: 'req-contract-ok',
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-contract-ok',
+                status: 'heartbeat',
+                stage: 'response_finalising',
+                progress_view_model: {
+                    schema_version: 'thinking_card_progress_view_model.v1',
+                    source_authority: 'derived_from_live_telemetry',
+                    objective_summary: 'Run the workflow',
+                    workflow_execution_summary: {
+                        workflow_id: '#V#demo',
+                        terminal_status: 'completed',
+                        observed: true,
+                        summary_text: 'Workflow #V#demo running with terminal status completed'
+                    },
+                    execution_interpretation: {
+                        schema_version: 'thinking_interpretability.v1',
+                        execution_family: 'selected_workflow',
+                        progress_kind: 'workflow_execution',
+                        identity_summary: 'Selected workflow: Demo (#V#demo)',
+                        step_summary: 'Finalising response after Fetch concept',
+                        selected_workflow_id: '#V#demo',
+                        selected_workflow_name: 'Demo',
+                        post_processing_only: true,
+                        progress_contract: {
+                            schema_version: 'thinking_progress_contract.v1',
+                            precedence_rule: 'selected_workflow_execution_before_finalisation',
+                            default_row_precedence: ['selected_workflow_execution', 'finalisation', 'auxiliary'],
+                            selected_workflow_evidence_present: true,
+                            selected_workflow_evidence_sources: ['progress.selected_workflow_id'],
+                            blocker_present: false,
+                            finalisation_demoted: true
+                        }
+                    }
+                }
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Workflow execution');
+        expect(html).not.toContain('data-thinking-precedence-violation');
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+        expect(text.indexOf('Workflow execution')).toBeLessThan(text.indexOf('Progress meaning'));
+        expect(telemetry.selected_workflow_execution_missing).toBe(before);
+    });
+
+    test('default synopsis flags a precedence violation when selected-workflow evidence is present but omitted (JVNAUTOSCI-2381)', () => {
+        const telemetry = __testOnly_getThinkingPrecedenceTelemetry();
+        const before = telemetry.selected_workflow_execution_missing;
+        const request = {
+            clientRequestId: 'req-contract-violation',
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-contract-violation',
+                status: 'heartbeat',
+                stage: 'response_finalising',
+                progress_view_model: {
+                    schema_version: 'thinking_card_progress_view_model.v1',
+                    source_authority: 'derived_from_live_telemetry',
+                    objective_summary: 'Run the workflow',
+                    current_activity: 'Assembling the final response payload.',
+                    execution_interpretation: {
+                        schema_version: 'thinking_interpretability.v1',
+                        execution_family: 'chat_response',
+                        progress_kind: 'post_processing',
+                        identity_summary: 'Direct chat response',
+                        step_summary: 'Finalising response',
+                        post_processing_only: true,
+                        progress_contract: {
+                            schema_version: 'thinking_progress_contract.v1',
+                            precedence_rule: 'selected_workflow_execution_before_finalisation',
+                            default_row_precedence: ['selected_workflow_execution', 'finalisation', 'auxiliary'],
+                            selected_workflow_evidence_present: true,
+                            selected_workflow_evidence_sources: ['workflow_routing_diagnostics.selected_workflow_id'],
+                            blocker_present: false,
+                            finalisation_demoted: false
+                        }
+                    }
+                }
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('data-thinking-precedence-violation="selected_workflow_execution_missing"');
+        expect(telemetry.selected_workflow_execution_missing).toBe(before + 1);
+        expect(telemetry.last_violation).not.toBeNull();
+        expect(telemetry.last_violation.evidence_sources).toContain('workflow_routing_diagnostics.selected_workflow_id');
+    });
+
     test('surfaces live prepared and sent LLM request previews in stage diagnostics', () => {
         const request = {
             clientRequestId: 'req-live-llm',
@@ -2572,9 +2670,66 @@ describe('thinking activity history normalisation', () => {
         };
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
-        expect(html).toContain('Full LLM call log');
+        expect(html).toContain('Every LLM interaction (timestamped)');
         expect(html).toContain('View full LLM call log');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
+    test('makes the LLM interaction log accessible from the default-mode thinking card', () => {
+        const request = {
+            clientRequestId: 'req-llm-log-default',
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-llm-log-default',
+                status: 'pending',
+                stage: 'workflow_dispatch'
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Every LLM interaction (timestamped)');
+        expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
+    test('renders each LLM interaction with timestamp, model and exact prompt/response (JVNAUTOSCI-2385)', () => {
+        const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
+            {
+                sequence_no: 1,
+                stage: 'workflow_dispatch',
+                call_type: 'llm.generate',
+                model: 'gpt-5.4-mini',
+                provider: 'openai',
+                at_utc: '2026-06-01T03:04:05.123456+00:00',
+                duration_ms: 842,
+                prompt: { text: 'EXACT-PROMPT-TEXT-ALPHA', is_truncated: false },
+                response: { text: 'EXACT-RESPONSE-TEXT-BETA', is_truncated: false }
+            }
+        ]);
+
+        expect(entriesHtml).toContain('gpt-5.4-mini');
+        expect(entriesHtml).toContain('EXACT-PROMPT-TEXT-ALPHA');
+        expect(entriesHtml).toContain('EXACT-RESPONSE-TEXT-BETA');
+        expect(entriesHtml).toContain('data-thinking-llm-call-at-utc="2026-06-01T03:04:05.123456+00:00"');
+        expect(entriesHtml).toContain('data-thinking-llm-call-model="gpt-5.4-mini"');
+        // Timestamp is rendered in the summary header (seconds precision present).
+        expect(entriesHtml).toMatch(/\d{2}:\d{2}:\d{2}\.\d{3}/);
+    });
+
+    test('marks a truncated LLM exchange so the exact-text expectation is visible (JVNAUTOSCI-2385)', () => {
+        const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
+            {
+                sequence_no: 2,
+                stage: 'tool_use',
+                call_type: 'llm.generate',
+                model: 'llama-3.3-70b',
+                at_utc: '2026-06-01T03:05:06.000000+00:00',
+                prompt: { text: 'partial prompt', is_truncated: true },
+                response: { text: 'partial response', is_truncated: true }
+            }
+        ]);
+
+        expect(entriesHtml).toContain('Prompt (truncated)');
+        expect(entriesHtml).toContain('Response (truncated)');
     });
 
     test('renders loaded full LLM call log entries and load-more control', () => {

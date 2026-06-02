@@ -115,6 +115,9 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
+from ...workflows.llm_call_telemetry import (
+    stamp_llm_call_timestamps as _stamp_llm_call_timestamps,
+)
 from .generate_route_support import (
     _GenerateConversationTurnInstanceState,
     _build_generate_error_body,
@@ -1044,6 +1047,102 @@ def _latest_non_finalising_stage_from_path(payload: Mapping[str, Any]) -> str | 
     return None
 
 
+def _selected_workflow_evidence_sources(
+    payload: Mapping[str, Any],
+) -> list[str]:
+    """Return the lineage of where selected-workflow evidence was resolved from.
+
+    Supports the default-mode Thinking-card precedence contract (JVNAUTOSCI-2381)
+    so the frontend and diagnostics can see why a selected-workflow execution row
+    is required before auxiliary finalisation rows.
+    """
+
+    sources: list[str] = []
+
+    def _note(source: str, present: bool) -> None:
+        if present and source not in sources:
+            sources.append(source)
+
+    _note("progress.selected_workflow_id", bool(_progress_str(payload.get("selected_workflow_id"))))
+
+    routing_diagnostics = payload.get("workflow_routing_diagnostics")
+    if isinstance(routing_diagnostics, Mapping):
+        _note(
+            "workflow_routing_diagnostics.selected_workflow_id",
+            bool(_progress_str(routing_diagnostics.get("selected_workflow_id"))),
+        )
+        dispatch = routing_diagnostics.get("dispatch")
+        if isinstance(dispatch, Mapping):
+            _note(
+                "workflow_routing_diagnostics.dispatch.dispatch_workflow_id",
+                bool(_progress_str(dispatch.get("dispatch_workflow_id"))),
+            )
+
+    selected_execution = payload.get("selected_workflow_execution")
+    if isinstance(selected_execution, Mapping):
+        _note(
+            "selected_workflow_execution",
+            bool(
+                _progress_str(selected_execution.get("selected_workflow_id"))
+                or _progress_str(selected_execution.get("workflow_id"))
+            ),
+        )
+
+    workflow_stage_path = payload.get("workflow_stage_path")
+    if isinstance(workflow_stage_path, Mapping):
+        path = workflow_stage_path.get("path")
+        _note(
+            "workflow_stage_path",
+            isinstance(path, list) and len(path) > 0,
+        )
+
+    return sources
+
+
+def _build_thinking_progress_precedence_contract(
+    *,
+    selected_workflow_id: str | None,
+    has_tool_evidence: bool,
+    blocker_summary: str | None,
+    post_processing_only: bool,
+    evidence_sources: Sequence[str],
+) -> dict[str, Any]:
+    """Build the canonical default-mode Thinking-card row precedence contract.
+
+    The default Thinking-card view must foreground the selected workflow's
+    execution before auxiliary finalisation rows. This contract declares the
+    deterministic ordering plus the evidence lineage so the frontend renders
+    workflow-first rather than synthesising its own order, and so a precedence
+    violation can be detected and counted (JVNAUTOSCI-2381).
+    """
+
+    selected_workflow_evidence_present = bool(selected_workflow_id) or bool(
+        evidence_sources
+    )
+
+    precedence: list[str] = []
+    if selected_workflow_evidence_present:
+        precedence.append("selected_workflow_execution")
+    elif has_tool_evidence:
+        precedence.append("tool_execution")
+    if blocker_summary:
+        precedence.append("blocker_next_action")
+    precedence.append("finalisation")
+    precedence.append("auxiliary")
+
+    return {
+        "schema_version": "thinking_progress_contract.v1",
+        "precedence_rule": "selected_workflow_execution_before_finalisation",
+        "default_row_precedence": precedence,
+        "selected_workflow_evidence_present": selected_workflow_evidence_present,
+        "selected_workflow_evidence_sources": list(evidence_sources),
+        "blocker_present": bool(blocker_summary),
+        "finalisation_demoted": bool(
+            post_processing_only and selected_workflow_evidence_present
+        ),
+    }
+
+
 def _build_thinking_interpretability_payload(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1119,6 +1218,18 @@ def _build_thinking_interpretability_payload(
     if not blocker_summary:
         blocker_summary = _progress_str(payload.get("failure_kind"))
 
+    post_processing_only = bool(
+        stage == "response_finalising" and latest_core_stage is not None
+    )
+    evidence_sources = _selected_workflow_evidence_sources(payload)
+    progress_contract = _build_thinking_progress_precedence_contract(
+        selected_workflow_id=selected_workflow_id,
+        has_tool_evidence=has_tool_evidence,
+        blocker_summary=blocker_summary or None,
+        post_processing_only=post_processing_only,
+        evidence_sources=evidence_sources,
+    )
+
     return {
         "schema_version": "thinking_interpretability.v1",
         "execution_family": execution_family,
@@ -1130,9 +1241,8 @@ def _build_thinking_interpretability_payload(
         "selected_workflow_name": selected_workflow_name,
         "stage": stage,
         "stage_label": stage_label,
-        "post_processing_only": bool(
-            stage == "response_finalising" and latest_core_stage is not None
-        ),
+        "post_processing_only": post_processing_only,
+        "progress_contract": progress_contract,
     }
 
 
@@ -10949,6 +11059,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["workflow_stage_id"] = workflow_stage_id.strip()
             if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
                 payload["exchange_blob_ref"] = dict(exchange_blob_ref)
+            _stamp_llm_call_timestamps(payload, duration_ms=duration_ms)
             llm_interaction["calls"].append(payload)
 
         def _emit_stage_progress(info: Mapping[str, Any] | None) -> None:

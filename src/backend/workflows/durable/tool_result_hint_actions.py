@@ -41,6 +41,7 @@ from ..action_registry import (
     WorkflowActionRequest,
     WorkflowActionResult,
 )
+from ..llm_call_telemetry import stamp_llm_call_timestamps
 
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ def _build_model_policy_generate(
                 entry["workflow_stage_id"] = workflow_stage_id.strip()
             if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
                 entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+            stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
             llm_calls.append(entry)
 
         stage = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -730,7 +731,9 @@ def _selector_core_evidence_sparse(value: Any) -> bool:
 def _collect_aux_llm_entries_from_value(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [_string_key_mapping(item) or {} for item in value if isinstance(item, Mapping)]
+    return [
+        _string_key_mapping(item) or {} for item in value if isinstance(item, Mapping)
+    ]
 
 
 def _collect_routing_aux_entries(
@@ -811,7 +814,9 @@ def _workflow_routing_from_sources(
             ),
         }
 
-    workflow_selection = _first_mapping_by_key("workflow_selection", payload, turn_record)
+    workflow_selection = _first_mapping_by_key(
+        "workflow_selection", payload, turn_record
+    )
     if isinstance(workflow_selection, Mapping):
         selector = workflow_selection.get("selector")
         return {
@@ -842,7 +847,9 @@ def _workflow_discovery_from_sources(
     direct = _first_mapping_by_key("workflow_discovery", payload, llm_debug)
     if direct is not None:
         return direct
-    workflow_selection = _first_mapping_by_key("workflow_selection", payload, turn_record)
+    workflow_selection = _first_mapping_by_key(
+        "workflow_selection", payload, turn_record
+    )
     if isinstance(workflow_selection, Mapping) and isinstance(
         workflow_selection.get("workflow_discovery"), Mapping
     ):
@@ -1453,7 +1460,9 @@ def _extract_text_capture(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _extract_prompt_capture_from_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+def _extract_prompt_capture_from_entry(
+    entry: Mapping[str, Any],
+) -> dict[str, Any] | None:
     direct = _extract_text_capture(entry.get("prompt"))
     if direct:
         return direct
@@ -1489,6 +1498,38 @@ def _extract_response_capture_from_entry(
     return None
 
 
+def _extract_llm_exchange_timestamps(
+    entry: Mapping[str, Any],
+) -> dict[str, str]:
+    """Pull wall-clock timestamps recorded on an LLM call entry.
+
+    Supports the Thinking-card timestamped LLM interaction list (JVNAUTOSCI-2385).
+    Reads canonical keys stamped at recording time, falling back to common
+    alternatives carried by chat-history or aux entries.
+    """
+
+    timestamps: dict[str, str] = {}
+    completed = (
+        _safe_str(entry.get("completed_at_utc"))
+        or _safe_str(entry.get("at_utc"))
+        or _safe_str(entry.get("timestamp"))
+        or _safe_str(entry.get("ended_at_utc"))
+    )
+    started = (
+        _safe_str(entry.get("started_at_utc"))
+        or _safe_str(entry.get("requested_at_utc"))
+        or _safe_str(entry.get("sent_at_utc"))
+    )
+    if completed:
+        timestamps["completed_at_utc"] = completed
+    if started:
+        timestamps["started_at_utc"] = started
+    canonical = completed or started
+    if canonical:
+        timestamps["at_utc"] = canonical
+    return timestamps
+
+
 def _normalise_llm_exchange_entry(
     entry: Mapping[str, Any],
     *,
@@ -1497,6 +1538,7 @@ def _normalise_llm_exchange_entry(
 ) -> dict[str, Any]:
     prompt_capture = _extract_prompt_capture_from_entry(entry)
     response_capture = _extract_response_capture_from_entry(entry)
+    exchange_timestamps = _extract_llm_exchange_timestamps(entry)
 
     call_type = _safe_str(entry.get("type")) or _safe_str(entry.get("call_type"))
     stage = _safe_str(entry.get("stage")) or _safe_str(entry.get("phase"))
@@ -1538,6 +1580,9 @@ def _normalise_llm_exchange_entry(
         "model": model,
         "provider": provider,
         "duration_ms": duration_ms,
+        "at_utc": exchange_timestamps.get("at_utc"),
+        "started_at_utc": exchange_timestamps.get("started_at_utc"),
+        "completed_at_utc": exchange_timestamps.get("completed_at_utc"),
         "prompt": prompt_capture,
         "response": response_capture,
         "prompt_recorded": prompt_recorded,
@@ -1548,6 +1593,106 @@ def _normalise_llm_exchange_entry(
     return {key: item for key, item in payload.items() if item is not None}
 
 
+def _coerce_exchange_blob_text(value: Any) -> dict[str, Any] | None:
+    """Coerce a hydrated exchange prompt/response body into a text capture.
+
+    Reuses :func:`_extract_text_capture` for strings and text-bearing mappings,
+    falling back to a JSON rendering for structured request/response bodies so
+    the exact exchange is preserved (JVNAUTOSCI-2385).
+    """
+
+    capture = _extract_text_capture(value)
+    if capture:
+        return capture
+    if isinstance(value, (Mapping, list, tuple)):
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            return None
+        rendered = rendered.strip()
+        if not rendered or rendered in {"{}", "[]"}:
+            return None
+        return {
+            "text": rendered,
+            "char_count": len(rendered),
+            "is_truncated": False,
+        }
+    return None
+
+
+def _hydrate_llm_exchange_blob_into_entry(entry: dict[str, Any]) -> None:
+    """Populate prompt/response/model/timestamps from an exchange blob ref.
+
+    Resolves ``exchange_blob_ref`` for entries whose exact prompt or response
+    was offloaded to the blob store, restoring the full exchange in the
+    Thinking-card timestamped LLM interaction list (JVNAUTOSCI-2385). No-ops
+    when the entry has no blob reference or already carries both bodies.
+    """
+
+    blob_ref = entry.get("exchange_blob_ref")
+    if not isinstance(blob_ref, Mapping) or not blob_ref:
+        return
+    if entry.get("prompt") is not None and entry.get("response") is not None:
+        return
+
+    try:
+        from .llm_exchange_blob_writer import read_llm_exchange_blob_ref
+
+        body = read_llm_exchange_blob_ref(blob_ref)
+    except Exception:
+        body = None
+    if not isinstance(body, Mapping):
+        return
+
+    blob_truncated = bool(body.get("truncated"))
+
+    if entry.get("prompt") is None:
+        request_body = body.get("request")
+        prompt_value = (
+            request_body.get("prompt") if isinstance(request_body, Mapping) else None
+        )
+        prompt_capture = _coerce_exchange_blob_text(prompt_value)
+        if prompt_capture is not None:
+            if blob_truncated:
+                prompt_capture["is_truncated"] = True
+            entry["prompt"] = prompt_capture
+            entry["prompt_recorded"] = True
+
+    if entry.get("response") is None:
+        response_capture = _coerce_exchange_blob_text(body.get("response"))
+        if response_capture is not None:
+            if blob_truncated:
+                response_capture["is_truncated"] = True
+            entry["response"] = response_capture
+            entry["response_recorded"] = True
+
+    if not _safe_str(entry.get("model")):
+        model = _safe_str(body.get("model"))
+        if model:
+            entry["model"] = model
+    if not _safe_str(entry.get("provider")):
+        provider = _safe_str(body.get("provider"))
+        if provider:
+            entry["provider"] = provider
+
+    completed = _safe_str(body.get("first_output_at_utc")) or _safe_str(
+        body.get("captured_at_utc")
+    )
+    started = _safe_str(body.get("sent_at_utc")) or _safe_str(
+        body.get("prepared_at_utc")
+    )
+    if completed:
+        entry.setdefault("completed_at_utc", completed)
+        if not _safe_str(entry.get("at_utc")):
+            entry["at_utc"] = completed
+    if started:
+        entry.setdefault("started_at_utc", started)
+
+    if entry.get("prompt") is not None and entry.get("response") is not None:
+        entry.pop("unavailable_reason", None)
+        entry["exchange_source"] = "blob_ref_hydrated"
+
+
 def _collect_llm_exchange_entries(
     *,
     llm_debug: Mapping[str, Any] | None,
@@ -1556,7 +1701,9 @@ def _collect_llm_exchange_entries(
     rows: list[dict[str, Any]] = []
 
     def _append_from_sequence(value: Any, source: str) -> None:
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
             return
         for index, raw in enumerate(value):
             if not isinstance(raw, Mapping):
@@ -1576,7 +1723,9 @@ def _collect_llm_exchange_entries(
                 llm_interaction.get("calls"),
                 "chat_history.llm_debug_data.llm_interaction.calls",
             )
-        _append_from_sequence(llm_debug.get("llm_calls"), "chat_history.llm_debug_data.llm_calls")
+        _append_from_sequence(
+            llm_debug.get("llm_calls"), "chat_history.llm_debug_data.llm_calls"
+        )
 
     if isinstance(turn_record, Mapping):
         execution = turn_record.get("execution")
@@ -1645,7 +1794,9 @@ def get_turn_llm_call_log_payload(
             else None
         ),
     )
-    if not isinstance(history_context, Mapping) and not isinstance(turn_record, Mapping):
+    if not isinstance(history_context, Mapping) and not isinstance(
+        turn_record, Mapping
+    ):
         return None
 
     llm_debug = (
@@ -1653,7 +1804,9 @@ def get_turn_llm_call_log_payload(
         if isinstance(history_context, Mapping)
         else None
     )
-    llm_debug_mapping = _safe_mapping(llm_debug) if isinstance(llm_debug, Mapping) else None
+    llm_debug_mapping = (
+        _safe_mapping(llm_debug) if isinstance(llm_debug, Mapping) else None
+    )
 
     all_entries = _collect_llm_exchange_entries(
         llm_debug=llm_debug_mapping,
@@ -1667,6 +1820,14 @@ def get_turn_llm_call_log_payload(
     page = all_entries[bounded_offset : bounded_offset + bounded_limit]
     next_offset = bounded_offset + len(page)
     has_more = next_offset < total_count
+
+    # Surface the exact prompt/response for the returned page by hydrating any
+    # exchange blob references (JVNAUTOSCI-2385). Blob I/O is bounded to the
+    # current page only. Page entries are the same dict objects held in
+    # ``all_entries`` (list slicing shares references), so the truncated and
+    # timestamped counts below reflect the hydrated values.
+    for entry in page:
+        _hydrate_llm_exchange_blob_into_entry(entry)
 
     truncated_entry_count = sum(
         1
@@ -1722,6 +1883,9 @@ def get_turn_llm_call_log_payload(
         "has_more": has_more,
         "next_offset": (next_offset if has_more else None),
         "truncated_entry_count": truncated_entry_count,
+        "timestamped_entry_count": sum(
+            1 for entry in all_entries if _safe_str(entry.get("at_utc"))
+        ),
         "entries": page,
         "diagnostics_source": (
             "chat_history.llm_debug_data"

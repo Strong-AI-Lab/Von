@@ -57,7 +57,6 @@ from .blob_store import (
     resolve_blob_store_backend_from_env,
 )
 
-
 _logger = logging.getLogger(__name__)
 
 
@@ -201,9 +200,7 @@ def _build_s3_store_for_bucket(bucket: str) -> S3BlobStore:
         )
         or "us-east-1"
     )
-    session_token = _first_non_empty_env(
-        "VON_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"
-    )
+    session_token = _first_non_empty_env("VON_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN")
     addressing_style = _first_non_empty_env("VON_S3_ADDRESSING_STYLE") or "path"
     return S3BlobStore(
         bucket=bucket,
@@ -293,17 +290,23 @@ class LlmExchangeBlobWriter:
         date_path = _utc_date_path()
         call_uuid = uuid.uuid4().hex
         if turn_execution_id and isinstance(turn_execution_id, str):
-            safe_turn = "".join(
-                ch if ch.isalnum() or ch in {"-", "_"} else "_"
-                for ch in turn_execution_id.strip()
-            )[:64] or "unknown_turn"
+            safe_turn = (
+                "".join(
+                    ch if ch.isalnum() or ch in {"-", "_"} else "_"
+                    for ch in turn_execution_id.strip()
+                )[:64]
+                or "unknown_turn"
+            )
         else:
             safe_turn = "unknown_turn"
         if stage and isinstance(stage, str) and stage.strip():
-            safe_stage = "".join(
-                ch if ch.isalnum() or ch in {"-", "_"} else "_"
-                for ch in stage.strip()
-            )[:48] or "unknown_stage"
+            safe_stage = (
+                "".join(
+                    ch if ch.isalnum() or ch in {"-", "_"} else "_"
+                    for ch in stage.strip()
+                )[:48]
+                or "unknown_stage"
+            )
         else:
             safe_stage = "unknown_stage"
         return (
@@ -381,9 +384,7 @@ class LlmExchangeBlobWriter:
             }
 
         request_size_bytes = len(
-            json.dumps(request_payload, ensure_ascii=False, default=str).encode(
-                "utf-8"
-            )
+            json.dumps(request_payload, ensure_ascii=False, default=str).encode("utf-8")
         )
         response_size_bytes = len(
             json.dumps(response_payload, ensure_ascii=False, default=str).encode(
@@ -419,9 +420,7 @@ class LlmExchangeBlobWriter:
             compressed = gzip.compress(serialised)
         except Exception as exc:
             return {
-                "error": (
-                    f"llm_exchange_gzip_failed: {type(exc).__name__}: {exc}"
-                ),
+                "error": (f"llm_exchange_gzip_failed: {type(exc).__name__}: {exc}"),
             }
 
         key = self._build_key(
@@ -447,9 +446,7 @@ class LlmExchangeBlobWriter:
                 exc,
             )
             return {
-                "error": (
-                    f"llm_exchange_blob_put_failed: {type(exc).__name__}: {exc}"
-                ),
+                "error": (f"llm_exchange_blob_put_failed: {type(exc).__name__}: {exc}"),
                 "key": key,
             }
 
@@ -514,9 +511,7 @@ def get_llm_exchange_blob_writer_from_env() -> LlmExchangeBlobWriter | None:
         except Exception:
             size_cap = DEFAULT_SIZE_CAP_BYTES
 
-    key_prefix = (
-        os.environ.get("VON_LLM_EXCHANGE_KEY_PREFIX") or DEFAULT_KEY_PREFIX
-    )
+    key_prefix = os.environ.get("VON_LLM_EXCHANGE_KEY_PREFIX") or DEFAULT_KEY_PREFIX
 
     _writer_singleton = LlmExchangeBlobWriter(
         store=store,
@@ -525,6 +520,80 @@ def get_llm_exchange_blob_writer_from_env() -> LlmExchangeBlobWriter | None:
     )
     _writer_singleton_resolved = True
     return _writer_singleton
+
+
+def read_llm_exchange_blob_ref(ref: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Load and decode an LLM exchange blob written by :class:`LlmExchangeBlobWriter`.
+
+    Returns the parsed exchange body (schema ``llm_exchange_blob.v1``) carrying
+    the exact ``request`` (prompt + context) and ``response`` bodies, or
+    ``None`` when the reference is unusable or the blob cannot be resolved.
+
+    This is the read counterpart to :meth:`LlmExchangeBlobWriter.write`. It
+    resolves the blob store the same way the writer does (dedicated container
+    if configured, otherwise the shared store) and falls back to the local
+    spillway queue when the blob has been enqueued but not yet migrated. Like
+    the writer, it never raises; resolution failures return ``None`` so callers
+    can degrade gracefully.
+
+    Supports JVNAUTOSCI-2385: surfacing the exact prompt and response in the
+    Thinking-card timestamped LLM interaction list.
+    """
+
+    if not isinstance(ref, Mapping):
+        return None
+    if ref.get("error"):
+        return None
+    key = ref.get("key")
+    if not isinstance(key, str) or not key.strip():
+        return None
+    clean_key = key.strip()
+    backend_hint = ref.get("backend")
+
+    try:
+        store: BlobStore | None = _build_dedicated_blob_store_for_llm_exchanges()
+        if store is None:
+            store = get_blob_store_from_env()
+    except Exception:
+        store = None
+
+    compressed: bytes | None = None
+    if store is not None and backend_hint != "spillway":
+        try:
+            compressed = store.get_bytes(clean_key)
+        except Exception:
+            compressed = None
+
+    if compressed is None:
+        try:
+            from .blob_spillway import get_blob_spillway_queue
+
+            compressed = get_blob_spillway_queue().get_local_bytes(clean_key)
+        except Exception:
+            compressed = None
+
+    if compressed is None and store is not None and backend_hint == "spillway":
+        try:
+            compressed = store.get_bytes(clean_key)
+        except Exception:
+            compressed = None
+
+    if compressed is None:
+        return None
+
+    try:
+        raw_bytes = gzip.decompress(compressed)
+    except Exception:
+        raw_bytes = compressed
+
+    try:
+        body = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        return None
+
+    if isinstance(body, dict):
+        return body
+    return None
 
 
 def reset_llm_exchange_blob_writer_singleton_for_tests() -> None:
@@ -541,5 +610,6 @@ __all__ = [
     "LlmExchangeBlobWriter",
     "SCHEMA_VERSION",
     "get_llm_exchange_blob_writer_from_env",
+    "read_llm_exchange_blob_ref",
     "reset_llm_exchange_blob_writer_singleton_for_tests",
 ]

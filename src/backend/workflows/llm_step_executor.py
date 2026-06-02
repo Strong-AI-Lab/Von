@@ -27,6 +27,7 @@ from ..services.required_tool_obligation_service import (
 from ..services.workflow_llm_duration_stats_service import (
     record_workflow_llm_step_duration_observation,
 )
+from .llm_call_telemetry import stamp_llm_call_timestamps
 from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .definitions import (
@@ -1292,6 +1293,7 @@ def _append_llm_call(
         entry["duration_ms"] = duration_ms
     if note:
         entry["note"] = note
+    stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
     llm_calls.append(entry)
     return entry
 
@@ -1787,6 +1789,7 @@ def _run_gateway_llm_step_no_tools(
             entry["workflow_stage_id"] = workflow_stage_id.strip()
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+        stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(
             request,
@@ -2145,6 +2148,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             entry["workflow_stage_id"] = workflow_stage_id.strip()
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+        stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(
             request,
