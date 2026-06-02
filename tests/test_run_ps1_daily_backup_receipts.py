@@ -38,7 +38,11 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _run_daily_backup_probe(
-    tmp_path: Path, setup_script: str, *, executable: str | None = None
+    tmp_path: Path,
+    setup_script: str,
+    *,
+    executable: str | None = None,
+    enable_daily_backup: bool = True,
 ) -> dict[str, Any]:
     run_dir = tmp_path / ".run"
     backup_root = tmp_path / "backups"
@@ -55,7 +59,11 @@ New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:BackupRoot | Out-Null
 Remove-Item Env:VON_BACKUP_SCHEDULE -ErrorAction SilentlyContinue
 Remove-Item Env:VON_BACKUP_INTERVAL_HOURS -ErrorAction SilentlyContinue
+Remove-Item Env:VON_ENABLE_DAILY_BACKUP -ErrorAction SilentlyContinue
 Remove-Item Env:VON_DISABLE_DAILY_BACKUP -ErrorAction SilentlyContinue
+if ({'$true' if enable_daily_backup else '$false'}) {{
+    $env:VON_ENABLE_DAILY_BACKUP = '1'
+}}
 $script:Logs = New-Object System.Collections.Generic.List[string]
 $script:StartJobCalls = 0
 $script:LastStartJobArgs = @()
@@ -97,6 +105,20 @@ $result = [ordered]@{{
         else None
     )
     return payload
+
+
+def test_run_ps1_daily_backup_skips_by_default_without_host_opt_in(
+    tmp_path: Path,
+) -> None:
+    result = _run_daily_backup_probe(
+        tmp_path,
+        "$env:VON_BACKUP_INTERVAL_HOURS = '1'",
+        enable_daily_backup=False,
+    )
+
+    assert result["start_job_calls"] == 0
+    assert result["receipt"] is None
+    assert any("automatic backups disabled" in line for line in result["logs"])
 
 
 def test_run_ps1_repairs_launcher_receipt_from_newer_validated_artifact_receipt(

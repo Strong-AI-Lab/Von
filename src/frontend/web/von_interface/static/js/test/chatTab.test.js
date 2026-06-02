@@ -1687,6 +1687,191 @@ describe('loadChatHistory degraded handling', () => {
         expect(document.getElementById('scrollableField').textContent).not.toContain('Kept content');
         expect(document.getElementById('historyBanner').classList.contains('hidden')).toBe(true);
     });
+
+    test('renders retained thinking card for history turns with embedded diagnostics', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [
+                            {
+                                role: 'assistant',
+                                content: 'Done',
+                                timestamp: '2026-06-02T14:13:00Z',
+                                history_location: {
+                                    session_id: 'session-1',
+                                    history_index: 4
+                                },
+                                llm_debug_data: {
+                                    timestamp: '2026-06-02T14:13:00Z',
+                                    turn_execution_diagnostics: {
+                                        request_id: 'request-history-card',
+                                        latest_progress: {
+                                            status: 'completed',
+                                            phase_label: 'Complete',
+                                            result_summary: 'Tool call finished'
+                                        },
+                                        workflow_stage_path: {
+                                            path: [
+                                                {
+                                                    stage_id: 'selected_workflow_execution',
+                                                    stage_label: 'Selected workflow execution'
+                                                }
+                                            ]
+                                        },
+                                        stage_diagnostics: [
+                                            {
+                                                stage_id: 'selected_workflow_execution',
+                                                status: 'success',
+                                                tool: 'get_text_relations_summary',
+                                                result_summary: 'Loaded relations'
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        ],
+                        segments_returned: 1,
+                        total_segments: 1,
+                        has_more_history: false
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const loaded = await __testOnly_loadChatHistory({ segments: 1 });
+
+        expect(loaded).toBe(true);
+        const card = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
+        expect(card).not.toBeNull();
+        expect(card.textContent).toContain('Selected workflow execution');
+        expect(card.textContent).toContain('Every LLM interaction');
+        expect(card.textContent).toContain('View full LLM call log');
+    });
+
+    test('loads history debug on demand and renders retained thinking card for locator-only turns', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        Object.assign(navigator, {
+            clipboard: { writeText: jest.fn().mockResolvedValue(undefined) }
+        });
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [
+                            {
+                                role: 'assistant',
+                                content: 'Done',
+                                timestamp: '2026-06-02T14:13:00Z',
+                                history_location: {
+                                    session_id: 'session-1',
+                                    history_index: 4
+                                }
+                            }
+                        ],
+                        segments_returned: 1,
+                        total_segments: 1,
+                        has_more_history: false
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/debug?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        success: true,
+                        llm_debug_data: {
+                            timestamp: '2026-06-02T14:13:00Z',
+                            turn_execution_diagnostics: {
+                                request_id: 'request-history-on-demand-card',
+                                latest_progress: {
+                                    status: 'completed',
+                                    phase_label: 'Complete',
+                                    result_summary: 'Debug loaded'
+                                },
+                                workflow_stage_path: {
+                                    path: [
+                                        {
+                                            stage_id: 'selected_workflow_execution',
+                                            stage_label: 'Selected workflow execution'
+                                        }
+                                    ]
+                                },
+                                stage_diagnostics: [
+                                    {
+                                        stage_id: 'selected_workflow_execution',
+                                        status: 'success',
+                                        tool: 'find_relations_with_argument'
+                                    }
+                                ]
+                            }
+                        }
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await __testOnly_loadChatHistory({ segments: 1 });
+
+        expect(document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper')).toBeNull();
+
+        document.querySelector('.llm-debug-button').click();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const card = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
+        expect(card).not.toBeNull();
+        expect(card.textContent).toContain('Selected workflow execution');
+        expect(card.textContent).toContain('Every LLM interaction');
+    });
 });
 
 describe('thinking liveness presentation', () => {

@@ -1090,11 +1090,17 @@ function Resolve-BackupReceiptCompletedAtUtc {
 
     if ($Value -is [datetimeoffset]) {
         $completedAtUtc = $Value.UtcDateTime
-        $completedAtText = $completedAtUtc.ToString('o')
+        $completedAtText = $completedAtUtc.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
     }
     elseif ($Value -is [datetime]) {
         $completedAtUtc = $Value.ToUniversalTime()
-        $completedAtText = $completedAtUtc.ToString('o')
+        $completedAtText = $completedAtUtc.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
     }
     else {
         $completedAtText = [string]$Value
@@ -1191,7 +1197,9 @@ function Set-LauncherBackupSuccessReceipt {
 
     if ($LegacySentinelPath) {
         try {
-            [string]$Receipt.completed_at_utc | Set-Content -LiteralPath $LegacySentinelPath -Encoding ASCII
+            $completedAtInfo = Resolve-BackupReceiptCompletedAtUtc -Value $Receipt.completed_at_utc
+            $completedAtText = if ($completedAtInfo) { [string]$completedAtInfo.CompletedAtText } else { [string]$Receipt.completed_at_utc }
+            $completedAtText | Set-Content -LiteralPath $LegacySentinelPath -Encoding ASCII
         }
         catch {
             Write-LauncherLog "[$Context] WARN: could not mirror legacy sentinel '$LegacySentinelPath': $($_.Exception.Message)"
@@ -1305,7 +1313,9 @@ function Invoke-DailyBackupIfDue {
     <#
         Performs a non-blocking (background job) backup of the remote DB
         at most once per interval (default 24h) using scripts/backup_von_db.py.
-        Skips if VON_DISABLE_DAILY_BACKUP is set to a truthy value.
+        Skips unless VON_ENABLE_DAILY_BACKUP is set to a truthy value.
+        Also skips if VON_DISABLE_DAILY_BACKUP is set to a truthy value, for
+        compatibility with existing local opt-out configurations.
         Supports schedule via VON_BACKUP_SCHEDULE (cron-like string) using 5 fields:
         "<minute> <hour> <day-of-month> <month> <day-of-week>".
         Falls back to interval-based schedule via VON_BACKUP_INTERVAL_HOURS if the cron
@@ -1314,7 +1324,12 @@ function Invoke-DailyBackupIfDue {
         source and mirrors the legacy ISO8601 UTC sentinel during migration.
         Logs are prefixed with [daily-backup].
     #>
-    if ($env:VON_DISABLE_DAILY_BACKUP -and $env:VON_DISABLE_DAILY_BACKUP.ToString() -match '^(1|true|yes)$') {
+    if (-not (Test-TruthySetting $env:VON_ENABLE_DAILY_BACKUP)) {
+        Write-LauncherLog '[daily-backup] Skip: automatic backups disabled. Set VON_ENABLE_DAILY_BACKUP=1 on a designated backup host to enable.'
+        return
+    }
+    if (Test-TruthySetting $env:VON_DISABLE_DAILY_BACKUP) {
+        Write-LauncherLog '[daily-backup] Skip: disabled via VON_DISABLE_DAILY_BACKUP.'
         return
     }
     $schedule = $null

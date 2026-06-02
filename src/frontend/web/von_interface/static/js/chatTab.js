@@ -2937,6 +2937,72 @@ function renderRetainedThinkingCardForTurn(request, turnId) {
     return true;
 }
 
+function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
+    if (!turnId || !debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const diagnostics = (
+        debugData.turn_execution_diagnostics
+        && typeof debugData.turn_execution_diagnostics === 'object'
+    )
+        ? debugData.turn_execution_diagnostics
+        : null;
+    if (!diagnostics) {
+        return null;
+    }
+
+    const timestampMs = parseIsoTimestampMs(
+        debugData.timestamp || diagnostics.completed_at_utc || diagnostics.started_at_utc
+    );
+    const requestId = normaliseThinkingActivityString(diagnostics.request_id || debugData.request_id);
+    const request = {
+        clientRequestId: requestId || null,
+        resultTurnId: turnId,
+        promptRaw: normaliseThinkingActivityString(debugData.prompt || debugData.user_prompt) || '',
+        activityHistory: [],
+        progressEvents: [],
+        phaseHistory: [],
+        toolUseProgressHistory: [],
+        workflowDiscovery: null,
+        workflowSelection: null,
+        workflowRoutingDiagnostics: null,
+        workflowStagePath: null,
+        stageDiagnostics: [],
+        timingBreakdown: null,
+        latestProgress: null,
+        turnExecutionDiagnostics: diagnostics,
+        turn_execution_diagnostics: diagnostics,
+        thinkingCardMode: loadStoredThinkingCardMode(),
+        thinkingStartedAtMs: Number.isFinite(timestampMs) ? timestampMs : null,
+        thinkingFinishedAtMs: Date.now(),
+        thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_finished' })
+    };
+
+    syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics);
+    if (!request.latestProgress || typeof request.latestProgress !== 'object') {
+        request.turnOutcome = {
+            status: 'completed',
+            phase_label: 'Turn completed',
+            summary: 'Loaded from Conversation history'
+        };
+        request.latestProgress = buildSyntheticThinkingTerminalProgress(request);
+    }
+    request.thinkingCardDisplayState = reduceThinkingCardDisplayState(
+        request.thinkingCardDisplayState,
+        { type: 'progress_update', progress: request.latestProgress || { status: 'completed' } }
+    );
+    return request;
+}
+
+function renderRetainedThinkingCardForDebugData(turnId, debugData) {
+    const request = buildRetainedThinkingCardRequestFromDebugData(turnId, debugData);
+    if (!request) {
+        return false;
+    }
+    return renderRetainedThinkingCardForTurn(request, turnId);
+}
+
 function persistFinishedThinkingCard(request) {
     const snapshot = createThinkingCardHistorySnapshot(request);
     if (!snapshot) {
@@ -8527,6 +8593,7 @@ function resolveThinkingRequestIdForLlmCallLog(request) {
         request?.clientRequestId,
         request?.latestProgress?.request_id,
         request?.turnExecutionDiagnostics?.request_id,
+        request?.turn_execution_diagnostics?.request_id,
         request?.latestProgress?.turn_execution_diagnostics?.request_id
     ];
     for (const candidate of candidates) {
@@ -21975,6 +22042,9 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             }
 
             appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
+            if (msg.role === 'assistant') {
+                renderRetainedThinkingCardForDebugData(turnId, llmDebugData.get(turnId));
+            }
         }
     });
 
@@ -28799,6 +28869,7 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                     : (existing?.timestamp || null)
             };
             setLlmDebugDataEntry(turnId, merged);
+            renderRetainedThinkingCardForDebugData(turnId, merged);
             return merged;
         } catch (err) {
             console.warn('[chatTab] Failed to load LLM debug data:', err);

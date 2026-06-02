@@ -20,9 +20,10 @@ We keep backup execution as local-operator tooling (not a remote server endpoint
 
 1. Manual backup action (`.\run.ps1 backup`) requires explicit opt-in via `VON_ENABLE_BACKUP_ACTION=1`.
 2. Backup apply mode is blocked when output resolves under the repository root, unless explicitly overridden with `VON_ALLOW_BACKUP_IN_REPO=1`.
-3. Scheduled daily backups use the same in-repo output safety check and skip if unsafe.
-4. Backup artefacts in `backups/` are blocked by pre-commit guardrails.
-5. Default backup root resolution prefers non-repository locations:
+3. Scheduled daily backups are disabled by default and require `VON_ENABLE_DAILY_BACKUP=1` on the designated backup host.
+4. Scheduled daily backups use the same in-repo output safety check and skip if unsafe.
+5. Backup artefacts in `backups/` are blocked by pre-commit guardrails.
+6. Default backup root resolution prefers non-repository locations:
    - `VON_BACKUP_ROOT`
    - `W:\von_backups`
    - `%LOCALAPPDATA%\Von\backups`
@@ -31,6 +32,7 @@ We keep backup execution as local-operator tooling (not a remote server endpoint
 ## Required operator configuration
 
 - Set `VON_BACKUP_ROOT` to a path outside the repository.
+- Enable scheduled backups only on the intended backup host: `VON_ENABLE_DAILY_BACKUP=1`.
 - Enable manual backup only when needed: `VON_ENABLE_BACKUP_ACTION=1`.
 - Leave `VON_ALLOW_BACKUP_IN_REPO` unset (or `0`) unless you intentionally accept repository-path risk.
 
@@ -38,6 +40,7 @@ Example:
 
 ```powershell
 $env:VON_BACKUP_ROOT = 'C:\von_backups'
+$env:VON_ENABLE_DAILY_BACKUP = '1'
 $env:VON_ENABLE_BACKUP_ACTION = '1'
 .\run.ps1 backup -BackupTag manual
 ```
@@ -147,4 +150,3 @@ store = get_blob_store_from_env()
 for k in store.list('mongo_backups'): print(k)
 "
 ```
-
