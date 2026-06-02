@@ -34730,15 +34730,18 @@ class InternalMCPChatOrchestrator:
                         )
                     )
                 else:
+                    from ...languagemodels.local_model_preflight import llm_stage
+
                     llm_start = time.perf_counter()
-                    direct_response_text = env.llm_client.generate(
-                        prompt_text,
-                        context=cast(
-                            Optional[List[Dict[str, Any]]],
-                            list(plain_response_context),
-                        ),
-                        model=default_model,
-                    )
+                    with llm_stage("plain_response"):
+                        direct_response_text = env.llm_client.generate(
+                            prompt_text,
+                            context=cast(
+                                Optional[List[Dict[str, Any]]],
+                                list(plain_response_context),
+                            ),
+                            model=default_model,
+                        )
                     duration_ms = (time.perf_counter() - llm_start) * 1000.0
                     if callable(record_llm_call):
                         record_llm_call(
@@ -34831,6 +34834,21 @@ class InternalMCPChatOrchestrator:
                 completed = False
                 final_state = "plain_response_failed"
                 failure_detail = str(exc)
+                # JVNAUTOSCI-2384: record a typed preflight warning in turn
+                # telemetry when the direct-response model was judged too large
+                # for the host, so later diagnosis can see model/footprint/
+                # capacity/stage instead of only an opaque failure string.
+                try:
+                    from ...languagemodels.local_model_preflight import (
+                        ModelTooLargeForHostError,
+                    )
+
+                    if isinstance(exc, ModelTooLargeForHostError) and isinstance(
+                        aux_llm_calls, list
+                    ):
+                        aux_llm_calls.append(exc.verdict.as_telemetry())
+                except Exception:
+                    pass
                 child_outputs = {
                     "selected_execution_mode": "direct_response",
                     "workflow_execution_summary": {

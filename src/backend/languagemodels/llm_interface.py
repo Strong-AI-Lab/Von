@@ -833,6 +833,18 @@ class OllamaClient(LLMInterface):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        # JVNAUTOSCI-2384: preflight whether this local model plausibly fits the
+        # host before attempting to load it.  Fails closed with a clear reason
+        # rather than letting the runtime crash under memory pressure.  Never
+        # substitutes a different model.
+        from .local_model_preflight import enforce_local_model_preflight
+
+        enforce_local_model_preflight(
+            target_model,
+            ollama_client=self.client,
+            host=self.host,
+        )
+
         logger.info(f"Generating response using Ollama model: {target_model}")
         if _should_log_llm_io():
             logger.debug(
