@@ -3601,6 +3601,10 @@ export function __testOnly_buildThinkingDiagnosticsPayload(request = null) {
     return buildThinkingDiagnosticsPayload(request);
 }
 
+export function __testOnly_buildThinkingDiagnosticsLocatorPayload(request = null) {
+    return buildThinkingDiagnosticsLocatorPayload(request);
+}
+
 export function __testOnly_formatThinkingEtaText(progress) {
     return formatThinkingEtaText(progress);
 }
@@ -26851,15 +26855,16 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     if (!request) {
         return false;
     }
-    const payload = buildThinkingDiagnosticsPayload(request);
+    const payload = buildThinkingDiagnosticsLocatorPayload(request);
     if (!payload) {
+        showToast('No diagnostic reference is available yet.', 'info');
         return false;
     }
 
     const text = JSON.stringify(payload, null, 2);
     if (button instanceof HTMLButtonElement) {
         return copyJsonTextWithButtonFeedback(button, text, {
-            fallbackLabel: 'Copy diagnostic snapshot'
+            fallbackLabel: 'Copy reference'
         });
     }
 
@@ -29324,7 +29329,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
         }
     }
 
-    // Prefer turn_execution_diagnostics for parity with active-turn Copy diagnostics.
+    // Prefer turn_execution_diagnostics for parity with active-turn diagnostic references.
     popup.dataset.currentDebugData = await buildLlmDebugClipboardJsonForTurn(turnId, options) || '';
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
@@ -29556,7 +29561,6 @@ function buildThinkingDiagnosticsLocatorPayload(request) {
         generated_at_utc: new Date().toISOString(),
         request_id: requestId,
         chat_session_id: activeChatSessionId || null,
-        prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
         namespace_context: namespaceContext,
         latest_progress_summary: latestProgress ? {
             status: latestProgress.status || null,

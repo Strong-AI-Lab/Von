@@ -124,7 +124,10 @@ describe('chat conversation info copy control', () => {
             steps: expect.any(Array),
             notes: expect.any(Array)
         }));
-        expect(showToast).toHaveBeenCalledWith('Copied conversation info JSON.', 'success');
+        expect(showToast).toHaveBeenCalledWith(
+            'Copied conversation info JSON (server locator unavailable; local summary only).',
+            'info'
+        );
     });
 
     test('copies deterministic conversation info JSON when turn telemetry exists', async () => {
@@ -179,8 +182,8 @@ describe('chat conversation info copy control', () => {
         }));
         expect(copiedPayload.turns).toBeUndefined();
         expect(showToast).toHaveBeenCalledWith(
-            'Copied conversation info JSON.',
-            'success'
+            'Copied conversation info JSON (server locator unavailable; local summary only).',
+            'info'
         );
     });
 });
