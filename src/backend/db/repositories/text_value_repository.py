@@ -42,11 +42,14 @@ class TextValuesRepository:
         sort: Optional[List] = None,
         skip: int = 0,
         limit: int = 0,
+        max_time_ms: Optional[int] = None,
     ):
         coll = TextValuesRepository.collection()
         if coll is None:
             return []
         cursor = coll.find(filter, projection)
+        if max_time_ms and max_time_ms > 0:
+            cursor = cursor.max_time_ms(max_time_ms)
         if sort:
             cursor = cursor.sort(sort)
         if skip:
@@ -144,11 +147,14 @@ class TextRelationsRepository:
         sort: Optional[List] = None,
         skip: int = 0,
         limit: int = 0,
+        max_time_ms: Optional[int] = None,
     ):
         coll = TextRelationsRepository.collection()
         if coll is None:
             return []
         cursor = coll.find(filter, projection)
+        if max_time_ms and max_time_ms > 0:
+            cursor = cursor.max_time_ms(max_time_ms)
         if sort:
             cursor = cursor.sort(sort)
         if skip:

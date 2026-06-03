@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from contextlib import nullcontext
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -14,7 +14,10 @@ from .text_value_service import get_texts_for_concept, upsert_singleton_text_rel
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
-from .workflow_vontology_materialisation_helpers import ensure_instance_typing
+from .workflow_vontology_materialisation_helpers import (
+    ensure_instance_typing,
+    suspend_event_workflow_integration,
+)
 from ..workflows import workflow_concept_authority_service as authority_service
 from ..workflows.static_input_binding_utils import stable_static_input_bindings
 from ..workflows.vontology_loader import (
@@ -33,6 +36,17 @@ _REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT = "launch_input_contract"
 _REPO_SEED_VERSION_TEXT_PREDICATE = "#V#hasWorkflowRepoSeedVersionJson"
 _REPO_SEED_VERSION_SCHEMA_VERSION = "workflow_repo_seed_version.v1"
+_DEFAULT_REPO_SEED_VERSION_TEXT_MAX_TIME_MS = 15000
+_REPO_SEED_VERSION_TEXT_MAX_TIME_MS_ENV = "VON_WORKFLOW_POLICY_TEXT_MAX_TIME_MS"
+
+
+def _repo_seed_version_text_max_time_ms() -> int:
+    raw = os.getenv(_REPO_SEED_VERSION_TEXT_MAX_TIME_MS_ENV)
+    try:
+        parsed = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_REPO_SEED_VERSION_TEXT_MAX_TIME_MS
+    return max(1000, min(parsed, 120000))
 
 
 def _materialise_support_concepts(
@@ -242,6 +256,7 @@ def _load_workflow_repo_seed_version_marker(
         workflow_id,
         predicate=_REPO_SEED_VERSION_TEXT_PREDICATE,
         limit=5,
+        max_time_ms=_repo_seed_version_text_max_time_ms(),
     )
     for row in rows:
         raw_text = row.get("text") if isinstance(row, Mapping) else None
@@ -1408,10 +1423,24 @@ def bootstrap_repo_seed_workflow_bundle(
     typed_step_ids: list[str] = []
     seed_version_marker_updates: list[dict[str, Any]] = []
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
+    postpublication_definition_cache: dict[str, Any | None] = {}
+
+    def _postpublication_cached_loader(candidate_workflow_id: str) -> Any | None:
+        workflow_id = str(candidate_workflow_id or "").strip()
+        if not workflow_id:
+            return None
+        if workflow_id not in postpublication_definition_cache:
+            postpublication_definition_cache[workflow_id] = (
+                load_workflow_definition_from_vontology(workflow_id)
+            )
+        return postpublication_definition_cache[workflow_id]
+
     if skip_publication:
         validation_by_workflow_id.update(existing_validation_by_workflow_id)
 
-    context_manager_factory = publish_context_manager_factory or nullcontext
+    context_manager_factory = (
+        publish_context_manager_factory or suspend_event_workflow_integration
+    )
     with context_manager_factory():
         publication_report: dict[str, Any]
         if skip_publication:
@@ -1442,6 +1471,7 @@ def bootstrap_repo_seed_workflow_bundle(
                     publication_specs
                 ),
                 publication_purposes=publication_purposes,
+                validate_after_publish=False,
             )
             publication_report["forced_republish"] = bool(force_republish)
         publication_report["materialisation_status"] = (
@@ -1590,7 +1620,7 @@ def bootstrap_repo_seed_workflow_bundle(
                         f"{workflow_id}:" + ",".join(warning_items)
                     )
 
-                definition = load_workflow_definition_from_vontology(workflow_id)
+                definition = _postpublication_cached_loader(workflow_id)
                 if definition is None:
                     raise RuntimeError(
                         f"repo_seed_workflow_definition_not_loadable:{workflow_id}"
@@ -1599,7 +1629,7 @@ def bootstrap_repo_seed_workflow_bundle(
                     definition=definition,
                     supported_action_ids=supported_action_ids,
                     known_workflow_ids=target_workflow_ids,
-                    workflow_definition_loader=load_workflow_definition_from_vontology,
+                    workflow_definition_loader=_postpublication_cached_loader,
                 )
                 validation_by_workflow_id[workflow_id] = copy.deepcopy(validation)
 

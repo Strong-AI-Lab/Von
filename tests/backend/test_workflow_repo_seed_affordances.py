@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,11 +190,19 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
             },
         ),
     )
-    monkeypatch.setattr(
-        authority_service,
-        "publish_canonical_chat_workflow_graphs",
-        lambda **kwargs: publications.append(kwargs)
-        or {
+    def _publish_with_context_capture(**kwargs):
+        publications.append(
+            {
+                **kwargs,
+                "event_workflow_integration": os.environ.get(
+                    "VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"
+                ),
+                "discovery_cache_invalidation": os.environ.get(
+                    "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"
+                ),
+            }
+        )
+        return {
             "counts": {
                 "workflows_targeted": 1,
                 "workflows_published": 1,
@@ -206,7 +215,12 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
                 "errors": 0,
             },
             "published_workflow_ids": ["#V#test_workflow"],
-        },
+        }
+
+    monkeypatch.setattr(
+        authority_service,
+        "publish_canonical_chat_workflow_graphs",
+        _publish_with_context_capture,
     )
     monkeypatch.setattr(
         authority_service,
@@ -259,6 +273,9 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
         "#V#test_workflow"
     ]
     assert publications
+    assert publications[0]["validate_after_publish"] is False
+    assert publications[0]["event_workflow_integration"] == "0"
+    assert publications[0]["discovery_cache_invalidation"] == "0"
     assert text_updates and text_updates[0]["relation_specs"] == tuple(
         bundle["workflow_text_relations"]["#V#test_workflow"]
     )
