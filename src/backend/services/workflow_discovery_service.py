@@ -229,6 +229,7 @@ class WorkflowMatch:
     routing_eligible: bool = False
     routing_exclusion_reason: Optional[str] = None
     routing_profile: Optional[Dict[str, Any]] = None
+    routing_index_metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -248,6 +249,11 @@ class WorkflowMatch:
             "routing_profile": (
                 dict(self.routing_profile)
                 if isinstance(self.routing_profile, dict)
+                else None
+            ),
+            "routing_index_metadata": (
+                dict(self.routing_index_metadata)
+                if isinstance(self.routing_index_metadata, dict)
                 else None
             ),
         }
@@ -1112,6 +1118,92 @@ def _lifecycle_allows_routing(
     return True, None
 
 
+def _routing_index_metadata(match: WorkflowMatch) -> Mapping[str, Any] | None:
+    metadata = getattr(match, "routing_index_metadata", None)
+    if isinstance(metadata, Mapping):
+        schema = str(metadata.get("routing_index_schema_version") or "").strip()
+        if schema == "workflow_routing_index_entry.v1":
+            return metadata
+    return None
+
+
+def _compact_executability_from_routing_index(
+    match: WorkflowMatch,
+) -> Tuple[bool, str, Optional[str]] | None:
+    metadata = _routing_index_metadata(match)
+    if metadata is None:
+        return None
+    compact = metadata.get("compact_executability")
+    if not isinstance(compact, Mapping):
+        return None
+    source = str(compact.get("source") or "").strip()
+    if source != "vontology_workflow_graph_shape":
+        return None
+    is_executable = bool(compact.get("is_executable"))
+    if is_executable:
+        detail_parts = [f"source={source}"]
+        step_count = compact.get("step_count")
+        if isinstance(step_count, int):
+            detail_parts.append(f"step_count={step_count}")
+        if bool(compact.get("has_initial_step")):
+            detail_parts.append("has_initial_step=true")
+        return (
+            True,
+            EXECUTABILITY_EXECUTABLE_NOW,
+            "compact_routing_index:" + ",".join(detail_parts),
+        )
+    reason = str(compact.get("reason") or "").strip()
+    if reason == "workflow_has_no_steps":
+        return (
+            False,
+            EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+            "compact_routing_index:workflow_has_no_steps",
+        )
+    return (
+        False,
+        EXECUTABILITY_GRAPH_INCOMPLETE,
+        f"compact_routing_index:{reason or 'graph_incomplete'}",
+    )
+
+
+def _has_authoritative_routing_text_from_index(match: WorkflowMatch) -> bool | None:
+    metadata = _routing_index_metadata(match)
+    if metadata is None:
+        return None
+    if isinstance(metadata.get("has_authoritative_routing_text"), bool):
+        return bool(metadata.get("has_authoritative_routing_text"))
+    description_source = str(metadata.get("description_source") or "").strip()
+    if description_source:
+        return description_source.startswith("text_relation:")
+    return None
+
+
+def _routing_profile_from_index(
+    match: WorkflowMatch,
+) -> tuple[dict[str, Any] | None, str | None] | None:
+    metadata = _routing_index_metadata(match)
+    if metadata is None:
+        return None
+    profile = metadata.get("routing_profile")
+    source = str(metadata.get("routing_profile_source") or "").strip() or None
+    if isinstance(profile, Mapping):
+        return dict(profile), source
+    return None, source
+
+
+def _publication_lifecycle_from_index(
+    match: WorkflowMatch,
+) -> tuple[dict[str, Any] | None, str | None] | None:
+    metadata = _routing_index_metadata(match)
+    if metadata is None:
+        return None
+    lifecycle = metadata.get("publication_lifecycle")
+    source = str(metadata.get("publication_lifecycle_source") or "").strip() or None
+    if isinstance(lifecycle, Mapping):
+        return dict(lifecycle), source
+    return None, source
+
+
 def _annotate_and_rank_candidates(
     matches: List[WorkflowMatch],
     *,
@@ -1124,17 +1216,36 @@ def _annotate_and_rank_candidates(
     required_routing_candidates = max(1, int(max_results))
 
     for match in matches[:annotation_cap]:
-        is_executable, reason, detail = _classify_workflow_candidate_executability(
-            match.concept_id,
-            workflow_registry=workflow_registry,
+        compact_executability = _compact_executability_from_routing_index(match)
+        if compact_executability is not None:
+            is_executable, reason, detail = compact_executability
+        else:
+            is_executable, reason, detail = _classify_workflow_candidate_executability(
+                match.concept_id,
+                workflow_registry=workflow_registry,
+            )
+        indexed_authoritative_text = _has_authoritative_routing_text_from_index(match)
+        has_authoritative_text = (
+            indexed_authoritative_text
+            if indexed_authoritative_text is not None
+            else _has_authoritative_routing_text(match.concept_id)
         )
-        has_authoritative_text = _has_authoritative_routing_text(match.concept_id)
-        routing_profile, _routing_profile_source = (
-            _resolve_workflow_routing_profile_data(match.concept_id)
-        )
-        publication_lifecycle, _publication_lifecycle_source = (
-            _resolve_workflow_publication_lifecycle_data(match.concept_id)
-        )
+        indexed_routing_profile = _routing_profile_from_index(match)
+        if indexed_routing_profile is not None:
+            routing_profile, _routing_profile_source = indexed_routing_profile
+        else:
+            routing_profile, _routing_profile_source = (
+                _resolve_workflow_routing_profile_data(match.concept_id)
+            )
+        indexed_publication_lifecycle = _publication_lifecycle_from_index(match)
+        if indexed_publication_lifecycle is not None:
+            publication_lifecycle, _publication_lifecycle_source = (
+                indexed_publication_lifecycle
+            )
+        else:
+            publication_lifecycle, _publication_lifecycle_source = (
+                _resolve_workflow_publication_lifecycle_data(match.concept_id)
+            )
         lifecycle_allows_routing, lifecycle_exclusion_reason = (
             _lifecycle_allows_routing(publication_lifecycle)
         )
@@ -1243,6 +1354,7 @@ def invalidate_workflow_discovery_executability_caches() -> None:
     _classify_workflow_concept_executability.cache_clear()
     _is_executable_workflow_concept.cache_clear()
     _resolve_workflow_routing_profile_data.cache_clear()
+    _resolve_workflow_publication_lifecycle_data.cache_clear()
 
 
 def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
@@ -1286,6 +1398,9 @@ def _search_workflow_capabilities(
                     description=cap.description,
                     relevance_score=cap.relevance_score,
                     match_source="capability_index",
+                    routing_index_metadata=(
+                        dict(cap.metadata) if isinstance(cap.metadata, dict) else None
+                    ),
                 )
             )
         return results

@@ -1208,6 +1208,82 @@ class TestDiscoverWorkflowsForTurn:
         }
         assert annotated[0].to_dict()["routing_profile"]["role"] == "authoring"
 
+    def test_annotation_uses_routing_index_metadata_without_live_hydration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        match = WorkflowMatch(
+            "#V#compact_indexed_workflow",
+            "Compact Indexed Workflow",
+            description="Authoritative compact routing description.",
+            relevance_score=0.96,
+            match_source="capability_index",
+            routing_index_metadata={
+                "routing_index_schema_version": "workflow_routing_index_entry.v1",
+                "has_authoritative_routing_text": True,
+                "routing_profile": {
+                    "role": "execution",
+                    "authoring_intent_required": False,
+                    "explicit_workflow_context_required": False,
+                    "prefer_existing_capability": False,
+                },
+                "routing_profile_source": (
+                    "text_relation:#V#hasWorkflowRoutingProfileJson"
+                ),
+                "publication_lifecycle": {
+                    "schema_version": "workflow_publication_lifecycle.v1",
+                    "phase": "published",
+                    "published": True,
+                    "routing_eligible": True,
+                },
+                "publication_lifecycle_source": (
+                    "text_relation:#V#hasWorkflowLifecycleJson"
+                ),
+                "compact_executability": {
+                    "schema_version": "workflow_compact_executability.v1",
+                    "source": "vontology_workflow_graph_shape",
+                    "is_executable": True,
+                    "reason": "compact_graph_present",
+                    "has_initial_step": True,
+                    "step_count": 4,
+                },
+            },
+        )
+
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._classify_workflow_candidate_executability",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("compact routing index should avoid definition hydration")
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("compact routing index should carry routing text status")
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("compact routing index should carry routing profile")
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("compact routing index should carry lifecycle")
+            ),
+        )
+
+        annotated = _annotate_and_rank_candidates([match], max_results=1)
+
+        assert len(annotated) == 1
+        assert annotated[0].is_executable is True
+        assert annotated[0].executability_reason == EXECUTABILITY_EXECUTABLE_NOW
+        assert annotated[0].routing_eligible is True
+        assert annotated[0].routing_profile["role"] == "execution"
+        assert "compact_routing_index" in str(annotated[0].executability_detail)
+
     @patch(
         "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
     )

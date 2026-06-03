@@ -582,6 +582,7 @@ class TestIndexFromRegistry:
         self,
         tmp_path: Any,
         _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import src.backend.services.workflow_capability_service as capability_service
         from src.backend.workflows import WorkflowRegistry
@@ -612,7 +613,24 @@ class TestIndexFromRegistry:
             workflow_registry=registry,
         )
 
+        monkeypatch.setattr(
+            capability_service.WorkflowCapabilityIndex,
+            "_entries_from_registry",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "current manifest entries should restore the routing projection "
+                    "without rereading Vontology routing metadata"
+                )
+            ),
+        )
+        reset_workflow_capability_index()
+        third_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+
         assert second_index.size == 1
+        assert third_index.size == 1
         assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
         assert len(_fake_retrieval_backend.upsert_calls) == 1
         readiness = get_workflow_capability_index_readiness_report()
@@ -1095,6 +1113,72 @@ def test_invalidate_workflow_capability_index_records_reason_and_backend_reset(
     assert reset_calls == ["workflow_capabilities"]
     assert readiness["status"] == "rebuild_required"
     assert readiness["detail"] == "RAG embedder changed; rebuild required."
+
+
+def test_workflow_routing_text_relation_change_invalidates_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import text_value_service
+
+    invalidations: list[str | None] = []
+    discovery_cache_clears: list[bool] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
+        lambda **kwargs: invalidations.append(kwargs.get("reason"))
+        or {"success": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
+        lambda: discovery_cache_clears.append(True),
+    )
+
+    text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
+        subject_concept_id="#V#workflow_repair_or_create_workflow",
+        predicate="#V#hasWorkflowRoutingProfileJson",
+    )
+    text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
+        subject_concept_id="#V#ordinary_concept",
+        predicate="hasNote",
+    )
+
+    assert len(invalidations) == 1
+    assert "workflow_routing_text_relation_changed" in str(invalidations[0])
+    assert discovery_cache_clears == [True]
+
+
+def test_workflow_graph_relationship_change_invalidates_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import relationship_write_service
+
+    invalidations: list[str | None] = []
+    discovery_cache_clears: list[bool] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
+        lambda **kwargs: invalidations.append(kwargs.get("reason"))
+        or {"success": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
+        lambda: discovery_cache_clears.append(True),
+    )
+
+    relationship_write_service._invalidate_workflow_routing_projection_for_relationship_change(
+        source_id="#V#workflow_repair_or_create_workflow",
+        predicate="#V#hasInitialStep",
+        target_id="#V#workflow_repair_start_step",
+    )
+    relationship_write_service._invalidate_workflow_routing_projection_for_relationship_change(
+        source_id="#V#ordinary_concept",
+        predicate="#V#unrelatedPredicate",
+        target_id="#V#other_concept",
+    )
+
+    assert len(invalidations) == 1
+    assert "workflow_routing_relationship_changed" in str(invalidations[0])
+    assert discovery_cache_clears == [True]
 
 
 def test_readiness_report_starts_auto_rebuild_for_embedding_signature_mismatch(

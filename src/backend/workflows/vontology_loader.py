@@ -4045,12 +4045,12 @@ def batch_fetch_workflow_purposes(
 def batch_fetch_workflow_routing_metadata(
     workflow_ids: Iterable[str],
 ) -> Dict[str, Dict[str, Any]]:
-    """Batch-fetch routing descriptions and discovery exemplars for workflows.
+    """Batch-fetch compact routing metadata for workflows.
 
     This preserves the same authoritative text-relation precedence as the
     per-workflow helpers while avoiding one-by-one Vontology text fetch loops
-    when registry-wide surfaces (such as capability indexing) need many
-    workflow descriptions at once.
+    when registry-wide surfaces (such as capability indexing) need workflow
+    descriptions, profiles, lifecycle state, and graph-shape routing probes.
     """
 
     ordered_workflow_ids: list[str] = []
@@ -4079,10 +4079,42 @@ def batch_fetch_workflow_routing_metadata(
         preferred_languages=("en-NZ", "en"),
         limit_per_concept=50,
     )
+    routing_profile_rows = get_preferred_texts_for_concepts(
+        ordered_workflow_ids,
+        predicate_precedence=WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE,
+        preferred_languages=("en-NZ", "en"),
+        limit_per_concept=50,
+    )
+    lifecycle_rows = get_preferred_texts_for_concepts(
+        ordered_workflow_ids,
+        predicate_precedence=WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE,
+        preferred_languages=("en-NZ", "en"),
+        limit_per_concept=50,
+    )
+    workflow_docs: Dict[str, Mapping[str, Any]] = {}
+    try:
+        cursor = ConceptsRepository.find(
+            {"concept_id": {"$in": ordered_workflow_ids}},
+            {"concept_id": 1, "relationships": 1, "concept_data": 1},
+        )
+        for doc in cursor:
+            concept_id = _normalise_non_empty_text(doc.get("concept_id"))
+            if concept_id:
+                workflow_docs[concept_id] = doc
+    except Exception:
+        workflow_docs = {}
 
     metadata_by_workflow_id: Dict[str, Dict[str, Any]] = {}
     for workflow_id in ordered_workflow_ids:
         workflow_metadata: Dict[str, Any] = {}
+        workflow_doc = workflow_docs.get(workflow_id)
+        relationships = (
+            workflow_doc.get("relationships")
+            if isinstance(workflow_doc, Mapping)
+            else None
+        )
+        if not isinstance(relationships, Mapping):
+            relationships = {}
 
         description_row = description_rows.get(workflow_id)
         if isinstance(description_row, Mapping):
@@ -4108,6 +4140,68 @@ def batch_fetch_workflow_routing_metadata(
                 workflow_metadata["discovery_exemplars_source"] = (
                     f"text_relation:{predicate}"
                 )
+
+        routing_profile_row = routing_profile_rows.get(workflow_id)
+        if isinstance(routing_profile_row, Mapping):
+            predicate = _normalise_non_empty_text(routing_profile_row.get("predicate"))
+            routing_profile = _parse_workflow_routing_profile_text_value(
+                routing_profile_row.get("text")
+            )
+            if predicate and routing_profile is not None:
+                workflow_metadata["routing_profile"] = routing_profile
+                workflow_metadata["routing_profile_source"] = (
+                    f"text_relation:{predicate}"
+                )
+
+        lifecycle = None
+        lifecycle_source = WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
+        concept_data = (
+            workflow_doc.get("concept_data")
+            if isinstance(workflow_doc, Mapping)
+            else None
+        )
+        if isinstance(concept_data, Mapping):
+            raw_lifecycle = concept_data.get(
+                WORKFLOW_PUBLICATION_LIFECYCLE_CONCEPT_DATA_KEY
+            )
+            lifecycle = _normalise_workflow_publication_lifecycle(raw_lifecycle)
+            if lifecycle is not None:
+                lifecycle_source = "concept_data"
+        if lifecycle is None:
+            lifecycle_row = lifecycle_rows.get(workflow_id)
+            if isinstance(lifecycle_row, Mapping):
+                predicate = _normalise_non_empty_text(lifecycle_row.get("predicate"))
+                raw_payload = _parse_json_object_text_value(lifecycle_row.get("text"))
+                lifecycle = _normalise_workflow_publication_lifecycle(raw_payload)
+                if predicate and lifecycle is not None:
+                    lifecycle_source = f"text_relation:{predicate}"
+        if lifecycle is not None:
+            workflow_metadata["publication_lifecycle"] = lifecycle
+            workflow_metadata["publication_lifecycle_source"] = lifecycle_source
+
+        initial_step = _first_relationship_target(
+            relationships,
+            WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
+        )
+        step_ids = _all_relationship_targets(
+            relationships,
+            WORKFLOW_GRAPH_PREDICATE_ALIASES["hasStep"],
+        )
+        has_graph_shape = bool(initial_step or step_ids)
+        workflow_metadata["compact_executability"] = {
+            "schema_version": "workflow_compact_executability.v1",
+            "source": "vontology_workflow_graph_shape",
+            "is_executable": has_graph_shape,
+            "reason": (
+                "compact_graph_present"
+                if has_graph_shape
+                else "workflow_has_no_steps"
+            ),
+            "has_initial_step": bool(initial_step),
+            "step_count": len(step_ids),
+        }
+        if initial_step:
+            workflow_metadata["compact_executability"]["initial_step"] = initial_step
 
         metadata_by_workflow_id[workflow_id] = workflow_metadata
 

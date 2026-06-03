@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 _WORKFLOW_CAPABILITY_MANIFEST_FILENAME = "workflow_capability_manifest.json"
-_WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION = "workflow_capability_manifest.v1"
+_WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION = "workflow_capability_manifest.v2"
+WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION = "workflow_routing_index_entry.v1"
 
 
 def _get_positive_float_env(name: str, default: float) -> float:
@@ -242,6 +243,17 @@ def _normalise_manifest_value(value: Any) -> Any:
     return str(value)
 
 
+def _digest_manifest_value(value: Any) -> str:
+    payload = json.dumps(
+        _normalise_manifest_value(value),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _entry_manifest_row(entry: "_CapabilityEntry") -> dict[str, Any]:
     return {
         "workflow_id": entry.workflow_id,
@@ -249,6 +261,93 @@ def _entry_manifest_row(entry: "_CapabilityEntry") -> dict[str, Any]:
         "text": entry.text,
         "metadata": _normalise_manifest_value(entry.metadata),
     }
+
+
+def _entry_from_manifest_row(row: Mapping[str, Any]) -> "_CapabilityEntry" | None:
+    workflow_id = str(row.get("workflow_id") or "").strip()
+    doc_id = str(row.get("doc_id") or "").strip()
+    text = str(row.get("text") or "").strip()
+    if not workflow_id or not doc_id or not text:
+        return None
+    metadata_raw = row.get("metadata")
+    metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
+    return _CapabilityEntry(
+        workflow_id=workflow_id,
+        doc_id=doc_id,
+        text=text,
+        metadata=metadata,
+    )
+
+
+def _entries_from_manifest_payload(
+    manifest: Mapping[str, Any],
+) -> dict[str, "_CapabilityEntry"]:
+    raw_entries = manifest.get("entries")
+    if not isinstance(raw_entries, Sequence) or isinstance(
+        raw_entries,
+        (str, bytes, bytearray),
+    ):
+        return {}
+    entries: dict[str, _CapabilityEntry] = {}
+    for raw_row in raw_entries:
+        if not isinstance(raw_row, Mapping):
+            continue
+        entry = _entry_from_manifest_row(raw_row)
+        if entry is None:
+            continue
+        entries[entry.workflow_id] = entry
+    return entries
+
+
+def _authoritative_registry_workflow_ids(registry: Any) -> tuple[str, ...]:
+    return tuple(
+        row["workflow_id"]
+        for row in _authoritative_registry_fingerprint_rows(registry)
+    )
+
+
+def _authoritative_registry_fingerprint_rows(registry: Any) -> tuple[dict[str, str], ...]:
+    rows_out: list[dict[str, str]] = []
+    ids: set[str] = set()
+    for method_name, attr_name in (
+        ("eager_workflow_ids", "_workflows"),
+        ("lazy_workflow_ids", "_lazy"),
+    ):
+        method = getattr(registry, method_name, None)
+        rows = getattr(registry, attr_name, None)
+        if not callable(method) or not isinstance(rows, Mapping):
+            continue
+        try:
+            workflow_ids = list(method())
+        except Exception:
+            continue
+        for raw_workflow_id in workflow_ids:
+            workflow_id = str(raw_workflow_id or "").strip()
+            if not workflow_id:
+                continue
+            registration = rows.get(workflow_id)
+            source = str(getattr(registration, "source", "") or "").strip().lower()
+            if source in _AUTHORITATIVE_CAPABILITY_SOURCES:
+                ids.add(workflow_id)
+                rows_out.append(
+                    {
+                        "workflow_id": workflow_id,
+                        "source": source,
+                        "purpose": str(
+                            getattr(registration, "purpose", "") or ""
+                        ).strip(),
+                    }
+                )
+    return tuple(sorted(rows_out, key=lambda item: item["workflow_id"]))
+
+
+def _authoritative_registry_fingerprint_digest(registry: Any) -> str:
+    return _digest_manifest_value(
+        {
+            "schema_version": "workflow_registry_routing_fingerprint.v1",
+            "rows": list(_authoritative_registry_fingerprint_rows(registry)),
+        }
+    )
 
 
 def _compute_workflow_capability_entries_digest(
@@ -370,6 +469,7 @@ def _write_workflow_capability_manifest(
     entries: Mapping[str, "_CapabilityEntry"],
     *,
     mode: str | None = None,
+    registry: Any | None = None,
 ) -> None:
     path = _workflow_capability_manifest_path(rag_service)
     digest = _compute_workflow_capability_entries_digest(entries)
@@ -390,6 +490,18 @@ def _write_workflow_capability_manifest(
         "entry_count": len(entries),
         "entry_digest": digest,
         "workflow_ids": sorted(str(workflow_id) for workflow_id in entries.keys()),
+        "registry_fingerprint_digest": (
+            _authoritative_registry_fingerprint_digest(registry)
+            if registry is not None
+            else None
+        ),
+        "entries": [
+            _entry_manifest_row(entry)
+            for _workflow_id, entry in sorted(
+                entries.items(),
+                key=lambda item: item[0],
+            )
+        ],
         "embedding_signature": namespace_state.get("current_embedding_signature")
         or namespace_state.get("stored_embedding_signature"),
     }
@@ -487,6 +599,7 @@ class WorkflowCapabilityIndex:
         *,
         mode: str | None = None,
         write_manifest: bool = True,
+        registry: Any | None = None,
     ) -> None:
         rag_service = _get_workflow_capability_rag_service()
         _reset_workflow_capability_backend_namespace(rag_service)
@@ -510,6 +623,7 @@ class WorkflowCapabilityIndex:
                 rag_service,
                 pending_entries,
                 mode=mode,
+                registry=registry,
             )
         elif write_manifest:
             _set_workflow_capability_manifest_state(
@@ -602,11 +716,52 @@ class WorkflowCapabilityIndex:
                 doc_id=_build_workflow_capability_document_id(workflow_id),
                 text=text,
                 metadata={
+                    "routing_index_schema_version": WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION,
                     "name": _workflow_id_to_name(workflow_id),
                     "source": str(source or "unknown"),
+                    "authority_source": str(source or "unknown"),
                     "description_source": reason,
                     "purpose": _normalise_capability_text(purpose),
                     "summary_text": text.split("\n\n", 1)[0].strip(),
+                    "has_authoritative_routing_text": reason.startswith(
+                        "text_relation:"
+                    ),
+                    "routing_profile": (
+                        dict(routing_metadata.get("routing_profile"))
+                        if isinstance(routing_metadata, Mapping)
+                        and isinstance(routing_metadata.get("routing_profile"), Mapping)
+                        else None
+                    ),
+                    "routing_profile_source": (
+                        str(routing_metadata.get("routing_profile_source") or "").strip()
+                        if isinstance(routing_metadata, Mapping)
+                        else ""
+                    ),
+                    "publication_lifecycle": (
+                        dict(routing_metadata.get("publication_lifecycle"))
+                        if isinstance(routing_metadata, Mapping)
+                        and isinstance(
+                            routing_metadata.get("publication_lifecycle"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    "publication_lifecycle_source": (
+                        str(
+                            routing_metadata.get("publication_lifecycle_source") or ""
+                        ).strip()
+                        if isinstance(routing_metadata, Mapping)
+                        else ""
+                    ),
+                    "compact_executability": (
+                        dict(routing_metadata.get("compact_executability"))
+                        if isinstance(routing_metadata, Mapping)
+                        and isinstance(
+                            routing_metadata.get("compact_executability"),
+                            Mapping,
+                        )
+                        else None
+                    ),
                 },
             )
 
@@ -668,7 +823,11 @@ class WorkflowCapabilityIndex:
         """Index all authoritative workflows from a ``WorkflowRegistry``."""
 
         pending_entries, diagnostics = self._entries_from_registry(registry)
-        self._replace_entries(pending_entries, mode=mode or "registry")
+        self._replace_entries(
+            pending_entries,
+            mode=mode or "registry",
+            registry=registry,
+        )
 
         count = len(pending_entries)
         logger.info(
@@ -733,24 +892,70 @@ class WorkflowCapabilityIndex:
             )
             return False
 
-        current_entries, diagnostics = self._entries_from_registry(registry)
-        current_digest = _compute_workflow_capability_entries_digest(current_entries)
         manifest_digest = str(manifest.get("entry_digest") or "").strip()
-        if manifest_digest != current_digest:
+        manifest_entries = _entries_from_manifest_payload(manifest)
+        manifest_entry_digest = _compute_workflow_capability_entries_digest(
+            manifest_entries
+        )
+        if not manifest_entries:
+            _set_workflow_capability_manifest_state(
+                status="entries_missing",
+                detail=(
+                    "Workflow capability manifest did not contain materialised "
+                    "routing projection entries."
+                ),
+                path=manifest_path,
+            )
+            return False
+        if manifest_digest != manifest_entry_digest:
             _set_workflow_capability_manifest_state(
                 status="digest_mismatch",
                 detail=(
-                    "Authoritative workflow capability documents changed since "
-                    "the persisted namespace was built."
+                    "Workflow capability manifest entry digest does not match "
+                    "its materialised routing projection entries."
                 ),
                 path=manifest_path,
-                digest=current_digest,
+                digest=manifest_entry_digest,
             )
             logger.info(
                 "[workflow_capability_index] Persisted manifest digest mismatch "
                 "(manifest=%s current=%s); rebuilding namespace.",
                 manifest_digest,
-                current_digest,
+                manifest_entry_digest,
+            )
+            return False
+
+        manifest_workflow_ids = tuple(sorted(str(item) for item in manifest_entries.keys()))
+        registry_workflow_ids = _authoritative_registry_workflow_ids(registry)
+        current_registry_fingerprint = _authoritative_registry_fingerprint_digest(
+            registry
+        )
+        manifest_registry_fingerprint = str(
+            manifest.get("registry_fingerprint_digest") or ""
+        ).strip()
+        if registry_workflow_ids and manifest_workflow_ids != registry_workflow_ids:
+            _set_workflow_capability_manifest_state(
+                status="registry_workflow_set_mismatch",
+                detail=(
+                    "Authoritative workflow registry IDs differ from the "
+                    "materialised routing projection manifest."
+                ),
+                path=manifest_path,
+                digest=manifest_entry_digest,
+            )
+            return False
+        if (
+            manifest_registry_fingerprint
+            and manifest_registry_fingerprint != current_registry_fingerprint
+        ):
+            _set_workflow_capability_manifest_state(
+                status="registry_fingerprint_mismatch",
+                detail=(
+                    "Authoritative workflow registry metadata differs from the "
+                    "materialised routing projection manifest."
+                ),
+                path=manifest_path,
+                digest=manifest_entry_digest,
             )
             return False
 
@@ -769,28 +974,27 @@ class WorkflowCapabilityIndex:
                         "embedding signature."
                     ),
                     path=manifest_path,
-                    digest=current_digest,
+                    digest=manifest_entry_digest,
                 )
                 return False
 
         with self._lock:
-            self._entries = dict(current_entries)
+            self._entries = dict(manifest_entries)
         _set_workflow_capability_manifest_state(
             status="loaded",
             detail=(
-                "Loaded workflow capability process cache from a compatible "
-                "persisted namespace without rebuilding embeddings."
+                "Loaded workflow capability process cache and compact routing "
+                "projection from a compatible persisted namespace without "
+                "rebuilding embeddings or rereading routing text."
             ),
             path=manifest_path,
-            digest=current_digest,
+            digest=manifest_entry_digest,
         )
         logger.info(
             "[workflow_capability_index] Loaded %d workflows from persisted "
-            "namespace manifest without RAG reset/upsert "
-            "(%d eager, %d lazy).",
-            len(current_entries),
-            int(diagnostics.get("eager_count") or 0),
-            int(diagnostics.get("lazy_count") or 0),
+            "namespace manifest without RAG reset/upsert or routing metadata "
+            "reread.",
+            len(manifest_entries),
         )
         return True
 
@@ -2131,7 +2335,9 @@ def invalidate_workflow_capability_index(
 ) -> dict[str, Any]:
     """Drop the cached capability index so the next lookup rebuilds it."""
 
-    previous_state = get_workflow_capability_index_runtime_state()
+    previous_state = get_workflow_capability_index_runtime_state(
+        latency_sensitive=not reset_backend_namespace
+    )
     backend_namespace_reset = False
     backend_reset_error = None
     if reset_backend_namespace:

@@ -125,6 +125,48 @@ def _emit_relationship_mutation_event(
         )
 
 
+def _invalidate_workflow_routing_projection_for_relationship_change(
+    *,
+    source_id: str,
+    predicate: str,
+    target_id: str,
+) -> None:
+    """Best-effort invalidation for workflow graph/type routing projections."""
+
+    predicate_text = str(predicate or "").strip()
+    if not predicate_text:
+        return
+    relevant_predicates = {"is_a_type_of", "is_an_instance_of"}
+    try:
+        from ..workflows.vontology_loader import WORKFLOW_GRAPH_PREDICATE_ALIASES
+
+        relevant_predicates.update(
+            item
+            for aliases in WORKFLOW_GRAPH_PREDICATE_ALIASES.values()
+            for item in aliases
+        )
+    except Exception:
+        pass
+    if predicate_text not in relevant_predicates:
+        return
+
+    try:
+        from .workflow_capability_service import invalidate_workflow_capability_index
+        from .workflow_discovery_service import (
+            invalidate_workflow_discovery_executability_caches,
+        )
+
+        invalidate_workflow_capability_index(
+            reason=(
+                "workflow_routing_relationship_changed:"
+                f"{source_id}:{predicate_text}:{target_id}"
+            ),
+        )
+        invalidate_workflow_discovery_executability_caches()
+    except Exception:
+        pass
+
+
 def normalise_structural_predicate(predicate: str) -> str:
     """Normalise a predicate string to its canonical form.
 
@@ -631,6 +673,20 @@ def add_relationship(
     normalised = normalise_structural_predicate(predicate)
 
     if normalised in get_relationship_kinds_set():
-        return add_structural_relationship(source_id, normalised, target, repo=repo)
+        result = add_structural_relationship(source_id, normalised, target, repo=repo)
+        predicate_for_invalidation = normalised
     else:
-        return add_dynamic_relationship(source_id, predicate, target, repo=repo)
+        result = add_dynamic_relationship(source_id, predicate, target, repo=repo)
+        predicate_for_invalidation = predicate
+
+    if isinstance(result, Mapping) and bool(result.get("success")):
+        modified = bool(result.get("forward_modified")) or bool(
+            result.get("modified")
+        ) or bool(result.get("created"))
+        if modified:
+            _invalidate_workflow_routing_projection_for_relationship_change(
+                source_id=source_id,
+                predicate=predicate_for_invalidation,
+                target_id=target,
+            )
+    return result

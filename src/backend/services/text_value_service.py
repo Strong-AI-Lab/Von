@@ -60,6 +60,57 @@ def _invalidate_stats_for_predicate_change(predicate: str | None) -> None:
         pass
 
 
+def _invalidate_workflow_routing_projection_for_text_relation_change(
+    *,
+    subject_concept_id: str,
+    predicate: str | None,
+) -> None:
+    """Best-effort invalidation for workflow-routing support projections."""
+
+    predicate_text = str(predicate or "").strip()
+    if not predicate_text:
+        return
+    try:
+        from ..workflows.vontology_loader import (
+            WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE,
+            WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE,
+            WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+            WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE,
+        )
+
+        relevant_predicates = {
+            item
+            for precedence in (
+                WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE,
+                WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE,
+                WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+                WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE,
+            )
+            for group in precedence
+            for item in group
+        }
+        if predicate_text not in relevant_predicates:
+            return
+    except Exception:
+        return
+
+    try:
+        from .workflow_capability_service import invalidate_workflow_capability_index
+        from .workflow_discovery_service import (
+            invalidate_workflow_discovery_executability_caches,
+        )
+
+        invalidate_workflow_capability_index(
+            reason=(
+                "workflow_routing_text_relation_changed:"
+                f"{subject_concept_id}:{predicate_text}"
+            ),
+        )
+        invalidate_workflow_discovery_executability_caches()
+    except Exception:
+        pass
+
+
 def _emit_text_relation_mutation_event(
     *,
     event_type: str,
@@ -266,6 +317,11 @@ def upsert_text_for_concept(
 
     if relation_created:
         _invalidate_stats_for_predicate_change(predicate)
+    if relation_created or context_updated:
+        _invalidate_workflow_routing_projection_for_text_relation_change(
+            subject_concept_id=subject_concept_id,
+            predicate=predicate,
+        )
 
     relation_doc = None
     if relation_id:
@@ -745,6 +801,10 @@ def update_text_relation_text(
         "updated": relation_updated,
     }
     if relation_updated:
+        _invalidate_workflow_routing_projection_for_text_relation_change(
+            subject_concept_id=subject_concept_id,
+            predicate=str(rel.get("predicate") or ""),
+        )
         _emit_text_relation_mutation_event(
             event_type=_EVENT_TYPE_TEXT_RELATION_UPDATED,
             subject_concept_id=subject_concept_id,
@@ -831,6 +891,10 @@ def delete_text_relation_by_predicate_and_text(
     # Delete the relation
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
     _invalidate_stats_for_predicate_change(predicate)
+    _invalidate_workflow_routing_projection_for_text_relation_change(
+        subject_concept_id=subject_concept_id,
+        predicate=predicate,
+    )
 
     # Check if the text value is now orphaned
     orphaned = False
@@ -882,6 +946,10 @@ def delete_text_relation(
     predicate = rel.get("predicate")
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
     _invalidate_stats_for_predicate_change(predicate if isinstance(predicate, str) else None)
+    _invalidate_workflow_routing_projection_for_text_relation_change(
+        subject_concept_id=subject_concept_id,
+        predicate=predicate if isinstance(predicate, str) else None,
+    )
     orphaned = False
     if tv_id and garbage_collect:
         # Check if any other relation references this text value
