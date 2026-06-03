@@ -93,6 +93,7 @@ const LS_CARTOUCHE_SHOW_ID = 'von_cartouche_show_id';
 const LS_CARTOUCHE_SHOW_KIND = 'von_cartouche_show_kind';
 const LS_CARTOUCHE_KIND_AS_BG = 'von_cartouche_kind_as_background';
 const RUNTIME_REFRESH_MS = 12000;
+const RUNTIME_MODEL_STATUS_REFRESH_COOLDOWN_MS = 30000;
 const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT = 100;
 const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN = 0;
 const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
@@ -103,6 +104,8 @@ const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
+let runtimeModelStatusInFlight = null;
+let runtimeModelStatusLastFetchedAt = 0;
 let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
@@ -1412,11 +1415,30 @@ function renderRuntimeModelSummaries({
   applyCapabilityIndexStatusCard(capabilityIndex || latestCapabilityIndexStatus);
 }
 
-async function refreshRuntimeModelStatus() {
-  try {
+async function refreshRuntimeModelStatus({ force = false } = {}) {
+  if (runtimeModelStatusInFlight) {
+    return runtimeModelStatusInFlight;
+  }
+  const now = Date.now();
+  if (
+    !force
+    && runtimeModelStatusLastFetchedAt > 0
+    && (now - runtimeModelStatusLastFetchedAt) < RUNTIME_MODEL_STATUS_REFRESH_COOLDOWN_MS
+  ) {
+    renderRuntimeModelSummaries();
+    return null;
+  }
+
+  runtimeModelStatusInFlight = (async () => {
+    const capabilityUrl = force
+      ? '/api/workflows/capability-index/status?nocache=1'
+      : '/api/workflows/capability-index/status';
+    const runtimeUrl = force
+      ? '/admin/rag_runtime?namespace=workflow_capabilities&nocache=1'
+      : '/admin/rag_runtime?namespace=workflow_capabilities';
     const [runtimeResponse, capabilityResponse] = await Promise.all([
-      fetch('/admin/rag_runtime?namespace=workflow_capabilities', { cache: 'no-store' }),
-      fetch('/api/workflows/capability-index/status', { cache: 'no-store' }),
+      fetch(runtimeUrl, { cache: 'no-store' }),
+      fetch(capabilityUrl, { cache: 'no-store' }),
     ]);
 
     if (runtimeResponse.ok) {
@@ -1430,9 +1452,21 @@ async function refreshRuntimeModelStatus() {
       latestCapabilityIndexStatus = await capabilityResponse.json();
     }
 
+    runtimeModelStatusLastFetchedAt = Date.now();
     renderRuntimeModelSummaries();
+    return {
+      runtime: runtimeResponse.ok,
+      capability: capabilityResponse.ok,
+    };
+  })();
+
+  try {
+    return await runtimeModelStatusInFlight;
   } catch (error) {
     console.warn('Failed to refresh runtime model status', error);
+    return null;
+  } finally {
+    runtimeModelStatusInFlight = null;
   }
 }
 
@@ -2678,6 +2712,17 @@ export function __testOnly_updateOllamaModelStatusMessage() {
   updateOllamaModelStatusMessage();
 }
 
+export async function __testOnly_refreshRuntimeModelStatus(options = {}) {
+  return refreshRuntimeModelStatus(options);
+}
+
+export function __testOnly_resetRuntimeModelStatusCache() {
+  runtimeModelStatusInFlight = null;
+  runtimeModelStatusLastFetchedAt = 0;
+  latestCapabilityIndexStatus = null;
+  latestRagRuntimeConfiguration = null;
+}
+
 export async function __testOnly_testSelectedOllamaModel() {
   return testSelectedOllamaModel();
 }
@@ -2767,6 +2812,11 @@ export function __testOnly_setupInternalMcpCapAutoSave(options = {}) {
 
 function isSettingsRuntimePanelVisible() {
   try {
+    if (document.hidden) return false;
+  } catch (_) {
+    // Ignore environments without Page Visibility support.
+  }
+  try {
     const frameEl = window.frameElement;
     if (!frameEl) return true;
     const parentView = window.parent;
@@ -2832,7 +2882,7 @@ async function loadRuntimeStatus(manualRefresh = false) {
 
     renderActiveNamespace();
     await loadRagStatus(ragPending);
-    await refreshRuntimeModelStatus();
+    await refreshRuntimeModelStatus({ force: Boolean(manualRefresh) });
   } catch (err) {
     if (err && err.name === 'AbortError') {
       // Expected when a newer poll supersedes an older one or the page is unloading.

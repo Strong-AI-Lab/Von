@@ -252,6 +252,7 @@ const WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS = 15_000;
 const WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS = 20_000;
 const WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS = 8_000;
 const WORKFLOW_CAPABILITY_INDEX_POLL_INTERVAL_MS = 60_000;
+const WORKFLOW_CAPABILITY_INDEX_SILENT_REFRESH_COOLDOWN_MS = 15_000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS = 750;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS = 5000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
@@ -260,6 +261,7 @@ const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_BASE_MS = 1200;
 const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_MS = 6000;
 const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_ATTEMPTS = 2;
 let workflowStatusPanelInitialised = false;
+let workflowCapabilityIndexRefreshPromise = null;
 let chatTabInitialised = false;
 const REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION = 1;
 const workflowEpisodesState = {
@@ -24605,19 +24607,35 @@ function describeWorkflowCapabilityIndexStatusFetchError(err) {
     return err instanceof Error ? err.message : String(err || 'unknown_error');
 }
 
-async function refreshWorkflowCapabilityIndexStatus({ silent = false } = {}) {
+async function refreshWorkflowCapabilityIndexStatus({ silent = false, force = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
-    if (workflowCapabilityIndexState.loading) return;
+    if (workflowCapabilityIndexRefreshPromise) {
+        return workflowCapabilityIndexRefreshPromise;
+    }
+    const now = Date.now();
+    if (
+        !force
+        && silent
+        && workflowCapabilityIndexState.payload
+        && Number.isFinite(workflowCapabilityIndexState.lastFetchedAt)
+        && workflowCapabilityIndexState.lastFetchedAt > 0
+        && (now - workflowCapabilityIndexState.lastFetchedAt) < WORKFLOW_CAPABILITY_INDEX_SILENT_REFRESH_COOLDOWN_MS
+    ) {
+        return workflowCapabilityIndexState.payload;
+    }
+    if (workflowCapabilityIndexState.loading) return workflowCapabilityIndexState.payload;
 
     workflowCapabilityIndexState.loading = true;
     if (!silent) {
         renderWorkflowStatusBody();
     }
 
-    try {
+    workflowCapabilityIndexRefreshPromise = (async () => {
         const resp = await fetchWithTimeout(
-            '/api/workflows/capability-index/status',
+            force
+                ? '/api/workflows/capability-index/status?nocache=1'
+                : '/api/workflows/capability-index/status',
             {
                 method: 'GET',
                 headers: buildChatFetchHeaders(),
@@ -24632,13 +24650,20 @@ async function refreshWorkflowCapabilityIndexStatus({ silent = false } = {}) {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         applyWorkflowCapabilityIndexPayload(responsePayload);
+        return responsePayload;
+    })();
+
+    try {
+        return await workflowCapabilityIndexRefreshPromise;
     } catch (err) {
         const message = describeWorkflowCapabilityIndexStatusFetchError(err);
         workflowCapabilityIndexState.error = `Could not load capability index status: ${message}`;
         if (!silent) {
             console.warn('[workflowStatus] Capability index status fetch failed', err);
         }
+        return null;
     } finally {
+        workflowCapabilityIndexRefreshPromise = null;
         workflowCapabilityIndexState.loading = false;
         renderWorkflowStatusBody();
     }
@@ -25684,7 +25709,7 @@ function initializeWorkflowStatusPanel() {
 
     if (refreshButton && refreshButton.dataset.bound !== 'true') {
         refreshButton.addEventListener('click', () => {
-            void refreshWorkflowCapabilityIndexStatus({ silent: true });
+            void refreshWorkflowCapabilityIndexStatus({ silent: true, force: true });
             if (workflowDefinitionsState.visible) {
                 void refreshAvailableWorkflowDefinitions();
                 return;
@@ -30598,6 +30623,7 @@ export async function __testOnly_refreshWorkflowCapabilityIndexStatus(options = 
     return refreshWorkflowCapabilityIndexStatus(options);
 }
 export function __testOnly_resetWorkflowCapabilityIndexState() {
+    workflowCapabilityIndexRefreshPromise = null;
     clearWorkflowCapabilityIndexPollTimer();
     workflowCapabilityIndexState.loading = false;
     workflowCapabilityIndexState.error = '';

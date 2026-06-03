@@ -95,6 +95,25 @@ def app_client(monkeypatch):
         yield client
 
 
+@pytest.fixture(autouse=True)
+def _clear_workflow_capability_index_status_cache():
+    try:
+        import src.backend.server.routes.workflows_routes as workflows_routes
+
+        with workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
+            workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import src.backend.server.routes.workflows_routes as workflows_routes
+
+        with workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
+            workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
+    except Exception:
+        pass
+
+
 def test_workflow_execution_routes_roundtrip(app_client):
     from src.backend.workflows.trace_model import WorkflowExecutionTrace
     from src.backend.workflows.trace_store import insert_workflow_execution_trace
@@ -412,6 +431,50 @@ def test_workflow_capability_index_status_endpoint_returns_readiness_report(
     assert payload["ready"] is False
     assert payload["status"] == "timeout"
     assert payload["build_in_progress"] is True
+    assert payload["cache"]["state"] == "computed"
+
+
+def test_workflow_capability_index_status_endpoint_caches_repeated_reads(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    with workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
+    monkeypatch.setenv("VON_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS", "60")
+    calls = {"count": 0}
+
+    def _fake_report():
+        calls["count"] += 1
+        return {
+            "ready": calls["count"] >= 2,
+            "status": f"status-{calls['count']}",
+            "summary": "Workflow capability index status.",
+        }
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_capability_index_readiness_report",
+        _fake_report,
+    )
+
+    first = app_client.get("/api/workflows/capability-index/status")
+    second = app_client.get("/api/workflows/capability-index/status")
+    bypass = app_client.get("/api/workflows/capability-index/status?nocache=1")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert bypass.status_code == 200
+    assert calls["count"] == 2
+    first_payload = first.get_json()
+    second_payload = second.get_json()
+    bypass_payload = bypass.get_json()
+    assert first_payload["status"] == "status-1"
+    assert first_payload["cache"]["state"] == "computed"
+    assert second_payload["status"] == "status-1"
+    assert second_payload["cache"]["state"] == "fresh"
+    assert bypass_payload["status"] == "status-2"
+    assert bypass_payload["cache"]["state"] == "computed"
 
 
 def test_workflow_definitions_list_includes_relation_description_source(monkeypatch, app_client):

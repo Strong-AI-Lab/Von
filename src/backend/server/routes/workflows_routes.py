@@ -80,6 +80,9 @@ _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_REASON = "inspection_summary_pending"
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL = "lazy_definition_not_loaded"
+_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK = threading.Lock()
+_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE: Dict[str, Any] = {}
+_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS_DEFAULT = 15.0
 
 
 def _safe_request_arg(value: Any) -> str:
@@ -181,6 +184,76 @@ def _read_workflow_definitions_refresh_retry_after_seconds() -> float:
     except (TypeError, ValueError):
         return _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT
     return max(0.1, delay_seconds)
+
+
+def _read_workflow_capability_index_status_cache_ttl_seconds() -> float:
+    raw = os.getenv(
+        "VON_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS",
+        str(_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS_DEFAULT),
+    )
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS_DEFAULT
+    return max(0.0, ttl)
+
+
+def _read_cached_workflow_capability_index_status(
+    *, bypass_cache: bool
+) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
+    if bypass_cache:
+        return None, None
+
+    ttl_seconds = _read_workflow_capability_index_status_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return None, None
+
+    now_monotonic = time.monotonic()
+    with _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
+        stored_at = _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.get("stored_at_monotonic")
+        payload = _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.get("payload")
+        if not isinstance(stored_at, (int, float)) or not isinstance(payload, dict):
+            return None, None
+        age_seconds = max(0.0, now_monotonic - float(stored_at))
+        if age_seconds > ttl_seconds:
+            _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
+            return None, None
+        return dict(payload), age_seconds
+
+
+def _write_cached_workflow_capability_index_status(payload: Dict[str, Any]) -> None:
+    ttl_seconds = _read_workflow_capability_index_status_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return
+    with _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
+        _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
+        _WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.update(
+            {
+                "stored_at_monotonic": time.monotonic(),
+                "payload": dict(payload),
+            }
+        )
+
+
+def _attach_workflow_capability_index_status_cache_metadata(
+    payload: Dict[str, Any],
+    *,
+    state: str,
+    age_seconds: float | None,
+) -> Dict[str, Any]:
+    response_payload = dict(payload)
+    response_payload["cache"] = {
+        "state": state,
+        "age_seconds": (
+            round(float(age_seconds), 3)
+            if isinstance(age_seconds, (int, float))
+            else None
+        ),
+        "ttl_seconds": round(
+            _read_workflow_capability_index_status_cache_ttl_seconds(), 3
+        ),
+    }
+    return response_payload
 
 
 def _read_cached_workflow_definitions_entry(
@@ -656,7 +729,37 @@ def api_get_workflow_capability_index_status():
     """Return the authoritative workflow capability-index readiness state."""
 
     try:
-        return jsonify(get_workflow_capability_index_readiness_report())
+        bypass_cache = request.args.get("nocache", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        cached_payload, cached_age_seconds = (
+            _read_cached_workflow_capability_index_status(
+                bypass_cache=bypass_cache,
+            )
+        )
+        if isinstance(cached_payload, dict):
+            return jsonify(
+                _attach_workflow_capability_index_status_cache_metadata(
+                    cached_payload,
+                    state="fresh",
+                    age_seconds=cached_age_seconds,
+                )
+            )
+
+        payload = get_workflow_capability_index_readiness_report()
+        if isinstance(payload, dict):
+            _write_cached_workflow_capability_index_status(payload)
+            return jsonify(
+                _attach_workflow_capability_index_status_cache_metadata(
+                    payload,
+                    state="computed",
+                    age_seconds=0.0,
+                )
+            )
+        return jsonify(payload)
     except Exception as exc:
         logger.exception("Failed to read workflow capability index status")
         return (

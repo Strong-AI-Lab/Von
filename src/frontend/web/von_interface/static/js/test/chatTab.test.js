@@ -807,6 +807,78 @@ describe('workflow monitor capability-index polling and global furl', () => {
         expect(exportPayload.monitor_state.capability_index_poll_active).toBe(false);
     });
 
+    test('coalesces concurrent capability-index status refreshes', async () => {
+        let resolveFetch;
+        global.fetch = jest.fn(() => new Promise((resolve) => {
+            resolveFetch = resolve;
+        }));
+
+        const first = __testOnly_refreshWorkflowCapabilityIndexStatus({ silent: true });
+        const second = __testOnly_refreshWorkflowCapabilityIndexStatus({ silent: true });
+
+        await flushMicrotasks();
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+
+        resolveFetch({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                ready: true,
+                status: 'ready',
+                summary: 'Workflow capability index ready.'
+            })
+        });
+
+        await Promise.all([first, second]);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('skips quiet capability-index refreshes during the cooldown window', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                ready: true,
+                status: 'ready',
+                summary: 'Workflow capability index ready.'
+            })
+        });
+
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Workflow capability index still building.'
+        });
+
+        const result = await __testOnly_refreshWorkflowCapabilityIndexStatus({ silent: true });
+
+        expect(result.status).toBe('building');
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('manual capability-index refresh bypasses browser and server caches', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                ready: true,
+                status: 'ready',
+                summary: 'Workflow capability index ready.'
+            })
+        });
+
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Workflow capability index still building.'
+        });
+
+        await __testOnly_refreshWorkflowCapabilityIndexStatus({ silent: true, force: true });
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch.mock.calls[0][0]).toBe('/api/workflows/capability-index/status?nocache=1');
+    });
+
     test('renders capability-index status fetch timeouts without exposing the raw abort message', async () => {
         global.fetch = jest.fn((_url, options = {}) => new Promise((_resolve, reject) => {
             const signal = options.signal;
