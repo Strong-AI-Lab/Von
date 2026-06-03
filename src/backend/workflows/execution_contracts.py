@@ -32,6 +32,7 @@ WORKFLOW_CONTROL_ACTION_JOIN_ID = "workflow_control.join"
 WORKFLOW_CONTROL_ACTION_FOR_EACH_ID = "workflow_control.for_each"
 WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID = "workflow_control.context_set"
 WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID = "workflow_control.context_template"
+WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID = "workflow_control.context_project"
 
 WORKFLOW_CONTROL_BREAK_ACTION_IDS: tuple[str, ...] = (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
@@ -430,4 +431,3 @@ def build_arxiv_ingestion_completion_report(
         "follow_up_required": bool(follow_up_required),
         "user_safe_operational_summary": user_safe_operational_summary,
     }
-

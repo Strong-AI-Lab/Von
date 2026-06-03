@@ -27,6 +27,7 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -130,6 +131,21 @@ def _coerce_branch_max_transitions(value: Any) -> int:
         min_value=5,
         max_value=_MAX_BRANCH_MAX_TRANSITIONS,
     )
+
+
+def _coerce_bool_with_default(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return bool(default)
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _normalise_failure_policy(value: Any) -> str:
@@ -499,6 +515,10 @@ def _build_for_each_handler(
         success_policy = _normalise_for_each_success_policy(
             request.inputs.get("success_policy")
         )
+        include_tool_invocations_in_iteration_results = _coerce_bool_with_default(
+            request.inputs.get("include_tool_invocations_in_iteration_results"),
+            default=True,
+        )
         max_transitions = _coerce_branch_max_transitions(
             request.inputs.get("max_transitions")
         )
@@ -595,13 +615,13 @@ def _build_for_each_handler(
                             "result_envelope": None,
                         }
 
-        iteration_results = [
+        raw_iteration_results = [
             indexed_results[index]
             for index in range(len(selected_items))
             if index in indexed_results
         ]
         child_step_invocations: list[Mapping[str, Any]] = []
-        for item in iteration_results:
+        for item in raw_iteration_results:
             raw_item_invocations = item.get("tool_invocations")
             if not isinstance(raw_item_invocations, list):
                 continue
@@ -610,6 +630,12 @@ def _build_for_each_handler(
                 for invocation in raw_item_invocations
                 if isinstance(invocation, Mapping)
             )
+        iteration_results: list[dict[str, Any]] = []
+        for item in raw_iteration_results:
+            public_item = dict(item)
+            if not include_tool_invocations_in_iteration_results:
+                public_item.pop("tool_invocations", None)
+            iteration_results.append(public_item)
 
         success_count = len([item for item in iteration_results if item["completed"]])
         error_count = len(iteration_results) - success_count
@@ -620,16 +646,30 @@ def _build_for_each_handler(
             and isinstance((result_payload := item.get("result")), Mapping)
             and result_payload
         ]
+        iteration_errors = [
+            {
+                "index": item.get("index"),
+                "item": item.get("item"),
+                "final_state": item.get("final_state"),
+                "error": item.get("error"),
+            }
+            for item in iteration_results
+            if not item["completed"]
+        ]
         outputs: Dict[str, Any] = {
             "items_source": items_source or None,
             "for_each_item_count": len(iteration_results),
             "for_each_item_limit": item_limit,
             "for_each_max_concurrency": max_concurrency,
             "for_each_success_policy": success_policy,
+            "for_each_include_tool_invocations_in_iteration_results": (
+                include_tool_invocations_in_iteration_results
+            ),
             "for_each_success_count": success_count,
             "for_each_error_count": error_count,
             "for_each_partial_success": success_count > 0 and error_count > 0,
             "iteration_results": iteration_results,
+            "iteration_errors": iteration_errors,
             "successful_results": successful_results,
         }
         existing_invocations = request.data.get("invocations")
@@ -659,6 +699,9 @@ def _build_for_each_handler(
                 "success_count": success_count,
                 "error_count": error_count,
                 "success_policy": success_policy,
+                "include_tool_invocations_in_iteration_results": (
+                    include_tool_invocations_in_iteration_results
+                ),
                 "items_source": items_source or None,
             },
         )
@@ -865,6 +908,176 @@ def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
         applied.append(key)
 
     outputs["_context_set_applied_keys"] = applied
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
+def _normalise_field_name(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalise_field_sequence(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates: Sequence[Any] = [item.strip() for item in value.split(",")]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        candidates = value
+    else:
+        candidates = [value]
+    fields: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        field = _normalise_field_name(candidate)
+        if not field:
+            continue
+        key = field.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        fields.append(field)
+    return fields
+
+
+def _normalise_field_aliases(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    aliases: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = _normalise_field_name(raw_key).lower()
+        target = _normalise_field_name(raw_value)
+        if key and target:
+            aliases[key] = target
+    return aliases
+
+
+def _truncate_projected_value(value: Any, max_chars: int | None) -> tuple[Any, bool]:
+    if not isinstance(value, str) or not max_chars or max_chars <= 0:
+        return value, False
+    if len(value) <= max_chars:
+        return value, False
+    return value[:max_chars], True
+
+
+def _handle_context_project(request: WorkflowActionRequest) -> WorkflowActionResult:
+    """Project candidate context fields to a compact payload.
+
+    The projection policy is supplied by workflow context/metadata. This action
+    is intentionally domain-neutral: it only applies the represented field list,
+    aliases, exclusions, and size bounds supplied by the workflow.
+    """
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    target_key = _normalise_text(inputs.get("target_key")) or "projected_payload"
+    field_sources = inputs.get("field_sources")
+    if not isinstance(field_sources, Mapping):
+        return WorkflowActionResult(
+            status="failed",
+            error="context_project:field_sources_missing_or_invalid",
+        )
+
+    requirement = inputs.get("requirement")
+    requirement_map = requirement if isinstance(requirement, Mapping) else {}
+    required_fields = _normalise_field_sequence(
+        inputs.get("required_fields")
+        or requirement_map.get("required_fields")
+        or requirement_map.get("fields")
+    )
+    if not required_fields:
+        required_fields = _normalise_field_sequence(
+            inputs.get("default_fields") or requirement_map.get("default_fields")
+        )
+    always_include_fields = _normalise_field_sequence(
+        inputs.get("always_include_fields")
+        or requirement_map.get("always_include_fields")
+    )
+    selected_fields = _normalise_field_sequence(
+        [*always_include_fields, *required_fields]
+    )
+    excluded_fields = {
+        field.lower()
+        for field in _normalise_field_sequence(
+            inputs.get("excluded_fields") or requirement_map.get("excluded_fields")
+        )
+    }
+    aliases = _normalise_field_aliases(
+        inputs.get("field_aliases") or requirement_map.get("field_aliases")
+    )
+
+    try:
+        max_chars_per_field = int(
+            inputs.get("max_chars_per_field")
+            or requirement_map.get("max_chars_per_field")
+            or 0
+        )
+    except (TypeError, ValueError):
+        max_chars_per_field = 0
+
+    projected: dict[str, Any] = {}
+    selected_output_fields: list[str] = []
+    missing_fields: list[str] = []
+    omitted_fields: list[str] = []
+    truncated_fields: list[str] = []
+    source_lookup = {
+        _normalise_field_name(key).lower(): (key, value)
+        for key, value in field_sources.items()
+        if _normalise_field_name(key)
+    }
+
+    for requested_field in selected_fields:
+        requested_key = requested_field.lower()
+        output_field = aliases.get(requested_key, requested_field)
+        output_key = output_field.lower()
+        if requested_key in excluded_fields or output_key in excluded_fields:
+            omitted_fields.append(requested_field)
+            continue
+        source_entry = source_lookup.get(output_key) or source_lookup.get(requested_key)
+        if source_entry is None:
+            missing_fields.append(requested_field)
+            continue
+        _source_key, value = source_entry
+        if not _context_value_present(value):
+            missing_fields.append(requested_field)
+            continue
+        projected_value, truncated = _truncate_projected_value(
+            value,
+            max_chars_per_field if max_chars_per_field > 0 else None,
+        )
+        projected[output_field] = projected_value
+        selected_output_fields.append(output_field)
+        if truncated:
+            truncated_fields.append(output_field)
+
+    if missing_fields and _coerce_bool(inputs.get("include_missing_fields")):
+        projected["_missing_fields"] = list(missing_fields)
+
+    metadata = {
+        "schema_version": "workflow_item_output_projection.v1",
+        "target_key": target_key,
+        "selected_fields": selected_output_fields,
+        "requested_fields": selected_fields,
+        "missing_fields": missing_fields,
+        "omitted_fields": omitted_fields,
+        "truncated_fields": truncated_fields,
+        "requirement_schema_version": _normalise_text(
+            requirement_map.get("schema_version")
+        )
+        or None,
+        "purpose": _normalise_text(requirement_map.get("purpose")) or None,
+    }
+    outputs: dict[str, Any] = {
+        target_key: projected,
+        f"{target_key}_projection": metadata,
+    }
+    append_runtime_event(
+        context=request.data,
+        event={
+            "status": "context_projected",
+            "target_key": target_key,
+            "selected_fields": list(selected_output_fields),
+            "missing_fields": list(missing_fields),
+            "purpose": metadata["purpose"],
+        },
+    )
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
@@ -1114,6 +1327,17 @@ def register_control_flow_actions(
                 "Declaratively render workflow context/request/environment "
                 "values into string context keys. Supports JSON and concept-id "
                 "rendering as generic VWL template support."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
+            handler=_handle_context_project,
+            description=(
+                "Project candidate context fields into a compact payload using "
+                "a workflow-supplied item-output requirement, aliases, "
+                "exclusions, and size bounds."
             ),
         )
     )
