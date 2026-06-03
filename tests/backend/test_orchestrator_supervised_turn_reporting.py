@@ -395,9 +395,7 @@ def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> N
     assert result is not None
     assert result.completed is True
     submission_event = next(
-        item
-        for item in aux_log
-        if item.get("type") == "workflow_instance_submission"
+        item for item in aux_log if item.get("type") == "workflow_instance_submission"
     )
     assert submission_event["status"] == "submission_skipped"
     assert submission_event["reason_code"] == "agent_test_instance"
@@ -1097,6 +1095,358 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
         ]
         == "augmented_context"
     )
+
+
+def test_prepare_selector_context_compacts_bloated_augmented_context(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    orchestrator._selector_context_chars = 2_000
+    old_debug_payload = "old diagnostic payload " + ("x" * 8_000)
+    recent_user_turn = "Please route this concise request."
+
+    result = orchestrator._action_turn_execution_prepare_selector_context(
+        SimpleNamespace(
+            data={
+                "user_prompt": recent_user_turn,
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "augmented_context": [
+                    {"role": "system", "content": "CURRENT USER CONTEXT: Test User"},
+                    {"role": "assistant", "content": old_debug_payload},
+                    {"role": "tool", "content": "tool payload " + ("y" * 7_000)},
+                    {"role": "user", "content": recent_user_turn},
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_DummyLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    selector_context = result.outputs["selector_context_messages"]
+    joined_context = "\n".join(
+        str(message.get("content") or "")
+        for message in selector_context
+        if isinstance(message, dict)
+    )
+    assert "Current turn request to route" in joined_context
+    assert recent_user_turn in joined_context
+    assert old_debug_payload not in joined_context
+
+    lineage = result.outputs["selector_context_lineage"]
+    assert lineage["base_context_source"] == "selector_compact_augmented_context"
+    capsule = lineage["selector_context_capsule"]
+    assert capsule["schema_version"] == "selector_context_capsule.v1"
+    assert capsule["compacted"] is True
+    assert capsule["original_content_chars"] > capsule["included_content_chars"]
+    assert capsule["estimated_included_tokens"] < capsule["estimated_original_tokens"]
+    assert capsule["omitted_message_count"] >= 1
+
+
+def test_turn_execution_route_uses_represented_selector_fast_path_without_llm(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    selected_workflow_id = "#V#represented_fast_path_candidate_workflow"
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "execution",
+                        "explicit_workflow_context_required": False,
+                    }
+                },
+            ),
+            purpose="A represented workflow candidate for fast-path tests.",
+            source="test",
+        )
+    )
+
+    class _FailIfCalledLLM:
+        def generate(self, prompt, context=None, model=None):  # pragma: no cover
+            raise AssertionError(
+                "selector LLM should be skipped by represented fast path"
+            )
+
+    aux_llm_calls: list[dict[str, Any]] = []
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Run the represented candidate.",
+                "workflow_discovery_result": {
+                    "requested_query": "Run the represented candidate.",
+                    "query": "Run the represented candidate.",
+                    "selector_fast_path_policy": {
+                        "enabled": True,
+                        "rule": "unique_candidate_covers_contract",
+                        "authority_concept_id": (
+                            "#V#selector_fast_path_policy_unique_contract"
+                        ),
+                        "require_contract_coverage": True,
+                    },
+                    "matches": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Represented Fast Path Candidate",
+                            "description": "Synthetic represented workflow candidate.",
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "turn_launchable": True,
+                            "covers_expected_tool_set": True,
+                            "covers_success_contract": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                            "selector_fast_path_policy": {
+                                "enabled": True,
+                                "rule": "unique_candidate_covers_contract",
+                                "authority_concept_id": (
+                                    "#V#selector_fast_path_policy_unique_contract"
+                                ),
+                                "require_contract_coverage": True,
+                            },
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Represented Fast Path Candidate",
+                            "description": "Synthetic represented workflow candidate.",
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "turn_launchable": True,
+                            "covers_expected_tool_set": True,
+                            "covers_success_contract": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                            "selector_fast_path_policy": {
+                                "enabled": True,
+                                "rule": "unique_candidate_covers_contract",
+                                "authority_concept_id": (
+                                    "#V#selector_fast_path_policy_unique_contract"
+                                ),
+                                "require_contract_coverage": True,
+                            },
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_FailIfCalledLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == selected_workflow_id
+    assert result.outputs["workflow_routing"]["source"] == "represented_fast_path"
+    fast_path = result.outputs["selected_workflow_trace"][
+        "selector_represented_fast_path"
+    ]
+    assert fast_path["applied"] is True
+    assert (
+        fast_path["authority_source"] == "#V#selector_fast_path_policy_unique_contract"
+    )
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_represented_fast_path"
+        and entry.get("applied") is True
+        for entry in aux_llm_calls
+    )
+
+
+def test_turn_execution_route_falls_back_to_selector_llm_when_fast_path_ambiguous(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    first_workflow_id = "#V#represented_fast_path_first_workflow"
+    second_workflow_id = "#V#represented_fast_path_second_workflow"
+    for workflow_id in (first_workflow_id, second_workflow_id):
+        orchestrator._workflow_registry.register_or_replace(
+            WorkflowRegistration(
+                workflow_id=workflow_id,
+                definition=WorkflowDefinition(
+                    workflow_id=workflow_id,
+                    initial_state="complete",
+                    states={
+                        "complete": WorkflowStateSpec(
+                            state_id="complete",
+                            actions=(),
+                            terminal=True,
+                        )
+                    },
+                    metadata={
+                        "routing_profile": {
+                            "role": "execution",
+                            "explicit_workflow_context_required": False,
+                        }
+                    },
+                ),
+                purpose=f"Synthetic represented workflow {workflow_id}.",
+                source="test",
+            )
+        )
+
+    llm_calls: list[dict[str, Any]] = []
+
+    class _CapturingLLM:
+        def generate(self, prompt, context=None, model=None):
+            llm_calls.append({"prompt": prompt, "context": list(context or [])})
+            return first_workflow_id
+
+    candidate_base = {
+        "description": "Synthetic represented workflow candidate.",
+        "routing_eligible": True,
+        "is_executable": True,
+        "is_policy_safe": True,
+        "turn_launchable": True,
+        "covers_expected_tool_set": True,
+        "covers_success_contract": True,
+        "executability_reason": "executable_now",
+        "candidate_source": "workflow_discovery",
+        "routing_profile": {"role": "execution"},
+        "selector_fast_path_policy": {
+            "enabled": True,
+            "rule": "unique_candidate_covers_contract",
+            "authority_concept_id": "#V#selector_fast_path_policy_unique_contract",
+            "require_contract_coverage": True,
+        },
+    }
+    aux_llm_calls: list[dict[str, Any]] = []
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Run one represented candidate.",
+                "workflow_discovery_result": {
+                    "requested_query": "Run one represented candidate.",
+                    "query": "Run one represented candidate.",
+                    "selector_fast_path_policy": {
+                        "enabled": True,
+                        "rule": "unique_candidate_covers_contract",
+                        "authority_concept_id": (
+                            "#V#selector_fast_path_policy_unique_contract"
+                        ),
+                        "require_contract_coverage": True,
+                    },
+                    "matches": [
+                        {
+                            **candidate_base,
+                            "concept_id": first_workflow_id,
+                            "name": "First Represented Fast Path Candidate",
+                        },
+                        {
+                            **candidate_base,
+                            "concept_id": second_workflow_id,
+                            "name": "Second Represented Fast Path Candidate",
+                        },
+                    ],
+                    "candidates": [
+                        {
+                            **candidate_base,
+                            "concept_id": first_workflow_id,
+                            "name": "First Represented Fast Path Candidate",
+                        },
+                        {
+                            **candidate_base,
+                            "concept_id": second_workflow_id,
+                            "name": "Second Represented Fast Path Candidate",
+                        },
+                    ],
+                    "match_count": 2,
+                },
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_CapturingLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert llm_calls
+    fast_path_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_represented_fast_path"
+    )
+    assert fast_path_entry["applied"] is False
+    assert fast_path_entry["reason"] == "ambiguous_represented_fast_path_candidates"
 
 
 def test_supervised_turn_propagates_completion_gate_retry_budget(

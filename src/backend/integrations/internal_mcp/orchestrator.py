@@ -1425,11 +1425,11 @@ class _CustomWorkflowDispatchSupport:
 
         try:
             candidate_count = int(discovery_payload.get("candidate_count") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             candidate_count = 0
         try:
             match_count = int(discovery_payload.get("match_count") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             match_count = 0
         if candidate_count > 0 or match_count > 0:
             return False
@@ -3449,6 +3449,13 @@ class InternalMCPChatOrchestrator:
             env_var="VON_MCP_FOLLOW_UP_CONTEXT_CHARS",
             default=40_000,
             min_value=4_000,
+            max_value=200_000,
+        )
+        self._selector_context_chars = self._coerce_int(
+            None,
+            env_var="VON_MCP_SELECTOR_CONTEXT_CHARS",
+            default=16_000,
+            min_value=0,
             max_value=200_000,
         )
         # Structured tool-calling candidate caps.
@@ -6622,7 +6629,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw, str):
                     try:
                         raw = datetime.fromisoformat(raw)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         continue
                 if isinstance(raw, datetime):
                     if raw.tzinfo is None:
@@ -8304,10 +8311,9 @@ class InternalMCPChatOrchestrator:
         invocation: Mapping[str, Any],
     ) -> str:
         payload = self._agent_test_relation_payload(invocation)
-        concept_id = (
-            str(payload.get("concept_id") or "").strip()
-            or self._agent_test_relation_concept_id(request, data)
-        )
+        concept_id = str(
+            payload.get("concept_id") or ""
+        ).strip() or self._agent_test_relation_concept_id(request, data)
         predicates_raw = payload.get("predicates")
         predicates: list[str] = []
         if isinstance(predicates_raw, Sequence) and not isinstance(
@@ -8453,7 +8459,9 @@ class InternalMCPChatOrchestrator:
                 "response": response,
                 "tool_calls": [tool_call],
                 "use_structured": False,
-                "tool_call_model": getattr(getattr(request, "environment", None), "model", None),
+                "tool_call_model": getattr(
+                    getattr(request, "environment", None), "model", None
+                ),
                 "required_prompt_tools": ["get_text_relations_summary"],
                 "result": True,
                 **retry_fields,
@@ -12860,6 +12868,171 @@ class InternalMCPChatOrchestrator:
             "total_content_chars": total_content_chars,
         }
 
+    @staticmethod
+    def _estimate_context_tokens_from_chars(char_count: int) -> int:
+        return int(max(0, char_count) + 3) // 4
+
+    @staticmethod
+    def _message_content_char_count(message: Mapping[str, Any]) -> int:
+        content = message.get("content")
+        if isinstance(content, str):
+            return len(content)
+        if content is None:
+            return 0
+        return len(str(content))
+
+    @staticmethod
+    def _copy_message_with_limited_content(
+        message: Mapping[str, Any],
+        *,
+        max_chars: int,
+    ) -> Mapping[str, Any]:
+        copied = dict(message)
+        content = copied.get("content")
+        content_text = content if isinstance(content, str) else str(content or "")
+        if max_chars <= 0 or len(content_text) <= max_chars:
+            copied["content"] = content_text
+            return copied
+        omitted = len(content_text) - max_chars
+        copied["content"] = (
+            content_text[:max_chars].rstrip() + f"... [truncated {omitted} chars]"
+        )
+        copied["selector_context_truncated"] = True
+        copied["selector_context_omitted_chars"] = omitted
+        return copied
+
+    def _build_selector_base_context_capsule(
+        self,
+        messages: Sequence[Mapping[str, Any]] | None,
+    ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+        base_messages = [
+            dict(message)
+            for message in (messages or ())
+            if isinstance(message, Mapping)
+        ]
+        original_summary = self._summarise_context_messages_for_telemetry(base_messages)
+        original_chars = (
+            int(original_summary.get("total_content_chars") or 0)
+            if isinstance(original_summary, Mapping)
+            else 0
+        )
+        target_chars = max(0, int(self._selector_context_chars))
+        base_payload: dict[str, Any] = {
+            "schema_version": "selector_context_capsule.v1",
+            "enabled": True,
+            "target_max_base_context_chars": target_chars,
+            "message_selection_strategy": "leading_system_and_recent_tail",
+            "original_message_count": len(base_messages),
+            "original_content_chars": original_chars,
+            "estimated_original_tokens": self._estimate_context_tokens_from_chars(
+                original_chars
+            ),
+        }
+        if not base_messages or target_chars == 0:
+            return [], {
+                **base_payload,
+                "compacted": bool(base_messages),
+                "included_message_count": 0,
+                "included_content_chars": 0,
+                "estimated_included_tokens": 0,
+                "omitted_message_count": len(base_messages),
+                "omitted_content_chars": original_chars,
+            }
+        if original_chars <= target_chars:
+            return base_messages, {
+                **base_payload,
+                "compacted": False,
+                "included_message_count": len(base_messages),
+                "included_content_chars": original_chars,
+                "estimated_included_tokens": self._estimate_context_tokens_from_chars(
+                    original_chars
+                ),
+                "omitted_message_count": 0,
+                "omitted_content_chars": 0,
+            }
+
+        leading_system, remainder = self._split_leading_system_messages(base_messages)
+        per_message_limit = max(500, min(4_000, target_chars // 2 or 500))
+        leading_budget = min(target_chars // 2, 6_000)
+        included: list[Mapping[str, Any]] = []
+        included_original_indexes: set[int] = set()
+        running_chars = 0
+
+        for index, message in enumerate(leading_system):
+            original_len = self._message_content_char_count(message)
+            if included and running_chars >= leading_budget:
+                break
+            allowance = min(per_message_limit, max(0, leading_budget - running_chars))
+            if allowance <= 0:
+                break
+            copied = self._copy_message_with_limited_content(
+                message,
+                max_chars=allowance,
+            )
+            included.append(copied)
+            included_original_indexes.add(index)
+            running_chars += min(original_len, allowance)
+
+        tail_budget = max(0, target_chars - running_chars)
+        tail_kept_reversed: list[tuple[int, Mapping[str, Any], int]] = []
+        for reverse_offset, message in enumerate(reversed(remainder)):
+            original_index = len(base_messages) - reverse_offset - 1
+            original_len = self._message_content_char_count(message)
+            allowance = min(per_message_limit, original_len)
+            if tail_kept_reversed and running_chars + allowance > target_chars:
+                break
+            if not tail_kept_reversed and running_chars + allowance > target_chars:
+                allowance = max(0, tail_budget)
+            if allowance <= 0:
+                continue
+            copied = self._copy_message_with_limited_content(
+                message,
+                max_chars=allowance,
+            )
+            tail_kept_reversed.append(
+                (original_index, copied, min(original_len, allowance))
+            )
+            included_original_indexes.add(original_index)
+            running_chars += min(original_len, allowance)
+
+        included.extend(item[1] for item in reversed(tail_kept_reversed))
+        included_summary = self._summarise_context_messages_for_telemetry(included)
+        included_chars = (
+            int(included_summary.get("total_content_chars") or 0)
+            if isinstance(included_summary, Mapping)
+            else 0
+        )
+        omitted_message_count = max(
+            0, len(base_messages) - len(included_original_indexes)
+        )
+        omitted_chars = max(0, original_chars - included_chars)
+        truncated_message_count = sum(
+            1
+            for message in included
+            if isinstance(message, Mapping)
+            and message.get("selector_context_truncated") is True
+        )
+        return list(included), {
+            **base_payload,
+            "compacted": True,
+            "included_message_count": len(included),
+            "included_content_chars": included_chars,
+            "estimated_included_tokens": self._estimate_context_tokens_from_chars(
+                included_chars
+            ),
+            "omitted_message_count": omitted_message_count,
+            "omitted_content_chars": omitted_chars,
+            "truncated_message_count": truncated_message_count,
+            "excluded_context_classes": [
+                {
+                    "class": "base_context_messages_not_selected_for_selector_capsule",
+                    "message_count": omitted_message_count,
+                    "content_chars": omitted_chars,
+                }
+            ],
+            "included_context_summary": included_summary,
+        }
+
     @classmethod
     def _summarise_added_context_messages_for_telemetry(
         cls,
@@ -17146,10 +17319,10 @@ class InternalMCPChatOrchestrator:
         check_cancellation: Callable[[], None] | None = None,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
-        turn_model_failures: dict[
-            tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]
-        ]
-        | None = None,
+        turn_model_failures: (
+            dict[tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]]
+            | None
+        ) = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: ``workflow_stage_id`` is the canonical
         # workflow-path stage identifier (e.g. ``tool_plan``,
@@ -17189,9 +17362,7 @@ class InternalMCPChatOrchestrator:
             turn_model_failures_local = getattr(
                 self, "_turn_model_failures_local", None
             )
-            turn_model_failures = getattr(
-                turn_model_failures_local, "cache", None
-            )
+            turn_model_failures = getattr(turn_model_failures_local, "cache", None)
         _dead_cache = (
             turn_model_failures if isinstance(turn_model_failures, dict) else None
         )
@@ -17242,7 +17413,9 @@ class InternalMCPChatOrchestrator:
                 else (str(candidate.host).strip().lower() if candidate.host else None)
             )
             normalised_model = (
-                model_name.strip() if isinstance(model_name, str) and model_name else None
+                model_name.strip()
+                if isinstance(model_name, str) and model_name
+                else None
             )
             cache_key = (provider, normalised_model, host)
 
@@ -18018,10 +18191,10 @@ class InternalMCPChatOrchestrator:
         prefer_default_model: bool = False,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
-        turn_model_failures: dict[
-            tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]
-        ]
-        | None = None,
+        turn_model_failures: (
+            dict[tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]]
+            | None
+        ) = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: see ``_run_llm_with_fallbacks`` for the
         # rationale on ``workflow_stage_id`` vs the orchestrator-internal
@@ -18046,9 +18219,7 @@ class InternalMCPChatOrchestrator:
             turn_model_failures_local = getattr(
                 self, "_turn_model_failures_local", None
             )
-            turn_model_failures = getattr(
-                turn_model_failures_local, "cache", None
-            )
+            turn_model_failures = getattr(turn_model_failures_local, "cache", None)
         _dead_cache = (
             turn_model_failures if isinstance(turn_model_failures, dict) else None
         )
@@ -18102,7 +18273,9 @@ class InternalMCPChatOrchestrator:
                 else (str(candidate.host).strip().lower() if candidate.host else None)
             )
             normalised_model = (
-                model_name.strip() if isinstance(model_name, str) and model_name else None
+                model_name.strip()
+                if isinstance(model_name, str) and model_name
+                else None
             )
             normalised_provider = provider.lower() if provider else None
             cache_key = (normalised_provider, normalised_model, host)
@@ -18973,7 +19146,7 @@ class InternalMCPChatOrchestrator:
             # Try to parse as JSON
             try:
                 parsed = json.loads(fenced_content)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
 
             # Check if it looks like a tool call (single object or array)
@@ -19078,7 +19251,7 @@ class InternalMCPChatOrchestrator:
                 or missing_action_but_tool_shape
                 or has_tool_uses_shape
             )
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return False
 
     def _extract_tool_calls(self, text: str) -> list[_ToolCallRequest] | None:
@@ -20526,7 +20699,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(max_predicates_value, (int, float, str))
                         else 3
                     )
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     max_predicates_int = 3
                 derivation_context = self._predicate_follow_up_derivation_context(
                     derivation_spec,
@@ -33074,8 +33247,7 @@ class InternalMCPChatOrchestrator:
                     "source": "agent_test_local_replay",
                     "render_variables": {
                         "candidate_list": (
-                            f"- {TOOL_CALLING_WORKFLOW_ID}: "
-                            "Tool Calling Workflow"
+                            f"- {TOOL_CALLING_WORKFLOW_ID}: " "Tool Calling Workflow"
                         )
                     },
                 },
@@ -33305,6 +33477,29 @@ class InternalMCPChatOrchestrator:
                 discovered_workflows=selector_candidate_matches or None,
                 continuation_routing_context_text=continuation_routing_context_text,
             )
+        top_level_fast_path_policy = (
+            workflow_discovery_result.get("selector_fast_path_policy")
+            if isinstance(workflow_discovery_result, Mapping)
+            else None
+        )
+        if isinstance(top_level_fast_path_policy, Mapping):
+            selector_policy_recommendation = (
+                dict(selector_prompt.policy_recommendation)
+                if isinstance(selector_prompt.policy_recommendation, Mapping)
+                else {}
+            )
+            selector_policy_recommendation.setdefault(
+                "selector_fast_path_policy",
+                {
+                    str(key): value
+                    for key, value in top_level_fast_path_policy.items()
+                    if isinstance(key, str)
+                },
+            )
+            selector_prompt = replace(
+                selector_prompt,
+                policy_recommendation=selector_policy_recommendation,
+            )
         selector_stage_messages: list[dict[str, str]] = []
         current_turn_message = self._build_turn_current_request_stage_message(
             prompt_text
@@ -33329,11 +33524,22 @@ class InternalMCPChatOrchestrator:
                 "Build selector context",
                 "Composing the selector-stage LLM context from turn context and selector guidance.",
             )
+        selector_base_context, selector_context_capsule = (
+            self._build_selector_base_context_capsule(augmented_context)
+        )
+        selector_base_context_source = (
+            "selector_compact_augmented_context"
+            if bool(selector_context_capsule.get("compacted"))
+            else "augmented_context"
+        )
         selector_context, selector_context_lineage = self._build_stage_llm_context(
-            base_context=augmented_context,
+            base_context=selector_base_context,
             stage="selector_decision",
-            base_context_source="augmented_context",
+            base_context_source=selector_base_context_source,
             stage_messages=selector_stage_messages,
+        )
+        selector_context_lineage["selector_context_capsule"] = dict(
+            selector_context_capsule
         )
         self._attach_memory_context_lineage(
             selector_context_lineage,
@@ -33684,6 +33890,7 @@ class InternalMCPChatOrchestrator:
             prepared_outputs.get("selector_context_lineage")
         )
         selector_override_trace: dict[str, Any] | None = None
+        selector_fast_path_evaluation: dict[str, Any] | None = None
         if env.user_namespace and self._workflow_selector.enabled():
             if not selector_prompt.prompt_text:
                 selector_selection = (
@@ -33692,37 +33899,75 @@ class InternalMCPChatOrchestrator:
                     )
                 )
             else:
-                selector_response_text = data.get("selector_raw_response")
-                if (
-                    not isinstance(selector_response_text, str)
-                    or not selector_response_text.strip()
-                ):
-                    selector_context = (
-                        cast(
-                            Sequence[Mapping[str, Any]],
-                            prepared_outputs.get("selector_context_messages"),
-                        )
-                        if isinstance(
-                            prepared_outputs.get("selector_context_messages"),
-                            Sequence,
-                        )
-                        and not isinstance(
-                            prepared_outputs.get("selector_context_messages"),
-                            (str, bytes, bytearray),
-                        )
-                        else cast(
-                            Sequence[Mapping[str, Any]],
-                            augmented_context,
+                selector_fast_path_evaluation = (
+                    self._workflow_selector.evaluate_represented_fast_path(
+                        selection_prompt=selector_prompt
+                    )
+                )
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        {
+                            "type": "workflow_selector_represented_fast_path",
+                            "stage": "selector_decision",
+                            **dict(selector_fast_path_evaluation),
+                        },
+                        stage="selector_decision",
+                        component="workflow_selector",
+                        function="evaluate_represented_fast_path",
+                        decision_class="workflow_selector_fast_path",
+                        decision_source="represented_selector_fast_path_policy",
+                        changed_outcome=bool(
+                            selector_fast_path_evaluation.get("applied")
+                        ),
+                        reason_code=str(
+                            selector_fast_path_evaluation.get("reason")
+                            or "not_evaluated"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
+                selector_selection = None
+                if bool(selector_fast_path_evaluation.get("applied")):
+                    selector_selection = (
+                        self._workflow_selector.resolve_represented_fast_path_selection(
+                            selection_prompt=selector_prompt
                         )
                     )
-                    selector_call_prompt = str(
-                        prepared_outputs.get("selector_call_prompt_text")
-                        or build_selector_call_prompt(
-                            str(data.get("user_prompt") or data.get("prompt") or "")
+                if selector_selection is None:
+                    selector_response_text = data.get("selector_raw_response")
+                    if (
+                        not isinstance(selector_response_text, str)
+                        or not selector_response_text.strip()
+                    ):
+                        selector_context = (
+                            cast(
+                                Sequence[Mapping[str, Any]],
+                                prepared_outputs.get("selector_context_messages"),
+                            )
+                            if isinstance(
+                                prepared_outputs.get("selector_context_messages"),
+                                Sequence,
+                            )
+                            and not isinstance(
+                                prepared_outputs.get("selector_context_messages"),
+                                (str, bytes, bytearray),
+                            )
+                            else cast(
+                                Sequence[Mapping[str, Any]],
+                                augmented_context,
+                            )
                         )
-                    )
-                    selector_response_text, _classifier_model, _selector_candidate = (
-                        self._run_llm_with_fallbacks(
+                        selector_call_prompt = str(
+                            prepared_outputs.get("selector_call_prompt_text")
+                            or build_selector_call_prompt(
+                                str(data.get("user_prompt") or data.get("prompt") or "")
+                            )
+                        )
+                        (
+                            selector_response_text,
+                            _classifier_model,
+                            _selector_candidate,
+                        ) = self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
                             policy_stage="classifier",
                             prompt=selector_call_prompt,
@@ -33746,22 +33991,23 @@ class InternalMCPChatOrchestrator:
                             timeout_override_sec=timeout_override_sec,
                             workflow_stage_id="selector_preparation",
                         )
-                    )
-                    prepared_outputs["selector_raw_response"] = selector_response_text
-                selector_selection = self._workflow_selector.resolve_selection(
-                    raw_response=selector_response_text,
-                    prompt_id=selector_prompt.prompt_id,
-                    prompt_used=selector_prompt.prompt_text,
-                    discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
-                    candidate_entries=(
-                        tuple(selector_prompt.candidate_entries)
-                        + tuple(
-                            item
-                            for item in excluded_discovered_matches
-                            if isinstance(item, Mapping)
+                        prepared_outputs["selector_raw_response"] = (
+                            selector_response_text
                         )
-                    ),
-                )
+                    selector_selection = self._workflow_selector.resolve_selection(
+                        raw_response=selector_response_text,
+                        prompt_id=selector_prompt.prompt_id,
+                        prompt_used=selector_prompt.prompt_text,
+                        discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
+                        candidate_entries=(
+                            tuple(selector_prompt.candidate_entries)
+                            + tuple(
+                                item
+                                for item in excluded_discovered_matches
+                                if isinstance(item, Mapping)
+                            )
+                        ),
+                    )
             selector_selection_metadata = (
                 {
                     str(key): value
@@ -34391,6 +34637,15 @@ class InternalMCPChatOrchestrator:
                     "selector_selection_metadata": (
                         dict(selector_selection_metadata)
                         if isinstance(selector_selection_metadata, Mapping)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "selector_represented_fast_path": dict(
+                                selector_fast_path_evaluation
+                            )
+                        }
+                        if isinstance(selector_fast_path_evaluation, Mapping)
                         else {}
                     ),
                     **(
@@ -35153,7 +35408,8 @@ class InternalMCPChatOrchestrator:
                     "state_id": envelope.get("state_id"),
                     "action_id": envelope.get("action_id"),
                     "action_status": envelope.get("action_status"),
-                    "outcome": envelope.get("action_outcome") or envelope.get("outcome"),
+                    "outcome": envelope.get("action_outcome")
+                    or envelope.get("outcome"),
                     "execution_mode": envelope.get("execution_mode"),
                     "state_attempt": envelope.get("state_attempt"),
                     "duration_ms": envelope.get("duration_ms"),
@@ -35416,7 +35672,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 parsed = default
             if parsed <= 0:
                 return default
@@ -35466,7 +35722,9 @@ class InternalMCPChatOrchestrator:
 
         def _empty_agent_test_turn_memory_context_state() -> dict[str, Any]:
             requested_memory_context = (
-                dict(turn_memory_context) if isinstance(turn_memory_context, Mapping) else {}
+                dict(turn_memory_context)
+                if isinstance(turn_memory_context, Mapping)
+                else {}
             )
             return {
                 "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
@@ -35494,7 +35752,9 @@ class InternalMCPChatOrchestrator:
                 ],
             }
 
-        def _timeout_turn_memory_context_state(timeout_seconds: float) -> dict[str, Any]:
+        def _timeout_turn_memory_context_state(
+            timeout_seconds: float,
+        ) -> dict[str, Any]:
             return {
                 "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
                 "status": "unavailable",
@@ -35508,9 +35768,14 @@ class InternalMCPChatOrchestrator:
                 "conversation_session_id": conversation_session_id,
             }
 
-        def _timeout_augmented_context(timeout_seconds: float) -> list[Mapping[str, Any]]:
+        def _timeout_augmented_context(
+            timeout_seconds: float,
+        ) -> list[Mapping[str, Any]]:
             fallback_context: list[Mapping[str, Any]] = []
-            if isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+            if (
+                isinstance(auxiliary_system_prompt, str)
+                and auxiliary_system_prompt.strip()
+            ):
                 fallback_context.append(
                     {"role": "system", "content": auxiliary_system_prompt.strip()}
                 )
@@ -35584,8 +35849,9 @@ class InternalMCPChatOrchestrator:
                 user_namespace=user_namespace,
             ),
         )
-        if explicit_local_agent_test_model and not _has_explicit_turn_memory_context_request(
-            turn_memory_context
+        if (
+            explicit_local_agent_test_model
+            and not _has_explicit_turn_memory_context_request(turn_memory_context)
         ):
             turn_memory_context_state = _run_supervised_setup_step(
                 "Use no turn memory context",
@@ -35699,19 +35965,17 @@ class InternalMCPChatOrchestrator:
                 )
             ),
         )
-        conversation_turn_llm_timeout_override_sec = (
-            _run_supervised_setup_step(
-                "Resolve conversation-turn LLM timeout",
-                lambda: (
-                    _default_conversation_turn_llm_timeout_override_sec()
-                    if explicit_local_agent_test_model
-                    else _resolve_model_llm_timeout_override_sec(
-                        llm_client=llm_client,
-                        model=model,
-                        model_budget_policy=model_budget_policy,
-                    )
-                ),
-            )
+        conversation_turn_llm_timeout_override_sec = _run_supervised_setup_step(
+            "Resolve conversation-turn LLM timeout",
+            lambda: (
+                _default_conversation_turn_llm_timeout_override_sec()
+                if explicit_local_agent_test_model
+                else _resolve_model_llm_timeout_override_sec(
+                    llm_client=llm_client,
+                    model=model,
+                    model_budget_policy=model_budget_policy,
+                )
+            ),
         )
         completion_gate_loop_max_attempts = int(self._completion_gate_loop_max_attempts)
         completion_gate_loop_max_elapsed_ms = int(
@@ -36372,7 +36636,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 parsed = default
             if parsed <= 0:
                 return default
@@ -36392,7 +36656,9 @@ class InternalMCPChatOrchestrator:
                 ],
             }
 
-        def _timeout_turn_memory_context_state(timeout_seconds: float) -> dict[str, Any]:
+        def _timeout_turn_memory_context_state(
+            timeout_seconds: float,
+        ) -> dict[str, Any]:
             return {
                 "schema_version": TURN_MEMORY_CONTEXT_SCHEMA_VERSION,
                 "status": "unavailable",
@@ -36406,9 +36672,14 @@ class InternalMCPChatOrchestrator:
                 "conversation_session_id": conversation_session_id,
             }
 
-        def _timeout_augmented_context(timeout_seconds: float) -> list[Mapping[str, str]]:
+        def _timeout_augmented_context(
+            timeout_seconds: float,
+        ) -> list[Mapping[str, str]]:
             fallback_context: list[Mapping[str, str]] = []
-            if isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+            if (
+                isinstance(auxiliary_system_prompt, str)
+                and auxiliary_system_prompt.strip()
+            ):
                 fallback_context.append(
                     {"role": "system", "content": auxiliary_system_prompt.strip()}
                 )

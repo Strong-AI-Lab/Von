@@ -26,7 +26,6 @@ from src.backend.services.workflow_selection_policy_service import (
 
 from .workflow_registry import WorkflowRegistry
 
-
 # Fail closed if the authoritative selector prompt cannot be resolved from
 # Vontology or omits the required routing context variables.
 SELECTOR_PROMPT_UNAVAILABLE_REASON = "selector_prompt_unavailable"
@@ -149,7 +148,7 @@ class WorkflowSelector:
     def _format_candidate_percentage(value: Any) -> str | None:
         try:
             number = float(value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         if number < 0:
             return None
@@ -568,10 +567,230 @@ class WorkflowSelector:
         return recommendation
 
     @staticmethod
+    def _copy_string_key_mapping(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            str(key): nested for key, nested in value.items() if isinstance(key, str)
+        }
+
+    @staticmethod
+    def _represented_fast_path_authority_source(
+        policy: Mapping[str, Any],
+    ) -> str | None:
+        for key in (
+            "authority_concept_id",
+            "policy_concept_id",
+            "rule_concept_id",
+            "source_concept_id",
+            "authority_surface",
+        ):
+            value = policy.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _candidate_declares_selector_fast_path_coverage(
+        candidate: Mapping[str, Any],
+    ) -> bool:
+        for key in (
+            "covers_expected_tool_set",
+            "covers_success_contract",
+            "satisfies_expected_outcome_contract",
+            "selector_fast_path_eligible",
+        ):
+            if candidate.get(key) is False:
+                return False
+        return bool(
+            candidate.get("covers_expected_tool_set") is True
+            and (
+                candidate.get("covers_success_contract") is True
+                or candidate.get("satisfies_expected_outcome_contract") is True
+            )
+        )
+
+    def evaluate_represented_fast_path(
+        self,
+        *,
+        selection_prompt: WorkflowSelectionPrompt,
+    ) -> dict[str, Any]:
+        """Evaluate represented selector fast-path policy metadata.
+
+        The runtime only interprets explicit policy metadata supplied by the
+        discovery/candidate surface.  If that metadata is absent or ambiguous,
+        this returns a non-applied evaluation so the normal selector LLM remains
+        the routing authority.
+        """
+
+        policy = self._copy_string_key_mapping(
+            selection_prompt.policy_recommendation.get("selector_fast_path_policy")
+            or selection_prompt.policy_recommendation.get(
+                "represented_fast_path_policy"
+            )
+            or selection_prompt.policy_recommendation.get("represented_fast_path")
+        )
+        if not policy or policy.get("enabled") is not True:
+            return {
+                "schema_version": "selector_represented_fast_path_evaluation.v1",
+                "eligible": False,
+                "applied": False,
+                "reason": "represented_fast_path_policy_absent",
+            }
+
+        authority_source = self._represented_fast_path_authority_source(policy)
+        if not authority_source:
+            return {
+                "schema_version": "selector_represented_fast_path_evaluation.v1",
+                "eligible": False,
+                "applied": False,
+                "reason": "represented_fast_path_policy_missing_authority_source",
+                "policy": policy,
+            }
+
+        supported_rules = {
+            "single_unique_executable_candidate",
+            "unique_executable_candidate",
+            "unique_candidate_covers_contract",
+        }
+        rule = str(policy.get("rule") or policy.get("rule_id") or "").strip()
+        if rule not in supported_rules:
+            return {
+                "schema_version": "selector_represented_fast_path_evaluation.v1",
+                "eligible": False,
+                "applied": False,
+                "reason": "represented_fast_path_policy_rule_unsupported",
+                "authority_source": authority_source,
+                "rule": rule or None,
+            }
+
+        candidates: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        require_contract_coverage = bool(policy.get("require_contract_coverage", True))
+        for entry in selection_prompt.candidate_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = str(entry.get("concept_id") or "").strip()
+            if not concept_id:
+                continue
+            if self._is_selector_default_candidate(entry):
+                excluded.append(
+                    {"workflow_id": concept_id, "reason": "selector_default_candidate"}
+                )
+                continue
+            if entry.get("routing_eligible") is not True:
+                excluded.append(
+                    {"workflow_id": concept_id, "reason": "routing_ineligible"}
+                )
+                continue
+            if entry.get("is_executable") is not True:
+                excluded.append({"workflow_id": concept_id, "reason": "not_executable"})
+                continue
+            if entry.get("is_policy_safe") is not True:
+                excluded.append({"workflow_id": concept_id, "reason": "policy_unsafe"})
+                continue
+            if entry.get("turn_launchable") is False:
+                excluded.append(
+                    {"workflow_id": concept_id, "reason": "not_turn_launchable"}
+                )
+                continue
+            if (
+                require_contract_coverage
+                and not self._candidate_declares_selector_fast_path_coverage(entry)
+            ):
+                excluded.append(
+                    {
+                        "workflow_id": concept_id,
+                        "reason": "contract_coverage_not_declared",
+                    }
+                )
+                continue
+            candidates.append(
+                {
+                    "workflow_id": concept_id,
+                    "name": str(entry.get("name") or "").strip() or concept_id,
+                }
+            )
+
+        if len(candidates) != 1:
+            return {
+                "schema_version": "selector_represented_fast_path_evaluation.v1",
+                "eligible": False,
+                "applied": False,
+                "reason": (
+                    "ambiguous_represented_fast_path_candidates"
+                    if candidates
+                    else "no_represented_fast_path_candidate"
+                ),
+                "authority_source": authority_source,
+                "rule": rule,
+                "eligible_candidate_ids": [
+                    candidate["workflow_id"] for candidate in candidates
+                ],
+                "excluded_candidates": excluded,
+            }
+
+        selected = candidates[0]
+        return {
+            "schema_version": "selector_represented_fast_path_evaluation.v1",
+            "eligible": True,
+            "applied": True,
+            "reason": "represented_policy_single_unique_executable_candidate",
+            "authority_source": authority_source,
+            "rule": rule,
+            "selected_workflow_id": selected["workflow_id"],
+            "selected_workflow_name": selected["name"],
+            "eligible_candidate_ids": [selected["workflow_id"]],
+            "excluded_candidates": excluded,
+        }
+
+    def resolve_represented_fast_path_selection(
+        self,
+        *,
+        selection_prompt: WorkflowSelectionPrompt,
+    ) -> WorkflowSelection | None:
+        evaluation = self.evaluate_represented_fast_path(
+            selection_prompt=selection_prompt
+        )
+        if not bool(evaluation.get("applied")):
+            return None
+        workflow_id = str(evaluation.get("selected_workflow_id") or "").strip()
+        if not workflow_id:
+            return None
+        reasoning = (
+            "Represented selector fast-path policy selected the only eligible "
+            "workflow candidate whose metadata declared expected-outcome coverage."
+        )
+        return WorkflowSelection(
+            workflow_id=workflow_id,
+            verdict="rag_selected",
+            prompt_id=selection_prompt.prompt_id,
+            prompt_used=selection_prompt.prompt_text,
+            raw_response=json.dumps(
+                {
+                    "workflow_id": workflow_id,
+                    "confidence": 1.0,
+                    "reasoning": reasoning,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+            confidence_score=1.0,
+            reasoning=reasoning,
+            selection_source="represented_fast_path",
+            selection_metadata={
+                "selection_resolution": "represented_fast_path",
+                "selector_represented_fast_path": evaluation,
+                "selected_workflow_id": workflow_id,
+            },
+        )
+
+    @staticmethod
     def _format_policy_fragment_number(value: Any) -> str | None:
         try:
             return f"{float(value):.2f}"
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     @staticmethod
@@ -772,6 +991,8 @@ class WorkflowSelector:
                     "routing_profile",
                     "routing_policy_flags",
                     "routing_policy_lexical_signals",
+                    "selector_fast_path_policy",
+                    "represented_fast_path_policy",
                 ):
                     value = wf.get(field_name)
                     if isinstance(value, Mapping):
@@ -780,6 +1001,15 @@ class WorkflowSelector:
                             for key, nested_value in value.items()
                             if isinstance(key, str)
                         }
+                for field_name in (
+                    "covers_expected_tool_set",
+                    "covers_success_contract",
+                    "satisfies_expected_outcome_contract",
+                    "selector_fast_path_eligible",
+                ):
+                    value = wf.get(field_name)
+                    if isinstance(value, bool):
+                        entry[field_name] = value
                 candidate_entries.append(entry)
 
         policy_recommendation = self._normalise_policy_recommendation(
@@ -788,6 +1018,26 @@ class WorkflowSelector:
                 candidate_workflows=candidate_entries,
             )
         )
+        for entry in candidate_entries:
+            for field_name in (
+                "selector_fast_path_policy",
+                "represented_fast_path_policy",
+            ):
+                value = entry.get(field_name)
+                if isinstance(value, Mapping) and value.get("enabled") is True:
+                    policy_recommendation.setdefault(
+                        "selector_fast_path_policy",
+                        {
+                            str(key): nested
+                            for key, nested in value.items()
+                            if isinstance(key, str)
+                        },
+                    )
+                    break
+            if isinstance(
+                policy_recommendation.get("selector_fast_path_policy"), Mapping
+            ):
+                break
         ranked_candidate_ids = tuple(
             str(item)
             for item in policy_recommendation.get("ranked_candidate_ids", ())
@@ -1276,7 +1526,7 @@ class WorkflowSelector:
             if raw_conf is not None:
                 try:
                     confidence = max(0.0, min(1.0, float(raw_conf)))
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     pass
                 break
 
