@@ -2642,28 +2642,30 @@ def _build_health_check_response(app: Flask):
     import socket
     import urllib.request
 
-    local_ip = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.connect(("8.8.8.8", 80))
-        local_ip = sock.getsockname()[0]
-        sock.close()
-    except Exception as exc:
-        print(f"[health] Local IP detection (method 1) failed: {exc}")
+    agent_test_instance = _is_agent_test_instance()
+    if agent_test_instance:
+        local_ip = "127.0.0.1"
+    else:
+        local_ip = None
         try:
-            local_ip = socket.gethostbyname(socket.gethostname())
-            print(f"[health] Local IP from hostname: {local_ip}")
-        except Exception as inner_exc:
-            print(f"[health] Local IP detection (method 2) failed: {inner_exc}")
-            local_ip = "127.0.0.1"
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("8.8.8.8", 80))
+            local_ip = sock.getsockname()[0]
+            sock.close()
+        except Exception as exc:
+            print(f"[health] Local IP detection (method 1) failed: {exc}")
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+                print(f"[health] Local IP from hostname: {local_ip}")
+            except Exception as inner_exc:
+                print(f"[health] Local IP detection (method 2) failed: {inner_exc}")
+                local_ip = "127.0.0.1"
 
     public_ip = app.config.get("PUBLIC_IP_ADDRESS")
-    if _is_agent_test_instance():
+    if agent_test_instance:
         public_ip = None
-    if not public_ip:
+    if not public_ip and not agent_test_instance:
         try:
-            if _is_agent_test_instance():
-                raise RuntimeError("agent_test_instance")
             with urllib.request.urlopen(
                 "https://api.ipify.org?format=text", timeout=3
             ) as response:
@@ -2679,7 +2681,7 @@ def _build_health_check_response(app: Flask):
         status="healthy",
         version=version_info.get("version"),
         version_details=version_info,
-        agent_test_instance=_is_agent_test_instance(),
+        agent_test_instance=agent_test_instance,
         agent_test_environment_marker="VON_AGENT_TEST_INSTANCE",
         pid=os.getpid(),
         start_time=app.config["SERVER_START_TIME"],

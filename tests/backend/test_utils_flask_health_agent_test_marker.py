@@ -18,11 +18,17 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
     import src.backend.server.utils_flask as utils_flask
 
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
-    monkeypatch.setattr("socket.socket", lambda *args, **kwargs: _FakeSocket())
+    network_calls = {"socket": 0, "urlopen": 0}
+
+    def _socket(*_args: object, **_kwargs: object) -> _FakeSocket:
+        network_calls["socket"] += 1
+        return _FakeSocket()
 
     def _raise_urlopen(*_args: object, **_kwargs: object) -> object:
+        network_calls["urlopen"] += 1
         raise OSError("network disabled in test")
 
+    monkeypatch.setattr("socket.socket", _socket)
     monkeypatch.setattr("urllib.request.urlopen", _raise_urlopen)
     monkeypatch.setattr(
         utils_flask,
@@ -38,6 +44,9 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
 
     assert payload["agent_test_instance"] is True
     assert payload["agent_test_environment_marker"] == "VON_AGENT_TEST_INSTANCE"
+    assert payload["local_ip"] == "127.0.0.1"
+    assert payload["public_ip"] is None
+    assert network_calls == {"socket": 0, "urlopen": 0}
 
 
 def test_agent_test_instance_skips_durable_workflow_startup(monkeypatch) -> None:

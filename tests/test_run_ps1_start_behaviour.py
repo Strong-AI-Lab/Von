@@ -124,6 +124,82 @@ $result = [ordered]@{{
     assert any("skipping workflow purity" in line for line in payload["logs"])
 
 
+def test_run_ps1_agent_test_health_requires_marker_and_listener_pid() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:Logs = New-Object System.Collections.Generic.List[string]
+function global:Write-LauncherLog {{
+    param([string]$Msg)
+    $script:Logs.Add([string]$Msg) | Out-Null
+}}
+function global:Get-ListeningProcessByPort {{
+    param([int]$Port)
+    [pscustomobject]@{{ Id = 4242 }}
+}}
+$missingMarker = [pscustomobject]@{{
+    Healthy = $true
+    Payload = [pscustomobject]@{{ agent_test_instance = $false; pid = 4242 }}
+    StatusCode = 200
+    Error = $null
+}}
+$wrongPid = [pscustomobject]@{{
+    Healthy = $true
+    Payload = [pscustomobject]@{{ agent_test_instance = $true; pid = 1111 }}
+    StatusCode = 200
+    Error = $null
+}}
+$ok = [pscustomobject]@{{
+    Healthy = $true
+    Payload = [pscustomobject]@{{ agent_test_instance = $true; pid = 4242 }}
+    StatusCode = 200
+    Error = $null
+}}
+$result = [ordered]@{{
+    missing_marker = [bool](Test-AgentTestHealthProbe -Probe $missingMarker -Port 5010 -LogFailure)
+    wrong_pid = [bool](Test-AgentTestHealthProbe -Probe $wrongPid -Port 5010 -LogFailure)
+    ok = [bool](Test-AgentTestHealthProbe -Probe $ok -Port 5010 -LogFailure)
+    logs = @($script:Logs)
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload["missing_marker"] is False
+    assert payload["wrong_pid"] is False
+    assert payload["ok"] is True
+    assert any("agent_test_instance marker was not true" in line for line in payload["logs"])
+    assert any("did not match listener PID" in line for line in payload["logs"])
+
+
+def test_run_ps1_agent_test_disables_log_ready_shortcut() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+$agentAllowed = [bool](Test-VonLogReadyShortcutAllowed)
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+$script:AgentTestInstance = $false
+$normalAllowed = [bool](Test-VonLogReadyShortcutAllowed)
+$result = [ordered]@{{
+    agent_allowed = $agentAllowed
+    normal_allowed = $normalAllowed
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "agent_allowed": False,
+        "normal_allowed": True,
+    }
+
+
 def test_run_ps1_apply_launcher_switch_compatibility_honours_double_dash_flags() -> (
     None
 ):

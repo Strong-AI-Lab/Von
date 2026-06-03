@@ -76,6 +76,7 @@ $RunDir = Join-Path $Root '.run'
 $LogsDir = Join-Path $Root 'logs'
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
+$script:VonStartFailed = $false
 
 # Ensure logging helper is available before any code path that may emit log lines.
 if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
@@ -587,6 +588,17 @@ function Get-ExistingProcess {
 function Get-ListeningProcessByPort {
     param([int]$Port)
     try {
+        if (-not $IsWindows) {
+            $lsof = Get-Command lsof -ErrorAction SilentlyContinue
+            if ($lsof) {
+                $lines = & $lsof.Source -nP "-iTCP:$Port" -sTCP:LISTEN -Fp 2>$null
+                foreach ($line in $lines) {
+                    if ($line -notmatch '^p(\d+)$') { continue }
+                    return (Get-Process -Id ([int]$Matches[1]) -ErrorAction Stop)
+                }
+            }
+        }
+
         # Get-NetTCPConnection can hang on some hosts; parse netstat output instead.
         $lines = netstat -ano -p tcp 2>$null
         foreach ($line in $lines) {
@@ -1767,8 +1779,7 @@ function Invoke-AiChatSessionSyncIfDue {
     } -ArgumentList $pdmExe, $Root, $syncScript, $sentinel, $userConceptId, $codexRoot, $copilotRoots, $outputJsonPath, $rawOutputPath, $liveLogPath | Out-Null
 }
 
-function Test-VonHealthEndpoint($Port) {
-    # was Health-Check
+function Get-VonHealthProbe($Port) {
     $hosts = @('127.0.0.1')
     if ($env:VON_HEALTH_HOSTS -and $env:VON_HEALTH_HOSTS.ToString().Trim()) {
         $configuredHosts = $env:VON_HEALTH_HOSTS.ToString().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -1784,18 +1795,136 @@ function Test-VonHealthEndpoint($Port) {
         if ($envTimeout -gt 0 -and $envTimeout -lt 61) { $httpTimeout = $envTimeout }
     }
     catch { }
+    $lastProbe = $null
     foreach ($h in $hosts) {
         $url = "http://${h}:$Port/health"
         try {
             $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $httpTimeout
-            if ($resp.StatusCode -eq 200) { return $true }
+            $payload = $null
+            if ($resp.Content) {
+                try { $payload = $resp.Content | ConvertFrom-Json -ErrorAction Stop }
+                catch {
+                    if ($HealthDebug) { Write-LauncherLog "Health attempt $url returned non-JSON content: $($_.Exception.Message)" }
+                }
+            }
+            if ($resp.StatusCode -eq 200) {
+                return [pscustomobject]@{
+                    Healthy = $true
+                    Url = $url
+                    StatusCode = [int]$resp.StatusCode
+                    Payload = $payload
+                    Error = $null
+                }
+            }
             elseif ($HealthDebug) { Write-LauncherLog "Health attempt $url status=$($resp.StatusCode)" }
         }
         catch {
             if ($HealthDebug) { Write-LauncherLog "Health attempt failed $url : $($_.Exception.Message)" }
+            $statusCode = $null
+            try {
+                if ($_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+                    $statusCode = [int]$_.Exception.Response.StatusCode
+                }
+            }
+            catch { }
+            $lastProbe = [pscustomobject]@{
+                Healthy = $false
+                Url = $url
+                StatusCode = $statusCode
+                Payload = $null
+                Error = $_.Exception.Message
+            }
         }
     }
-    return $false
+    if ($lastProbe) { return $lastProbe }
+    return [pscustomobject]@{
+        Healthy = $false
+        Url = $null
+        StatusCode = $null
+        Payload = $null
+        Error = "No configured health host responded successfully."
+    }
+}
+
+function Test-VonHealthEndpoint($Port) {
+    # was Health-Check
+    $probe = Get-VonHealthProbe -Port $Port
+    return [bool]($probe -and $probe.Healthy)
+}
+
+function Test-AgentTestHealthProbe {
+    param(
+        [Parameter(Mandatory = $true)]$Probe,
+        [int]$Port,
+        [int]$ExpectedPid = 0,
+        [switch]$LogFailure
+    )
+    if (-not $Probe -or -not $Probe.Healthy) {
+        if ($LogFailure -and $Probe) {
+            Write-LauncherLog ("Agent test health read-back not ready: status={0} error={1}" -f $Probe.StatusCode, $Probe.Error)
+        }
+        return $false
+    }
+
+    $payload = $Probe.Payload
+    if (-not $payload) {
+        if ($LogFailure) { Write-LauncherLog "Agent test health read-back rejected: /health returned no JSON payload." }
+        return $false
+    }
+    if ($payload.agent_test_instance -ne $true) {
+        if ($LogFailure) { Write-LauncherLog "Agent test health read-back rejected: agent_test_instance marker was not true." }
+        return $false
+    }
+
+    $listener = if ($Port -gt 0) { Get-ListeningProcessByPort -Port $Port } else { $null }
+    if ($Port -gt 0 -and -not $listener) {
+        if ($LogFailure) { Write-LauncherLog "Agent test health read-back rejected: no listener remained on port $Port." }
+        return $false
+    }
+
+    $payloadPid = 0
+    try { if ($payload.pid) { $payloadPid = [int]$payload.pid } } catch { $payloadPid = 0 }
+    if ($payloadPid -le 0) {
+        if ($LogFailure) { Write-LauncherLog "Agent test health read-back rejected: /health payload did not include a valid pid." }
+        return $false
+    }
+    if ($listener -and $payloadPid -ne $listener.Id) {
+        if ($LogFailure) { Write-LauncherLog ("Agent test health read-back rejected: /health pid {0} did not match listener PID {1}." -f $payloadPid, $listener.Id) }
+        return $false
+    }
+    return $true
+}
+
+function Test-VonLauncherHealthReady {
+    param(
+        [int]$Port,
+        [int]$ExpectedPid = 0,
+        [switch]$LogFailure
+    )
+    $probe = Get-VonHealthProbe -Port $Port
+    if (Test-AgentTestInstance) {
+        return (Test-AgentTestHealthProbe -Probe $probe -Port $Port -ExpectedPid $ExpectedPid -LogFailure:$LogFailure)
+    }
+    return [bool]($probe -and $probe.Healthy)
+}
+
+function Confirm-AgentTestHealthStable {
+    param(
+        [int]$Port,
+        [int]$ExpectedPid = 0
+    )
+    $attempts = 4
+    for ($i = 0; $i -lt $attempts; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Test-VonLauncherHealthReady -Port $Port -ExpectedPid $ExpectedPid -LogFailure:($i -eq ($attempts - 1)))) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-VonLogReadyShortcutAllowed {
+    return -not (Test-AgentTestInstance)
 }
 
 function Test-VonPortListening($Port) {
@@ -2506,11 +2635,16 @@ function Start-VonServer {
                 Write-LauncherLog "Port $Port is listening; waiting for /health..."
                 $listeningLogged = $true
             }
-            if (Test-VonHealthEndpoint $Port) { $healthy = $true; break }
+            if (Test-VonLauncherHealthReady -Port $Port -ExpectedPid $proc.Id) { $healthy = $true; break }
             elseif ($HealthDebug -and ($attempt % 4 -eq 0)) { Write-LauncherLog ("Health not ready yet (attempt {0}/{1})" -f $attempt, $maxAttempts) }
             if (-not $DisableLogReady -and $ReadyLogPatterns -and (Test-VonLogReady -LogPath $CurrentLog -Patterns $ReadyLogPatterns)) {
-                Write-LauncherLog "Detected readiness log pattern; marking healthy (log shortcut)."
-                $healthy = $true; break
+                if (Test-VonLogReadyShortcutAllowed) {
+                    Write-LauncherLog "Detected readiness log pattern; marking healthy (log shortcut)."
+                    $healthy = $true; break
+                }
+                elseif ($HealthDebug -and ($attempt % 4 -eq 0)) {
+                    Write-LauncherLog "Detected readiness log pattern; Agent test mode still requires /health marker read-back."
+                }
             }
             $attempt++
         }
@@ -2520,11 +2654,16 @@ function Start-VonServer {
             $g = 0
             while ($g -lt $graceAttempts -and -not $healthy) {
                 Start-Sleep -Milliseconds 500
-                if (Test-VonHealthEndpoint $Port) { $healthy = $true; break }
+                if (Test-VonLauncherHealthReady -Port $Port -ExpectedPid $proc.Id) { $healthy = $true; break }
                 elseif ($HealthDebug -and ($g % 10 -eq 0)) { Write-LauncherLog ("Grace wait health not ready ({0}s/{1}s)" -f ([int]($g / 2)), $HealthGraceSec) }
                 if (-not $DisableLogReady -and $ReadyLogPatterns -and (Test-VonLogReady -LogPath $CurrentLog -Patterns $ReadyLogPatterns)) {
-                    Write-LauncherLog "Detected readiness log pattern during grace; marking healthy (log shortcut)."
-                    $healthy = $true; break
+                    if (Test-VonLogReadyShortcutAllowed) {
+                        Write-LauncherLog "Detected readiness log pattern during grace; marking healthy (log shortcut)."
+                        $healthy = $true; break
+                    }
+                    elseif ($HealthDebug -and ($g % 10 -eq 0)) {
+                        Write-LauncherLog "Detected readiness log pattern during grace; Agent test mode still requires /health marker read-back."
+                    }
                 }
                 if (($g % 10) -eq 0) {
                     # every 5s
@@ -2534,17 +2673,39 @@ function Start-VonServer {
                 $g++
             }
         }
+        if ($healthy -and (Test-AgentTestInstance) -and -not (Confirm-AgentTestHealthStable -Port $Port -ExpectedPid $proc.Id)) {
+            $healthy = $false
+            $script:VonStartFailed = $true
+            Write-LauncherLog "ERROR: Agent test /health marker read-back did not remain stable after initial readiness."
+            try {
+                $procCheck = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+                if (-not $procCheck) { Remove-PidFile }
+            }
+            catch { Remove-PidFile }
+        }
         if ($healthy) {
             Write-LauncherLog "Server healthy (http://localhost:$Port)"
             Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
             Invoke-VonHealthyStartFollowUps -TargetPort $Port
         }
         elseif ($listeningLogged) {
-            Write-LauncherLog "WARNING: Port is listening but /health did not respond in ${HealthTimeoutSec + $HealthGraceSec}s; continuing (service may still be initializing)."
+            if (Test-AgentTestInstance) {
+                $script:VonStartFailed = $true
+                Write-LauncherLog "ERROR: Agent test port is listening but /health marker read-back did not validate in ${HealthTimeoutSec + $HealthGraceSec}s."
+            }
+            else {
+                Write-LauncherLog "WARNING: Port is listening but /health did not respond in ${HealthTimeoutSec + $HealthGraceSec}s; continuing (service may still be initializing)."
+            }
             Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
         }
         else {
-            Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog and $serverErrLog"
+            if (Test-AgentTestInstance) {
+                $script:VonStartFailed = $true
+                Write-LauncherLog "ERROR: Agent test server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog and $serverErrLog"
+            }
+            else {
+                Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog and $serverErrLog"
+            }
         }
     }
     # Attempt to refine PID to child python only when launch mode used a wrapper.
@@ -3666,7 +3827,10 @@ function Invoke-RestoreBackupNow {
 }
 
 switch ($Action) {
-    'start' { Start-VonServer }
+    'start' {
+        Start-VonServer
+        if ($script:VonStartFailed) { exit 2 }
+    }
     'foreground' {
         Write-LauncherLog "Running in foreground... (Ctrl+C to stop)"
         $env:VON_ADMIN_TOKEN = Read-AdminToken
@@ -3721,7 +3885,10 @@ switch ($Action) {
         Stop-VonServer
     }
     'status' { Get-VonStatus }
-    'restart' { Restart-VonServer }
+    'restart' {
+        Restart-VonServer
+        if ($script:VonStartFailed) { exit 2 }
+    }
     'logs' { Show-VonLogs }
     'check' {
         Sync-PidFileToListener
