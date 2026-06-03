@@ -1145,6 +1145,7 @@ def get_chat_history(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    hydrate_blob_refs: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Retrieves the chat history for a specific user and session.
@@ -1179,7 +1180,10 @@ def get_chat_history(
         _record_chat_history_read_success()
 
         if doc:
-            return _hydrate_chat_history_entries(doc.get("history", []))
+            return _normalise_chat_history_entries(
+                doc.get("history", []),
+                hydrate_blob_refs=hydrate_blob_refs,
+            )
         return []
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history", e)
@@ -1187,21 +1191,32 @@ def get_chat_history(
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
 
 
-def _hydrate_chat_history_entries(history: Any) -> List[Dict[str, Any]]:
+def _normalise_chat_history_entries(
+    history: Any,
+    *,
+    hydrate_blob_refs: bool = False,
+) -> List[Dict[str, Any]]:
     if not isinstance(history, list):
         return []
 
-    hydrated_entries: List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []
     for entry in history:
         if not isinstance(entry, dict):
             continue
-        hydrated = hydrate_debug_payload_blob_refs(entry, fail_soft=True)
-        payload = hydrated.payload
-        if isinstance(payload, dict):
-            hydrated_entries.append(payload)
+        if hydrate_blob_refs:
+            hydrated = hydrate_debug_payload_blob_refs(entry, fail_soft=True)
+            payload = hydrated.payload
+            if isinstance(payload, dict):
+                entries.append(payload)
+            else:
+                entries.append(dict(entry))
         else:
-            hydrated_entries.append(dict(entry))
-    return hydrated_entries
+            entries.append(dict(entry))
+    return entries
+
+
+def _hydrate_chat_history_entries(history: Any) -> List[Dict[str, Any]]:
+    return _normalise_chat_history_entries(history, hydrate_blob_refs=True)
 
 
 def get_chat_history_segments(
@@ -1215,6 +1230,7 @@ def get_chat_history_segments(
     include_debug: bool = True,
     history_tail_limit: Optional[int] = None,
     return_meta: bool = False,
+    hydrate_blob_refs: bool = False,
 ) -> List[List[Dict[str, Any]]] | tuple[List[List[Dict[str, Any]]], Dict[str, Any]]:
     """
     Return chat history split into segments separated by reset markers.
@@ -1285,7 +1301,10 @@ def get_chat_history_segments(
             _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
 
-        history = _hydrate_chat_history_entries(doc.get("history") or [])
+        history = _normalise_chat_history_entries(
+            doc.get("history") or [],
+            hydrate_blob_refs=hydrate_blob_refs,
+        )
         if not isinstance(history, list) or not history:
             _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []

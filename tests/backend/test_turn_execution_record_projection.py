@@ -147,6 +147,7 @@ def test_add_message_to_history_synthesises_turn_execution_projection_without_re
 def test_add_message_to_history_offloads_oversized_debug_fields(monkeypatch) -> None:
     mock_coll = MagicMock()
     store = _FakeBlobStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
     monkeypatch.setenv("VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
     monkeypatch.setattr(
         "src.backend.services.blob_store.get_blob_store_from_env",

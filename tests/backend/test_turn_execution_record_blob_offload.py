@@ -55,6 +55,7 @@ def test_turn_execution_record_projection_offloads_large_diagnostics(
 ) -> None:
     coll = _FakeCollection()
     store = _FakeBlobStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
     monkeypatch.setenv("VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
     monkeypatch.setattr(service, "get_turn_execution_records_collection", lambda: coll)
     monkeypatch.setattr(

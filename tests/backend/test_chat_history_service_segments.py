@@ -379,7 +379,60 @@ def test_get_chat_history_debug_entry_hydrates_blob_refs(monkeypatch):
     assert debug == original_debug
 
 
-def test_add_message_to_history_offloads_large_content_and_get_chat_history_hydrates(
+def test_get_chat_history_segments_keeps_debug_blob_refs_compact_by_default(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    original_debug = {
+        "request_id": "req-compact-history",
+        "messages": [{"role": "tool", "content": "x" * 2000}],
+    }
+    compacted = compact_debug_payload_for_storage(
+        original_debug,
+        root_kind="chat_history.llm_debug_data",
+        namespace="#V#u",
+        request_id="req-compact-history",
+        threshold_bytes=512,
+    )
+    docs = [
+        {
+            "_id": "1",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "ok",
+                    "llm_debug_data": compacted.payload,
+                }
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeCollection(docs),
+    )
+
+    segments = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        include_locations=True,
+        include_debug=True,
+    )
+
+    debug_data = segments[0][0]["llm_debug_data"]
+    assert debug_data["messages"]["schema_version"] == "debug_payload_blob_ref.v1"
+
+
+def test_add_message_to_history_offloads_large_content_and_get_chat_history_is_compact_by_default(
     monkeypatch,
 ):
     from src.backend.services import chat_history_service
@@ -436,9 +489,18 @@ def test_add_message_to_history_offloads_large_content_and_get_chat_history_hydr
         assert isinstance(stored_entry["content"], dict)
         assert stored_entry["content"]["schema_version"] == "debug_payload_blob_ref.v1"
 
-        history = chat_history_service.get_chat_history(user_id="#V#u", session_id="s1")
+        compact_history = chat_history_service.get_chat_history(
+            user_id="#V#u",
+            session_id="s1",
+        )
+        hydrated_history = chat_history_service.get_chat_history(
+            user_id="#V#u",
+            session_id="s1",
+            hydrate_blob_refs=True,
+        )
 
-    assert history[0]["content"] == large_content
+    assert compact_history[0]["content"]["schema_version"] == "debug_payload_blob_ref.v1"
+    assert hydrated_history[0]["content"] == large_content
 
 
 def test_agent_test_skips_episode_critique_memory_backfill(monkeypatch):

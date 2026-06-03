@@ -21,13 +21,23 @@ debug-entry tools still return the original payload when the blob is available.
   tool messages to chat history.
 - `turn_execution_record_service.upsert_turn_execution_record_projection()`
   compacts oversized projected turn-execution records.
+- Normal chat-history reads return compact blob references by default. Callers
+  that need full forensic payloads must opt into hydration or use the explicit
+  debug/diagnostic endpoints.
 - `get_chat_history_debug_entry()` and turn-execution diagnostics loading
   recursively hydrate debug blob references before returning diagnostic data.
+- Hydration is local-first: the local spillway/cache is checked before remote
+  blob storage. Remote hits repopulate the local cache so repeated Thinking-card
+  or debug reads on the same machine avoid repeated remote downloads.
+- The async spillway migrator marks successfully uploaded blobs as remotely
+  committed in the local manifest and keeps the local copy as a hot cache until
+  TTL cleanup. Pending blobs are never removed by TTL cleanup.
 
 Thresholds are environment-controlled:
 
 - `VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES` defaults to `32768`.
 - `VON_DEBUG_TOOL_MESSAGE_BLOB_THRESHOLD_BYTES` defaults to `4096`.
+- `VON_BLOB_SPILLWAY_CACHE_TTL_DAYS` defaults to `7`.
 
 These keys are registered in startup `.env` override handling.
 

@@ -159,8 +159,17 @@ def test_chat_history_blob_backfill_rewrites_and_reads_back(monkeypatch):
     assert result["entries_updated"] == 1
     assert docs[0]["history"][0]["content"]["schema_version"] == "debug_payload_blob_ref.v1"
 
-    history = chat_history_service.get_chat_history(user_id="#V#u", session_id="s1")
-    assert history[0]["content"] == "x" * 5000
+    compact_history = chat_history_service.get_chat_history(
+        user_id="#V#u",
+        session_id="s1",
+    )
+    hydrated_history = chat_history_service.get_chat_history(
+        user_id="#V#u",
+        session_id="s1",
+        hydrate_blob_refs=True,
+    )
+    assert compact_history[0]["content"]["schema_version"] == "debug_payload_blob_ref.v1"
+    assert hydrated_history[0]["content"] == "x" * 5000
 
 
 def test_chat_history_blob_backfill_is_idempotent(monkeypatch):

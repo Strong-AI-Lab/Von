@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from typing import Any, Mapping
 from .blob_store import BlobRef
 from .blob_uploads import BlobUploadError, put_bytes_durable
 
+
+logger = logging.getLogger(__name__)
 
 DEBUG_PAYLOAD_BLOB_REF_SCHEMA_VERSION = "debug_payload_blob_ref.v1"
 DEBUG_PAYLOAD_OFFLOAD_DEGRADED_SCHEMA_VERSION = "debug_payload_offload_degraded.v1"
@@ -62,6 +65,15 @@ class DebugPayloadHydrationResult:
     payload: Any
     hydrated_count: int = 0
     error_count: int = 0
+
+
+@dataclass(frozen=True)
+class DebugPayloadBlobLoadResult:
+    payload: Any | None
+    status: str
+    source: str | None = None
+    error: str | None = None
+    error_class: str | None = None
 
 
 def _env_int(name: str, *, default: int) -> int:
@@ -198,27 +210,41 @@ def load_debug_payload_blob_ref(
     if not isinstance(key, str) or not key.strip():
         raise ValueError("Debug payload blob reference is missing blob key")
 
-    from .blob_store import get_blob_store_from_env
-
-    # Try remote blob store first; fall back to local spillway when the blob
-    # has been enqueued but not yet migrated (backend == "spillway").
-    blob_backend = (
-        blob_ref.get("backend")
-        if isinstance(blob_ref, Mapping)
-        else None
+    result = resolve_debug_payload_blob_ref(
+        ref_payload,
+        expected_raw_sha256=expected_raw_sha256,
     )
-    try:
-        compressed = get_blob_store_from_env().get_bytes(key.strip())
-    except Exception as remote_exc:
-        if blob_backend == "spillway":
-            try:
-                from .blob_spillway import get_blob_spillway_queue
+    if result.payload is not None:
+        return result.payload
+    message = result.error or result.status
+    raise ValueError(f"Debug payload blob load failed: {message}")
 
-                compressed = get_blob_spillway_queue().get_local_bytes(key.strip())
-            except KeyError:
-                raise remote_exc from None
-        else:
+
+def _decode_blob_ref_bytes(
+    *,
+    ref_payload: Mapping[str, Any],
+    compressed: bytes,
+    expected_raw_sha256: str | None,
+) -> Any:
+    blob_ref = ref_payload.get("blob_ref")
+    if isinstance(blob_ref, Mapping):
+        expected_stored_size = blob_ref.get("size_bytes")
+        try:
+            if (
+                expected_stored_size is not None
+                and int(expected_stored_size) > 0
+                and int(expected_stored_size) != len(compressed)
+            ):
+                raise ValueError("Debug payload blob stored size mismatch")
+        except ValueError:
             raise
+        except Exception:
+            pass
+        expected_stored_sha = ref_payload.get("sha256") or blob_ref.get("etag")
+        if isinstance(expected_stored_sha, str) and expected_stored_sha.strip():
+            if hashlib.sha256(compressed).hexdigest() != expected_stored_sha.strip():
+                raise ValueError("Debug payload blob stored SHA-256 mismatch")
+
     if ref_payload.get("compression") == "gzip":
         raw_bytes = gzip.decompress(compressed)
     else:
@@ -234,6 +260,145 @@ def load_debug_payload_blob_ref(
         raise ValueError("Debug payload blob raw SHA-256 mismatch")
 
     return json.loads(raw_bytes.decode("utf-8"))
+
+
+def resolve_debug_payload_blob_ref(
+    ref_payload: Mapping[str, Any],
+    *,
+    expected_raw_sha256: str | None = None,
+    populate_local_cache: bool = True,
+) -> DebugPayloadBlobLoadResult:
+    """Resolve a debug blob reference with local-first cache semantics."""
+    if not _is_blob_ref_payload(ref_payload):
+        return DebugPayloadBlobLoadResult(
+            payload=None,
+            status="invalid_ref",
+            error="Not a debug payload blob reference",
+            error_class="ValueError",
+        )
+
+    blob_ref = ref_payload.get("blob_ref")
+    if not isinstance(blob_ref, Mapping):
+        return DebugPayloadBlobLoadResult(
+            payload=None,
+            status="invalid_ref",
+            error="Debug payload blob reference is missing blob_ref",
+            error_class="ValueError",
+        )
+    key = blob_ref.get("key")
+    if not isinstance(key, str) or not key.strip():
+        return DebugPayloadBlobLoadResult(
+            payload=None,
+            status="invalid_ref",
+            error="Debug payload blob reference is missing blob key",
+            error_class="ValueError",
+        )
+    clean_key = key.strip()
+
+    local_error: Exception | None = None
+    try:
+        from .blob_spillway import get_blob_spillway_queue
+
+        queue = get_blob_spillway_queue()
+        compressed = queue.get_local_bytes(clean_key)
+        try:
+            local_manifest = queue.get_local_manifest(clean_key)
+        except Exception:
+            local_manifest = {}
+        payload = _decode_blob_ref_bytes(
+            ref_payload=ref_payload,
+            compressed=compressed,
+            expected_raw_sha256=expected_raw_sha256,
+        )
+        remote_state = (
+            str(local_manifest.get("remote_state") or ref_payload.get("remote_state") or "")
+            .strip()
+            .lower()
+        )
+        blob_backend = str(blob_ref.get("backend") or "").strip().lower()
+        status = "local_hit"
+        if remote_state == "committed":
+            status = "remote_committed_local_hit"
+        elif remote_state == "pending" or blob_backend == "spillway":
+            status = "pending_local"
+        return DebugPayloadBlobLoadResult(
+            payload=payload,
+            status=status,
+            source="local_cache",
+        )
+    except KeyError as exc:
+        local_error = exc
+    except Exception as exc:
+        return DebugPayloadBlobLoadResult(
+            payload=None,
+            status="local_corrupt",
+            source="local_cache",
+            error=str(exc),
+            error_class=type(exc).__name__,
+        )
+
+    try:
+        from .blob_store import get_blob_store_from_env
+
+        compressed = get_blob_store_from_env().get_bytes(clean_key)
+        payload = _decode_blob_ref_bytes(
+            ref_payload=ref_payload,
+            compressed=compressed,
+            expected_raw_sha256=expected_raw_sha256,
+        )
+    except Exception as exc:
+        return DebugPayloadBlobLoadResult(
+            payload=None,
+            status="missing_both",
+            error=str(exc),
+            error_class=type(exc).__name__,
+        )
+
+    if populate_local_cache:
+        try:
+            from .blob_spillway import get_blob_spillway_queue, is_spillway_enabled
+
+            if is_spillway_enabled():
+                metadata = blob_ref.get("metadata")
+                clean_metadata = (
+                    {str(k): str(v) for k, v in metadata.items()}
+                    if isinstance(metadata, Mapping)
+                    else None
+                )
+                get_blob_spillway_queue().cache_committed(
+                    key=clean_key,
+                    data=compressed,
+                    content_type=(
+                        str(blob_ref.get("content_type"))
+                        if blob_ref.get("content_type")
+                        else None
+                    ),
+                    metadata=clean_metadata,
+                    sha256=(
+                        str(ref_payload.get("sha256"))
+                        if ref_payload.get("sha256")
+                        else None
+                    ),
+                    size_bytes=len(compressed),
+                    remote_backend=(
+                        str(blob_ref.get("backend")) if blob_ref.get("backend") else None
+                    ),
+                )
+        except Exception as exc:
+            logger.debug(
+                "Debug blob remote hydration cache fill skipped for key=%r: %s",
+                clean_key,
+                exc,
+            )
+
+    status = "local_miss_remote_hit"
+    if local_error is not None and blob_ref.get("backend") == "spillway":
+        status = "pending_local_miss_remote_hit"
+    return DebugPayloadBlobLoadResult(
+        payload=payload,
+        status=status,
+        source="remote",
+    )
 
 
 def hydrate_debug_payload_blob_refs(
@@ -256,22 +421,22 @@ def hydrate_debug_payload_blob_refs(
         nonlocal hydrated_count, error_count
 
         if _is_blob_ref_payload(value):
-            try:
-                hydrated = load_debug_payload_blob_ref(value)
-            except Exception as exc:
+            result = resolve_debug_payload_blob_ref(value)
+            if result.payload is None:
                 error_count += 1
                 if not fail_soft:
-                    raise
+                    raise ValueError(result.error or result.status)
                 replacement = dict(value)
                 replacement["hydration_error"] = {
                     "schema_version": "debug_payload_blob_hydration_error.v1",
-                    "error": str(exc),
-                    "error_class": type(exc).__name__,
+                    "status": result.status,
+                    "error": result.error,
+                    "error_class": result.error_class,
                     "created_at_utc": _utcnow_iso(),
                 }
                 return replacement
             hydrated_count += 1
-            return hydrated
+            return result.payload
 
         if isinstance(value, Mapping):
             return {str(key): _walk(item) for key, item in value.items()}
@@ -399,6 +564,10 @@ def _offload_value(
         "stored_size_bytes": stored.size_bytes,
         "raw_sha256": raw_sha256,
         "sha256": stored.sha256,
+        "local_cache_state": (
+            "pending_local" if stored.ref.backend == "spillway" else "remote_only"
+        ),
+        "remote_state": "pending" if stored.ref.backend == "spillway" else "committed",
         "summary": _summarise_value(value),
         "blob_ref": _blob_ref_to_payload(stored.ref),
         "created_at_utc": _utcnow_iso(),

@@ -8,6 +8,7 @@ from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     hydrate_debug_payload_blob_refs,
     load_debug_payload_blob_ref,
+    resolve_debug_payload_blob_ref,
 )
 
 
@@ -148,3 +149,77 @@ def test_hydrate_debug_payload_blob_refs_restores_nested_payload(monkeypatch) ->
     assert hydrated.hydrated_count == 1
     assert hydrated.error_count == 0
     assert hydrated.payload == payload
+
+
+def test_resolve_debug_payload_blob_ref_reports_typed_cache_states(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.backend.services.blob_spillway import BlobSpillwayQueue
+
+    queue = BlobSpillwayQueue(tmp_path / "spillway")
+    payload = {"messages": [{"role": "tool", "content": "cached"}]}
+    raw = json.dumps(payload).encode("utf-8")
+    import gzip
+    import hashlib
+
+    compressed = gzip.compress(raw)
+    stored_sha = hashlib.sha256(compressed).hexdigest()
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    key = "debug/turns/ns/req/messages.json.gz"
+    queue.enqueue(key=key, data=compressed, sha256=stored_sha)
+
+    class _RemoteStore:
+        calls = 0
+
+        def get_bytes(self, requested_key: str) -> bytes:
+            self.calls += 1
+            if requested_key == "debug/turns/ns/req/remote.json.gz":
+                return compressed
+            raise KeyError(requested_key)
+
+    remote = _RemoteStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "true")
+    monkeypatch.setattr(
+        "src.backend.services.blob_spillway.get_blob_spillway_queue",
+        lambda: queue,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: remote,
+    )
+
+    def _ref(ref_key: str, backend: str = "spillway") -> dict[str, Any]:
+        return {
+            "schema_version": "debug_payload_blob_ref.v1",
+            "offloaded": True,
+            "payload_kind": "chat_history.llm_debug_data",
+            "field_path": "messages",
+            "compression": "gzip",
+            "raw_sha256": raw_sha,
+            "sha256": stored_sha,
+            "blob_ref": {
+                "backend": backend,
+                "key": ref_key,
+                "size_bytes": len(compressed),
+            },
+        }
+
+    local_pending = resolve_debug_payload_blob_ref(_ref(key))
+    queue.cache_committed(key=key, data=compressed, sha256=stored_sha)
+    migrated_local = resolve_debug_payload_blob_ref(_ref(key))
+    remote_fill = resolve_debug_payload_blob_ref(
+        _ref("debug/turns/ns/req/remote.json.gz", backend="s3")
+    )
+    local_after_remote_fill = resolve_debug_payload_blob_ref(
+        _ref("debug/turns/ns/req/remote.json.gz", backend="s3")
+    )
+    missing = resolve_debug_payload_blob_ref(_ref("debug/turns/ns/req/missing.json.gz"))
+    unsafe = resolve_debug_payload_blob_ref(_ref("../secret.json.gz"))
+
+    assert local_pending.status == "pending_local"
+    assert migrated_local.status == "remote_committed_local_hit"
+    assert remote_fill.status == "local_miss_remote_hit"
+    assert local_after_remote_fill.status == "remote_committed_local_hit"
+    assert missing.status == "missing_both"
+    assert unsafe.status == "local_corrupt"

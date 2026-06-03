@@ -40,6 +40,7 @@ from src.backend.services.blob_uploads import (
 from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     load_debug_payload_blob_ref,
+    resolve_debug_payload_blob_ref,
 )
 
 
@@ -171,7 +172,7 @@ def test_list_pending_keys_empty_queue(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migrate_pending_uploads_and_deletes_local(tmp_path: Path) -> None:
+def test_migrate_pending_uploads_and_marks_committed_cache(tmp_path: Path) -> None:
     q = _make_queue(tmp_path)
     data = b"payload to migrate"
     key = "debug/turns/req1/payload.json.gz"
@@ -190,9 +191,13 @@ def test_migrate_pending_uploads_and_deletes_local(tmp_path: Path) -> None:
     assert call_args[0][1] == data
     assert call_args[1]["content_type"] == "application/json"
 
-    # Local files cleaned up.
-    assert not q._blob_path(key).exists()
-    assert not q._manifest_path(key).exists()
+    # Local files are retained as a hot cache but are no longer pending.
+    assert q._blob_path(key).exists()
+    assert q._manifest_path(key).exists()
+    assert q.get_local_bytes(key) == data
+    manifest = json.loads(q._manifest_path(key).read_text())
+    assert manifest["remote_state"] == "committed"
+    assert manifest["local_cache_state"] == "present"
     assert not q.has_pending(key)
     assert q.list_pending_keys() == []
 
@@ -286,6 +291,7 @@ def test_migrate_pending_succeeds_after_transient_failure(tmp_path: Path) -> Non
     succeeded, failed = q.migrate_pending(lambda: remote)
     assert (succeeded, failed) == (1, 0)
     assert not q.has_pending(key)
+    assert q.get_local_bytes(key) == data
 
 
 def test_migrate_pending_store_factory_failure(tmp_path: Path) -> None:
@@ -442,10 +448,9 @@ def test_load_debug_payload_blob_ref_falls_back_to_spillway(
     assert result == payload
 
 
-def test_load_debug_payload_blob_ref_no_fallback_for_non_spillway_backend(
+def test_load_debug_payload_blob_ref_reports_missing_when_not_local_or_remote(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """When backend is not 'spillway', remote failure is re-raised immediately."""
     monkeypatch.setattr(
            "src.backend.services.blob_store.get_blob_store_from_env",
         lambda: _FakeRemoteStore(),
@@ -473,8 +478,89 @@ def test_load_debug_payload_blob_ref_no_fallback_for_non_spillway_backend(
         "created_at_utc": "2026-06-01T00:00:00+00:00",
     }
 
-    with pytest.raises(RuntimeError, match="Remote unavailable"):
+    with pytest.raises(ValueError, match="Remote unavailable"):
         load_debug_payload_blob_ref(ref_payload)
+
+
+def test_remote_hit_populates_local_cache(tmp_path: Path, monkeypatch) -> None:
+    q = _make_queue(tmp_path)
+    payload = {"events": [{"detail": "remote only"}]}
+    raw = json.dumps(payload).encode("utf-8")
+    compressed = gzip.compress(raw)
+    sha256 = hashlib.sha256(compressed).hexdigest()
+    raw_sha256 = hashlib.sha256(raw).hexdigest()
+    key = "debug/turns/ns/req/diagnostic_events.json.gz"
+
+    class _RemoteStore:
+        def get_bytes(self, requested_key: str) -> bytes:
+            assert requested_key == key
+            return compressed
+
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "true")
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _RemoteStore(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_spillway.get_blob_spillway_queue",
+        lambda: q,
+    )
+
+    ref_payload = {
+        "schema_version": "debug_payload_blob_ref.v1",
+        "offloaded": True,
+        "payload_kind": "turn_execution_record",
+        "field_path": "execution.diagnostic_events",
+        "content_type": "application/json",
+        "compression": "gzip",
+        "content_encoding": "utf-8",
+        "original_size_bytes": len(raw),
+        "stored_size_bytes": len(compressed),
+        "raw_sha256": raw_sha256,
+        "sha256": sha256,
+        "summary": {"type": "object"},
+        "blob_ref": {
+            "backend": "s3",
+            "key": key,
+            "uri": f"s3://bucket/{key}",
+            "size_bytes": len(compressed),
+        },
+    }
+
+    first = resolve_debug_payload_blob_ref(ref_payload)
+    second = resolve_debug_payload_blob_ref(ref_payload)
+
+    assert first.status == "local_miss_remote_hit"
+    assert first.payload == payload
+    assert second.status == "remote_committed_local_hit"
+    assert second.payload == payload
+    assert q.get_local_bytes(key) == compressed
+
+
+def test_cleanup_committed_cache_keeps_pending_and_removes_old_committed(
+    tmp_path: Path,
+) -> None:
+    q = _make_queue(tmp_path)
+    pending_key = "pending/key.gz"
+    committed_key = "committed/key.gz"
+    q.enqueue(key=pending_key, data=b"pending")
+    q.cache_committed(key=committed_key, data=b"committed")
+
+    old_timestamp = 1
+    q._blob_path(committed_key).touch()
+    q._manifest_path(committed_key).touch()
+    import os
+
+    os.utime(q._blob_path(committed_key), (old_timestamp, old_timestamp))
+    os.utime(q._manifest_path(committed_key), (old_timestamp, old_timestamp))
+
+    removed = q.cleanup_committed_cache(ttl_days=1)
+
+    assert removed == 1
+    assert q.has_pending(pending_key)
+    assert q.get_local_bytes(pending_key) == b"pending"
+    with pytest.raises(KeyError):
+        q.get_local_bytes(committed_key)
 
 
 # ---------------------------------------------------------------------------

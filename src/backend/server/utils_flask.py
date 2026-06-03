@@ -3900,6 +3900,7 @@ def _register_optional_blob_spillway_migrator(app: Flask) -> None:
                             get_blob_store_from_env,
                             max_per_run=_DEFAULT_SPILLWAY_MAX_PER_RUN,
                         )
+                    queue.cleanup_committed_cache()
                 except Exception as exc:
                     try:
                         app.logger.warning(

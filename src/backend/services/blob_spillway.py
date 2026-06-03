@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -37,6 +37,7 @@ _DEFAULT_SPILLWAY_DIR = "data/blob_spillway"
 _MANIFEST_SUFFIX = ".manifest.json"
 _DEFAULT_MAX_RETRIES = 10
 _DEFAULT_MAX_PER_RUN = 50
+_DEFAULT_CACHE_TTL_DAYS = 7
 
 _singleton: BlobSpillwayQueue | None = None
 _singleton_lock = threading.Lock()
@@ -121,6 +122,8 @@ class BlobSpillwayQueue:
             "sha256": computed_sha,
             "size_bytes": computed_size,
             "retry_count": 0,
+            "remote_state": "pending",
+            "local_cache_state": "present",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
         }
         self._manifest_path(key).write_text(
@@ -136,15 +139,38 @@ class BlobSpillwayQueue:
         )
 
     def get_local_bytes(self, key: str) -> bytes:
-        """Read bytes from local spillway.  Raises ``KeyError`` if not present."""
+        """Read bytes from local spillway/cache. Raises ``KeyError`` if absent."""
         path = self._blob_path(key)
         if not path.exists():
             raise KeyError(f"Key not in spillway: {key!r}")
+        try:
+            os.utime(path, None)
+        except Exception:
+            pass
         return path.read_bytes()
+
+    def get_local_manifest(self, key: str) -> dict[str, object]:
+        """Return local manifest metadata for a spillway/cache key."""
+        manifest_path = self._manifest_path(key)
+        if not manifest_path.exists():
+            raise KeyError(f"Manifest not in spillway: {key!r}")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Unreadable spillway manifest for {key!r}: {exc}") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Unexpected spillway manifest for {key!r}")
+        return manifest
 
     def has_pending(self, key: str) -> bool:
         """Return True if this key has a pending local blob."""
-        return self._blob_path(key).exists()
+        if not self._blob_path(key).exists():
+            return False
+        try:
+            manifest = self.get_local_manifest(key)
+        except Exception:
+            return True
+        return str(manifest.get("remote_state") or "pending") != "committed"
 
     def list_pending_keys(self) -> list[str]:
         """Return remote keys of all pending (unmigrated) spillway blobs."""
@@ -154,6 +180,8 @@ class BlobSpillwayQueue:
         ):
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if str(manifest.get("remote_state") or "pending") == "committed":
+                    continue
                 remote_key = manifest.get("remote_key")
                 if isinstance(remote_key, str) and remote_key.strip():
                     keys.append(remote_key.strip())
@@ -279,15 +307,95 @@ class BlobSpillwayQueue:
                     pass
             return False
 
-        # Success — remove local copy.
+        # Success: retain the local copy as the hot history/debug cache. The
+        # manifest state prevents duplicate uploads while cleanup later applies
+        # TTL policy only to remotely committed entries.
         try:
-            blob_path.unlink(missing_ok=True)
-            manifest_path.unlink(missing_ok=True)
+            manifest["remote_state"] = "committed"
+            manifest["remote_committed_at_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["local_cache_state"] = "present"
+            manifest["last_error"] = None
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         except Exception as exc:
             logger.warning(
-                "Spillway: cleanup failed for key=%r (migrated OK): %s", key, exc
+                "Spillway: manifest commit update failed for key=%r: %s", key, exc
             )
         return True
+
+    def cache_committed(
+        self,
+        *,
+        key: str,
+        data: bytes,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        sha256: str | None = None,
+        size_bytes: int | None = None,
+        remote_backend: str | None = None,
+    ) -> BlobRef:
+        """Populate the local cache for a blob already durable remotely."""
+        ref = self.enqueue(
+            key=key,
+            data=data,
+            content_type=content_type,
+            metadata=metadata,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+        manifest_path = self._manifest_path(key)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {"remote_key": key, "metadata": metadata or {}}
+        manifest["remote_state"] = "committed"
+        manifest["remote_backend"] = remote_backend
+        manifest["remote_committed_at_utc"] = manifest.get(
+            "remote_committed_at_utc"
+        ) or datetime.now(timezone.utc).isoformat()
+        manifest["local_cache_state"] = "present"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        return ref
+
+    def cleanup_committed_cache(
+        self,
+        *,
+        ttl_days: int | None = None,
+        now: datetime | None = None,
+        max_per_run: int = 500,
+    ) -> int:
+        """Remove old local copies only after remote commit is recorded."""
+        ttl = ttl_days if isinstance(ttl_days, int) and ttl_days > 0 else _default_cache_ttl_days()
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=ttl)
+        removed = 0
+        for manifest_path in sorted(self._pending_dir.rglob(f"*{_MANIFEST_SUFFIX}")):
+            if removed >= max_per_run:
+                break
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if manifest.get("remote_state") != "committed":
+                continue
+            key = manifest.get("remote_key")
+            if not isinstance(key, str) or not key.strip():
+                continue
+            blob_path = self._blob_path(key)
+            try:
+                mtime = datetime.fromtimestamp(blob_path.stat().st_mtime, timezone.utc)
+            except FileNotFoundError:
+                manifest_path.unlink(missing_ok=True)
+                continue
+            except Exception:
+                continue
+            if mtime > cutoff:
+                continue
+            try:
+                blob_path.unlink(missing_ok=True)
+                manifest_path.unlink(missing_ok=True)
+                removed += 1
+            except Exception as exc:
+                logger.warning("Spillway: cache cleanup failed for key=%r: %s", key, exc)
+        return removed
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +415,14 @@ def _default_max_retries() -> int:
         return val if val > 0 else _DEFAULT_MAX_RETRIES
     except (ValueError, TypeError):
         return _DEFAULT_MAX_RETRIES
+
+
+def _default_cache_ttl_days() -> int:
+    try:
+        val = int(os.getenv("VON_BLOB_SPILLWAY_CACHE_TTL_DAYS", str(_DEFAULT_CACHE_TTL_DAYS)))
+        return val if val > 0 else _DEFAULT_CACHE_TTL_DAYS
+    except (ValueError, TypeError):
+        return _DEFAULT_CACHE_TTL_DAYS
 
 
 def get_blob_spillway_queue() -> BlobSpillwayQueue:
