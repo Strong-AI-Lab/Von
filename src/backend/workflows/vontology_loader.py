@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
@@ -10,6 +11,7 @@ from ..services.text_value_service import (
     get_preferred_text_for_concept,
     get_preferred_texts_for_concepts,
     get_texts_for_concept,
+    get_texts_for_concepts,
 )
 from .prompt_metadata_resolution import (
     WORKFLOW_STEP_PROMPT_LINK_PREDICATE_ALIASES,
@@ -61,6 +63,17 @@ from .engine import (
 logger = logging.getLogger(__name__)
 
 WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY = "workflow_step_control_flow"
+_DEFAULT_WORKFLOW_POLICY_TEXT_MAX_TIME_MS = 15000
+_WORKFLOW_POLICY_TEXT_MAX_TIME_MS_ENV = "VON_WORKFLOW_POLICY_TEXT_MAX_TIME_MS"
+
+
+def _workflow_policy_text_max_time_ms() -> int:
+    raw = os.getenv(_WORKFLOW_POLICY_TEXT_MAX_TIME_MS_ENV)
+    try:
+        parsed = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_WORKFLOW_POLICY_TEXT_MAX_TIME_MS
+    return max(1000, min(parsed, 120000))
 
 # Canonical workflow graph predicates with legacy-compatible aliases.
 # The first entry in each tuple is the preferred canonical concept predicate.
@@ -2324,7 +2337,10 @@ def _get_cached_policy_text_rows(
         return text_cache[concept_id]
 
     try:
-        raw_texts = get_texts_for_concept(concept_id)
+        raw_texts = get_texts_for_concept(
+            concept_id,
+            max_time_ms=_workflow_policy_text_max_time_ms(),
+        )
     except Exception:
         raw_texts = []
     texts: List[Mapping[str, Any]] = [
@@ -2336,6 +2352,45 @@ def _get_cached_policy_text_rows(
     if text_cache is not None:
         text_cache[concept_id] = texts
     return texts
+
+
+def _prefetch_policy_text_rows(
+    concept_ids: Sequence[str],
+    *,
+    text_cache: Dict[str, List[Mapping[str, Any]]],
+) -> str | None:
+    missing_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in concept_ids:
+        if not isinstance(raw_id, str):
+            continue
+        concept_id = raw_id.strip()
+        if not concept_id or concept_id in seen or concept_id in text_cache:
+            continue
+        seen.add(concept_id)
+        missing_ids.append(concept_id)
+    if not missing_ids:
+        return None
+
+    try:
+        rows_by_concept = get_texts_for_concepts(
+            missing_ids,
+            limit_per_concept=50,
+            max_time_ms=_workflow_policy_text_max_time_ms(),
+        )
+    except Exception as exc:
+        for concept_id in missing_ids:
+            text_cache.setdefault(concept_id, [])
+        return f"workflow_policy_text_prefetch_failed:{type(exc).__name__}"
+
+    for concept_id in missing_ids:
+        raw_rows = rows_by_concept.get(concept_id) or []
+        text_cache[concept_id] = [
+            cast(Mapping[str, Any], item)
+            for item in raw_rows
+            if isinstance(item, Mapping)
+        ]
+    return None
 
 
 def _resolve_policy_from_text_relations(
@@ -2763,6 +2818,12 @@ def build_workflow_process_graph(
         return None, ["workflow_has_no_steps"]
 
     step_docs = _fetch_concepts_by_id(step_ids)
+    policy_prefetch_warning = _prefetch_policy_text_rows(
+        step_ids,
+        text_cache=text_policy_cache,
+    )
+    if policy_prefetch_warning:
+        warnings.append(f"{policy_prefetch_warning}:{workflow_id}")
     missing_steps = [sid for sid in step_ids if sid not in step_docs]
     if missing_steps:
         warnings.append(f"missing_step_concepts:{','.join(missing_steps[:25])}")

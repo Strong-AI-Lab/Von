@@ -1344,7 +1344,7 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
 
     try:
         from ..db.repositories.concepts_repository import ConceptsRepository
-        from .text_value_service import get_preferred_text_for_concept
+        from .text_value_service import get_preferred_texts_for_concepts
 
         # Find all instances of #V#mcp_tool
         cursor = ConceptsRepository.find(
@@ -1354,8 +1354,23 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 "attributes": 1,
             },
         )
+        docs = [doc for doc in cursor if isinstance(doc, dict)]
+        concept_ids = [
+            doc["concept_id"]
+            for doc in docs
+            if isinstance(doc.get("concept_id"), str) and doc.get("concept_id")
+        ]
+        preferred_text_by_concept = get_preferred_texts_for_concepts(
+            concept_ids,
+            predicate_precedence=(
+                ("hasDescription", "#V#hasDescription"),
+                ("hasContent", "#V#hasContent"),
+            ),
+            preferred_languages=("en-NZ", "en"),
+            limit_per_concept=10,
+        )
 
-        for doc in cursor:
+        for doc in docs:
             attrs = doc.get("attributes") or {}
             tool_name = attrs.get("mcp_tool_name")
             if not tool_name:
@@ -1365,15 +1380,7 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
             display_template = attrs.get("display_template")
             description = None
             if isinstance(doc.get("concept_id"), str):
-                best = get_preferred_text_for_concept(
-                    doc["concept_id"],
-                    predicate_precedence=(
-                        ("hasDescription", "#V#hasDescription"),
-                        ("hasContent", "#V#hasContent"),
-                    ),
-                    preferred_languages=("en-NZ", "en"),
-                    limit=10,
-                )
+                best = preferred_text_by_concept.get(doc["concept_id"])
                 if isinstance(best, dict):
                     text_value = best.get("text")
                     if isinstance(text_value, str) and text_value.strip():

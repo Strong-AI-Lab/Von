@@ -2650,6 +2650,7 @@ def publish_canonical_chat_workflow_graphs(
     publication_definitions: Mapping[str, WorkflowDefinition] | None = None,
     publication_purposes: Mapping[str, str] | None = None,
     workflow_text_relations: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    validate_after_publish: bool = True,
 ) -> Dict[str, Any]:
     """Publish canonical chat workflows as Vontology process graphs.
 
@@ -2664,6 +2665,9 @@ def publish_canonical_chat_workflow_graphs(
     ``create_missing_child_concepts`` may be used by validated authoring paths
     to permit new step concepts while still refusing to create a missing root
     workflow concept.
+    ``validate_after_publish`` remains true by default. Repo-seed bootstrap may
+    disable it because that path applies additional seed text relations after
+    graph publication and then performs one final read-back validation.
     """
     explicit_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = {
         str(workflow_id).strip(): spec
@@ -2802,6 +2806,7 @@ def publish_canonical_chat_workflow_graphs(
             ).union(available_publication_specs.keys())
         )
     )
+    definition_validation_cache: dict[str, Any | None] = {}
 
     def _resolve_workflow_definition_for_validation(
         candidate_workflow_id: str,
@@ -2809,28 +2814,25 @@ def publish_canonical_chat_workflow_graphs(
         candidate_id = str(candidate_workflow_id or "").strip()
         if not candidate_id:
             return None
+        if candidate_id in definition_validation_cache:
+            return definition_validation_cache[candidate_id]
+        resolved_definition = None
         try:
-            authoritative_definition = load_workflow_definition_from_vontology(
-                candidate_id
-            )
+            resolved_definition = load_workflow_definition_from_vontology(candidate_id)
         except Exception:
-            authoritative_definition = None
-        if authoritative_definition is not None:
-            return authoritative_definition
-        explicit_definition = explicit_publication_definitions.get(candidate_id)
-        if explicit_definition is not None:
-            return explicit_definition
-        if registry is not None:
-            registered_definition = registry.get(candidate_id)
-            if registered_definition is not None:
-                return registered_definition
+            resolved_definition = None
+        if resolved_definition is None:
+            resolved_definition = explicit_publication_definitions.get(candidate_id)
+        if resolved_definition is None and registry is not None:
+            resolved_definition = registry.get(candidate_id)
         canonical_spec = available_publication_specs.get(candidate_id)
-        if canonical_spec is not None:
-            return _build_definition_from_publication_spec(
+        if resolved_definition is None and canonical_spec is not None:
+            resolved_definition = _build_definition_from_publication_spec(
                 workflow_id=candidate_id,
                 spec=canonical_spec,
             )
-        return None
+        definition_validation_cache[candidate_id] = resolved_definition
+        return resolved_definition
 
     for workflow_id in target_workflow_ids:
         spec = available_publication_specs.get(workflow_id)
@@ -2973,14 +2975,16 @@ def publish_canonical_chat_workflow_graphs(
             ordered_step_ids
         )
 
-        try:
-            concept_service.update_concept(
-                workflow_id,
-                {"relationships": workflow_relationships},
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            errors_by_workflow_id[workflow_id] = f"workflow_update_failed:{exc}"
-            continue
+        if _normalise_relationships(workflow_doc) != workflow_relationships:
+            try:
+                concept_service.update_concept(
+                    workflow_id,
+                    {"relationships": workflow_relationships},
+                    defer_side_effects=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                errors_by_workflow_id[workflow_id] = f"workflow_update_failed:{exc}"
+                continue
 
         step_update_failed = False
         for step in spec.steps:
@@ -3396,23 +3400,37 @@ def publish_canonical_chat_workflow_graphs(
                     step_update_failed = True
                     break
 
-            try:
-                concept_service.update_concept(
-                    step_concept_id,
-                    {
-                        "relationships": step_relationships,
-                        (
-                            "concept_data."
-                            f"{WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY}"
-                        ): step_control_flow_payload,
-                    },
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                errors_by_workflow_id[workflow_id] = (
-                    f"step_update_failed:{step_concept_id}:{exc}"
-                )
-                step_update_failed = True
-                break
+            current_step_concept_data = (
+                step_doc.get("concept_data") if isinstance(step_doc, Mapping) else None
+            )
+            current_step_control_flow_payload = (
+                current_step_concept_data.get(WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY)
+                if isinstance(current_step_concept_data, Mapping)
+                else None
+            )
+            step_update_payload = {}
+            if _normalise_relationships(step_doc) != step_relationships:
+                step_update_payload["relationships"] = step_relationships
+            if current_step_control_flow_payload != step_control_flow_payload:
+                step_update_payload[
+                    (
+                        "concept_data."
+                        f"{WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY}"
+                    )
+                ] = step_control_flow_payload
+            if step_update_payload:
+                try:
+                    concept_service.update_concept(
+                        step_concept_id,
+                        step_update_payload,
+                        defer_side_effects=True,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors_by_workflow_id[workflow_id] = (
+                        f"step_update_failed:{step_concept_id}:{exc}"
+                    )
+                    step_update_failed = True
+                    break
 
         if not step_update_failed:
             registration_source = (
@@ -3431,75 +3449,79 @@ def publish_canonical_chat_workflow_graphs(
             # example when bootstrapping an action-less graph to executable form).
             if registration_source == "vontology" and not supported_action_ids:
                 enforce_supported_actions = False
-            try:
-                published_definition = load_workflow_definition_from_vontology(
-                    workflow_id
-                )
-            except Exception as exc:
-                errors_by_workflow_id[workflow_id] = (
-                    "publication_validation_failed:definition_load_exception:"
-                    f"{type(exc).__name__}:{exc}"
-                )
-                validation_failures_by_workflow_id[workflow_id] = {
-                    "errors": ["workflow_definition_load_exception"],
-                    "error": f"{type(exc).__name__}:{exc}",
-                    "supported_action_ids": list(supported_action_ids),
-                }
-                continue
-            if published_definition is None:
-                errors_by_workflow_id[workflow_id] = (
-                    "publication_validation_failed:definition_not_loadable"
-                )
-                validation_failures_by_workflow_id[workflow_id] = {
-                    "errors": ["workflow_definition_not_loadable"],
-                    "supported_action_ids": list(supported_action_ids),
-                }
-                continue
+            if validate_after_publish:
+                try:
+                    published_definition = load_workflow_definition_from_vontology(
+                        workflow_id
+                    )
+                except Exception as exc:
+                    errors_by_workflow_id[workflow_id] = (
+                        "publication_validation_failed:definition_load_exception:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
+                    validation_failures_by_workflow_id[workflow_id] = {
+                        "errors": ["workflow_definition_load_exception"],
+                        "error": f"{type(exc).__name__}:{exc}",
+                        "supported_action_ids": list(supported_action_ids),
+                    }
+                    continue
+                if published_definition is None:
+                    errors_by_workflow_id[workflow_id] = (
+                        "publication_validation_failed:definition_not_loadable"
+                    )
+                    validation_failures_by_workflow_id[workflow_id] = {
+                        "errors": ["workflow_definition_not_loadable"],
+                        "supported_action_ids": list(supported_action_ids),
+                    }
+                    continue
+                definition_validation_cache[workflow_id] = published_definition
 
-            contract_validation = validate_workflow_definition_contract(
-                definition=published_definition,
-                supported_action_ids=supported_action_ids,
-                enforce_supported_actions=enforce_supported_actions,
-                known_workflow_ids=known_workflow_ids,
-                workflow_definition_loader=_resolve_workflow_definition_for_validation,
-            )
-            try:
-                _graph, graph_warnings = build_workflow_process_graph(workflow_id)
-            except Exception as exc:
-                errors_by_workflow_id[workflow_id] = (
-                    "publication_validation_failed:graph_load_exception:"
-                    f"{type(exc).__name__}:{exc}"
+                contract_validation = validate_workflow_definition_contract(
+                    definition=published_definition,
+                    supported_action_ids=supported_action_ids,
+                    enforce_supported_actions=enforce_supported_actions,
+                    known_workflow_ids=known_workflow_ids,
+                    workflow_definition_loader=(
+                        _resolve_workflow_definition_for_validation
+                    ),
                 )
-                validation_failures_by_workflow_id[workflow_id] = {
-                    "errors": ["workflow_graph_load_exception"],
-                    "error": f"{type(exc).__name__}:{exc}",
-                    "supported_action_ids": list(supported_action_ids),
-                }
-                continue
-            warning_items = [
-                str(item).strip()
-                for item in (graph_warnings or [])
-                if isinstance(item, str) and str(item).strip()
-            ]
-            validation_errors = [
-                code
-                for code in contract_validation.get("errors", [])
-                if isinstance(code, str) and code.strip()
-            ]
-            if warning_items:
-                validation_errors.append("workflow_graph_warnings_present")
+                try:
+                    _graph, graph_warnings = build_workflow_process_graph(workflow_id)
+                except Exception as exc:
+                    errors_by_workflow_id[workflow_id] = (
+                        "publication_validation_failed:graph_load_exception:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
+                    validation_failures_by_workflow_id[workflow_id] = {
+                        "errors": ["workflow_graph_load_exception"],
+                        "error": f"{type(exc).__name__}:{exc}",
+                        "supported_action_ids": list(supported_action_ids),
+                    }
+                    continue
+                warning_items = [
+                    str(item).strip()
+                    for item in (graph_warnings or [])
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                validation_errors = [
+                    code
+                    for code in contract_validation.get("errors", [])
+                    if isinstance(code, str) and code.strip()
+                ]
+                if warning_items:
+                    validation_errors.append("workflow_graph_warnings_present")
 
-            if validation_errors:
-                validation_failures_by_workflow_id[workflow_id] = {
-                    "errors": validation_errors,
-                    "graph_warnings": warning_items,
-                    "contract_validation": contract_validation,
-                    "supported_action_ids": list(supported_action_ids),
-                }
-                errors_by_workflow_id[workflow_id] = (
-                    "publication_validation_failed:" + ",".join(validation_errors)
-                )
-                continue
+                if validation_errors:
+                    validation_failures_by_workflow_id[workflow_id] = {
+                        "errors": validation_errors,
+                        "graph_warnings": warning_items,
+                        "contract_validation": contract_validation,
+                        "supported_action_ids": list(supported_action_ids),
+                    }
+                    errors_by_workflow_id[workflow_id] = (
+                        "publication_validation_failed:" + ",".join(validation_errors)
+                    )
+                    continue
 
             if upsert_publication_lifecycle_metadata:
                 try:

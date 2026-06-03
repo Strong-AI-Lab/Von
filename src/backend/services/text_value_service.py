@@ -314,23 +314,92 @@ def get_texts_for_concept(
     lang: Optional[str] = None,
     limit: int = 50,
     recent_first: bool = False,
+    max_time_ms: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch linked TextValues for a concept, optionally filtered by predicate and lang.
 
     Returns a list of { text, lang, text_value_id, predicate, relation_id, context }.
     """
-    if not can_access_concept(subject_concept_id):
-        return []
-    rel_filter: Dict[str, Any] = {"subject_concept_id": subject_concept_id}
+    rows_by_concept = get_texts_for_concepts(
+        [subject_concept_id],
+        predicate=predicate,
+        lang=lang,
+        limit_per_concept=limit,
+        recent_first=recent_first,
+        max_time_ms=max_time_ms,
+    )
+    return rows_by_concept.get(subject_concept_id, [])
+
+
+def get_texts_for_concepts(
+    subject_concept_ids: Sequence[str],
+    *,
+    predicate: Optional[str] = None,
+    lang: Optional[str] = None,
+    limit_per_concept: int = 50,
+    recent_first: bool = False,
+    max_time_ms: Optional[int] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch linked TextValues for many concepts with one relation/text join.
+
+    Returns rows grouped by concept id. This is deliberately generic support for
+    Vontology-heavy paths such as workflow publication/read-back, where many
+    step concepts need their policy text relations at once.
+    """
+    ordered_subject_ids: List[str] = []
+    seen_subject_ids: set[str] = set()
+    for raw_id in subject_concept_ids:
+        if not isinstance(raw_id, str):
+            continue
+        subject_concept_id = raw_id.strip()
+        if (
+            not subject_concept_id
+            or subject_concept_id in seen_subject_ids
+            or not can_access_concept(subject_concept_id)
+        ):
+            continue
+        seen_subject_ids.add(subject_concept_id)
+        ordered_subject_ids.append(subject_concept_id)
+
+    if not ordered_subject_ids:
+        return {}
+
+    rel_filter: Dict[str, Any] = {"subject_concept_id": {"$in": ordered_subject_ids}}
     if predicate:
         rel_filter["predicate"] = predicate
 
     sort = [("updated_at", -1), ("created_at", -1)] if recent_first else None
-    relations = list(TextRelationsRepository.find(rel_filter, sort=sort, limit=limit))
+    relation_limit = max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1)
+    relations = list(
+        TextRelationsRepository.find(
+            rel_filter,
+            sort=sort,
+            limit=relation_limit,
+            max_time_ms=max_time_ms,
+        )
+    )
+    rows_by_concept: Dict[str, List[Dict[str, Any]]] = {
+        subject_id: [] for subject_id in ordered_subject_ids
+    }
     if not relations:
-        return []
+        return rows_by_concept
 
-    return _resolve_text_rows_from_relations(relations, lang=lang, limit=limit)
+    rows = _resolve_text_rows_from_relations(
+        relations,
+        lang=lang,
+        limit=None,
+        max_time_ms=max_time_ms,
+    )
+    for row in rows:
+        subject_concept_id = row.get("subject_concept_id")
+        if not isinstance(subject_concept_id, str):
+            continue
+        concept_rows = rows_by_concept.get(subject_concept_id)
+        if concept_rows is None or len(concept_rows) >= limit_per_concept:
+            continue
+        concept_rows.append(row)
+
+    return rows_by_concept
 
 
 def _resolve_text_rows_from_relations(
@@ -338,6 +407,7 @@ def _resolve_text_rows_from_relations(
     *,
     lang: Optional[str] = None,
     limit: Optional[int] = None,
+    max_time_ms: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve relation documents into joined text rows."""
 
@@ -364,14 +434,14 @@ def _resolve_text_rows_from_relations(
         tv_filter: Dict[str, Any] = {"_id": {"$in": object_id_values}}
         if lang:
             tv_filter["lang"] = lang
-        for tv in TextValuesRepository.find(tv_filter):
+        for tv in TextValuesRepository.find(tv_filter, max_time_ms=max_time_ms):
             values[str(tv["_id"])] = tv
 
     if string_id_values:
         tv_filter: Dict[str, Any] = {"_id": {"$in": string_id_values}}
         if lang:
             tv_filter["lang"] = lang
-        for tv in TextValuesRepository.find(tv_filter):
+        for tv in TextValuesRepository.find(tv_filter, max_time_ms=max_time_ms):
             values[str(tv["_id"])] = tv
 
     results: List[Dict[str, Any]] = []
@@ -1207,6 +1277,7 @@ __all__ = [
     "upsert_text_for_concept",
     "upsert_singleton_text_relation",
     "get_texts_for_concept",
+    "get_texts_for_concepts",
     "get_text_relations_summary",
     "update_text_relation_text",
     "delete_text_relation_by_predicate_and_text",
