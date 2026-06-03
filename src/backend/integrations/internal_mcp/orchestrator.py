@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -32961,7 +32962,9 @@ class InternalMCPChatOrchestrator:
         *,
         progress_note: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        from ...services.workflow_discovery_service import discover_workflows_for_turn
+        from ...services.workflow_discovery_memo_service import (
+            discover_workflows_for_turn_memoized,
+        )
 
         data = request.data
         env = request.environment
@@ -33158,9 +33161,39 @@ class InternalMCPChatOrchestrator:
                     "VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
                     "1.0",
                 )
-            discovered = discover_workflows_for_turn(
+            turn_scope = None
+            for scope_key in ("turn_id", "request_id"):
+                scope_value = data.get(scope_key)
+                if isinstance(scope_value, str) and scope_value.strip():
+                    turn_scope = scope_value.strip()
+                    break
+            if turn_scope is None:
+                session_value = data.get("conversation_session_id") or data.get(
+                    "session_id"
+                )
+                if isinstance(session_value, str) and session_value.strip():
+                    prompt_digest = hashlib.sha256(
+                        prompt_text.encode("utf-8")
+                    ).hexdigest()
+                    turn_scope = f"{session_value.strip()}:{prompt_digest}"
+            if turn_scope is None and isinstance(data, dict):
+                turn_scope = f"request_data:{id(data)}"
+            try:
+                expected_contract_for_cache = (
+                    expected_outcome_contract.to_state_payload()
+                )
+            except Exception:
+                expected_contract_for_cache = expected_outcome_contract.to_dict()
+            discovered = discover_workflows_for_turn_memoized(
                 discovery_query_input,
                 namespace=env.user_namespace,
+                turn_scope=turn_scope,
+                requested_query=prompt_text,
+                expected_outcome_contract=(
+                    expected_contract_for_cache
+                    if isinstance(expected_contract_for_cache, Mapping)
+                    else None
+                ),
                 timeout_seconds=discovery_timeout_seconds,
                 workflow_registry=self._workflow_registry,
             )

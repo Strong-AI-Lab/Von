@@ -8,6 +8,7 @@ JVNAUTOSCI-1763:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Mapping, Sequence
 
@@ -256,6 +257,48 @@ def _build_turn_primary_discovery_query_text(data: Mapping[str, Any]) -> str:
     return _normalise_turn_prompt(data)
 
 
+def _build_turn_workflow_discovery_memo_scope(data: Mapping[str, Any]) -> str | None:
+    for key in ("turn_id", "request_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    session_id = data.get("conversation_session_id") or data.get("session_id")
+    if isinstance(session_id, str) and session_id.strip():
+        prompt = _normalise_turn_prompt(data)
+        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return f"{session_id.strip()}:{prompt_digest}"
+    if isinstance(data, dict):
+        return f"request_data:{id(data)}"
+    return None
+
+
+def _turn_expected_outcome_contract_for_discovery_memo(
+    data: Mapping[str, Any],
+) -> dict[str, Any]:
+    for key in (
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_contract",
+        "expected_outcome_contract_state",
+        "expected_outcome_contract",
+    ):
+        value = data.get(key)
+        if isinstance(value, Mapping):
+            return {str(k): v for k, v in value.items() if isinstance(k, str)}
+    contract: dict[str, Any] = {}
+    for key in (
+        "turn_expected_outcome_summary",
+        "turn_expected_grounding_requirement",
+        "turn_expected_precision_policy",
+        "turn_selector_guidance",
+        "turn_answering_guidance",
+        "turn_expected_required_tools",
+    ):
+        value = data.get(key)
+        if value is not None:
+            contract[key] = value
+    return contract
+
+
 def _discovery_candidate_entries(discovery: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw_candidates = discovery.get("matches")
     if not isinstance(raw_candidates, Sequence) or isinstance(
@@ -297,7 +340,9 @@ def _discover_turn_workflows_for_durable_action(
         )
         return reused
 
-    from ...services.workflow_discovery_service import discover_workflows_for_turn
+    from ...services.workflow_discovery_memo_service import (
+        discover_workflows_for_turn_memoized,
+    )
 
     raw_discovery_timeout_seconds = request.data.get(
         "workflow_discovery_timeout_seconds"
@@ -318,9 +363,14 @@ def _discover_turn_workflows_for_durable_action(
                     "durable_action_skipped_no_query"
                 ),
             }
-        result = discover_workflows_for_turn(
+        result = discover_workflows_for_turn_memoized(
             query,
             namespace=request.environment.user_namespace,
+            turn_scope=_build_turn_workflow_discovery_memo_scope(request.data),
+            requested_query=_normalise_turn_prompt(request.data),
+            expected_outcome_contract=(
+                _turn_expected_outcome_contract_for_discovery_memo(request.data)
+            ),
             timeout_seconds=discovery_timeout_seconds,
         )
         discovery_result = dict(result) if isinstance(result, Mapping) else {}

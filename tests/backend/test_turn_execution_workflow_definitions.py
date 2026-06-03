@@ -228,6 +228,93 @@ def test_durable_turn_selector_prepare_routes_on_user_prompt_before_contract(
     )
 
 
+def test_durable_turn_selector_prepare_reuses_turn_scoped_discovery_memo(
+    monkeypatch,
+) -> None:
+    from src.backend.services.workflow_discovery_memo_service import (
+        clear_turn_workflow_discovery_memo,
+    )
+
+    clear_turn_workflow_discovery_memo()
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda *, latency_sensitive=False: {
+            "surface": "workflow_retrieval",
+            "namespace": "workflow_capabilities",
+            "size": 1,
+            "ready": True,
+            "last_manifest_digest": "test-manifest",
+            "last_success_monotonic": 1.0,
+            "last_invalidated_at_utc": None,
+            "last_mode": "test",
+        },
+    )
+    calls: list[str] = []
+
+    def fake_discovery(query_text: str, *args, **kwargs) -> dict[str, object]:
+        calls.append(query_text)
+        match = {
+            "concept_id": "#V#represented_retrieval_workflow",
+            "relevance_score": 1.0,
+        }
+        return {
+            "matches": [match],
+            "candidates": [match],
+            "routing_matches": [match],
+            "query": query_text,
+            "match_count": 1,
+            "candidate_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        fake_discovery,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    prepare_spec = registry.get("turn_execution.prepare_selector_context")
+    assert prepare_spec is not None
+
+    request_data = {
+        "turn_id": "turn-2400",
+        "user_prompt": "Find represented facts for this turn",
+        "turn_expected_outcome_summary": "Answer from represented facts.",
+    }
+    first = prepare_spec.handler(
+        WorkflowActionRequest(
+            action_id="turn_execution.prepare_selector_context",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data=dict(request_data),
+        )
+    )
+    second = prepare_spec.handler(
+        WorkflowActionRequest(
+            action_id="turn_execution.prepare_selector_context",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data=dict(request_data),
+        )
+    )
+
+    assert calls == ["Find represented facts for this turn"]
+    assert first.outputs["workflow_discovery_result"]["workflow_discovery_cache"][
+        "cache_hit"
+    ] is False
+    assert second.outputs["workflow_discovery_result"]["workflow_discovery_cache"][
+        "cache_hit"
+    ] is True
+    assert second.outputs["selector_candidate_ids"] == [
+        "#V#represented_retrieval_workflow"
+    ]
+
+
 def test_turn_execution_actions_do_not_define_private_lexical_workflow_discovery() -> (
     None
 ):
