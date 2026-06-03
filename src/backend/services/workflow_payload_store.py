@@ -208,18 +208,41 @@ def load_workflow_payload_blob_ref(
             raise last_exc
         raise RuntimeError("Blob read failed without an exception")
 
-    store = get_blob_store_from_env()
-    try:
-        compressed = _get_bytes_with_retries(store, key.strip(), attempts=2)
-    except Exception:
-        backend = blob_ref.get("backend")
-        if not isinstance(backend, str) or not backend.strip():
-            raise
-        compressed = _get_bytes_with_retries(
-            get_blob_store_for_backend_from_env(backend),
-            key.strip(),
-            attempts=3,
-        )
+    clean_key = key.strip()
+    backend = blob_ref.get("backend")
+    backend_text = backend.strip() if isinstance(backend, str) else ""
+    compressed: bytes | None = None
+    first_error: Exception | None = None
+
+    if backend_text == "spillway":
+        try:
+            from .blob_spillway import get_blob_spillway_queue
+
+            compressed = get_blob_spillway_queue().get_local_bytes(clean_key)
+        except Exception as exc:
+            first_error = exc
+
+    if compressed is None:
+        try:
+            store = get_blob_store_from_env()
+            compressed = _get_bytes_with_retries(store, clean_key, attempts=2)
+        except Exception as exc:
+            first_error = first_error or exc
+
+    if compressed is None and backend_text and backend_text != "spillway":
+        try:
+            compressed = _get_bytes_with_retries(
+                get_blob_store_for_backend_from_env(backend_text),
+                clean_key,
+                attempts=3,
+            )
+        except Exception as exc:
+            first_error = first_error or exc
+
+    if compressed is None:
+        if first_error is not None:
+            raise first_error
+        raise RuntimeError("Workflow payload blob read failed")
     if ref_payload.get("compression") == "gzip":
         raw_bytes = gzip.decompress(compressed)
     else:
@@ -381,14 +404,28 @@ def _offload_value(
     }
 
     try:
-        stored = put_bytes_durable(
-            key=key,
-            data=compressed,
-            content_type="application/json",
-            metadata=metadata,
-            sha256=compressed_sha256,
-            size_bytes=len(compressed),
-        )
+        from .blob_spillway import is_spillway_enabled
+
+        if is_spillway_enabled():
+            from .blob_uploads import enqueue_bytes_via_spillway
+
+            stored = enqueue_bytes_via_spillway(
+                key=key,
+                data=compressed,
+                content_type="application/json",
+                metadata=metadata,
+                sha256=compressed_sha256,
+                size_bytes=len(compressed),
+            )
+        else:
+            stored = put_bytes_durable(
+                key=key,
+                data=compressed,
+                content_type="application/json",
+                metadata=metadata,
+                sha256=compressed_sha256,
+                size_bytes=len(compressed),
+            )
     except BlobUploadError as exc:
         if not fail_soft:
             raise
@@ -426,6 +463,10 @@ def _offload_value(
         "sha256": stored.sha256,
         "summary": _summarise_value(value),
         "blob_ref": _blob_ref_to_payload(stored.ref),
+        "persistence_status": (
+            "queued_local_first" if stored.ref.backend == "spillway" else "committed"
+        ),
+        "remote_state": "pending" if stored.ref.backend == "spillway" else "committed",
         "created_at_utc": _utcnow_iso(),
     }
     return (

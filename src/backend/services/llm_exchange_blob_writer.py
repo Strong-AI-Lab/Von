@@ -90,6 +90,18 @@ def _is_falsy_env(name: str) -> bool:
     return raw.strip().lower() in {"0", "false", "no", "off"}
 
 
+def _llm_exchange_spillway_enabled() -> bool:
+    raw = os.environ.get("VON_LLM_EXCHANGE_USE_SPILLWAY")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        from .blob_spillway import is_spillway_enabled
+
+        return is_spillway_enabled()
+    except Exception:
+        return False
+
+
 def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -267,11 +279,13 @@ class LlmExchangeBlobWriter:
         store: BlobStore,
         key_prefix: str = DEFAULT_KEY_PREFIX,
         size_cap_bytes: int = DEFAULT_SIZE_CAP_BYTES,
+        use_spillway: bool = False,
     ) -> None:
         self._store = store
         normalised_prefix = (key_prefix or "").strip().strip("/")
         self._key_prefix = normalised_prefix or DEFAULT_KEY_PREFIX
         self._size_cap_bytes = max(1024, int(size_cap_bytes))
+        self._use_spillway = bool(use_spillway)
 
     @property
     def key_prefix(self) -> str:
@@ -427,16 +441,29 @@ class LlmExchangeBlobWriter:
             turn_execution_id=turn_execution_id,
             stage=stage,
         )
+        metadata = {
+            "schema_version": SCHEMA_VERSION,
+            "truncated": "1" if truncated else "0",
+        }
         try:
-            blob_ref = self._store.put_bytes(
-                key,
-                compressed,
-                content_type="application/json+gzip",
-                metadata={
-                    "schema_version": SCHEMA_VERSION,
-                    "truncated": "1" if truncated else "0",
-                },
-            )
+            if self._use_spillway:
+                from .blob_uploads import enqueue_bytes_via_spillway
+
+                stored = enqueue_bytes_via_spillway(
+                    key=key,
+                    data=compressed,
+                    content_type="application/json+gzip",
+                    metadata=metadata,
+                    size_bytes=len(compressed),
+                )
+                blob_ref = stored.ref
+            else:
+                blob_ref = self._store.put_bytes(
+                    key,
+                    compressed,
+                    content_type="application/json+gzip",
+                    metadata=metadata,
+                )
         except Exception as exc:
             _logger.warning(
                 "LLM exchange blob write failed (stage=%s, key=%s): %s: %s",
@@ -460,6 +487,10 @@ class LlmExchangeBlobWriter:
             "request_size_bytes": request_size_bytes,
             "response_size_bytes": response_size_bytes,
             "truncated": truncated,
+            "persistence_status": (
+                "queued_local_first" if blob_ref.backend == "spillway" else "committed"
+            ),
+            "remote_state": "pending" if blob_ref.backend == "spillway" else "committed",
         }
         if blob_ref.etag:
             result["etag"] = blob_ref.etag
@@ -517,6 +548,11 @@ def get_llm_exchange_blob_writer_from_env() -> LlmExchangeBlobWriter | None:
         store=store,
         key_prefix=key_prefix,
         size_cap_bytes=size_cap,
+        use_spillway=(
+            not _is_truthy_env("VON_LLM_EXCHANGE_SYNC_DURABILITY")
+            and not isinstance(store, LocalBlobStore)
+            and _llm_exchange_spillway_enabled()
+        ),
     )
     _writer_singleton_resolved = True
     return _writer_singleton

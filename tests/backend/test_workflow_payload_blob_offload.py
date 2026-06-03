@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
+import pytest
+
+from src.backend.services.blob_spillway import BlobSpillwayQueue
 from src.backend.services.blob_store import BlobRef
 from src.backend.services.workflow_payload_store import (
     compact_workflow_payload_for_storage,
@@ -62,6 +65,11 @@ class _FakeBlobStore:
         ]
 
 
+@pytest.fixture(autouse=True)
+def _disable_spillway_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
+
+
 def test_compact_workflow_payload_offloads_known_heavy_field(monkeypatch) -> None:
     store = _FakeBlobStore()
     monkeypatch.setattr(
@@ -95,6 +103,46 @@ def test_compact_workflow_payload_offloads_known_heavy_field(monkeypatch) -> Non
     assert ref["field_path"] == "llm_step_envelope"
     assert ref["blob_ref"]["key"].startswith("workflows/payloads/")
     assert load_workflow_payload_blob_ref(ref) == workflow_data["llm_step_envelope"]
+
+
+def test_compact_workflow_payload_can_enqueue_local_first_spillway(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store = _FakeBlobStore()
+    queue = BlobSpillwayQueue(tmp_path / "spillway")
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "1")
+    monkeypatch.setattr(
+        "src.backend.services.blob_spillway.get_blob_spillway_queue",
+        lambda: queue,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    workflow_data = {
+        "workflow_step_result_envelopes": [
+            {"state_id": "llm", "output_payload": {"text": "z" * 3000}}
+        ]
+    }
+
+    result = compact_workflow_payload_for_storage(
+        workflow_data,
+        record_family="workflow_instances.workflow_data",
+        record_id="instance-spillway",
+        threshold_bytes=512,
+        fail_soft=False,
+    )
+
+    assert store.writes == []
+    ref = result.payload["workflow_step_result_envelopes"]
+    assert ref["blob_ref"]["backend"] == "spillway"
+    assert ref["persistence_status"] == "queued_local_first"
+    assert ref["remote_state"] == "pending"
+    assert queue.has_pending(ref["blob_ref"]["key"])
+    assert load_workflow_payload_blob_ref(ref) == workflow_data[
+        "workflow_step_result_envelopes"
+    ]
 
 
 def test_hydrate_workflow_payload_blob_refs_restores_nested_payload(monkeypatch) -> None:

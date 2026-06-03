@@ -11,6 +11,7 @@ from unittest import mock
 
 import pytest
 
+from src.backend.services.blob_spillway import BlobSpillwayQueue
 from src.backend.services.blob_store import BlobRef, LocalBlobStore
 from src.backend.services.llm_exchange_blob_writer import (
     DEFAULT_KEY_PREFIX,
@@ -18,6 +19,7 @@ from src.backend.services.llm_exchange_blob_writer import (
     SCHEMA_VERSION,
     LlmExchangeBlobWriter,
     get_llm_exchange_blob_writer_from_env,
+    read_llm_exchange_blob_ref,
     reset_llm_exchange_blob_writer_singleton_for_tests,
 )
 
@@ -139,6 +141,59 @@ def test_write_failure_isolates_error(tmp_path: Path) -> None:
     assert "error" in result
     assert "simulated upload failure" in result["error"]
     assert "key" in result
+
+
+def test_write_can_enqueue_exchange_via_local_first_spillway(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _RemoteStore:
+        def put_bytes(
+            self,
+            key: str,
+            data: bytes,
+            *,
+            content_type: str | None = None,
+            metadata: Mapping[str, str] | None = None,
+        ) -> BlobRef:
+            raise AssertionError("remote store should not be used on spillway path")
+
+        def get_bytes(self, key: str) -> bytes:
+            raise KeyError(key)
+
+    queue = BlobSpillwayQueue(tmp_path / "spillway")
+    monkeypatch.setattr(
+        "src.backend.services.blob_spillway.get_blob_spillway_queue",
+        lambda: queue,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _RemoteStore(),
+    )
+    writer = LlmExchangeBlobWriter(store=_RemoteStore(), use_spillway=True)
+
+    result = writer.write(
+        turn_execution_id="turn-spillway",
+        stage="selector",
+        workflow_stage_id="workflow_selector",
+        call_type="llm.generate",
+        model="gpt-test",
+        provider="openai",
+        request_prompt="Select a workflow",
+        request_context=[{"role": "user", "content": "hello"}],
+        response="selected",
+    )
+
+    assert result["backend"] == "spillway"
+    assert result["persistence_status"] == "queued_local_first"
+    assert result["remote_state"] == "pending"
+    assert queue.has_pending(result["key"])
+
+    hydrated = read_llm_exchange_blob_ref(result)
+    assert hydrated is not None
+    assert hydrated["turn_execution_id"] == "turn-spillway"
+    assert hydrated["request"]["prompt"] == "Select a workflow"
+    assert hydrated["response"] == "selected"
 
 
 def test_disabled_env_returns_no_writer(tmp_path: Path) -> None:

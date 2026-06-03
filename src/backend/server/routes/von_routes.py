@@ -92,8 +92,9 @@ from ...services.runtime_code_version_service import (
 )
 from ...services.tool_progress_store_service import (
     delete_tool_progress_state,
+    discard_queued_tool_progress_state,
     fetch_tool_progress_state,
-    store_tool_progress_state,
+    queue_tool_progress_state_persistence,
 )
 from ...services.turn_execution_record_service import (
     build_search_tool_evidence,
@@ -4803,12 +4804,36 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         _TOOL_PROGRESS[key] = merged
 
     try:
-        store_tool_progress_state(
+        phase_for_terminal = _progress_str(merged.get("phase"))
+        terminal_state = (
+            str(merged.get("status") or "").strip().lower()
+            in _TOOL_PROGRESS_TERMINAL_STATUSES
+            or (phase_for_terminal or "").strip().lower()
+            in _TOOL_PROGRESS_TERMINAL_PHASES
+        )
+        synchronous_durability = any(
+            bool(merged.get(flag_name))
+            for flag_name in (
+                "synchronous_durability",
+                "progress_synchronous_durability",
+                "progress_persistence_synchronous",
+            )
+        )
+        persistence_telemetry = queue_tool_progress_state_persistence(
             scope_key=scope_key,
             request_id=request_id,
             payload=merged,
             ttl_seconds=_TOOL_PROGRESS_TTL_SEC,
+            terminal_state=terminal_state,
+            synchronous_durability=synchronous_durability,
         )
+        if isinstance(persistence_telemetry, Mapping):
+            with _TOOL_PROGRESS_LOCK:
+                current = _TOOL_PROGRESS.get((scope_key, request_id))
+                if isinstance(current, dict) and current.get("sequence_no") == merged.get(
+                    "sequence_no"
+                ):
+                    current["progress_persistence"] = dict(persistence_telemetry)
     except Exception:
         pass
 
@@ -4858,6 +4883,10 @@ def _snapshot_tool_progress_for_request(
 def _clear_tool_progress(scope_key: str, request_id: str) -> None:
     with _TOOL_PROGRESS_LOCK:
         _TOOL_PROGRESS.pop((scope_key, request_id), None)
+    try:
+        discard_queued_tool_progress_state(scope_key=scope_key, request_id=request_id)
+    except Exception:
+        pass
     try:
         delete_tool_progress_state(scope_key=scope_key, request_id=request_id)
     except Exception:

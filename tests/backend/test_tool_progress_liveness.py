@@ -7,6 +7,9 @@ from flask import Flask
 import src.backend.server.routes.von_routes as von_routes
 from src.backend.services.tool_progress_store_service import (
     clear_tool_progress_documents_for_tests,
+    flush_queued_tool_progress_states,
+    queued_tool_progress_state_count,
+    reset_tool_progress_persistence_queue_for_tests,
 )
 
 
@@ -23,6 +26,7 @@ def _set_clock(monkeypatch, start: float = 1000.0):
 def _clear_progress_state() -> None:
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
+    reset_tool_progress_persistence_queue_for_tests()
     clear_tool_progress_documents_for_tests()
 
 
@@ -177,6 +181,7 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
             "goal_label": "https://arxiv.org/abs/2602.20478",
         },
     )
+    flush_queued_tool_progress_states(force=True)
 
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
@@ -221,6 +226,147 @@ def test_get_tool_progress_prefers_live_memory_state_before_persisted_fetch(
     assert state["request_id"] == "req-live"
     assert state["phase"] == "tool_execute"
     assert state["subtask"] == "workflow execution"
+
+
+def test_tool_progress_batches_non_terminal_updates_until_flush(
+    monkeypatch,
+) -> None:
+    writes: list[dict] = []
+
+    def _fake_store(*, scope_key, request_id, payload, ttl_seconds):
+        writes.append(
+            {
+                "scope_key": scope_key,
+                "request_id": request_id,
+                "payload": dict(payload),
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        return True
+
+    monkeypatch.setenv("VON_TOOL_PROGRESS_PERSISTENCE_FLUSH_INTERVAL_SECONDS", "60")
+    monkeypatch.setattr(
+        "src.backend.services.tool_progress_store_service.store_tool_progress_state",
+        _fake_store,
+    )
+
+    von_routes._set_tool_progress(
+        "scope-batched",
+        "req-batched",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "request_id": "req-batched",
+        },
+    )
+    von_routes._set_tool_progress(
+        "scope-batched",
+        "req-batched",
+        {
+            "status": "heartbeat",
+            "request_id": "req-batched",
+        },
+    )
+
+    assert writes == []
+    assert queued_tool_progress_state_count() == 1
+    state = von_routes._get_tool_progress("scope-batched", "req-batched")
+    assert state is not None
+    assert state["sequence_no"] == 2
+    assert state["progress_persistence"]["status"] == "queued"
+
+    summary = flush_queued_tool_progress_states(force=True)
+
+    assert summary["flushed_count"] == 1
+    assert queued_tool_progress_state_count() == 0
+    assert len(writes) == 1
+    assert writes[0]["payload"]["sequence_no"] == 2
+    assert writes[0]["payload"]["progress_persistence"]["status"] == "flushed"
+
+
+def test_tool_progress_terminal_state_flushes_immediately(monkeypatch) -> None:
+    writes: list[dict] = []
+
+    def _fake_store(*, scope_key, request_id, payload, ttl_seconds):
+        writes.append(dict(payload))
+        return True
+
+    monkeypatch.setenv("VON_TOOL_PROGRESS_PERSISTENCE_FLUSH_INTERVAL_SECONDS", "60")
+    monkeypatch.setattr(
+        "src.backend.services.tool_progress_store_service.store_tool_progress_state",
+        _fake_store,
+    )
+
+    von_routes._set_tool_progress(
+        "scope-terminal",
+        "req-terminal",
+        {"status": "thinking", "request_id": "req-terminal"},
+    )
+    von_routes._set_tool_progress(
+        "scope-terminal",
+        "req-terminal",
+        {"status": "completed", "request_id": "req-terminal"},
+    )
+
+    assert len(writes) == 1
+    assert writes[0]["status"] == "completed"
+    assert writes[0]["progress_persistence"]["flush_reason"] == "terminal_state"
+    state = von_routes._get_tool_progress("scope-terminal", "req-terminal")
+    assert state is not None
+    assert state["progress_persistence"]["status"] == "flushed"
+
+
+def test_tool_progress_reports_failed_flush_and_keeps_pending(monkeypatch) -> None:
+    def _fake_store(*, scope_key, request_id, payload, ttl_seconds):
+        return False
+
+    monkeypatch.setattr(
+        "src.backend.services.tool_progress_store_service.store_tool_progress_state",
+        _fake_store,
+    )
+
+    von_routes._set_tool_progress(
+        "scope-failed-flush",
+        "req-failed-flush",
+        {"status": "completed", "request_id": "req-failed-flush"},
+    )
+
+    state = von_routes._get_tool_progress("scope-failed-flush", "req-failed-flush")
+    assert state is not None
+    persistence = state["progress_persistence"]
+    assert persistence["status"] == "failed"
+    assert persistence["failed_flush_count"] == 1
+    assert queued_tool_progress_state_count() == 1
+
+
+def test_tool_progress_synchronous_durability_opt_in_flushes(monkeypatch) -> None:
+    writes: list[dict] = []
+
+    def _fake_store(*, scope_key, request_id, payload, ttl_seconds):
+        writes.append(dict(payload))
+        return True
+
+    monkeypatch.setenv("VON_TOOL_PROGRESS_PERSISTENCE_FLUSH_INTERVAL_SECONDS", "60")
+    monkeypatch.setattr(
+        "src.backend.services.tool_progress_store_service.store_tool_progress_state",
+        _fake_store,
+    )
+
+    von_routes._set_tool_progress(
+        "scope-sync",
+        "req-sync",
+        {
+            "status": "thinking",
+            "request_id": "req-sync",
+            "progress_persistence_synchronous": True,
+        },
+    )
+
+    assert len(writes) == 1
+    assert writes[0]["progress_persistence"]["flush_reason"] == (
+        "synchronous_durability"
+    )
+    assert writes[0]["progress_persistence"]["synchronous_durability"] is True
 
 
 def test_progress_endpoint_pending_response_includes_explanatory_payload(
@@ -288,6 +434,7 @@ def test_progress_endpoint_uses_window_session_scope_for_anonymous_requests(
             "goal_label": "https://arxiv.org/abs/2602.20478",
         },
     )
+    flush_queued_tool_progress_states(force=True)
 
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
@@ -440,6 +587,7 @@ def test_progress_endpoint_retains_legacy_session_scope_without_window_header(
             "request_id": "req-legacy-scope",
         },
     )
+    flush_queued_tool_progress_states(force=True)
 
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
@@ -484,6 +632,7 @@ def test_progress_endpoint_recovers_session_scoped_progress_after_auth_scope_shi
             "request_id": "req-auth-shift",
         },
     )
+    flush_queued_tool_progress_states(force=True)
 
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
@@ -527,6 +676,7 @@ def test_progress_endpoint_recovers_window_scoped_progress_after_auth_scope_shif
             "request_id": "req-window-auth-shift",
         },
     )
+    flush_queued_tool_progress_states(force=True)
 
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()

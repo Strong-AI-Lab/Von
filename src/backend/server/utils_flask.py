@@ -2082,6 +2082,10 @@ def create_flask_app(
     # so response finalisation is not blocked by slow/degraded remote blob writes.
     _register_optional_blob_spillway_migrator(app)
 
+    # Optional background progress flusher (JVNAUTOSCI-2403).
+    # Coalesces memory-first live progress checkpoints before durable Mongo writes.
+    _register_optional_tool_progress_flusher(app)
+
     return app
 
 
@@ -3851,6 +3855,75 @@ def _register_optional_prewarm(app: Flask) -> None:
 
         except Exception:
             _start_prewarm(app)
+
+
+def _register_optional_tool_progress_flusher(app: Flask) -> None:
+    """Register a daemon thread that periodically flushes queued progress state.
+
+    Live progress remains in memory for active foreground turns; this loop moves
+    coalesced checkpoints into ``tool_progress_state`` after a bounded interval
+    without making each heartbeat wait for Mongo.
+    """
+    if _is_agent_test_instance():
+        app.logger.info(
+            "[tool-progress] AgentTest mode: skipping progress flusher."
+        )
+        return
+    if app.testing or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+
+    try:
+        from ..services.tool_progress_store_service import (
+            flush_queued_tool_progress_states,
+            tool_progress_persistence_flush_interval_seconds,
+        )
+    except Exception as exc:
+        app.logger.warning("[tool-progress] Could not import progress flusher: %s", exc)
+        return
+
+    raw_interval = os.environ.get("VON_TOOL_PROGRESS_FLUSHER_INTERVAL_SECONDS")
+    try:
+        interval = float(raw_interval) if raw_interval else max(
+            1.0,
+            min(5.0, tool_progress_persistence_flush_interval_seconds()),
+        )
+    except (ValueError, TypeError):
+        interval = 5.0
+    interval = max(0.5, interval)
+
+    def _progress_flusher_loop() -> None:
+        with app.app_context():
+            while True:
+                try:
+                    summary = flush_queued_tool_progress_states(max_items=100)
+                    if summary.get("flushed_count") or summary.get("failed_count"):
+                        app.logger.debug(
+                            "[tool-progress] flush summary: %s",
+                            summary,
+                        )
+                except Exception as exc:
+                    try:
+                        app.logger.warning(
+                            "[tool-progress] Flusher error: %s", exc
+                        )
+                    except Exception:
+                        pass
+                time.sleep(interval)
+
+    try:
+        t = threading.Thread(
+            target=_progress_flusher_loop,
+            name="tool-progress-flusher",
+            daemon=True,
+        )
+        t.start()
+        app.logger.info(
+            "[tool-progress] Progress flusher started (interval=%.1fs)", interval
+        )
+    except Exception as exc:
+        app.logger.warning(
+            "[tool-progress] Failed to start progress flusher: %s", exc
+        )
 
 
 def _register_optional_blob_spillway_migrator(app: Flask) -> None:
