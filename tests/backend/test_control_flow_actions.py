@@ -220,6 +220,14 @@ def test_for_each_action_respects_partial_success_policy() -> None:
     assert result.outputs.get("for_each_error_count") == 1
     assert result.outputs.get("for_each_partial_success") is True
     assert result.outputs.get("successful_results") == [{"item_value": "good"}]
+    assert result.outputs.get("iteration_errors") == [
+        {
+            "index": 1,
+            "item": "bad",
+            "final_state": "start",
+            "error": "child_failed",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +383,68 @@ def test_context_set_fails_on_non_mapping_assignment() -> None:
 
     assert result.status == "failed"
     assert "not_mapping" in (result.error or "")
+
+
+def test_context_project_uses_requirement_fields_without_domain_policy() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        "workflow_control.context_project",
+        inputs={
+            "target_key": "projected_item",
+            "requirement": {
+                "schema_version": "workflow_item_output_requirement.v1",
+                "purpose": "mail_list_rendering",
+                "required_fields": ["subject", "sender"],
+                "excluded_fields": ["payload", "body"],
+            },
+            "always_include_fields": ["message_id"],
+            "field_sources": {
+                "message_id": "msg-1",
+                "subject": "Subject line",
+                "sender": "Sender <sender@example.test>",
+                "payload": {"large": "not selected"},
+            },
+            "include_missing_fields": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["projected_item"] == {
+        "message_id": "msg-1",
+        "subject": "Subject line",
+        "sender": "Sender <sender@example.test>",
+    }
+    projection = result.outputs["projected_item_projection"]
+    assert projection["purpose"] == "mail_list_rendering"
+    assert projection["requested_fields"] == ["message_id", "subject", "sender"]
+    assert projection["missing_fields"] == []
+
+
+def test_context_project_reports_missing_contract_fields() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        "workflow_control.context_project",
+        inputs={
+            "target_key": "projected_item",
+            "required_fields": ["paper_url", "doi"],
+            "field_sources": {
+                "message_id": "msg-1",
+                "paper_url": "https://arxiv.org/abs/2601.00001",
+            },
+            "include_missing_fields": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["projected_item"] == {
+        "paper_url": "https://arxiv.org/abs/2601.00001",
+        "_missing_fields": ["doi"],
+    }
+    assert result.outputs["projected_item_projection"]["missing_fields"] == ["doi"]
 
 
 def test_context_template_renders_context_request_and_json_values() -> None:

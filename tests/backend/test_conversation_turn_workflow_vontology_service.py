@@ -628,9 +628,13 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert set(extract_required_fields) == {
         "requested_message_count",
         "label_ids",
+        "output_fields",
         "extraction_reason",
     }
     assert "mail_review_effective_limit" in mail_review_definition.states[
+        mail_review_extract_step_id
+    ].metadata.get("writes_context_keys", [])
+    assert "mail_review_output_fields" in mail_review_definition.states[
         mail_review_extract_step_id
     ].metadata.get("writes_context_keys", [])
     assert any(
@@ -662,6 +666,31 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
             mail_review_list_step_id
         ].metadata.get("tool_output_context_mappings", [])
     )
+    mail_review_record_invocation_step_id = authority_service._step_concept_id(
+        workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+        state_id="record_mail_list_invocation",
+    )
+    record_invocation_action = mail_review_definition.states[
+        mail_review_record_invocation_step_id
+    ].actions[0]
+    record_assignments = record_invocation_action.inputs.get("assignments")
+    requirement_assignment = next(
+        (
+            item
+            for item in record_assignments
+            if isinstance(item, dict)
+            and item.get("key") == "mail_review_item_output_requirement"
+        ),
+        None,
+    )
+    assert isinstance(requirement_assignment, dict)
+    requirement_value = requirement_assignment.get("value")
+    assert isinstance(requirement_value, dict)
+    assert requirement_value["schema_version"] == "workflow_item_output_requirement.v1"
+    assert requirement_value["required_fields"]["$context_key"] == (
+        "mail_review_output_fields"
+    )
+    assert "gmail_message_detail" in requirement_value["excluded_fields"]
     mail_review_for_each_step_id = authority_service._step_concept_id(
         workflow_id=GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         state_id="fetch_mail_message_details",
@@ -683,6 +712,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         "mail_review_effective_limit"
     )
     assert mail_review_for_each_action.inputs["success_policy"] == "allow_partial"
+    assert (
+        mail_review_for_each_action.inputs[
+            "include_tool_invocations_in_iteration_results"
+        ]
+        is False
+    )
     detail_mappings = mail_review_definition.states[
         mail_review_for_each_step_id
     ].metadata.get("tool_output_context_mappings", [])
@@ -695,6 +730,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert any(
         mapping.get("tool_output_field") == "iteration_results"
         and mapping.get("context_key") == "mail_message_detail_iteration_results"
+        for mapping in detail_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("tool_output_field") == "iteration_errors"
+        and mapping.get("context_key") == "mail_message_detail_iteration_errors"
         for mapping in detail_mappings
         if isinstance(mapping, dict)
     )
@@ -715,14 +756,19 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_render_action.llm_policy is not None
     assert mail_review_render_action.llm_policy.get("tool_mode") == "none"
     render_contract = mail_review_render_action.llm_policy["response_contract_text"]
-    assert "compact list of Gmail message detail objects" in render_contract
+    assert "projected to the caller's required fields" in render_contract
     assert "do not claim that details cannot be displayed" in render_contract
+    assert "mail_review_item_output_requirement" in {
+        field.get("context_key")
+        for field in mail_review_render_action.llm_policy.get("context_fields", [])
+        if isinstance(field, dict)
+    }
     assert "mail_message_detail_results" in {
         field.get("context_key")
         for field in mail_review_render_action.llm_policy.get("context_fields", [])
         if isinstance(field, dict)
     }
-    assert "mail_message_detail_iteration_results" in {
+    assert "mail_message_detail_iteration_errors" in {
         field.get("context_key")
         for field in mail_review_render_action.llm_policy.get("context_fields", [])
         if isinstance(field, dict)
@@ -749,9 +795,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         == "final_response"
         and item["value"].get("invocations", {}).get("$context_key") == "invocations"
         and item["value"]
-        .get("mail_message_detail_iteration_results", {})
+        .get("mail_message_detail_iteration_errors", {})
         .get("$context_key")
-        == "mail_message_detail_iteration_results"
+        == "mail_message_detail_iteration_errors"
         for item in return_assignments
         if isinstance(item, dict)
     )
@@ -778,6 +824,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
         state_id="fetch_message_detail",
     )
+    detail_project_step_id = authority_service._step_concept_id(
+        workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+        state_id="project_message_detail_output",
+    )
     detail_fetch_action = detail_fetch_definition.states[detail_fetch_step_id].actions[
         0
     ]
@@ -786,14 +836,31 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert detail_fetch_action.inputs["message_id"]["$context_key"] == (
         "current_message_id"
     )
+    detail_project_action = detail_fetch_definition.states[
+        detail_project_step_id
+    ].actions[0]
+    assert detail_project_action.action_id == "workflow_control.context_project"
+    assert detail_project_action.inputs["requirement"]["$context_key"] == (
+        "mail_review_item_output_requirement"
+    )
+    assert detail_project_action.inputs["field_sources"]["subject"]["$context_key"] == (
+        "message_detail_subject"
+    )
+    assert "gmail_message_detail" in detail_project_action.inputs["excluded_fields"]
     detail_return_step_id = authority_service._step_concept_id(
         workflow_id=GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
         state_id="return_message_detail",
     )
     assert any(
-        transition.to_state == detail_return_step_id
+        transition.to_state == detail_project_step_id
         for transition in detail_fetch_definition.states[
             detail_fetch_step_id
+        ].transitions
+    )
+    assert any(
+        transition.to_state == detail_return_step_id
+        for transition in detail_fetch_definition.states[
+            detail_project_step_id
         ].transitions
     )
     detail_fetch_mappings = detail_fetch_definition.states[
@@ -849,27 +916,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         {},
     )
     assert isinstance(detail_return_payload, dict)
-    assert detail_return_payload.get("message_id", {}).get("$context_key") == (
-        "message_detail_message_id"
+    assert detail_return_payload.get("$context_key") == (
+        "message_detail_projected_payload"
     )
-    assert detail_return_payload.get("sender", {}).get("$context_key") == (
-        "message_detail_sender"
-    )
-    assert detail_return_payload.get("from", {}).get("$context_key") == (
-        "message_detail_from"
-    )
-    assert detail_return_payload.get("subject", {}).get("$context_key") == (
-        "message_detail_subject"
-    )
-    assert detail_return_payload.get("date", {}).get("$context_key") == (
-        "message_detail_date"
-    )
-    assert detail_return_payload.get("snippet", {}).get("$context_key") == (
-        "message_detail_snippet"
-    )
-    assert detail_return_payload.get("gmail_message_detail", {}).get(
-        "$context_key"
-    ) == "gmail_message_detail"
     launch_contract = mail_review_definition.metadata.get("launch_input_contract")
     assert isinstance(launch_contract, dict)
     assert launch_contract.get("required_inputs") == ["prompt"]
@@ -1263,6 +1312,12 @@ def test_gmail_message_detail_fetch_workflow_returns_compact_declared_payload(
         data={
             "gmail_profile": "default-profile",
             "current_mail_message": {"message_id": "msg-1"},
+            "mail_review_item_output_requirement": {
+                "schema_version": "workflow_item_output_requirement.v1",
+                "purpose": "mail_list_rendering",
+                "required_fields": ["message_id", "subject", "sender"],
+                "excluded_fields": ["gmail_message_detail", "payload"],
+            },
         },
     )
 
@@ -1272,19 +1327,8 @@ def test_gmail_message_detail_fetch_workflow_returns_compact_declared_payload(
     payload = result.result_envelope.get("declared_output_payload")
     assert payload == {
         "message_id": "msg-1",
-        "sender": "Sender <sender@example.test>",
-        "from": "Sender <sender@example.test>",
         "subject": "Subject line",
-        "date": "Sat, 25 Apr 2026 09:00:00 +0000",
-        "snippet": "Short preview",
-        "gmail_message_detail": {
-            "message_id": "msg-1",
-            "sender": "Sender <sender@example.test>",
-            "from": "Sender <sender@example.test>",
-            "subject": "Subject line",
-            "date": "Sat, 25 Apr 2026 09:00:00 +0000",
-            "snippet": "Short preview",
-        },
+        "sender": "Sender <sender@example.test>",
     }
 
 
@@ -1338,6 +1382,12 @@ def test_gmail_message_detail_fetch_workflow_uses_projected_mcp_payload(
         data={
             "gmail_profile": "default-profile",
             "current_mail_message": {"message_id": "msg-1"},
+            "mail_review_item_output_requirement": {
+                "schema_version": "workflow_item_output_requirement.v1",
+                "purpose": "mail_list_rendering",
+                "required_fields": ["message_id", "subject", "sender"],
+                "excluded_fields": ["gmail_message_detail", "payload"],
+            },
         },
     )
 
@@ -1345,12 +1395,13 @@ def test_gmail_message_detail_fetch_workflow_uses_projected_mcp_payload(
     assert result.result_envelope is not None
     payload = result.result_envelope.get("declared_output_payload")
     assert isinstance(payload, dict)
-    detail_payload = payload.get("gmail_message_detail")
-    assert isinstance(detail_payload, dict)
-    assert detail_payload["_llm_view"] == "tool_evidence_projection.v1"
-    assert detail_payload["message_id"] == "msg-1"
-    assert detail_payload["subject"] == "Subject line"
-    assert "payload" not in detail_payload
+    assert payload == {
+        "message_id": "msg-1",
+        "subject": "Subject line",
+        "sender": "Sender <sender@example.test>",
+    }
+    assert "gmail_message_detail" not in payload
+    assert "payload" not in payload
 
     detail_step = next(
         envelope
@@ -1363,7 +1414,108 @@ def test_gmail_message_detail_fetch_workflow_uses_projected_mcp_payload(
     assert detail_outputs["mcp_raw_result_omitted_from_workflow_context"] is True
     assert detail_outputs["result"]["_llm_view"] == "tool_evidence_projection.v1"
     assert "payload" not in detail_outputs["result"]
+    assert "gmail_message_detail" not in json.dumps(payload, sort_keys=True, default=str)
     assert large_marker not in json.dumps(result.data, sort_keys=True, default=str)
+
+
+def test_mail_review_detail_loop_collects_compact_child_results(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_conversation_turn_workflows()
+
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: load_workflow_definition_from_vontology(
+            workflow_id
+        ),
+    )
+
+    large_marker = "RAW_DETAIL_BODY_SHOULD_NOT_REACH_PARENT_LOOP"
+
+    def fake_mcp_fallback(request: Any) -> WorkflowActionResult:
+        assert request.action_id == "gmail_get_message"
+        message_id = request.inputs["message_id"]
+        return workflow_action_result_from_mcp_payload(
+            tool_name=request.action_id,
+            payload={
+                "message_id": message_id,
+                "threadId": f"thread-{message_id}",
+                "labelIds": ["INBOX"],
+                "sender": f"Sender {message_id} <sender-{message_id}@example.test>",
+                "from": f"Sender {message_id} <sender-{message_id}@example.test>",
+                "subject": f"Subject {message_id}",
+                "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+                "snippet": f"Preview {message_id}",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": f"Subject {message_id}"}],
+                    "parts": [{"body": large_marker * 64}],
+                },
+            },
+            duration_ms=1.0,
+        )
+
+    registry.set_fallback_handler(fake_mcp_fallback)
+    context: dict[str, Any] = {
+        "gmail_profile": "default-profile",
+        "mail_review_item_output_requirement": {
+            "schema_version": "workflow_item_output_requirement.v1",
+            "purpose": "mail_list_rendering",
+            "required_fields": ["message_id", "subject", "sender"],
+            "excluded_fields": ["gmail_message_detail", "payload", "body"],
+        },
+    }
+    result = registry.execute(
+        "workflow_control.for_each",
+        inputs={
+            "workflow_id": GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+            "items": [{"message_id": "msg-1"}, {"message_id": "msg-2"}],
+            "item_context_key": "current_mail_message",
+            "item_limit": 2,
+            "success_policy": "all_must_succeed",
+            "max_transitions": 8,
+            "include_tool_invocations_in_iteration_results": False,
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs.get("for_each_success_count") == 2
+    assert result.outputs.get("for_each_error_count") == 0
+    assert result.outputs.get("iteration_errors") == []
+    assert result.outputs.get("successful_results") == [
+        {
+            "message_id": "msg-1",
+            "subject": "Subject msg-1",
+            "sender": "Sender msg-1 <sender-msg-1@example.test>",
+        },
+        {
+            "message_id": "msg-2",
+            "subject": "Subject msg-2",
+            "sender": "Sender msg-2 <sender-msg-2@example.test>",
+        },
+    ]
+
+    parent_visible_payload = {
+        "iteration_results": result.outputs.get("iteration_results"),
+        "successful_results": result.outputs.get("successful_results"),
+    }
+    serialised_parent_payload = json.dumps(
+        parent_visible_payload,
+        sort_keys=True,
+        default=str,
+    )
+    assert large_marker not in serialised_parent_payload
+    for iteration in result.outputs.get("iteration_results", []):
+        assert isinstance(iteration, dict)
+        assert "gmail_message_detail" not in (iteration.get("result") or {})
+        assert "payload" not in (iteration.get("result") or {})
+        envelope = iteration.get("result_envelope")
+        assert isinstance(envelope, dict)
+        declared_payload = envelope.get("declared_output_payload")
+        assert "gmail_message_detail" not in (declared_payload or {})
+        assert "payload" not in (declared_payload or {})
 
 
 def test_turn_and_episode_prompt_authority_resolve_on_live_surface(

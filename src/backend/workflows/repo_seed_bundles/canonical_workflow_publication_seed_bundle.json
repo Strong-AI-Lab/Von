@@ -2164,7 +2164,7 @@
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
-              "response_contract_text": "Return JSON with keys requested_message_count, mail_query, label_ids, and extraction_reason. requested_message_count must be an integer from 1 to 25. Treat written number words from one through twenty-five as explicit counts. If the request says last 3, latest three, last four, or latest four, return 3 or 4 respectively. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels.",
+              "response_contract_text": "Return JSON with keys requested_message_count, mail_query, label_ids, output_fields, and extraction_reason. requested_message_count must be an integer from 1 to 25. Treat written number words from one through twenty-five as explicit counts. If the request says last 3, latest three, last four, or latest four, return 3 or 4 respectively. If no count is explicit and mail_review_limit is numeric, use that. Otherwise return 3. mail_query should be null unless the user explicitly supplied a Gmail search query or sender/topic filter. label_ids should be an empty array unless the user explicitly named Gmail labels. output_fields must be the compact per-message fields required to answer the user's requested output. Always include message_id for provenance. If the user explicitly requests fields such as subject and sender, return only message_id plus those requested fields. If the request asks for a summary, digest, triage, comparison, or gist without naming fields, include message_id, subject, sender, date, and snippet.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -2181,6 +2181,10 @@
                 {
                   "context_key": "mail_review_label_filter",
                   "label": "Selector-provided label filter, if any"
+                },
+                {
+                  "context_key": "mail_review_output_fields",
+                  "label": "Selector-provided output fields, if any"
                 }
               ]
             },
@@ -2214,6 +2218,11 @@
                 "context_key": "mail_review_effective_label_ids"
               },
               {
+                "concept_id": "#V#workflow_mapping_mail_review_output_fields_to_mail_review_output_fields",
+                "tool_output_field": "validated_json.output_fields",
+                "context_key": "mail_review_output_fields"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_mail_review_parameter_extraction_reason_to_mail_review_parameter_extraction_reason",
                 "tool_output_field": "validated_json.extraction_reason",
                 "context_key": "mail_review_parameter_extraction_reason"
@@ -2224,12 +2233,20 @@
               "required_json_fields": [
                 "requested_message_count",
                 "label_ids",
+                "output_fields",
                 "extraction_reason"
               ],
               "json_field_defaults": {
                 "requested_message_count": 3,
                 "mail_query": null,
                 "label_ids": [],
+                "output_fields": [
+                  "message_id",
+                  "subject",
+                  "sender",
+                  "date",
+                  "snippet"
+                ],
                 "extraction_reason": "Defaulted to three recent messages because no reliable count was extracted."
               }
             },
@@ -2237,6 +2254,7 @@
               "mail_review_effective_limit",
               "mail_review_effective_query",
               "mail_review_effective_label_ids",
+              "mail_review_output_fields",
               "mail_review_parameter_extraction_reason"
             ]
           },
@@ -2353,6 +2371,38 @@
                         }
                       }
                     ]
+                  },
+                  {
+                    "key": "mail_review_item_output_requirement",
+                    "value": {
+                      "schema_version": "workflow_item_output_requirement.v1",
+                      "purpose": {
+                        "$context_key": "mail_review_output_shape"
+                      },
+                      "required_fields": {
+                        "$context_key": "mail_review_output_fields"
+                      },
+                      "default_fields": [
+                        "message_id",
+                        "subject",
+                        "sender",
+                        "date",
+                        "snippet"
+                      ],
+                      "always_include_fields": [
+                        "message_id"
+                      ],
+                      "excluded_fields": [
+                        "payload",
+                        "body",
+                        "long_snippet",
+                        "raw_headers",
+                        "attachments",
+                        "gmail_message_detail"
+                      ],
+                      "max_chars_per_field": 500,
+                      "provenance_required": true
+                    }
                   }
                 ]
               ]
@@ -2361,7 +2411,8 @@
             "tool_output_mapping_specs": [],
             "validation_policy": null,
             "writes_context_keys": [
-              "invocations"
+              "invocations",
+              "mail_review_item_output_requirement"
             ]
           },
           {
@@ -2424,6 +2475,10 @@
               [
                 "success_policy",
                 "allow_partial"
+              ],
+              [
+                "include_tool_invocations_in_iteration_results",
+                false
               ]
             ],
             "tool_output_context_mappings": [],
@@ -2437,6 +2492,11 @@
                 "concept_id": "#V#workflow_mapping_mail_review_detail_iteration_results_to_mail_message_detail_iteration_results",
                 "tool_output_field": "iteration_results",
                 "context_key": "mail_message_detail_iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_mail_review_detail_iteration_errors_to_mail_message_detail_iteration_errors",
+                "tool_output_field": "iteration_errors",
+                "context_key": "mail_message_detail_iteration_errors"
               },
               {
                 "concept_id": "#V#workflow_mapping_mail_review_detail_invocations_to_invocations",
@@ -2458,6 +2518,7 @@
             "writes_context_keys": [
               "mail_message_detail_results",
               "mail_message_detail_iteration_results",
+              "mail_message_detail_iteration_errors",
               "invocations",
               "mail_detail_success_count",
               "mail_detail_error_count"
@@ -2488,7 +2549,7 @@
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
-              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results and mail_review_list_result. mail_message_detail_results is a compact list of Gmail message detail objects; each object may expose direct keys message_id, subject, sender, from, date, and snippet. For each message requested, include subject, sender/from, date, and a short snippet/body preview when present. If mail_message_detail_results contains entries, render those entries and do not claim that details cannot be displayed. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
+              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results, mail_review_list_result, and the mail_review_item_output_requirement. mail_message_detail_results is a compact list of per-message payloads projected to the caller's required fields. Render only the fields requested by the user, while preserving message_id only as grounding/provenance unless the user asked to see IDs. If mail_message_detail_results contains entries, render those entries and do not claim that details cannot be displayed. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -2503,16 +2564,20 @@
                   "label": "Requested/effective message count"
                 },
                 {
+                  "context_key": "mail_review_item_output_requirement",
+                  "label": "Per-message output requirement"
+                },
+                {
                   "context_key": "mail_review_list_result",
                   "label": "Gmail list result"
                 },
                 {
                   "context_key": "mail_message_detail_results",
-                  "label": "Compact per-message Gmail detail results"
+                  "label": "Projected per-message Gmail detail results"
                 },
                 {
-                  "context_key": "mail_message_detail_iteration_results",
-                  "label": "Per-message Gmail detail retrieval iteration diagnostics"
+                  "context_key": "mail_message_detail_iteration_errors",
+                  "label": "Per-message Gmail detail retrieval errors"
                 },
                 {
                   "context_key": "mail_detail_success_count",
@@ -2620,8 +2685,8 @@
                       "mail_message_detail_results": {
                         "$context_key": "mail_message_detail_results"
                       },
-                      "mail_message_detail_iteration_results": {
-                        "$context_key": "mail_message_detail_iteration_results"
+                      "mail_message_detail_iteration_errors": {
+                        "$context_key": "mail_message_detail_iteration_errors"
                       }
                     }
                   }
@@ -2777,7 +2842,7 @@
                   "kind": "always"
                 },
                 "reason": "message_detail_fetched",
-                "to_state": "return_message_detail"
+                "to_state": "project_message_detail_output"
               }
             ],
             "context_input_mapping_specs": [],
@@ -2866,6 +2931,125 @@
           },
           {
             "action_concept_id": null,
+            "action_id": "workflow_control.context_project",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "message_detail_projected_to_requirement",
+                "to_state": "return_message_detail"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "project_message_detail_output",
+            "static_input_bindings": [
+              [
+                "target_key",
+                "message_detail_projected_payload"
+              ],
+              [
+                "requirement",
+                {
+                  "$context_key": "mail_review_item_output_requirement"
+                }
+              ],
+              [
+                "default_fields",
+                [
+                  "message_id",
+                  "subject",
+                  "sender",
+                  "date",
+                  "snippet"
+                ]
+              ],
+              [
+                "always_include_fields",
+                [
+                  "message_id"
+                ]
+              ],
+              [
+                "excluded_fields",
+                [
+                  "payload",
+                  "body",
+                  "long_snippet",
+                  "raw_headers",
+                  "attachments",
+                  "gmail_message_detail"
+                ]
+              ],
+              [
+                "max_chars_per_field",
+                500
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "field_sources",
+                {
+                  "message_id": {
+                    "$context_key": "message_detail_message_id"
+                  },
+                  "sender": {
+                    "$context_key": "message_detail_sender"
+                  },
+                  "from": {
+                    "$context_key": "message_detail_from"
+                  },
+                  "subject": {
+                    "$context_key": "message_detail_subject"
+                  },
+                  "date": {
+                    "$context_key": "message_detail_date"
+                  },
+                  "snippet": {
+                    "$context_key": "message_detail_snippet"
+                  }
+                }
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_projected_payload_to_message_detail_projected_payload",
+                "tool_output_field": "message_detail_projected_payload",
+                "context_key": "message_detail_projected_payload"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_gmail_message_detail_projected_payload_projection_to_message_detail_projected_payload_projection",
+                "tool_output_field": "message_detail_projected_payload_projection",
+                "context_key": "message_detail_projected_payload_projection"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "message_detail_projected_payload",
+              "message_detail_projected_payload_projection"
+            ]
+          },
+          {
+            "action_concept_id": null,
             "action_id": "workflow_control.context_set",
             "concept_id": null,
             "conditional_transitions": [],
@@ -2897,27 +3081,7 @@
                   {
                     "key": "return_payload",
                     "value": {
-                      "message_id": {
-                        "$context_key": "message_detail_message_id"
-                      },
-                      "sender": {
-                        "$context_key": "message_detail_sender"
-                      },
-                      "from": {
-                        "$context_key": "message_detail_from"
-                      },
-                      "subject": {
-                        "$context_key": "message_detail_subject"
-                      },
-                      "date": {
-                        "$context_key": "message_detail_date"
-                      },
-                      "snippet": {
-                        "$context_key": "message_detail_snippet"
-                      },
-                      "gmail_message_detail": {
-                        "$context_key": "gmail_message_detail"
-                      }
+                      "$context_key": "message_detail_projected_payload"
                     }
                   }
                 ]
