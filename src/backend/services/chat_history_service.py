@@ -31,6 +31,10 @@ from .debug_payload_store import (
     compact_debug_payload_for_storage,
     hydrate_debug_payload_blob_refs,
 )
+from .mongo_observability_service import (
+    build_mongo_operation_comment,
+    observe_mongo_operation,
+)
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -217,24 +221,99 @@ def _read_find_one(
     chat_history_coll,
     query: Dict[str, Any],
     projection: Optional[Dict[str, Any]] = None,
+    *,
+    operation: str = "find_one",
+    detail: Optional[str] = None,
 ):
     max_time_ms = _chat_history_read_max_time_ms()
     kwargs: Dict[str, Any] = {}
     if max_time_ms > 0:
         kwargs["max_time_ms"] = max_time_ms
+    comment = build_mongo_operation_comment(
+        service="chat_history_service",
+        collection=chat_history_collection_name,
+        operation=operation,
+        detail=detail,
+    )
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: Optional[str] = None
     try:
-        return chat_history_coll.find_one(query, projection, **kwargs)
-    except TypeError:
+        result = chat_history_coll.find_one(query, projection, **kwargs)
+        success = True
+        return result
+    except TypeError as exc:
         # Test doubles may not accept max_time_ms kwargs.
-        return chat_history_coll.find_one(query, projection)
+        error_type = type(exc).__name__
+        try:
+            result = chat_history_coll.find_one(query, projection)
+            success = True
+            return result
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="chat_history_service",
+            collection=chat_history_collection_name,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
 
 
 def _read_find(
     chat_history_coll,
     query: Dict[str, Any],
     projection: Optional[Dict[str, Any]] = None,
+    *,
+    operation: str = "find",
+    detail: Optional[str] = None,
 ):
-    cursor = chat_history_coll.find(query, projection)
+    comment = build_mongo_operation_comment(
+        service="chat_history_service",
+        collection=chat_history_collection_name,
+        operation=operation,
+        detail=detail,
+    )
+    started_at = time.perf_counter()
+    success = False
+    error_type: Optional[str] = None
+    try:
+        if comment is not None:
+            cursor = chat_history_coll.find(query, projection, comment=comment)
+        else:
+            cursor = chat_history_coll.find(query, projection)
+        success = True
+    except TypeError as exc:
+        # Test doubles may not accept PyMongo comment kwargs.
+        error_type = type(exc).__name__
+        try:
+            cursor = chat_history_coll.find(query, projection)
+            success = True
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="chat_history_service",
+            collection=chat_history_collection_name,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
     max_time_ms = _chat_history_read_max_time_ms()
     if max_time_ms > 0:
         try:
@@ -245,16 +324,55 @@ def _read_find(
     return cursor
 
 
-def _read_aggregate(chat_history_coll, pipeline: List[Dict[str, Any]]):
+def _read_aggregate(
+    chat_history_coll,
+    pipeline: List[Dict[str, Any]],
+    *,
+    operation: str = "aggregate",
+    detail: Optional[str] = None,
+):
     max_time_ms = _chat_history_read_max_time_ms()
     kwargs: Dict[str, Any] = {}
     if max_time_ms > 0:
         kwargs["maxTimeMS"] = max_time_ms
+    comment = build_mongo_operation_comment(
+        service="chat_history_service",
+        collection=chat_history_collection_name,
+        operation=operation,
+        detail=detail,
+    )
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: Optional[str] = None
     try:
-        return chat_history_coll.aggregate(pipeline, **kwargs)
-    except TypeError:
+        cursor = chat_history_coll.aggregate(pipeline, **kwargs)
+        success = True
+        return cursor
+    except TypeError as exc:
         # Test doubles may not accept maxTimeMS kwargs.
-        return chat_history_coll.aggregate(pipeline)
+        error_type = type(exc).__name__
+        try:
+            cursor = chat_history_coll.aggregate(pipeline)
+            success = True
+            return cursor
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="chat_history_service",
+            collection=chat_history_collection_name,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
 
 
 def _history_array_expr(field_name: str = "history") -> Dict[str, Any]:
@@ -1174,7 +1292,11 @@ def get_chat_history(
             namespace=namespace,
             include_legacy=include_legacy,
         ):
-            doc = _read_find_one(chat_history_coll, query)
+            doc = _read_find_one(
+                chat_history_coll,
+                query,
+                operation="get_chat_history.find_session",
+            )
             if doc is not None:
                 break
         _record_chat_history_read_success()
@@ -1280,13 +1402,25 @@ def get_chat_history_segments(
                         },
                     ]
                     try:
-                        doc = next(_read_aggregate(chat_history_coll, pipeline), None)
+                        doc = next(
+                            _read_aggregate(
+                                chat_history_coll,
+                                pipeline,
+                                operation="get_chat_history_segments.aggregate_tail",
+                            ),
+                            None,
+                        )
                     except PyMongoError:
                         raise
                     except Exception:
                         doc = None
                 if doc is None:
-                    doc = _read_find_one(chat_history_coll, query, projection)
+                    doc = _read_find_one(
+                        chat_history_coll,
+                        query,
+                        projection,
+                        operation="get_chat_history_segments.tail_fallback",
+                    )
                     if doc is not None:
                         full_history = doc.get("history") or []
                         if isinstance(full_history, list):
@@ -1294,7 +1428,12 @@ def get_chat_history_segments(
                             doc = dict(doc)
                             doc["history"] = full_history[-history_tail_limit:]
             else:
-                doc = _read_find_one(chat_history_coll, query, projection)
+                doc = _read_find_one(
+                    chat_history_coll,
+                    query,
+                    projection,
+                    operation="get_chat_history_segments.find_session",
+                )
             if doc is not None:
                 break
         if not doc:
@@ -1393,7 +1532,12 @@ def get_chat_history_debug_entry(
             namespace=namespace,
             include_legacy=include_legacy,
         ):
-            doc = _read_find_one(chat_history_coll, query, projection)
+            doc = _read_find_one(
+                chat_history_coll,
+                query,
+                projection,
+                operation="get_chat_history_debug_entry.slice_entry",
+            )
             if doc is not None:
                 break
         if not doc:
@@ -2194,7 +2338,14 @@ def get_chat_history_length(
             },
             {"$group": {"_id": None, "total_turns": {"$sum": "$message_count"}}},
         ]
-        summary = next(_read_aggregate(chat_history_coll, pipeline), None)
+        summary = next(
+            _read_aggregate(
+                chat_history_coll,
+                pipeline,
+                operation="get_chat_history_length.aggregate",
+            ),
+            None,
+        )
         total_turns = 0
         if isinstance(summary, dict):
             raw_total = summary.get("total_turns")
@@ -2280,7 +2431,14 @@ def get_chat_history_session_count(
                 }
             },
         ]
-        summary = next(_read_aggregate(chat_history_coll, pipeline), None)
+        summary = next(
+            _read_aggregate(
+                chat_history_coll,
+                pipeline,
+                operation="get_chat_history_session_count.aggregate",
+            ),
+            None,
+        )
         count = 0
         if isinstance(summary, dict):
             raw_count = summary.get("session_count")
@@ -2349,7 +2507,14 @@ def _get_chat_history_session_summaries_metadata_only(
             "organisation_concept_id": 1,
         }
     )
-    docs = list(_read_find(chat_history_coll, query, projection))
+    docs = list(
+        _read_find(
+            chat_history_coll,
+            query,
+            projection,
+            operation="get_chat_history_session_summaries.metadata_find",
+        )
+    )
 
     summaries: List[Dict[str, Any]] = []
     for doc in docs:
@@ -2430,7 +2595,14 @@ def _load_chat_history_session_summaries(
                 "session_name": 1,
             }
         )
-        docs = list(_read_find(chat_history_coll, query, projection))
+        docs = list(
+            _read_find(
+                chat_history_coll,
+                query,
+                projection,
+                operation="get_chat_history_session_summaries.full_find",
+            )
+        )
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history_session_summaries", e)
         # Atlas timeout resilience: fall back to metadata-only summaries when
@@ -2623,7 +2795,15 @@ def has_chat_history_session(
         include_legacy=include_legacy,
     )
     try:
-        result = _read_find_one(chat_history_coll, query, {"_id": 1}) is not None
+        result = (
+            _read_find_one(
+                chat_history_coll,
+                query,
+                {"_id": 1},
+                operation="has_chat_history_session.exists",
+            )
+            is not None
+        )
         _record_chat_history_read_success()
         return result
     except PyMongoError as e:
@@ -2673,7 +2853,10 @@ def get_chat_history_session_summary(
                 include_legacy=include_legacy,
             ):
                 metadata_doc = _read_find_one(
-                    chat_history_coll, session_query, metadata_projection
+                    chat_history_coll,
+                    session_query,
+                    metadata_projection,
+                    operation="get_chat_history_session_summary.metadata_find",
                 )
                 if metadata_doc is not None:
                     break
@@ -2715,7 +2898,12 @@ def get_chat_history_session_summary(
             namespace=namespace,
             include_legacy=include_legacy,
         ):
-            doc = _read_find_one(chat_history_coll, session_query, projection)
+            doc = _read_find_one(
+                chat_history_coll,
+                session_query,
+                projection,
+                operation="get_chat_history_session_summary.full_find",
+            )
             if doc is not None:
                 break
     except PyMongoError as e:
@@ -2734,7 +2922,10 @@ def get_chat_history_session_summary(
                 include_legacy=include_legacy,
             ):
                 metadata_doc = _read_find_one(
-                    chat_history_coll, session_query, metadata_projection
+                    chat_history_coll,
+                    session_query,
+                    metadata_projection,
+                    operation="get_chat_history_session_summary.metadata_fallback",
                 )
                 if metadata_doc is not None:
                     break

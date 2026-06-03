@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import time
 from typing import Any, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
 from pymongo.errors import OperationFailure
@@ -12,9 +13,139 @@ from ..db.mongo_client import (
 )
 from ..db.mongo_setup import get_application_settings_collection
 from .exceptions import MultipleUsersForEmailError
+from .mongo_observability_service import (
+    build_mongo_operation_comment,
+    observe_mongo_operation,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def _settings_mongo_comment(operation: str, detail: str | None = None):
+    return build_mongo_operation_comment(
+        service="settings_service",
+        collection=APPLICATION_SETTINGS_COLLECTION_NAME,
+        operation=operation,
+        detail=detail,
+    )
+
+
+def _settings_find_one(collection, query, *, operation: str, detail: str | None = None):
+    kwargs: dict[str, Any] = {}
+    comment = _settings_mongo_comment(operation, detail=detail)
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: str | None = None
+    try:
+        result = collection.find_one(query, **kwargs)
+        success = True
+        return result
+    except TypeError as exc:
+        error_type = type(exc).__name__
+        try:
+            result = collection.find_one(query)
+            success = True
+            return result
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="settings_service",
+            collection=APPLICATION_SETTINGS_COLLECTION_NAME,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
+
+
+def _settings_find(collection, query, *, operation: str, detail: str | None = None):
+    kwargs: dict[str, Any] = {}
+    comment = _settings_mongo_comment(operation, detail=detail)
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: str | None = None
+    try:
+        cursor = collection.find(query, **kwargs)
+        success = True
+        return cursor
+    except TypeError as exc:
+        error_type = type(exc).__name__
+        try:
+            cursor = collection.find(query)
+            success = True
+            return cursor
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="settings_service",
+            collection=APPLICATION_SETTINGS_COLLECTION_NAME,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
+
+
+def _settings_update_one(
+    collection,
+    query,
+    update,
+    *,
+    upsert: bool = False,
+    operation: str,
+    detail: str | None = None,
+):
+    kwargs: dict[str, Any] = {"upsert": upsert}
+    comment = _settings_mongo_comment(operation, detail=detail)
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: str | None = None
+    try:
+        result = collection.update_one(query, update, **kwargs)
+        success = True
+        return result
+    except TypeError as exc:
+        error_type = type(exc).__name__
+        kwargs.pop("comment", None)
+        try:
+            result = collection.update_one(query, update, **kwargs)
+            success = True
+            return result
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="settings_service",
+            collection=APPLICATION_SETTINGS_COLLECTION_NAME,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
 
 # --- Setting Names ---
 # REFACTORING_NOTE: Consolidating to a single setting for the active LLM.
@@ -205,7 +336,12 @@ def get_setting(setting_name: str) -> Any:
         )
         return None
     try:
-        setting_doc = settings_coll.find_one({"setting_name": setting_name})
+        setting_doc = _settings_find_one(
+            settings_coll,
+            {"setting_name": setting_name},
+            operation="get_setting.find_one",
+            detail=str(setting_name)[:96],
+        )
         if setting_doc:
             value = setting_doc.get("value")
             logger.info(f"Found setting '{setting_name}' with value: '{value}'")
@@ -245,7 +381,12 @@ def get_settings_batch(setting_names: List[str]) -> Dict[str, Any]:
         return {}
 
     try:
-        cursor = settings_coll.find({"setting_name": {"$in": setting_names}})
+        cursor = _settings_find(
+            settings_coll,
+            {"setting_name": {"$in": setting_names}},
+            operation="get_settings_batch.find",
+            detail=f"count={len(setting_names)}",
+        )
         result = {}
         for doc in cursor:
             name = doc.get("setting_name")
@@ -406,17 +547,23 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
             return False
 
         # Pre-check for existing setting with the same value
-        existing_doc = settings_collection.find_one(
-            {"setting_name": setting_name}
-        )  # Changed "name" to "setting_name"
+        existing_doc = _settings_find_one(
+            settings_collection,
+            {"setting_name": setting_name},
+            operation="update_setting.precheck_find_one",
+            detail=str(setting_name)[:96],
+        )
         if existing_doc and existing_doc.get("value") == setting_value:
             # For test_update_setting_same_value
             logger.info(f"Setting '{setting_name}' value is already up to date.")
             return True
 
-        result: UpdateResult = settings_collection.update_one(
-            {"setting_name": setting_name},  # Changed "name" to "setting_name"
+        result: UpdateResult = _settings_update_one(
+            settings_collection,
+            {"setting_name": setting_name},
             {"$set": {"value": setting_value, "updated_at": utc_now()}},
+            operation="update_setting.update_one",
+            detail=str(setting_name)[:96],
             upsert=True,
         )
 

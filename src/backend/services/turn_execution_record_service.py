@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, cast
 
@@ -23,6 +24,10 @@ from .arxiv_paper_link_service import extract_arxiv_id_candidates
 from .debug_payload_store import (
     compact_debug_payload_for_storage,
     hydrate_debug_payload_blob_refs,
+)
+from .mongo_observability_service import (
+    build_mongo_operation_comment,
+    observe_mongo_operation,
 )
 from .representation_contract_vontology_service import (
     canonical_representation_profile_concept_ids,
@@ -8638,6 +8643,109 @@ def get_turn_execution_records_collection():
     return coll
 
 
+def _turn_execution_mongo_comment(operation: str, detail: str | None = None):
+    return build_mongo_operation_comment(
+        service="turn_execution_record_service",
+        collection=TURN_EXECUTION_RECORDS_COLLECTION,
+        operation=operation,
+        detail=detail,
+    )
+
+
+def _turn_execution_find_one(
+    collection,
+    query: Mapping[str, Any],
+    *,
+    projection: Mapping[str, Any] | None = None,
+    sort: Any = None,
+    operation: str,
+    detail: str | None = None,
+):
+    kwargs: dict[str, Any] = {}
+    if projection is not None:
+        kwargs["projection"] = projection
+    if sort is not None:
+        kwargs["sort"] = sort
+    comment = _turn_execution_mongo_comment(operation, detail=detail)
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: str | None = None
+    try:
+        result = collection.find_one(query, **kwargs)
+        success = True
+        return result
+    except TypeError as exc:
+        error_type = type(exc).__name__
+        kwargs.pop("comment", None)
+        try:
+            result = collection.find_one(query, **kwargs)
+            success = True
+            return result
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="turn_execution_record_service",
+            collection=TURN_EXECUTION_RECORDS_COLLECTION,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
+
+
+def _turn_execution_update_one(
+    collection,
+    query: Mapping[str, Any],
+    update: Mapping[str, Any],
+    *,
+    upsert: bool = False,
+    operation: str,
+    detail: str | None = None,
+):
+    kwargs: dict[str, Any] = {"upsert": upsert}
+    comment = _turn_execution_mongo_comment(operation, detail=detail)
+    if comment is not None:
+        kwargs["comment"] = comment
+    started_at = time.perf_counter()
+    success = False
+    error_type: str | None = None
+    try:
+        result = collection.update_one(query, update, **kwargs)
+        success = True
+        return result
+    except TypeError as exc:
+        error_type = type(exc).__name__
+        kwargs.pop("comment", None)
+        try:
+            result = collection.update_one(query, update, **kwargs)
+            success = True
+            return result
+        except Exception as fallback_exc:
+            error_type = type(fallback_exc).__name__
+            raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        observe_mongo_operation(
+            service="turn_execution_record_service",
+            collection=TURN_EXECUTION_RECORDS_COLLECTION,
+            operation=operation,
+            started_at=started_at,
+            success=success,
+            detail=detail,
+            error_type=error_type,
+        )
+
+
 def upsert_turn_execution_record_projection(
     *,
     record: Mapping[str, Any],
@@ -8685,12 +8793,14 @@ def upsert_turn_execution_record_projection(
     payload["updated_at_utc"] = _iso_utc(now)
 
     try:
-        result = coll.update_one(
+        result = _turn_execution_update_one(
+            coll,
             {"request_id": request_id},
             {
                 "$set": payload,
                 "$setOnInsert": {"inserted_at": now},
             },
+            operation="upsert_turn_execution_record_projection.update_one",
             upsert=True,
         )
         updated = bool(getattr(result, "modified_count", 0) > 0)
@@ -8740,10 +8850,12 @@ def get_latest_turn_execution_record_projection(
         query["user_id"] = clean_user_id
 
     projection = {"_id": 0}
-    doc = coll.find_one(
+    doc = _turn_execution_find_one(
+        coll,
         query,
         projection=projection,
         sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
+        operation="get_latest_turn_execution_record_projection.find_latest",
     )
     if isinstance(doc, Mapping):
         hydrated = hydrate_debug_payload_blob_refs(doc, fail_soft=True)
@@ -8756,10 +8868,12 @@ def get_latest_turn_execution_record_projection(
     # Older projections may be missing namespace/user_id even when session_id is
     # stable, so fall back to session-scoped lookup before giving up.
     if clean_namespace or clean_user_id:
-        doc = coll.find_one(
+        doc = _turn_execution_find_one(
+            coll,
             {"session_id": clean_session_id},
             projection=projection,
             sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
+            operation="get_latest_turn_execution_record_projection.fallback_find_latest",
         )
         if isinstance(doc, Mapping):
             hydrated = hydrate_debug_payload_blob_refs(doc, fail_soft=True)

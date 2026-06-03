@@ -78,6 +78,10 @@ from ...services.workflow_capability_service import (
     invalidate_workflow_capability_index,
     prewarm_workflow_capability_index,
 )
+from ...services.mongo_observability_service import (
+    build_mongo_operation_comment,
+    observe_mongo_operation,
+)
 from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
@@ -572,7 +576,36 @@ def get_db_location_info():
         try:
             db = get_db()
             if db is not None:
-                db.command("ping")
+                comment = build_mongo_operation_comment(
+                    service="settings_routes",
+                    collection="$cmd",
+                    operation="get_db_location_info.ping",
+                )
+                ping_started_at = time.perf_counter()
+                ping_success = False
+                ping_error_type = None
+                try:
+                    if comment is not None:
+                        db.command("ping", comment=comment)
+                    else:
+                        db.command("ping")
+                    ping_success = True
+                except TypeError as exc:
+                    ping_error_type = type(exc).__name__
+                    db.command("ping")
+                    ping_success = True
+                except Exception as ping_exc:
+                    ping_error_type = type(ping_exc).__name__
+                    raise
+                finally:
+                    observe_mongo_operation(
+                        service="settings_routes",
+                        collection="$cmd",
+                        operation="get_db_location_info.ping",
+                        started_at=ping_started_at,
+                        success=ping_success,
+                        error_type=ping_error_type,
+                    )
                 ping_ok = True
             else:
                 error_message = "No DB connection"
