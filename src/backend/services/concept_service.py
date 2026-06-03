@@ -1246,7 +1246,12 @@ def enrich_concept_with_text_relations(
     return concept
 
 
-def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+def update_concept(
+    concept_id: str,
+    update_data: Dict[str, Any],
+    *,
+    defer_side_effects: bool = False,
+) -> Dict[str, Any]:
     """Updates an existing concept by its ID.
     REFACTORING_NOTE: Implements the 'Update' part of CRUD for concepts.
     Allows partial updates. Automatically updates the 'updated_at' timestamp.
@@ -1368,8 +1373,10 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         if "_id" in updated_concept_doc:
             updated_concept_doc["id"] = str(updated_concept_doc.pop("_id"))
 
-        # Ensure notes field uses proper getter function for consistency in API response
-        if updated_concept_doc:
+        # Ensure notes field uses proper getter function for consistency in API response.
+        # Bulk materialisation callers do not use the hydrated response and perform
+        # cache invalidation once after the batch.
+        if updated_concept_doc and not defer_side_effects:
             updated_concept_doc["notes"] = get_concept_notes(updated_concept_doc)
 
         if relationship_update:
@@ -1393,7 +1400,9 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
                     reconcile_err,
                 )
 
-        if get_event_workflow_integration_enabled(default=True):
+        if (not defer_side_effects) and get_event_workflow_integration_enabled(
+            default=True
+        ):
             try:
                 from .workflow_event_integration_service import (
                     EVENT_TYPE_CONCEPT_UPDATED,
@@ -1430,7 +1439,8 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
                     workflow_exc,
                 )
 
-        _invalidate_concept_mutation_caches()
+        if not defer_side_effects:
+            _invalidate_concept_mutation_caches()
         return updated_concept_doc
     except ConceptNotFoundError:  # Re-raise specific error
         raise

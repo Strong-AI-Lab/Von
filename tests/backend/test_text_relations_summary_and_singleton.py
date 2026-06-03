@@ -12,6 +12,7 @@ from src.backend.security.access_control import bypass_access_control
 from src.backend.services.text_value_service import (
     get_text_relations_summary,
     get_texts_for_concept,
+    get_texts_for_concepts,
     upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
@@ -186,3 +187,55 @@ def test_get_texts_for_concept_can_return_recent_rows_first():
         )
 
     assert [row["text"] for row in rows] == ["newer"]
+
+
+def test_get_texts_for_concepts_batches_rows_by_subject():
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    first_concept_id = "#V#batch_text_test_first"
+    second_concept_id = "#V#batch_text_test_second"
+    concepts.insert_many(
+        [
+            {"concept_id": first_concept_id, "relationships": {}},
+            {"concept_id": second_concept_id, "relationships": {}},
+        ]
+    )
+
+    with bypass_access_control():
+        upsert_text_for_concept(
+            subject_concept_id=first_concept_id,
+            predicate="hasDescription",
+            text="first description",
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=first_concept_id,
+            predicate="hasNote",
+            text="first note",
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=second_concept_id,
+            predicate="hasDescription",
+            text="second description",
+            lang="en-NZ",
+        )
+
+        rows_by_concept = get_texts_for_concepts(
+            [first_concept_id, second_concept_id],
+            predicate="hasDescription",
+            limit_per_concept=5,
+            max_time_ms=5000,
+        )
+
+    assert {
+        row["text"] for row in rows_by_concept[first_concept_id]
+    } == {"first description"}
+    assert {
+        row["text"] for row in rows_by_concept[second_concept_id]
+    } == {"second description"}
