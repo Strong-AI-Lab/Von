@@ -1,6 +1,89 @@
 from flask import Flask
 
 
+def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypatch):
+    from src.backend.server.routes.von_routes import von_bp
+
+    calls: dict[str, object] = {}
+    compact_debug_ref = {
+        "schema_version": "debug_payload_blob_ref.v1",
+        "field_path": "messages",
+        "summary": {"type": "array", "item_count": 1},
+        "blob_ref": {"backend": "local", "key": "debug/turns/test/messages.json.gz"},
+    }
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.resolve_chat_history_namespace",
+        lambda _user_id: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _segments(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        assert kwargs.get("hydrate_blob_refs") in (None, False)
+        payload = [
+            [
+                {
+                    "role": "assistant",
+                    "content": "compact answer",
+                    "timestamp": "2026-06-03T00:00:00Z",
+                    "history_location": {
+                        "session_id": "session-compact",
+                        "history_index": 0,
+                    },
+                    "llm_debug_data": {
+                        "request_id": "req-compact",
+                        "messages": compact_debug_ref,
+                    },
+                }
+            ]
+        ]
+        if kwargs.get("return_meta"):
+            return payload, {"history_truncated": False}
+        return payload
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_segments",
+        _segments,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_debug_entry",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("normal history must not hydrate debug entries")
+        ),
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_bp, url_prefix="/von")
+
+    response = app.test_client().get(
+        "/von/history",
+        query_string={"session_id": "session-compact", "segments": 1},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["segments_returned"] == 1
+    history = body["history"]
+    assert history[0]["llm_debug_data"]["messages"] == compact_debug_ref
+    assert "large raw payload" not in str(body)
+    assert calls["kwargs"]["include_debug"] is True
+    assert calls["kwargs"]["return_meta"] is True
+
+
 def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 

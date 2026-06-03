@@ -1863,7 +1863,9 @@ describe('loadChatHistory degraded handling', () => {
 
         expect(document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper')).toBeNull();
 
-        document.querySelector('.llm-debug-button').click();
+        document.querySelector('.llm-debug-button').dispatchEvent(
+            new MouseEvent('click', { bubbles: true, shiftKey: true })
+        );
         await Promise.resolve();
         await Promise.resolve();
 
@@ -5267,7 +5269,8 @@ describe('thinking card toggle accessibility', () => {
 
         expect(writeText).toHaveBeenCalledTimes(1);
         expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
-            schema_version: 'thinking_diagnostics_snapshot.v1',
+            schema_version: 'turn_live_progress_locator.v1',
+            request_id: expect.any(String),
             mcp_access: expect.objectContaining({
                 turn_execution_get_live_progress: expect.objectContaining({
                     tool_name: 'turn_execution_get_live_progress'
@@ -5894,8 +5897,9 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
 
         expect(copied).toBe(true);
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
-        expect(copiedPayload.schema_version).toBe('thinking_diagnostics_snapshot.v1');
-        expect(copiedPayload.thinking_card_mode).toBe('debug');
+        expect(copiedPayload.schema_version).toBe('turn_live_progress_locator.v1');
+        expect(copiedPayload.request_id).toBe('request-1458');
+        expect(copiedPayload.thinking_card_mode).toBeUndefined();
         expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
             turn_execution_get_live_progress: expect.objectContaining({
                 tool_name: 'turn_execution_get_live_progress'

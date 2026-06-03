@@ -8,6 +8,7 @@ function flushAsyncClickHandler() {
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
+    fetchWithTimeout: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'test-window-session'),
     WINDOW_SESSION_HEADER: 'X-Von-Window-Session'
@@ -31,6 +32,9 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
 
 describe('LLM debug popup workflow execution hook', () => {
     beforeEach(() => {
+        global.fetch = undefined;
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        fetchWithTimeout.mockReset();
         document.body.innerHTML = `
             <div id="scrollableField"></div>
             <div id="chatLlmDebugPopup" class="hidden" aria-hidden="true"></div>
@@ -85,9 +89,58 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(copiedPayload.schema_version).toBe('turn_telemetry_locator.v1');
         expect(copiedPayload.request_id).toBe('req-copy');
         expect(copiedPayload.prompt_preview).toBe('hello');
+        expect(copiedPayload.messages).toBeUndefined();
+        expect(copiedPayload.response).toBeUndefined();
         expect(button.classList.contains('llm-debug-button-copied')).toBe(true);
-        expect(button.getAttribute('title')).toContain('Copied LLM JSON');
+        expect(button.getAttribute('title')).toContain('Copied LLM reference JSON');
         expect(popup.classList.contains('hidden')).toBe(true);
+    });
+
+    test('conversation turn LLM button copies history locator without hydrating debug data', async () => {
+        const {
+            __testOnly_appendMessage,
+            setLlmDebugDataForTurn
+        } = require(chatTabModulePath);
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+        global.fetch = jest.fn();
+
+        setLlmDebugDataForTurn('assistant-history-ref', {
+            history_location: {
+                session_id: 'session-history-ref',
+                history_index: 4
+            },
+            timestamp: '2026-06-03T00:00:00.000Z'
+        });
+
+        __testOnly_appendMessage('Von', 'Stored history turn', 'assistant-history-ref', false, true);
+
+        const button = document.querySelector('.llm-debug-button');
+        expect(button).not.toBeNull();
+
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+        await Promise.resolve();
+        await flushAsyncClickHandler();
+
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect(writeText).toHaveBeenCalledTimes(1);
+        const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+        expect(copiedPayload.schema_version).toBe('turn_telemetry_locator.v1');
+        expect(copiedPayload.history_location).toEqual({
+            session_id: 'session-history-ref',
+            history_index: 4
+        });
+        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
+            chat_history_get_debug_entry: expect.any(Object)
+        }));
+        expect(copiedPayload.llm_debug_data).toBeUndefined();
+        expect(copiedPayload.messages).toBeUndefined();
+        expect(copiedPayload.response).toBeUndefined();
+        expect(copiedPayload.workflow_discovery).toBeUndefined();
+        expect(copiedPayload.stage_diagnostics).toBeUndefined();
     });
 
     test('conversation turn LLM button keeps popup behaviour on shift-click', async () => {
@@ -238,7 +291,14 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(payload.schema_version).toBe('turn_telemetry_locator.v1');
         expect(payload.request_id).toBe('req-456');
         expect(payload.prompt_preview).toBe('hello');
-        expect(payload.workflow_discovery).toEqual({ matches: [{ concept_id: '#V#demo' }] });
+        expect(payload.workflow_discovery).toBeUndefined();
+        expect(payload.stage_diagnostics).toBeUndefined();
+        expect(payload.diagnostic_summary).toEqual(expect.objectContaining({
+            has_hydrated_debug_payload: true,
+            workflow_discovery_available: true,
+            workflow_discovery_candidate_count: 1,
+            stage_diagnostics_count: 1
+        }));
         expect(payload.workflow_routing_diagnostics).toEqual({
             schema_version: 'workflow_routing_diagnostics.v1',
             selected_workflow_id: '#V#concept_search_instance_retrieval_workflow',
@@ -249,31 +309,22 @@ describe('LLM debug popup workflow execution hook', () => {
                 requested_prompt_ids: ['#V#chat_turn_classifier_prompt'],
                 prompt_provenance: null,
                 prompt: {
-                    text: 'Current user request:\nTell me about myself.',
-                    preview: null,
+                    preview: 'Current user request:\nTell me about myself.',
                     char_count: 42,
                     preview_truncated: false
                 },
                 candidate_list: {
-                    text: '- #V#concept_search_instance_retrieval_workflow',
-                    preview: null,
+                    preview: '- #V#concept_search_instance_retrieval_workflow',
                     char_count: 47,
                     preview_truncated: false
                 },
                 response: {
-                    text: '{"workflow_id":"#V#concept_search_instance_retrieval_workflow"}',
-                    preview: null,
+                    preview: '{"workflow_id":"#V#concept_search_instance_retrieval_workflow"}',
                     char_count: 65,
                     preview_truncated: false
                 }
             }
         });
-        expect(payload.stage_diagnostics).toEqual([
-            expect.objectContaining({
-                stage_id: 'workflow_discovery',
-                event_count: 1
-            })
-        ]);
         expect(payload.mcp_access).toEqual(expect.objectContaining({
             turn_execution_get_diagnostics: expect.any(Object)
         }));
@@ -394,12 +445,14 @@ describe('LLM debug popup workflow execution hook', () => {
             showLlmDebugPopup
         } = require(chatTabModulePath);
         const { getCurrentUserConceptId } = require('../../src/frontend/web/von_interface/static/js/domUtils.js');
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
 
         getCurrentUserConceptId.mockReturnValue('#V#test_user');
         localStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#test_user' }));
         sessionStorage.setItem('von_current_org', JSON.stringify({ concept_id: '#V#org' }));
         __testOnly_setActiveChatSession('session-1718', 'Session 1718');
-        global.fetch = jest.fn().mockResolvedValue({
+        global.fetch = jest.fn();
+        fetchWithTimeout.mockResolvedValue({
             ok: true,
             json: async () => ({
                 schema_version: 'conversation_llm_telemetry_locator.v1',
@@ -432,7 +485,7 @@ describe('LLM debug popup workflow execution hook', () => {
         const popup = document.getElementById('chatLlmDebugPopup');
         const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
 
-        const [calledUrl] = global.fetch.mock.calls[0];
+        const [calledUrl] = fetchWithTimeout.mock.calls[0];
         const parsedUrl = new URL(calledUrl, 'https://example.test');
         expect(parsedUrl.pathname).toBe('/von/history/telemetry_locator');
         expect(parsedUrl.searchParams.get('session_id')).toBe('session-1718');

@@ -1785,6 +1785,42 @@ function buildThinkingSelectorDiagnosticsSnapshot(workflowRoutingDiagnostics) {
     };
 }
 
+function compactThinkingDiagnosticCaptureForLocator(capture) {
+    if (!capture || typeof capture !== 'object') {
+        return null;
+    }
+    const text = normaliseThinkingActivityString(capture.text);
+    const preview = normaliseThinkingActivityString(capture.preview);
+    const chosenPreview = preview || (text ? `${text.slice(0, 240)}${text.length > 240 ? '...' : ''}` : null);
+    const charCount = Number.isFinite(capture.char_count)
+        ? Number(capture.char_count)
+        : (text ? text.length : null);
+    if (!chosenPreview && !Number.isFinite(charCount)) {
+        return null;
+    }
+    return {
+        preview: chosenPreview,
+        char_count: Number.isFinite(charCount) ? charCount : null,
+        preview_truncated: capture.preview_truncated === true || Boolean(text && text.length > 240)
+    };
+}
+
+function compactThinkingSelectorDiagnosticsForLocator(selector) {
+    if (!selector || typeof selector !== 'object') {
+        return null;
+    }
+    return {
+        prompt_id: selector.prompt_id || null,
+        requested_prompt_ids: Array.isArray(selector.requested_prompt_ids)
+            ? selector.requested_prompt_ids.slice()
+            : [],
+        prompt_provenance: selector.prompt_provenance || null,
+        prompt: compactThinkingDiagnosticCaptureForLocator(selector.prompt),
+        candidate_list: compactThinkingDiagnosticCaptureForLocator(selector.candidate_list),
+        response: compactThinkingDiagnosticCaptureForLocator(selector.response)
+    };
+}
+
 function buildWorkflowRoutingDiagnosticsLocatorSnapshot(progressLike) {
     const routingDiagnostics = getWorkflowRoutingDiagnostics(progressLike);
     if (!routingDiagnostics) {
@@ -1806,7 +1842,7 @@ function buildWorkflowRoutingDiagnosticsLocatorSnapshot(progressLike) {
         selected_workflow_id: selectedWorkflowId || null,
         selector_verdict: selectorVerdict || null,
         selector_source: selectorSource || null,
-        selector
+        selector: compactThinkingSelectorDiagnosticsForLocator(selector)
     };
 }
 
@@ -28672,20 +28708,20 @@ function setLlmDebugButtonCopyState(button, state) {
 
     if (state === 'copied') {
         button.classList.add(LLM_DEBUG_BUTTON_COPIED_CLASS);
-        button.setAttribute('title', 'Copied LLM JSON to clipboard. Shift-click to open details.');
-        button.setAttribute('aria-label', 'LLM JSON copied. Shift-click to open details.');
+        button.setAttribute('title', 'Copied LLM reference JSON to clipboard. Shift-click to open details.');
+        button.setAttribute('aria-label', 'LLM reference JSON copied. Shift-click to open details.');
         return;
     }
     if (state === 'failed') {
         button.classList.add(LLM_DEBUG_BUTTON_COPY_FAILED_CLASS);
         button.setAttribute('title', 'Copy failed. Shift-click to open LLM details.');
-        button.setAttribute('aria-label', 'Copy LLM JSON failed. Shift-click to open details.');
+        button.setAttribute('aria-label', 'Copy LLM reference JSON failed. Shift-click to open details.');
         return;
     }
 
     button.classList.add(LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS);
-    button.setAttribute('title', 'Copy LLM JSON. Shift-click to open details.');
-    button.setAttribute('aria-label', 'Copy LLM JSON. Shift-click to open details.');
+    button.setAttribute('title', 'Copy LLM reference JSON. Shift-click to open details.');
+    button.setAttribute('aria-label', 'Copy LLM reference JSON. Shift-click to open details.');
 }
 
 // Initialize LLM debug popup handlers
@@ -28987,6 +29023,17 @@ function hasLlmDebugPayload(debugData) {
     );
 }
 
+function hasLlmDebugLocatorReference(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return false;
+    }
+    return Boolean(
+        hasLlmDebugPayload(debugData)
+        || debugData.history_location
+        || resolveConversationTelemetryRequestId(debugData)
+    );
+}
+
 async function loadLlmDebugDataForTurn(turnId, options = {}) {
     const existing = llmDebugData.get(turnId);
     if (hasLlmDebugPayload(existing)) {
@@ -29087,12 +29134,9 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
     return fetchPromise;
 }
 
-async function buildLlmDebugClipboardJsonForTurn(turnId, options = {}) {
+async function buildLlmDebugClipboardJsonForTurn(turnId) {
     let debugDataRaw = llmDebugData.get(turnId);
-    if (!hasLlmDebugPayload(debugDataRaw)) {
-        debugDataRaw = await loadLlmDebugDataForTurn(turnId, options);
-    }
-    if (!hasLlmDebugPayload(debugDataRaw)) {
+    if (!hasLlmDebugLocatorReference(debugDataRaw)) {
         return null;
     }
 
@@ -29127,7 +29171,7 @@ async function copyLlmDebugJsonForTurn(turnId, button) {
     const copied = await copyTextWithClipboardFallback(jsonText);
     setLlmDebugButtonCopyState(button, copied ? 'copied' : 'failed');
     if (!copied) {
-        showToast('Unable to copy LLM JSON.');
+        showToast('Unable to copy LLM reference JSON.');
     }
     return copied;
 }
@@ -29712,6 +29756,70 @@ function buildWorkflowMonitorLocatorPayload() {
     };
 }
 
+function countArrayField(value, fieldNames = []) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    for (const fieldName of fieldNames) {
+        const candidate = value[fieldName];
+        if (Array.isArray(candidate)) {
+            return candidate.length;
+        }
+    }
+    return null;
+}
+
+function buildLlmDebugLocatorDiagnosticSummary({ debugData, turnExecutionDiagnostics }) {
+    const workflowDiscovery = (
+        turnExecutionDiagnostics?.workflow_discovery
+        && typeof turnExecutionDiagnostics.workflow_discovery === 'object'
+    )
+        ? turnExecutionDiagnostics.workflow_discovery
+        : (
+            debugData?.workflow_discovery
+            && typeof debugData.workflow_discovery === 'object'
+                ? debugData.workflow_discovery
+                : null
+        );
+    const stageDiagnostics = Array.isArray(turnExecutionDiagnostics?.stage_diagnostics)
+        ? turnExecutionDiagnostics.stage_diagnostics
+        : null;
+    const toolHistory = Array.isArray(turnExecutionDiagnostics?.tool_history)
+        ? turnExecutionDiagnostics.tool_history
+        : null;
+    const phaseHistory = Array.isArray(turnExecutionDiagnostics?.phase_history)
+        ? turnExecutionDiagnostics.phase_history
+        : null;
+    const progressEvents = Array.isArray(turnExecutionDiagnostics?.progress_events)
+        ? turnExecutionDiagnostics.progress_events
+        : null;
+    const auxLlmCalls = Array.isArray(debugData?.aux_llm_calls)
+        ? debugData.aux_llm_calls
+        : null;
+    const toolInvocations = Array.isArray(debugData?.tool_invocations)
+        ? debugData.tool_invocations
+        : null;
+
+    const summary = {
+        has_hydrated_debug_payload: hasLlmDebugPayload(debugData),
+        workflow_discovery_available: !!workflowDiscovery,
+        workflow_discovery_candidate_count: countArrayField(
+            workflowDiscovery,
+            ['matches', 'workflows', 'candidates', 'candidate_workflows']
+        ),
+        stage_diagnostics_count: stageDiagnostics ? stageDiagnostics.length : null,
+        tool_history_count: toolHistory ? toolHistory.length : null,
+        phase_history_count: phaseHistory ? phaseHistory.length : null,
+        progress_event_count: progressEvents ? progressEvents.length : null,
+        aux_llm_call_count: auxLlmCalls ? auxLlmCalls.length : null,
+        tool_invocation_count: toolInvocations ? toolInvocations.length : null
+    };
+
+    return Object.fromEntries(
+        Object.entries(summary).filter(([, value]) => value !== null)
+    );
+}
+
 function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExecutionTelemetry }) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
@@ -29736,6 +29844,11 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
         ? historyLocation.history_index
         : null;
 
+    const diagnosticSummary = buildLlmDebugLocatorDiagnosticSummary({
+        debugData,
+        turnExecutionDiagnostics
+    });
+
     const payload = {
         schema_version: TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION,
         generated_at_utc: new Date().toISOString(),
@@ -29748,22 +29861,12 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
         prompt_preview: typeof turnExecutionDiagnostics?.prompt_preview === 'string'
             ? turnExecutionDiagnostics.prompt_preview
             : (typeof debugData?.prompt_text === 'string' ? debugData.prompt_text : null),
-        workflow_discovery: (
-            turnExecutionDiagnostics?.workflow_discovery
-            && typeof turnExecutionDiagnostics.workflow_discovery === 'object'
-        )
-            ? turnExecutionDiagnostics.workflow_discovery
-            : ((debugData.workflow_discovery && typeof debugData.workflow_discovery === 'object')
-                ? debugData.workflow_discovery
-                : null),
+        diagnostic_summary: diagnosticSummary,
         workflow_routing_diagnostics: buildWorkflowRoutingDiagnosticsLocatorSnapshot(
             (turnExecutionDiagnostics && typeof turnExecutionDiagnostics === 'object')
                 ? turnExecutionDiagnostics
                 : debugData
         ),
-        stage_diagnostics: Array.isArray(turnExecutionDiagnostics?.stage_diagnostics)
-            ? turnExecutionDiagnostics.stage_diagnostics
-            : null,
         mcp_access: {}
     };
 
