@@ -203,6 +203,46 @@ def test_status_endpoint_does_not_perform_live_gmail_access(monkeypatch):
     assert response.get_json()["has_tokens"] is True
 
 
+def test_oauth_start_uses_current_local_callback_port(monkeypatch):
+    monkeypatch.setattr(
+        agent_gmail_oauth_routes.gmail_service,
+        "list_profile_ids_from_env",
+        lambda: ["vonwitbrock-gmail"],
+    )
+    agent_gmail_oauth_routes._agent_oauth_states.clear()
+    captured = {}
+
+    class FakeOAuthService:
+        def get_authorisation_url(self, *, profile_id, redirect_uri=None):
+            captured["profile_id"] = profile_id
+            captured["redirect_uri"] = redirect_uri
+            return (
+                "https://accounts.google.com/o/oauth2/v2/auth",
+                "state-1",
+                "verifier-1",
+            )
+
+    monkeypatch.setattr(
+        agent_gmail_oauth_routes,
+        "_get_service",
+        lambda: FakeOAuthService(),
+    )
+
+    client = _make_app().test_client()
+    response = client.get(
+        "/von/api/agent/gmail/oauth/start?profile_id=vonwitbrock-gmail",
+        base_url="http://localhost:5001",
+    )
+
+    assert response.status_code == 302
+    assert captured == {
+        "profile_id": "vonwitbrock-gmail",
+        "redirect_uri": "http://localhost:5001/von/api/agent/gmail/oauth/callback",
+    }
+
+    agent_gmail_oauth_routes._agent_oauth_states.clear()
+
+
 def test_oauth_callback_reuses_start_code_verifier(monkeypatch):
     monkeypatch.setattr(
         agent_gmail_oauth_routes.gmail_service,
@@ -213,7 +253,7 @@ def test_oauth_callback_reuses_start_code_verifier(monkeypatch):
     captured = {}
 
     class FakeOAuthService:
-        def get_authorisation_url(self, *, profile_id):
+        def get_authorisation_url(self, *, profile_id, redirect_uri=None):
             return (
                 "https://accounts.google.com/o/oauth2/v2/auth",
                 "state-1",
@@ -237,16 +277,22 @@ def test_oauth_callback_reuses_start_code_verifier(monkeypatch):
 
     client = _make_app().test_client()
     start_response = client.get(
-        "/von/api/agent/gmail/oauth/start?profile_id=vonwitbrock-gmail"
+        "/von/api/agent/gmail/oauth/start?profile_id=vonwitbrock-gmail",
+        base_url="http://localhost:5001",
     )
     assert start_response.status_code == 302
 
     callback_response = client.get(
-        "/von/api/agent/gmail/oauth/callback?state=state-1&code=abc"
+        "/von/api/agent/gmail/oauth/callback?state=state-1&code=abc",
+        base_url="http://localhost:5001",
     )
 
     assert callback_response.status_code == 200
     assert captured["profile_id"] == "vonwitbrock-gmail"
     assert captured["code_verifier"] == "verifier-1"
+    assert (
+        captured["redirect_uri"]
+        == "http://localhost:5001/von/api/agent/gmail/oauth/callback"
+    )
 
     agent_gmail_oauth_routes._agent_oauth_states.clear()

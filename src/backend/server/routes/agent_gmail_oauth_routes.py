@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Optional
 
-from flask import Blueprint, jsonify, redirect, request, session
+from flask import Blueprint, jsonify, redirect, request, session, url_for
 
 from ...services.agent_gmail_oauth_service import (
     AgentGmailOAuthService,
@@ -31,6 +31,13 @@ def _get_service() -> AgentGmailOAuthService:
     if _agent_gmail_oauth_service is None:
         _agent_gmail_oauth_service = AgentGmailOAuthService()
     return _agent_gmail_oauth_service
+
+
+def _current_agent_gmail_oauth_callback_url() -> str:
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    proto = forwarded_proto.split(",")[0].strip() if forwarded_proto else request.scheme
+    proto = proto or request.scheme
+    return f"{proto}://{request.host}{url_for('agent_gmail_oauth_bp.agent_gmail_oauth_callback')}"
 
 
 def _validate_profile_id(profile_id: str):
@@ -154,9 +161,11 @@ def start_agent_gmail_oauth():
         return validation_error
 
     service = _get_service()
+    redirect_uri = _current_agent_gmail_oauth_callback_url()
     try:
         authorisation_url, state, code_verifier = service.get_authorisation_url(
-            profile_id=profile_id
+            profile_id=profile_id,
+            redirect_uri=redirect_uri,
         )
     except AgentGmailOAuthError as exc:
         return jsonify({"error": "oauth_config_error", "detail": str(exc)}), 400
@@ -165,12 +174,14 @@ def start_agent_gmail_oauth():
         "state": state,
         "profile_id": profile_id,
         "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
     }
     _agent_oauth_states[state] = {
         "timestamp": time.time(),
         "used": False,
         "profile_id": profile_id,
         "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
     }
 
     return redirect(authorisation_url)
@@ -249,19 +260,25 @@ def agent_gmail_oauth_callback():
     session_state_value: Optional[str] = None
     session_profile_id: Optional[str] = None
     session_code_verifier: Optional[str] = None
+    session_redirect_uri: Optional[str] = None
     if isinstance(session_state, dict):
         raw_state = session_state.get("state")
         raw_profile = session_state.get("profile_id")
         raw_code_verifier = session_state.get("code_verifier")
+        raw_redirect_uri = session_state.get("redirect_uri")
         session_state_value = raw_state if isinstance(raw_state, str) else None
         session_profile_id = raw_profile if isinstance(raw_profile, str) else None
         session_code_verifier = (
             raw_code_verifier if isinstance(raw_code_verifier, str) else None
         )
+        session_redirect_uri = (
+            raw_redirect_uri if isinstance(raw_redirect_uri, str) else None
+        )
 
     valid_state = False
     profile_id: Optional[str] = None
     code_verifier: Optional[str] = None
+    redirect_uri: Optional[str] = None
 
     state_info = _agent_oauth_states.get(received_state) if received_state else None
     if state_info is not None:
@@ -293,6 +310,7 @@ def agent_gmail_oauth_callback():
         valid_state = True
         profile_id = session_profile_id
         code_verifier = session_code_verifier
+        redirect_uri = session_redirect_uri
         if state_info is not None:
             state_info["used"] = True
         session.pop("agent_gmail_oauth_state", None)
@@ -301,10 +319,12 @@ def agent_gmail_oauth_callback():
         state_info["used"] = True
         raw_profile = state_info.get("profile_id")
         raw_code_verifier = state_info.get("code_verifier")
+        raw_redirect_uri = state_info.get("redirect_uri")
         profile_id = raw_profile if isinstance(raw_profile, str) else None
         code_verifier = (
             raw_code_verifier if isinstance(raw_code_verifier, str) else None
         )
+        redirect_uri = raw_redirect_uri if isinstance(raw_redirect_uri, str) else None
         session.pop("agent_gmail_oauth_state", None)
 
     if not valid_state or not profile_id:
@@ -319,6 +339,7 @@ def agent_gmail_oauth_callback():
             profile_id=profile_id,
             authorisation_response_url=request.url,
             code_verifier=code_verifier,
+            redirect_uri=redirect_uri or _current_agent_gmail_oauth_callback_url(),
         )
     except Exception as exc:
         logger.exception(

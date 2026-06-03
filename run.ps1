@@ -13,7 +13,7 @@
         help         Show help
 
     Flags:
-        -Port <int>              Server port (default 5000; -AgentTest defaults to 5010)
+        -Port <int>              Server port (default 5001 on macOS, 5000 elsewhere; -AgentTest defaults to 5010)
         -AgentTest               Isolated coding-agent test instance mode
         -IsolatedTestInstance    Alias for -AgentTest
         -NoBrowser               Do not auto-open browser on start
@@ -113,13 +113,26 @@ function Test-AgentTestInstance {
     return [bool]$script:AgentTestInstance
 }
 
+function Test-MacLauncherHost {
+    return [bool](Get-Variable -Name IsMacOS -ValueOnly -ErrorAction SilentlyContinue)
+}
+
+function Get-StandardLauncherDefaultPort {
+    if (Test-MacLauncherHost) { return 5001 }
+    return 5000
+}
+
 function Apply-AgentTestLauncherDefaults {
     param([bool]$PortWasExplicitlyBound = $false)
 
+    $script:StandardDefaultPort = Get-StandardLauncherDefaultPort
     $script:AgentTestDefaultPort = 5010
     $script:AgentTestInstance = [bool]($script:AgentTest -or $script:IsolatedTestInstance)
     $script:AgentTestPortDefaulted = $false
     if (-not (Test-AgentTestInstance)) {
+        if (-not $PortWasExplicitlyBound) {
+            $script:Port = $script:StandardDefaultPort
+        }
         [Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', $null, 'Process')
         return
     }
@@ -3429,7 +3442,7 @@ Von Launcher Help
     Usage: .\run.ps1 [action] [options]
     Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
     Options:
-        -Port <int>            Server port (default 5000; -AgentTest defaults to 5010)
+        -Port <int>            Server port (default 5001 on macOS, 5000 elsewhere; -AgentTest defaults to 5010)
         -AgentTest             Isolated coding-agent test instance mode:
                                defaults to port 5010 unless -Port is supplied,
                                implies -NoBrowser unless -ForceBrowser is supplied,

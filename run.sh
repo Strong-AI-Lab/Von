@@ -21,8 +21,12 @@ if [[ "$ACTION" == "--help" || "$ACTION" == "-h" || "$ACTION" == "/?" ]]; then
 fi
 shift 1 || true
 
-# Defaults (match run.ps1)
-PORT=5000
+# Defaults (match run.ps1): macOS avoids AirPlay Receiver's common port 5000.
+DEFAULT_PORT=5000
+if [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]]; then
+    DEFAULT_PORT=5001
+fi
+PORT="$DEFAULT_PORT"
 PORT_EXPLICIT=0
 AGENT_TEST=0
 ISOLATED_TEST_INSTANCE=0
@@ -2681,7 +2685,7 @@ Von Launcher Help
     Usage: ./run.sh [action] [options]
     Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
     Options:
-        -Port <int>            Server port (default 5000; -AgentTest defaults to 5010)
+        -Port <int>            Server port (default 5001 on macOS, 5000 elsewhere; -AgentTest defaults to 5010)
         -AgentTest             Isolated coding-agent test instance mode
         -IsolatedTestInstance  Alias for -AgentTest
         -NoBrowser

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import platform
+import shlex
 from pathlib import Path
 
 from tests.powershell_test_utils import ps_quote, run_powershell_result
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _host_default_port() -> int:
+    return 5001 if platform.system() == "Darwin" else 5000
 
 
 def test_run_ps1_force_browser_reopens_for_existing_server(tmp_path: Path) -> None:
@@ -174,6 +180,54 @@ $result = [ordered]@{{
         "no_browser": True,
         "port_defaulted": True,
         "env_marker": "1",
+    }
+
+
+def test_run_ps1_standard_default_port_is_host_aware() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+$script:Port = 4999
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$false
+$result = [ordered]@{{
+    port = [int]$script:Port
+    agent_test = [bool]$script:AgentTestInstance
+    env_marker_cleared = -not [Environment]::GetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', 'Process')
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "port": _host_default_port(),
+        "agent_test": False,
+        "env_marker_cleared": True,
+    }
+
+
+def test_run_ps1_standard_default_respects_explicit_port() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+$script:Port = 5000
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+$result = [ordered]@{{
+    port = [int]$script:Port
+    agent_test = [bool]$script:AgentTestInstance
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "port": 5000,
+        "agent_test": False,
     }
 
 
@@ -425,18 +479,33 @@ Write-Output '{"misleading":"stdout-json"}'
 
 def test_run_ps1_stale_process_cleanup_uses_file_backed_helper(tmp_path: Path) -> None:
     arg_log = tmp_path / "cleanup_args.txt"
-    fake_python = tmp_path / "fake_python.cmd"
-    fake_python.write_text(
-        "\r\n".join(
-            [
-                "@echo off",
-                f'> "{arg_log}" echo %*',
-                "echo []",
-            ]
+    if platform.system() == "Windows":
+        fake_python = tmp_path / "fake_python.cmd"
+        fake_python.write_text(
+            "\r\n".join(
+                [
+                    "@echo off",
+                    f'> "{arg_log}" echo %*',
+                    "echo []",
+                ]
+            )
+            + "\r\n",
+            encoding="utf-8",
         )
-        + "\r\n",
-        encoding="utf-8",
-    )
+    else:
+        fake_python = tmp_path / "fake_python"
+        fake_python.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f"printf '%s\\n' \"$*\" > {shlex.quote(str(arg_log))}",
+                    "printf '[]\\n'",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
 
     script = f"""
 $ErrorActionPreference = 'Stop'

@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlparse
 
 from google_auth_oauthlib.flow import Flow
 
@@ -37,6 +38,14 @@ AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH_ENV_VAR = (
 AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR = "VON_AGENT_GMAIL_OAUTH_PROMPT"
 
 
+def _is_local_http_redirect(redirect_uri: str | None) -> bool:
+    if not redirect_uri:
+        return False
+    parsed = urlparse(redirect_uri)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "http" and host in {"localhost", "127.0.0.1"}
+
+
 @dataclass(frozen=True)
 class AgentGmailOAuthResult:
     profile_id: str
@@ -61,11 +70,18 @@ class AgentGmailOAuthService:
     def _get_profile(self, profile_id: str) -> GmailProfile:
         return get_profile(profile_id, self._profiles or load_profiles_from_env())
 
-    def _get_redirect_uri(self) -> str:
-        return (
-            os.getenv(AGENT_GMAIL_OAUTH_REDIRECT_URI_ENV_VAR)
-            or DEFAULT_AGENT_GMAIL_OAUTH_REDIRECT_URI
-        )
+    def _get_redirect_uri(self, request_redirect_uri: Optional[str] = None) -> str:
+        configured_redirect_uri = os.getenv(AGENT_GMAIL_OAUTH_REDIRECT_URI_ENV_VAR)
+        if (
+            request_redirect_uri
+            and _is_local_http_redirect(request_redirect_uri)
+            and (
+                not configured_redirect_uri
+                or _is_local_http_redirect(configured_redirect_uri)
+            )
+        ):
+            return request_redirect_uri
+        return configured_redirect_uri or DEFAULT_AGENT_GMAIL_OAUTH_REDIRECT_URI
 
     def _get_client_secret_path(self, *, profile_id: str) -> str:
         override = os.getenv(AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH_ENV_VAR)
@@ -120,10 +136,14 @@ class AgentGmailOAuthService:
         return env_scopes
 
     def _build_flow(
-        self, *, profile_id: str, code_verifier: Optional[str] = None
+        self,
+        *,
+        profile_id: str,
+        code_verifier: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
     ) -> Flow:
         profile = self._get_profile(profile_id)
-        redirect_uri = self._get_redirect_uri()
+        redirect_uri = self._get_redirect_uri(redirect_uri)
         secret_path = self._get_client_secret_path(profile_id=profile_id)
         configure_oauthlib_insecure_transport(redirect_uri)
 
@@ -140,9 +160,9 @@ class AgentGmailOAuthService:
         )
 
     def get_authorisation_url(
-        self, *, profile_id: str
+        self, *, profile_id: str, redirect_uri: Optional[str] = None
     ) -> tuple[str, str, Optional[str]]:
-        flow = self._build_flow(profile_id=profile_id)
+        flow = self._build_flow(profile_id=profile_id, redirect_uri=redirect_uri)
         prompt = (
             os.getenv(AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR, "consent").strip() or "consent"
         )
@@ -165,10 +185,15 @@ class AgentGmailOAuthService:
         profile_id: str,
         authorisation_response_url: str,
         code_verifier: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
     ) -> AgentGmailOAuthResult:
         """Exchange callback code for tokens and persist via DB token store."""
 
-        flow = self._build_flow(profile_id=profile_id, code_verifier=code_verifier)
+        flow = self._build_flow(
+            profile_id=profile_id,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+        )
 
         @contextmanager
         def _temporary_env(var_name: str, value: str):
