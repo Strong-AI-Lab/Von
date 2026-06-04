@@ -594,6 +594,106 @@ def test_build_workflow_purity_report_allows_retrieval_monitoring_seed_bootstrap
     assert all(item["allowed"] for item in repo_seed_drift["matches"])
 
 
+def test_build_workflow_purity_report_allows_vontology_materialisation_seed_services(
+    tmp_path: Path,
+) -> None:
+    for relative_path, body in {
+        (
+            "src/backend/services/"
+            "email_source_representation_convergence_workflow_vontology_service.py"
+        ): (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_canonical_email_source_workflows():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+        ),
+        (
+            "src/backend/services/"
+            "jira_task_incremental_import_workflow_vontology_service.py"
+        ): (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_canonical_jira_task_incremental_import_workflow():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+        ),
+        "src/backend/services/kr_materialisation_workflow_vontology_service.py": (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_canonical_kr_materialisation_workflows():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n\n"
+            "def validate_kr_materialisation_seed_bundle(authority_service):\n"
+            "    return authority_service.load_repo_seed_workflow_bundle('bundle.json')\n"
+        ),
+        (
+            "src/backend/services/"
+            "representation_workflow_routing_coverage_audit_vontology_service.py"
+        ): (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_canonical_representation_workflow_routing_coverage_audit():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+        ),
+    }.items():
+        _write(relative_path, body, root=tmp_path)
+    _write(
+        "src/backend/services/unrelated_runtime_workflow_service.py",
+        (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_runtime_authority():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    repo_seed_drift = report["details"]["repo_seed_authority_drift"]
+    assert report["counters"]["repo_seed_authority_drift_path_count"] == 1
+    assert repo_seed_drift["offending_paths"] == [
+        "src/backend/services/unrelated_runtime_workflow_service.py"
+    ]
+    assert all(
+        item["allowed"]
+        for item in repo_seed_drift["matches"]
+        if item["path"] != "src/backend/services/unrelated_runtime_workflow_service.py"
+    )
+
+
 def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
     tmp_path: Path,
 ) -> None:
