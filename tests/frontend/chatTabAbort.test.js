@@ -167,6 +167,56 @@ describe('chat abort behaviour', () => {
 
         await expect(sendPromise).resolves.toBeUndefined();
     });
+
+    test('non-json generate failure shows controlled server response error', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        __testOnly_resetChatRequestState();
+        __testOnly_setActiveChatSession('session-non-json', 'Non JSON');
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: false,
+                    json: async () => {
+                        throw new SyntaxError('Unexpected token <');
+                    }
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Trigger non-json failure';
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(document.getElementById('scrollableField').textContent).toContain(
+            'Server returned a non-JSON error response.'
+        );
+        expect(document.getElementById('scrollableField').textContent).not.toContain(
+            'Unexpected token <'
+        );
+    });
 });
 
 describe('thinking progress polling', () => {

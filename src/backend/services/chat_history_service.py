@@ -408,6 +408,25 @@ def _ensure_chat_history_indexes(collection) -> None:
                     [("user_id", ASCENDING), ("updated_at", DESCENDING)],
                     name="user_id_1_updated_at_-1",
                 )
+            if "namespace_1_user_id_1_updated_at_-1" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("updated_at", DESCENDING),
+                    ],
+                    name="namespace_1_user_id_1_updated_at_-1",
+                )
+            if "namespace_1_user_id_1_updated_at_-1_created_at_-1" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("updated_at", DESCENDING),
+                        ("created_at", DESCENDING),
+                    ],
+                    name="namespace_1_user_id_1_updated_at_-1_created_at_-1",
+                )
         except Exception as exc:
             logger.warning(
                 "Index creation skipped for chat_history collection: %s", exc
@@ -2507,14 +2526,24 @@ def _get_chat_history_session_summaries_metadata_only(
             "organisation_concept_id": 1,
         }
     )
-    docs = list(
-        _read_find(
-            chat_history_coll,
-            query,
-            projection,
-            operation="get_chat_history_session_summaries.metadata_find",
-        )
+    cursor = _read_find(
+        chat_history_coll,
+        query,
+        projection,
+        operation="get_chat_history_session_summaries.metadata_find",
     )
+    try:
+        cursor = cursor.sort(
+            [("updated_at", DESCENDING), ("created_at", DESCENDING)]
+        )
+    except Exception:
+        pass
+    if safe_limit is not None:
+        try:
+            cursor = cursor.limit(safe_limit)
+        except AttributeError:
+            pass
+    docs = list(cursor)
 
     summaries: List[Dict[str, Any]] = []
     for doc in docs:
@@ -2535,6 +2564,21 @@ def _get_chat_history_session_summaries_metadata_only(
     return summaries[:safe_limit]
 
 
+def _bounded_light_session_metadata_query_limit(
+    *,
+    safe_limit: int,
+    agent_visibility: Any,
+    keep_newest_agent_created: Any,
+) -> int:
+    visibility = _normalise_chat_session_agent_visibility(agent_visibility)
+    keep_newest = _coerce_bool(keep_newest_agent_created, default=True)
+    if visibility == CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE or (
+        visibility == CHAT_SESSION_AGENT_VISIBILITY_INCLUDE and keep_newest
+    ):
+        return min(1000, max(safe_limit * 5, safe_limit + 100))
+    return safe_limit
+
+
 def _safe_chat_history_session_summary_limit(limit: Any) -> int:
     safe_limit = 50
     if isinstance(limit, int) and limit > 0:
@@ -2548,6 +2592,7 @@ def _load_chat_history_session_summaries(
     namespace: Optional[str] = None,
     include_legacy: bool = True,
     summary_mode: str = "full",
+    metadata_query_limit: int | None = None,
 ) -> List[Dict[str, Any]]:
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
@@ -2568,7 +2613,7 @@ def _load_chat_history_session_summaries(
     if light_mode:
         try:
             summaries = _get_chat_history_session_summaries_metadata_only(
-                chat_history_coll, query=query, safe_limit=None
+                chat_history_coll, query=query, safe_limit=metadata_query_limit
             )
             _record_chat_history_read_success()
             return summaries
@@ -2724,11 +2769,20 @@ def get_chat_history_session_summaries_result(
     """Return session summaries plus test-conversation visibility metadata."""
 
     safe_limit = _safe_chat_history_session_summary_limit(limit)
+    metadata_query_limit = None
+    mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
+    if mode in ("light", "minimal", "summary"):
+        metadata_query_limit = _bounded_light_session_metadata_query_limit(
+            safe_limit=safe_limit,
+            agent_visibility=agent_visibility,
+            keep_newest_agent_created=keep_newest_agent_created,
+        )
     summaries = _load_chat_history_session_summaries(
         user_id,
         namespace=namespace,
         include_legacy=include_legacy,
         summary_mode=summary_mode,
+        metadata_query_limit=metadata_query_limit,
     )
     visibility_payload = apply_chat_session_agent_visibility(
         summaries,
@@ -2739,6 +2793,8 @@ def get_chat_history_session_summaries_result(
     return {
         "sessions": visibility_payload["sessions"],
         "limit": safe_limit,
+        "metadata_query_limit": metadata_query_limit,
+        "raw_session_count_is_bounded": metadata_query_limit is not None,
         "raw_session_count": len(summaries),
         **{
             key: value

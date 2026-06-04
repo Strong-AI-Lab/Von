@@ -9913,6 +9913,39 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     ),
                 )
             _check_background_cancellation("chat-history lookup")
+        except Exception as chat_history_exc:
+            if not chat_history_service.is_transient_chat_history_error(
+                chat_history_exc
+            ):
+                raise
+            current_app.logger.warning(
+                "/von/generate continuing with empty prior context after transient "
+                "chat-history lookup failure for session_id=%s request_id=%s: %s",
+                session_id,
+                request_id,
+                chat_history_exc,
+                exc_info=True,
+            )
+            context = []
+            namespace_report["chat_history_context_degraded"] = True
+            namespace_report["chat_history_context_degraded_reason"] = str(
+                chat_history_exc
+            )[:300]
+            if progress_updates_enabled:
+                _emit_generate_progress(
+                    {
+                        "status": "thinking",
+                        "phase": "context_build",
+                        "phase_label": "Building context",
+                        "goal_label": progress_goal_label,
+                        "request_id": request_id,
+                        "subtask": "chat-history lookup degraded",
+                        "result_summary": (
+                            "Chat history is temporarily unavailable; continuing "
+                            "with an empty prior conversation context."
+                        ),
+                    },
+                )
         finally:
             _chat_history_elapsed_ms = (
                 time.perf_counter() - _chat_history_start_perf
