@@ -107,6 +107,7 @@ def app(monkeypatch, recorder):
     flask_app.config["CONTEXT"] = []
     flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
     flask_app.config["INTERNAL_MCP_GATEWAY"] = None
+    flask_app.config["TEST_LLM"] = llm
 
     return flask_app
 
@@ -204,3 +205,31 @@ def test_assistant_message_still_persisted(app, recorder):
     assistant_calls = recorder.assistant_message_calls
     assert len(assistant_calls) >= 1, "No assistant message was persisted"
     assert assistant_calls[0]["message"]["content"] == "test response"
+
+
+def test_generate_continues_when_chat_history_context_read_is_transient(
+    app, monkeypatch, recorder
+):
+    from src.backend.services.chat_history_service import ChatHistoryServiceError
+
+    llm = app.config.get("TEST_LLM")
+
+    def _raise_transient_history(*_args, **_kwargs):
+        raise ChatHistoryServiceError("read circuit open for 3.0s")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
+        _raise_transient_history,
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Transient history"})
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["response"] == "test response"
+    assert recorder.user_message_calls
+    assert llm.calls
+    assert all(
+        call.get("role") == "system" for call in llm.calls[-1]["context"]
+    )

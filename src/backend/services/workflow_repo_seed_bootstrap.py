@@ -1380,6 +1380,11 @@ def bootstrap_repo_seed_workflow_bundle(
         for workflow_id, status in repo_seed_version_status_by_id.items()
         if bool(status.get("blocked")) and not force_republish
     )
+    repo_seed_version_superseded_ids = tuple(
+        workflow_id
+        for workflow_id, status in repo_seed_version_status_by_id.items()
+        if status.get("comparison") == -1 and not force_republish
+    )
     repo_seed_version_refresh_ids = tuple(
         workflow_id
         for workflow_id, status in repo_seed_version_status_by_id.items()
@@ -1397,7 +1402,7 @@ def bootstrap_repo_seed_workflow_bundle(
     materialisation_preflight = (
         _suppress_repo_seed_snapshot_drift_when_vontology_version_is_current(
             materialisation_preflight=materialisation_preflight,
-            version_blocked_workflow_ids=repo_seed_version_blocked_ids,
+            version_blocked_workflow_ids=repo_seed_version_superseded_ids,
             target_workflow_ids=target_workflow_ids,
         )
     )

@@ -27851,7 +27851,18 @@ async function handleSendPrompt(options = {}) {
             return;
         }
 
-        const data = await response.json();
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (parseError) {
+            console.warn('[chatTab] Unable to parse /von/generate response JSON:', parseError);
+            data = {
+                error: response.ok
+                    ? 'Server returned an unreadable response.'
+                    : 'Server returned a non-JSON error response.',
+                response_parse_error: parseError && parseError.message ? parseError.message : String(parseError || '')
+            };
+        }
         console.log('[chatTab] fetch response.ok=', response.ok, 'data=', data);
 
         if (request.aborted) {
