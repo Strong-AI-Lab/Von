@@ -103,6 +103,8 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#has_workflow_step_checkpoint_policy_json",
     "#V#hasWorkflowStepMutationAuthorityJson",
     "#V#has_workflow_step_mutation_authority_json",
+    "#V#hasWorkflowProgressProjectionJson",
+    "#V#has_workflow_progress_projection_json",
     "#V#hasWorkflowPlanStatePolicyJson",
     "#V#has_workflow_plan_state_policy_json",
     "#V#hasWorkflowCompletionGateJson",

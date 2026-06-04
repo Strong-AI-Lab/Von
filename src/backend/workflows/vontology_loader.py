@@ -20,6 +20,7 @@ from .prompt_metadata_resolution import (
     normalise_prompt_validation_policy,
     resolve_workflow_prompt_metadata,
 )
+from .progress_projection import WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION
 from .plan_state_runtime import (
     normalise_workflow_completion_gate_spec,
     normalise_workflow_plan_state_policy_spec,
@@ -305,6 +306,16 @@ WORKFLOW_STEP_MUTATION_AUTHORITY_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasWorkflowStepMutationAuthorityJson",
         "#V#has_workflow_step_mutation_authority_json",
         "has_workflow_step_mutation_authority_json",
+    ),
+)
+WORKFLOW_PROGRESS_PROJECTION_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowProgressProjectionJson",
+        "hasWorkflowProgressProjectionJson",
+        "#V#has_workflow_progress_projection_json",
+        "has_workflow_progress_projection_json",
     ),
 )
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
@@ -2274,6 +2285,76 @@ def _normalise_workflow_publication_lifecycle(
     return payload
 
 
+def _normalise_workflow_progress_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        raise ValueError("payload_not_object")
+
+    schema_version = _normalise_non_empty_text(value.get("schema_version"))
+    if schema_version and schema_version != WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION:
+        raise ValueError("schema_version_unsupported")
+
+    raw_facts = value.get("facts")
+    if not isinstance(raw_facts, Sequence) or isinstance(
+        raw_facts, (str, bytes, bytearray)
+    ):
+        raise ValueError("facts_missing_or_invalid")
+
+    facts: list[dict[str, Any]] = []
+    for index, raw_fact in enumerate(raw_facts):
+        if not isinstance(raw_fact, Mapping):
+            raise ValueError(f"fact_{index}_not_object")
+
+        label = _normalise_non_empty_text(raw_fact.get("label"))
+        source_path = _normalise_non_empty_text(
+            raw_fact.get("source_path")
+            or raw_fact.get("path")
+            or raw_fact.get("context_path")
+            or raw_fact.get("value_from_context")
+        )
+        fact_id = _normalise_non_empty_text(
+            raw_fact.get("fact_id")
+            or raw_fact.get("id")
+            or raw_fact.get("role")
+            or label
+        )
+        if not fact_id:
+            raise ValueError(f"fact_{index}_missing_fact_id")
+        if not label:
+            raise ValueError(f"fact_{index}_missing_label")
+        if not source_path:
+            raise ValueError(f"fact_{index}_missing_source_path")
+
+        fact: dict[str, Any] = {
+            "fact_id": fact_id,
+            "label": label,
+            "source_path": source_path,
+        }
+        for key in (
+            "value_kind",
+            "visibility",
+            "redaction_policy",
+            "contract_id",
+            "projection_contract_id",
+            "concept_id",
+            "sensitive",
+            "private",
+            "sensitivity",
+            "allow_raw",
+            "max_length",
+        ):
+            if key in raw_fact:
+                fact[key] = raw_fact[key]
+        facts.append(fact)
+
+    if not facts:
+        raise ValueError("facts_missing_or_invalid")
+
+    return {
+        "schema_version": WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION,
+        "facts": facts,
+    }
+
+
 def resolve_workflow_publication_lifecycle(
     workflow_id: str,
     workflow_doc: Mapping[str, Any] | None = None,
@@ -2507,6 +2588,22 @@ def resolve_workflow_step_runtime_policies(
             f"{step_id}:{mutation_authority_source}"
         )
 
+    progress_projection, progress_projection_source = (
+        _resolve_policy_from_text_relations(
+            concept_id=step_id,
+            predicate_precedence=WORKFLOW_PROGRESS_PROJECTION_TEXT_PREDICATE_PRECEDENCE,
+            normaliser=_normalise_workflow_progress_projection,
+            text_rows=text_rows,
+        )
+    )
+    if progress_projection is not None:
+        policies["progress_projection"] = progress_projection
+    elif isinstance(progress_projection_source, str) and progress_projection_source:
+        warnings.append(
+            "workflow_progress_projection_invalid:"
+            f"{step_id}:{progress_projection_source}"
+        )
+
     return policies, warnings
 
 
@@ -2584,6 +2681,22 @@ def resolve_workflow_long_horizon_policies(
         warnings.append(
             "workflow_required_effects_contract_invalid:"
             f"{workflow_id}:{required_effects_contract_source}"
+        )
+
+    progress_projection, progress_projection_source = (
+        _resolve_policy_from_text_relations(
+            concept_id=workflow_id,
+            predicate_precedence=WORKFLOW_PROGRESS_PROJECTION_TEXT_PREDICATE_PRECEDENCE,
+            normaliser=_normalise_workflow_progress_projection,
+            text_rows=text_rows,
+        )
+    )
+    if progress_projection is not None:
+        policies["progress_projection"] = progress_projection
+    elif isinstance(progress_projection_source, str) and progress_projection_source:
+        warnings.append(
+            "workflow_progress_projection_invalid:"
+            f"{workflow_id}:{progress_projection_source}"
         )
 
     return policies, warnings
@@ -3214,6 +3327,7 @@ def load_workflow_definition_from_vontology(
         "workflow_step_idempotency_policy_invalid:",
         "workflow_step_checkpoint_policy_invalid:",
         "workflow_step_mutation_authority_invalid:",
+        "workflow_progress_projection_invalid:",
         "workflow_plan_state_policy_invalid:",
         "workflow_completion_gate_invalid:",
         "workflow_terminal_success_contract_invalid:",
@@ -3655,6 +3769,7 @@ def load_workflow_definition_from_vontology(
         idempotency_policy = step.get("idempotency_policy")
         checkpoint_policy = step.get("checkpoint_policy")
         mutation_authority = step.get("mutation_authority")
+        progress_projection = step.get("progress_projection")
         prompt_contract = step.get("prompt_contract")
         if preconditions:
             step_metadata["preconditions"] = preconditions
@@ -3678,6 +3793,8 @@ def load_workflow_definition_from_vontology(
             step_metadata["checkpoint_policy"] = checkpoint_policy
         if mutation_authority:
             step_metadata["mutation_authority"] = mutation_authority
+        if progress_projection:
+            step_metadata["progress_projection"] = progress_projection
         if prompt_contract:
             step_metadata["prompt_contract"] = prompt_contract
         action_execution_modes = [

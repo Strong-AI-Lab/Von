@@ -542,6 +542,25 @@ class TestWorkflowStepRuntimePolicyResolution:
                         '"maximum_level":"mutative_vontology_non_destructive"}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowProgressProjectionJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "facts": [
+                                {
+                                    "fact_id": "email_subject",
+                                    "label": "Email subject",
+                                    "source_path": "context.current_message.subject",
+                                    "value_kind": "title",
+                                    "visibility": "default",
+                                    "redaction_policy": "private_redacted",
+                                    "contract_id": "#V#gmail_email_subject_progress_fact",
+                                }
+                            ],
+                        }
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_step_runtime_policies("#V#step")
@@ -559,6 +578,48 @@ class TestWorkflowStepRuntimePolicyResolution:
         assert policies["mutation_authority"]["maximum_level"] == (
             "mutative_vontology_non_destructive"
         )
+        assert policies["progress_projection"]["facts"] == [
+            {
+                "fact_id": "email_subject",
+                "label": "Email subject",
+                "source_path": "context.current_message.subject",
+                "value_kind": "title",
+                "visibility": "default",
+                "redaction_policy": "private_redacted",
+                "contract_id": "#V#gmail_email_subject_progress_fact",
+            }
+        ]
+
+    def test_resolve_workflow_step_runtime_policies_warns_for_invalid_progress_projection(
+        self,
+    ):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowProgressProjectionJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "facts": [
+                                {
+                                    "fact_id": "email_subject",
+                                    "label": "Email subject",
+                                }
+                            ],
+                        }
+                    ),
+                },
+            ],
+        ):
+            policies, warnings = resolve_workflow_step_runtime_policies("#V#step")
+
+        assert policies == {}
+        assert warnings == [
+            "workflow_progress_projection_invalid:"
+            "#V#step:text_relation_invalid:"
+            "#V#hasWorkflowProgressProjectionJson:fact_0_missing_source_path"
+        ]
 
     def test_resolve_workflow_step_runtime_policies_fetches_texts_once(self):
         rows = [
@@ -626,6 +687,24 @@ class TestWorkflowLongHorizonPolicyResolution:
                         '"required_tools":["conversation_telemetry_get_locator"]}]}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowProgressProjectionJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "facts": [
+                                {
+                                    "fact_id": "batch_result",
+                                    "label": "Batch result",
+                                    "source_path": "context.message_success_count",
+                                    "value_kind": "number",
+                                    "visibility": "expert",
+                                    "contract_id": "#V#gmail_arxiv_batch_result_progress_fact",
+                                }
+                            ],
+                        }
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_long_horizon_policies(
@@ -666,6 +745,9 @@ class TestWorkflowLongHorizonPolicyResolution:
         assert policies["required_effects_contract"]["required_effects"][0][
             "effect_type"
         ] == "diagnostic_evidence"
+        assert policies["progress_projection"]["facts"][0]["fact_id"] == (
+            "batch_result"
+        )
 
     def test_resolve_workflow_long_horizon_policies_fetches_texts_once(self):
         rows = [

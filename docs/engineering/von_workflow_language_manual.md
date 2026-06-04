@@ -703,6 +703,9 @@ completes. This is the authored surface for user-visible salient progress
 facts. Python support code may validate, redact, truncate, transport, and
 render the facts, but it MUST NOT infer domain-specific items such as email
 subjects or paper titles from workflow IDs, tool names, or source strings.
+Durable Vontology-authored projection metadata is stored as singleton JSON
+text relations on workflow or step concepts via
+`#V#hasWorkflowProgressProjectionJson`.
 
 Example:
 
@@ -758,12 +761,14 @@ Canonical workflow-step runtime policy payloads are stored as singleton text rel
 - `#V#hasWorkflowStepMutationAuthorityJson`
 - `#V#hasWorkflowStepIdempotencyPolicyJson`
 - `#V#hasWorkflowStepCheckpointPolicyJson`
+- `#V#hasWorkflowProgressProjectionJson`
 
 Workflow-level long-horizon policy payloads are stored as singleton text relations on the workflow concept:
 
 - `#V#hasWorkflowPlanStatePolicyJson`
 - `#V#hasWorkflowCompletionGateJson`
 - `#V#hasWorkflowLaunchInputContractJson`
+- `#V#hasWorkflowProgressProjectionJson`
 
 Workflow-template authoring metadata is stored as first-class Vontology text relations on template concepts:
 
