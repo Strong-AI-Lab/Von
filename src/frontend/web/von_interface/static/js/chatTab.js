@@ -1216,6 +1216,7 @@ const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_EXPLICIT = 'explicit_turn_state';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_telemetry';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
+const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
 // Browser live-progress polls must tolerate local-server contention while the
 // real /von/generate POST is still running. A shorter timeout causes the page
 // to abort its own /von/progress reads and surface a false "Awaiting visible
@@ -1543,6 +1544,7 @@ function setLoadingIndicatorDetailHtml(html, request = getThinkingCardDisplayReq
         datasetKey: 'conceptLinkBound'
     });
     bindThinkingDiagnosticToggles(detailEl, request);
+    bindThinkingLlmCallLogExpansionCache(detailEl, request);
 
     // Update wrapper to show/hide tool list
     const wrapper = getThinkingCardWrapperEl(cardRoot);
@@ -2858,6 +2860,7 @@ function createThinkingCardHistorySnapshot(request) {
             : (Array.isArray(request.expandedThinkingDiagnosticKeys)
                 ? request.expandedThinkingDiagnosticKeys.slice()
                 : []),
+        thinkingLlmCallLog: cloneThinkingLlmCallLogStateForSnapshot(request.thinkingLlmCallLog),
         thinkingCardBodyHeightPx: Number.isFinite(request.thinkingCardBodyHeightPx)
             ? clampThinkingCardBodyHeightPx(request.thinkingCardBodyHeightPx)
             : null,
@@ -5859,6 +5862,31 @@ function bindThinkingDiagnosticToggles(container, request = getThinkingCardDispl
     });
 }
 
+function bindThinkingLlmCallLogExpansionCache(container, request = getThinkingCardDisplayRequest()) {
+    if (!(container instanceof HTMLElement) || !request || typeof request !== 'object') {
+        return;
+    }
+
+    const rows = container.querySelectorAll(THINKING_LLM_CALL_LOG_DETAILS_SELECTOR);
+    rows.forEach((detailsEl) => {
+        const key = normaliseThinkingActivityString(detailsEl.dataset.thinkingLlmCallLogKey);
+        if (!key || detailsEl.dataset.thinkingLlmCallLogCacheBound === 'true') {
+            return;
+        }
+
+        detailsEl.addEventListener('toggle', () => {
+            const currentRequest = request || getThinkingCardDisplayRequest();
+            const state = ensureThinkingLlmCallLogState(currentRequest);
+            const cache = ensureThinkingLlmCallLogEntryCache(state);
+            if (detailsEl.open || !cache) {
+                return;
+            }
+            cache.delete(key);
+        });
+        detailsEl.dataset.thinkingLlmCallLogCacheBound = 'true';
+    });
+}
+
 function formatThinkingDiagnosticFactValue(value) {
     if (typeof value === 'boolean') {
         return value ? 'Yes' : 'No';
@@ -8651,16 +8679,29 @@ function ensureThinkingLlmCallLogState(request) {
     if (!request || typeof request !== 'object') {
         return null;
     }
+    const currentRequestId = resolveThinkingRequestIdForLlmCallLog(request);
     const existing = (request.thinkingLlmCallLog && typeof request.thinkingLlmCallLog === 'object')
         ? request.thinkingLlmCallLog
         : null;
     if (existing) {
+        const existingRequestId = normaliseThinkingActivityString(existing.requestId);
+        if (existingRequestId && currentRequestId && existingRequestId !== currentRequestId) {
+            request.thinkingLlmCallLog = createThinkingLlmCallLogState(currentRequestId);
+            return request.thinkingLlmCallLog;
+        }
+        existing.requestId = existingRequestId || currentRequestId;
         if (!Array.isArray(existing.entries)) {
             existing.entries = [];
         }
+        ensureThinkingLlmCallLogEntryCache(existing);
         return existing;
     }
-    request.thinkingLlmCallLog = {
+    request.thinkingLlmCallLog = createThinkingLlmCallLogState(currentRequestId);
+    return request.thinkingLlmCallLog;
+}
+
+function createThinkingLlmCallLogState(requestId = '') {
+    return {
         loading: false,
         loaded: false,
         error: '',
@@ -8668,9 +8709,64 @@ function ensureThinkingLlmCallLogState(request) {
         totalCount: null,
         nextOffset: 0,
         hasMore: false,
-        requestId: ''
+        requestId: normaliseThinkingActivityString(requestId),
+        entryCache: new Map()
     };
-    return request.thinkingLlmCallLog;
+}
+
+function ensureThinkingLlmCallLogEntryCache(state) {
+    if (!state || typeof state !== 'object') {
+        return null;
+    }
+    if (state.entryCache instanceof Map) {
+        return state.entryCache;
+    }
+    const next = new Map();
+    const rawCache = state.entryCache;
+    if (Array.isArray(rawCache)) {
+        rawCache.forEach((pair) => {
+            if (!Array.isArray(pair) || pair.length < 2) {
+                return;
+            }
+            const key = normaliseThinkingActivityString(pair[0]);
+            if (key && pair[1] && typeof pair[1] === 'object') {
+                next.set(key, cloneThinkingLlmCallLogEntry(pair[1]));
+            }
+        });
+    } else if (rawCache && typeof rawCache === 'object') {
+        Object.entries(rawCache).forEach(([keyRaw, entry]) => {
+            const key = normaliseThinkingActivityString(keyRaw);
+            if (key && entry && typeof entry === 'object') {
+                next.set(key, cloneThinkingLlmCallLogEntry(entry));
+            }
+        });
+    }
+    state.entryCache = next;
+    return next;
+}
+
+function cloneThinkingLlmCallLogStateForSnapshot(state) {
+    if (!state || typeof state !== 'object') {
+        return null;
+    }
+    const cache = ensureThinkingLlmCallLogEntryCache(state);
+    return {
+        loading: false,
+        loaded: state.loaded === true,
+        error: normaliseThinkingActivityString(state.error),
+        entries: Array.isArray(state.entries)
+            ? state.entries.map((entry) => cloneThinkingLlmCallLogEntry(entry)).filter(Boolean)
+            : [],
+        totalCount: Number.isFinite(state.totalCount) ? Number(state.totalCount) : null,
+        nextOffset: Number.isFinite(state.nextOffset) ? Number(state.nextOffset) : 0,
+        hasMore: state.hasMore === true,
+        requestId: normaliseThinkingActivityString(state.requestId),
+        entryCache: cache instanceof Map
+            ? Array.from(cache.entries())
+                .map(([key, entry]) => [key, cloneThinkingLlmCallLogEntry(entry)])
+                .filter(([, entry]) => !!entry)
+            : []
+    };
 }
 
 function formatThinkingLlmCallTimestamp(isoString) {
@@ -8742,6 +8838,9 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
     const llmRequest = (entry?.llm_request && typeof entry.llm_request === 'object')
         ? entry.llm_request
         : null;
+    const explicitCallId = normaliseThinkingActivityString(
+        entry?.call_id || entry?.llm_call_id || llmRequest?.call_id
+    );
     const promptCapture = normaliseThinkingDiagnosticCapture(
         entry?.prompt_preview || entry?.llm_prompt_preview || llmRequest?.prompt
     );
@@ -8769,6 +8868,7 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
         : (Number.isFinite(existing?.sequence_no) ? Number(existing.sequence_no) : index + 1);
 
     return {
+        call_id: explicitCallId || existing?.call_id || '',
         sequence_no: sequenceNo,
         stage: normaliseThinkingActivityString(entry?.workflow_stage_id)
             || normaliseThinkingActivityString(entry?.stage)
@@ -8838,6 +8938,89 @@ function collectThinkingLiveLlmCallLogEntries(request) {
         });
 }
 
+function cloneThinkingLlmCallLogEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    return {
+        ...entry,
+        prompt: entry.prompt && typeof entry.prompt === 'object' ? { ...entry.prompt } : entry.prompt,
+        response: entry.response && typeof entry.response === 'object' ? { ...entry.response } : entry.response
+    };
+}
+
+function buildThinkingLlmCallLogEntryKey(entry, index = null) {
+    const explicitCallId = normaliseThinkingActivityString(
+        entry?.call_id || entry?.llm_call_id
+    );
+    if (explicitCallId) {
+        return buildThinkingDiagnosticKey('llm_exchange', 'call', explicitCallId);
+    }
+
+    if (Number.isFinite(entry?.sequence_no)) {
+        return buildThinkingDiagnosticKey('llm_exchange', 'seq', Number(entry.sequence_no));
+    }
+
+    const stage = normaliseThinkingActivityString(entry?.stage) || 'unscoped';
+    const callType = normaliseThinkingActivityString(entry?.call_type) || 'llm_call';
+    const model = normaliseThinkingActivityString(entry?.model) || 'unknown_model';
+    const provider = normaliseThinkingActivityString(entry?.provider) || 'unknown_provider';
+    const timestamp = normaliseThinkingActivityString(entry?.completed_at_utc)
+        || normaliseThinkingActivityString(entry?.started_at_utc)
+        || normaliseThinkingActivityString(entry?.at_utc);
+    return buildThinkingDiagnosticKey(
+        'llm_exchange',
+        stage,
+        callType,
+        provider,
+        model,
+        timestamp || (Number.isFinite(index) ? Number(index) : 'unknown')
+    );
+}
+
+function rememberThinkingLlmCallLogEntries(state, entries) {
+    const cache = ensureThinkingLlmCallLogEntryCache(state);
+    if (!cache || !Array.isArray(entries)) {
+        return;
+    }
+    entries.forEach((entry, index) => {
+        const key = buildThinkingLlmCallLogEntryKey(entry, index);
+        const copy = cloneThinkingLlmCallLogEntry(entry);
+        if (key && copy) {
+            cache.set(key, copy);
+        }
+    });
+}
+
+function collectCachedExpandedThinkingLlmCallLogEntries(request, state, visibleEntries) {
+    const cache = ensureThinkingLlmCallLogEntryCache(state);
+    if (!cache || cache.size === 0 || !request || typeof request !== 'object') {
+        return [];
+    }
+
+    const expandedKeys = ensureThinkingDiagnosticExpansionState(request);
+    if (!(expandedKeys instanceof Set) || expandedKeys.size === 0) {
+        return [];
+    }
+
+    const visibleKeys = new Set(
+        (Array.isArray(visibleEntries) ? visibleEntries : [])
+            .map((entry, index) => buildThinkingLlmCallLogEntryKey(entry, index))
+            .filter(Boolean)
+    );
+    const cachedEntries = [];
+    expandedKeys.forEach((key) => {
+        if (!cache.has(key) || visibleKeys.has(key)) {
+            return;
+        }
+        const entry = cloneThinkingLlmCallLogEntry(cache.get(key));
+        if (entry) {
+            cachedEntries.push(entry);
+        }
+    });
+    return cachedEntries;
+}
+
 function combineThinkingLlmCallLogEntries(liveEntries, archivedEntries, archiveLoaded) {
     const live = Array.isArray(liveEntries) ? liveEntries : [];
     const archived = Array.isArray(archivedEntries) ? archivedEntries : [];
@@ -8876,7 +9059,8 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
     }
 
-    return entries.map((entry) => {
+    return entries.map((entry, index) => {
+        const diagnosticKey = buildThinkingLlmCallLogEntryKey(entry, index);
         const seq = Number.isFinite(entry?.sequence_no) ? Number(entry.sequence_no) : null;
         const stage = normaliseThinkingActivityString(entry?.stage) || 'unscoped';
         const callType = normaliseThinkingActivityString(entry?.call_type) || 'llm_call';
@@ -8917,7 +9101,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
             ? `<div class="thinking-card-diagnostic-section-title">Response${responseMeta}</div><pre class="thinking-card-diagnostic-pre"><code>${escapeHtml(responseText)}</code></pre>`
             : '';
 
-        return `<details class="thinking-card-diagnostic" data-thinking-diagnostic-key="llm_exchange_${escapeHtml(String(seq || 'x'))}" data-thinking-llm-call-at-utc="${escapeHtml(atUtc || '')}" data-thinking-llm-call-model="${escapeHtml(model)}">
+        return `<details class="thinking-card-diagnostic" data-thinking-diagnostic-key="${escapeHtml(diagnosticKey)}" data-thinking-llm-call-log-key="${escapeHtml(diagnosticKey)}" data-thinking-llm-call-at-utc="${escapeHtml(atUtc || '')}" data-thinking-llm-call-model="${escapeHtml(model)}">
             <summary>${escapeHtml(headerBits.join(' · '))}</summary>
             <div class="thinking-card-diagnostic-content">
                 ${promptBlock}
@@ -8944,7 +9128,11 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
     const buttonLabel = state.loaded ? 'Refresh full LLM call log' : 'View full LLM call log';
     const loadButton = `<button type="button" class="btn thinking-card-action" data-thinking-action="llm-call-log-toggle">${escapeHtml(buttonLabel)}</button>`;
     const liveEntries = collectThinkingLiveLlmCallLogEntries(request);
-    const visibleEntries = combineThinkingLlmCallLogEntries(liveEntries, state.entries, state.loaded);
+    const baseVisibleEntries = combineThinkingLlmCallLogEntries(liveEntries, state.entries, state.loaded);
+    rememberThinkingLlmCallLogEntries(state, baseVisibleEntries);
+    const cachedExpandedEntries = collectCachedExpandedThinkingLlmCallLogEntries(request, state, baseVisibleEntries);
+    const visibleEntries = [...baseVisibleEntries, ...cachedExpandedEntries];
+    const hasVisibleEntries = visibleEntries.length > 0;
 
     const statusLine = state.loading
         ? '<div class="thinking-card-diagnostic-text">Loading full LLM call log...</div>'
@@ -8952,17 +9140,23 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
             ? `<div class="thinking-card-diagnostic-text">${escapeHtml(state.error)}</div>`
             : '');
 
-    const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error))
-        ? (liveEntries.length > 0
-            ? '<div class="thinking-card-diagnostic-text">Showing live LLM events as they arrive. Load the full archived log for exact completed exchanges.</div>'
-            : '<div class="thinking-card-diagnostic-text">No live LLM events have arrived yet. Load the full archived log for completed exchanges.</div>')
+    const cachedExpandedLine = (!state.loaded && liveEntries.length === 0 && cachedExpandedEntries.length > 0)
+        ? '<div class="thinking-card-diagnostic-text">Keeping previously expanded LLM exchange details visible while live events refresh.</div>'
+        : '';
+
+    const liveLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && liveEntries.length > 0)
+        ? '<div class="thinking-card-diagnostic-text">Showing live LLM events as they arrive. Load the full archived log for exact completed exchanges.</div>'
+        : '';
+
+    const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && !hasVisibleEntries)
+        ? '<div class="thinking-card-diagnostic-text">No live LLM events have arrived yet. Load the full archived log for completed exchanges.</div>'
         : '';
 
     const countLine = Number.isFinite(state.totalCount)
         ? `<div class="thinking-card-diagnostic-text">Showing ${escapeHtml(String((state.entries || []).length))} of ${escapeHtml(String(state.totalCount))} exchanges.</div>`
         : '';
 
-    const entriesHtml = (state.loaded || liveEntries.length > 0)
+    const entriesHtml = (state.loaded || liveEntries.length > 0 || cachedExpandedEntries.length > 0)
         ? renderThinkingLlmCallLogEntriesHTML(visibleEntries)
         : '';
 
@@ -8975,6 +9169,8 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         <div class="thinking-card-diagnostic-actions">${loadButton}${loadMoreButton}</div>
         ${countLine}
         ${statusLine}
+        ${liveLine}
+        ${cachedExpandedLine}
         ${unloadedLine}
         ${entriesHtml}
     </section>`;

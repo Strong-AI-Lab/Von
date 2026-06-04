@@ -28,6 +28,7 @@ describe('thinking card selector telemetry rendering', () => {
         const { __testOnly_renderThinkingCardBodyHTML } = require(chatTabModulePath);
 
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             latestProgress: {
                 phase: 'workflow_dispatch',
                 stage: 'workflow_dispatch',
@@ -104,5 +105,58 @@ describe('thinking card selector telemetry rendering', () => {
         expect(html).toContain('Requested selector prompt ids');
         expect(html).toContain('#V#chat_turn_classifier_prompt');
         expect(html).toContain('Selector response');
+    });
+
+    test('keeps expanded live LLM interaction details when a refresh omits live events', () => {
+        const { __testOnly_renderThinkingCardBodyHTML } = require(chatTabModulePath);
+
+        const request = {
+            clientRequestId: 'req-llm-expanded-stability',
+            latestProgress: {
+                request_id: 'req-llm-expanded-stability',
+                status: 'running',
+                stage: 'selector_preparation',
+                phase: 'selector_preparation',
+                diagnostic_events: [
+                    {
+                        sequence_no: 84,
+                        workflow_stage_id: 'selector_preparation',
+                        model: 'gpt-oss:20b',
+                        provider: 'ollama',
+                        llm_request_state: 'completed',
+                        llm_request_sent_at_utc: '2026-06-03T15:02:47.641Z',
+                        at_utc: '2026-06-03T15:03:51.917Z',
+                        duration_ms: 60557,
+                        prompt_preview: {
+                            text: 'Select workflow for this user request: Look in recent email for arXiv papers.'
+                        },
+                        llm_response_preview: {
+                            text: '{"workflow_id":"#V#zhan_gmail_arxiv_ingestion_workflow"}'
+                        }
+                    }
+                ]
+            }
+        };
+
+        const firstHtml = __testOnly_renderThinkingCardBodyHTML(request);
+        const fixture = document.createElement('div');
+        fixture.innerHTML = firstHtml;
+        const row = fixture.querySelector('details[data-thinking-llm-call-log-key]');
+
+        expect(row).not.toBeNull();
+        expect(firstHtml).toContain('Select workflow for this user request');
+
+        request.expandedThinkingDiagnosticKeys = new Set([row.dataset.thinkingDiagnosticKey]);
+        request.latestProgress = {
+            ...request.latestProgress,
+            diagnostic_events: []
+        };
+
+        const refreshedHtml = __testOnly_renderThinkingCardBodyHTML(request);
+
+        expect(refreshedHtml).toContain('Keeping previously expanded LLM exchange details visible');
+        expect(refreshedHtml).toContain('Select workflow for this user request');
+        expect(refreshedHtml).toContain('#V#zhan_gmail_arxiv_ingestion_workflow');
+        expect(refreshedHtml).not.toContain('No live LLM events have arrived yet');
     });
 });
