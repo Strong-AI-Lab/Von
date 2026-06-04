@@ -317,6 +317,84 @@ def _progress_number(value: Any) -> float | None:
     return None
 
 
+def _normalise_progress_fact_value(value: Any, *, limit: int = 320) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        if not cleaned:
+            return None
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: max(0, limit - 3)].rstrip()}..."
+    if isinstance(value, list):
+        items = []
+        for item in value[:5]:
+            normalised = _normalise_progress_fact_value(item, limit=limit)
+            if normalised is not None:
+                items.append(normalised)
+        return items or None
+    return None
+
+
+def _normalise_progress_facts(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        raw_facts = value.get("facts")
+    else:
+        raw_facts = value
+    if not isinstance(raw_facts, list):
+        return []
+
+    facts: list[dict[str, Any]] = []
+    for raw_fact in raw_facts:
+        if not isinstance(raw_fact, Mapping):
+            continue
+        fact_id = _progress_str(raw_fact.get("fact_id")) or _progress_str(
+            raw_fact.get("id")
+        )
+        label = _progress_str(raw_fact.get("label"))
+        if not fact_id or not label:
+            continue
+        status = _progress_str(raw_fact.get("status")) or (
+            "available" if "value" in raw_fact else "missing"
+        )
+        fact: dict[str, Any] = {
+            "schema_version": _progress_str(raw_fact.get("schema_version"))
+            or "workflow_progress_projection.v1",
+            "fact_id": fact_id,
+            "label": label,
+            "status": status,
+            "present": bool(raw_fact.get("present")),
+            "redacted": bool(raw_fact.get("redacted")),
+            "truncated": bool(raw_fact.get("truncated")),
+        }
+        for key in (
+            "value_kind",
+            "visibility",
+            "source_path",
+            "resolved_path",
+            "contract_id",
+            "redaction_policy",
+            "reason_code",
+            "workflow_id",
+            "state_id",
+            "action_id",
+        ):
+            text_value = _progress_str(raw_fact.get(key))
+            if text_value:
+                fact[key] = text_value
+        if "value" in raw_fact and not fact["redacted"]:
+            normalised_value = _normalise_progress_fact_value(raw_fact.get("value"))
+            if normalised_value is not None:
+                fact["value"] = normalised_value
+        facts.append(fact)
+        if len(facts) >= 12:
+            break
+    return facts
+
+
 def _normalise_selected_workflow_execution_event(
     update: Mapping[str, Any],
     *,
@@ -369,6 +447,11 @@ def _normalise_selected_workflow_execution_event(
     duration_ms = _progress_number(event.get("duration_ms"))
     if duration_ms is not None:
         normalised["duration_ms"] = int(max(0.0, duration_ms))
+    progress_facts = _normalise_progress_facts(
+        event.get("progress_facts") or update.get("progress_facts")
+    )
+    if progress_facts:
+        normalised["progress_facts"] = progress_facts
     return normalised
 
 
@@ -4590,6 +4673,12 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "liveness_reason": liveness.get("liveness_reason"),
             "stall_detected": liveness.get("stall_detected"),
         }
+        progress_facts = _normalise_progress_facts(safe_update.get("progress_facts"))
+        if "progress_facts" in safe_update:
+            if progress_facts:
+                merged["progress_facts"] = progress_facts
+            else:
+                merged.pop("progress_facts", None)
         call_id = _progress_str(safe_update.get("call_id"))
         if call_id:
             event_entry["call_id"] = call_id
@@ -4693,6 +4782,14 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             sequence_no=sequence_no,
             at_utc=now_utc,
         )
+        if not progress_facts and selected_workflow_execution_event is not None:
+            progress_facts = _normalise_progress_facts(
+                selected_workflow_execution_event.get("progress_facts")
+            )
+            if progress_facts:
+                merged["progress_facts"] = progress_facts
+        if progress_facts:
+            event_entry["progress_facts"] = progress_facts
         if selected_workflow_execution_event is not None:
             event_entry["selected_workflow_execution_event"] = dict(
                 selected_workflow_execution_event
@@ -4763,6 +4860,8 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                     ),
                 }
             )
+            if progress_facts:
+                existing_summary["progress_facts"] = progress_facts
             stage_summaries[live_stage_id] = existing_summary
         merged["_stage_summaries"] = stage_summaries
 

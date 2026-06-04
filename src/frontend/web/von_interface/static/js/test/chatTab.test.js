@@ -4181,6 +4181,115 @@ describe('thinking activity history normalisation', () => {
         expect(text).toContain('Finalising response after Workflow dispatch preparation');
     });
 
+    test('renders workflow-authored progress facts by thinking-card mode', () => {
+        const request = {
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'selected_workflow_execution', stage_label: 'Selected workflow execution' }
+                ]
+            },
+            latestProgress: {
+                phase: 'selected_workflow_execution',
+                stage: 'selected_workflow_execution',
+                selected_workflow_id: '#V#research_triage_workflow',
+                selected_workflow_name: 'Research triage workflow',
+                selected_workflow_execution: {
+                    schema_version: 'selected_workflow_execution.v1',
+                    selected_workflow_id: '#V#research_triage_workflow',
+                    selected_workflow_name: 'Research triage workflow',
+                    event_count: 1,
+                    latest_event: {
+                        status: 'workflow_step_complete',
+                        event_kind: 'workflow_step_complete',
+                        workflow_id: '#V#research_triage_workflow',
+                        selected_workflow_id: '#V#research_triage_workflow',
+                        state_id: 'read_message',
+                        action_id: 'gmail_read',
+                        progress_facts: [
+                            {
+                                schema_version: 'workflow_progress_projection.v1',
+                                fact_id: 'email_subject',
+                                label: 'Email subject',
+                                status: 'available',
+                                present: true,
+                                redacted: false,
+                                truncated: false,
+                                value: 'Research digest: arXiv attention paper',
+                                visibility: 'default',
+                                source_path: 'context.email.subject',
+                                resolved_path: 'context.email.subject',
+                                contract_id: '#V#email_subject_progress_fact'
+                            },
+                            {
+                                schema_version: 'workflow_progress_projection.v1',
+                                fact_id: 'paper_concept',
+                                label: 'Paper concept',
+                                status: 'available',
+                                present: true,
+                                redacted: false,
+                                truncated: false,
+                                value: '#V#paper_attention_is_all_you_need',
+                                visibility: 'expert',
+                                source_path: 'action_outputs.paper.concept_id'
+                            },
+                            {
+                                schema_version: 'workflow_progress_projection.v1',
+                                fact_id: 'sender_email',
+                                label: 'Sender email',
+                                status: 'redacted',
+                                present: true,
+                                redacted: true,
+                                reason_code: 'redaction_policy_missing',
+                                visibility: 'expert',
+                                source_path: 'context.email.sender'
+                            }
+                        ]
+                    },
+                    events: [
+                        {
+                            status: 'workflow_step_complete',
+                            event_kind: 'workflow_step_complete',
+                            workflow_id: '#V#research_triage_workflow',
+                            selected_workflow_id: '#V#research_triage_workflow',
+                            state_id: 'read_message',
+                            action_id: 'gmail_read'
+                        }
+                    ]
+                }
+            }
+        };
+
+        const defaultContainer = document.createElement('div');
+        defaultContainer.innerHTML = __testOnly_renderThinkingCardBodyHTML({
+            ...request,
+            thinkingCardMode: 'default'
+        });
+        const defaultText = defaultContainer.textContent || '';
+        expect(defaultText).toContain('Email subject: Research digest: arXiv attention paper');
+        expect(defaultText).not.toContain('Paper concept');
+        expect(defaultText).not.toContain('Sender email');
+
+        const expertContainer = document.createElement('div');
+        expertContainer.innerHTML = __testOnly_renderThinkingCardBodyHTML({
+            ...request,
+            thinkingCardMode: 'expert'
+        });
+        const expertText = expertContainer.textContent || '';
+        expect(expertText).toContain('Projected progress facts');
+        expect(expertText).toContain('Paper concept: #V#paper_attention_is_all_you_need');
+        expect(expertText).toContain('Sender email: redacted');
+
+        const debugContainer = document.createElement('div');
+        debugContainer.innerHTML = __testOnly_renderThinkingCardBodyHTML({
+            ...request,
+            thinkingCardMode: 'debug'
+        });
+        const debugText = debugContainer.textContent || '';
+        expect(debugText).toContain('source: context.email.subject');
+        expect(debugText).toContain('contract: #V#email_subject_progress_fact');
+        expect(debugText).toContain('reason: redaction_policy_missing');
+    });
+
     test('surfaces interpretable execution path for general tool-use turns', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             thinkingCardMode: 'expert',

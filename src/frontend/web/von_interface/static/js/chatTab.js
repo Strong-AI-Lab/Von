@@ -5933,6 +5933,167 @@ function buildThinkingDiagnosticFactsHTML(facts) {
     return `<dl class="thinking-card-diagnostic-facts">${items.join('')}</dl>`;
 }
 
+function normaliseThinkingProgressFactValue(value) {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+    if (Number.isFinite(value)) {
+        return Number(value);
+    }
+    if (typeof value === 'string') {
+        return normaliseThinkingActivityString(value);
+    }
+    if (Array.isArray(value)) {
+        const values = value
+            .map((item) => normaliseThinkingProgressFactValue(item))
+            .filter((item) => item !== null && item !== undefined && item !== '');
+        return values.length > 0 ? values : null;
+    }
+    return null;
+}
+
+function normaliseThinkingProgressFacts(value) {
+    const rawFacts = Array.isArray(value)
+        ? value
+        : (Array.isArray(value?.facts) ? value.facts : []);
+    const facts = [];
+    for (const rawFact of rawFacts) {
+        if (!rawFact || typeof rawFact !== 'object') {
+            continue;
+        }
+        const factId = normaliseThinkingActivityString(rawFact.fact_id || rawFact.id);
+        const label = normaliseThinkingActivityString(rawFact.label);
+        if (!factId || !label) {
+            continue;
+        }
+        const fact = {
+            schema_version: normaliseThinkingActivityString(rawFact.schema_version) || 'workflow_progress_projection.v1',
+            fact_id: factId,
+            label,
+            status: normaliseThinkingActivityString(rawFact.status)
+                || (Object.prototype.hasOwnProperty.call(rawFact, 'value') ? 'available' : 'missing'),
+            present: rawFact.present === true,
+            redacted: rawFact.redacted === true,
+            truncated: rawFact.truncated === true,
+            value_kind: normaliseThinkingActivityString(rawFact.value_kind),
+            visibility: normaliseThinkingActivityString(rawFact.visibility),
+            source_path: normaliseThinkingActivityString(rawFact.source_path),
+            resolved_path: normaliseThinkingActivityString(rawFact.resolved_path),
+            contract_id: normaliseThinkingActivityString(rawFact.contract_id),
+            redaction_policy: normaliseThinkingActivityString(rawFact.redaction_policy),
+            reason_code: normaliseThinkingActivityString(rawFact.reason_code),
+            workflow_id: normaliseThinkingActivityString(rawFact.workflow_id),
+            state_id: normaliseThinkingActivityString(rawFact.state_id),
+            action_id: normaliseThinkingActivityString(rawFact.action_id)
+        };
+        if (Object.prototype.hasOwnProperty.call(rawFact, 'value') && !fact.redacted) {
+            fact.value = normaliseThinkingProgressFactValue(rawFact.value);
+        }
+        facts.push(fact);
+        if (facts.length >= 12) {
+            break;
+        }
+    }
+    return facts;
+}
+
+function isThinkingProgressFactVisibleForMode(fact, mode = THINKING_CARD_MODE_DEFAULT) {
+    if (!fact || typeof fact !== 'object') {
+        return false;
+    }
+    const renderMode = normaliseThinkingCardMode(mode);
+    const visibility = String(fact.visibility || '').trim().toLowerCase();
+    if (visibility === 'hidden' || visibility === 'none' || visibility === 'telemetry_only') {
+        return false;
+    }
+    if (renderMode === THINKING_CARD_MODE_DEBUG) {
+        return true;
+    }
+    if (renderMode === THINKING_CARD_MODE_EXPERT) {
+        return true;
+    }
+    if (visibility === 'expert' || visibility === 'debug' || visibility === 'diagnostic') {
+        return false;
+    }
+    return fact.redacted !== true && fact.status === 'available' && fact.value !== null && fact.value !== undefined && fact.value !== '';
+}
+
+function formatThinkingProgressFactValueText(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => formatThinkingProgressFactValueText(item))
+            .filter(Boolean)
+            .join(', ');
+    }
+    if (typeof value === 'boolean') {
+        return value ? 'Yes' : 'No';
+    }
+    if (Number.isFinite(value)) {
+        return String(value);
+    }
+    return normaliseThinkingActivityString(value);
+}
+
+function formatThinkingProgressFactInline(fact, mode = THINKING_CARD_MODE_DEFAULT) {
+    if (!isThinkingProgressFactVisibleForMode(fact, mode)) {
+        return '';
+    }
+    const label = normaliseThinkingActivityString(fact.label);
+    if (!label) {
+        return '';
+    }
+    const renderMode = normaliseThinkingCardMode(mode);
+    const valueText = formatThinkingProgressFactValueText(fact.value);
+    let body = valueText;
+    if (fact.redacted === true) {
+        body = 'redacted';
+    } else if (!body && renderMode !== THINKING_CARD_MODE_DEFAULT) {
+        body = formatThinkingActivityFallbackLabel(fact.status || fact.reason_code || 'missing');
+    }
+    if (!body) {
+        return '';
+    }
+    const suffixes = [];
+    if (fact.truncated === true) {
+        suffixes.push('truncated');
+    }
+    if (renderMode === THINKING_CARD_MODE_DEBUG) {
+        if (fact.source_path) {
+            suffixes.push(`source: ${fact.source_path}`);
+        }
+        if (fact.resolved_path && fact.resolved_path !== fact.source_path) {
+            suffixes.push(`resolved: ${fact.resolved_path}`);
+        }
+        if (fact.contract_id) {
+            suffixes.push(`contract: ${fact.contract_id}`);
+        }
+        if (fact.reason_code) {
+            suffixes.push(`reason: ${fact.reason_code}`);
+        }
+    } else if (renderMode === THINKING_CARD_MODE_EXPERT && (fact.redacted || fact.reason_code)) {
+        suffixes.push(formatThinkingActivityFallbackLabel(fact.reason_code || fact.redaction_policy || 'redacted'));
+    }
+    return `${label}: ${body}${suffixes.length > 0 ? ` (${suffixes.join('; ')})` : ''}`;
+}
+
+function formatThinkingProgressFactsInline(value, mode = THINKING_CARD_MODE_DEFAULT, options = {}) {
+    const facts = normaliseThinkingProgressFacts(value)
+        .map((fact) => formatThinkingProgressFactInline(fact, mode))
+        .filter(Boolean);
+    const limit = Number.isFinite(options.limit) ? Math.max(1, Number(options.limit)) : 3;
+    return facts.slice(0, limit).join(' · ');
+}
+
+function buildThinkingProgressFactsSectionHTML(value, mode = THINKING_CARD_MODE_EXPERT) {
+    const lines = normaliseThinkingProgressFacts(value)
+        .map((fact) => formatThinkingProgressFactInline(fact, mode))
+        .filter(Boolean);
+    if (lines.length === 0) {
+        return '';
+    }
+    return buildThinkingDiagnosticListHTML('Projected progress facts', lines);
+}
+
 function buildThinkingDiagnosticListHTML(title, values, options = {}) {
     const items = Array.isArray(values)
         ? values
@@ -6417,6 +6578,11 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         || (!llmInputRecorded);
     const missingRecordedLlmOutput = stageDiagnostic?.missing_recorded_llm_output === true
         || (!llmOutputRecorded);
+    const latestProgressFacts = normaliseThinkingProgressFacts(
+        stageDiagnostic?.progress_facts
+        || latestStageEvent?.progress_facts
+        || latestProgress?.progress_facts
+    );
 
     const data = {
         stage_id: cleanStageId,
@@ -6484,7 +6650,8 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
             : null,
         llm_fallback_candidate_count: Number.isFinite(latestLlmExchange?.fallback_candidate_count)
             ? Number(latestLlmExchange.fallback_candidate_count)
-            : null
+            : null,
+        progress_facts: latestProgressFacts
     };
 
     if (
@@ -6509,6 +6676,13 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
             ? Number(selectedWorkflowExecution.event_count)
             : 0;
         data.latest_selected_workflow_event = selectedWorkflowExecution?.latest_event || null;
+        const selectedProgressFacts = normaliseThinkingProgressFacts(
+            data.latest_selected_workflow_event?.progress_facts
+            || selectedWorkflowExecution?.progress_facts
+        );
+        if (selectedProgressFacts.length > 0) {
+            data.progress_facts = selectedProgressFacts;
+        }
     }
 
     data.latest_subtask = normaliseThinkingActivityString(stageDiagnostic?.latest_subtask)
@@ -6888,6 +7062,10 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
                 data.selected_workflow_execution,
                 workflowDiscovery
             )
+        ));
+        sections.push(buildThinkingProgressFactsSectionHTML(
+            data.progress_facts,
+            THINKING_CARD_MODE_DEBUG
         ));
     } else if (data.stage_id === 'workflow_discovery') {
         facts.push(
@@ -7388,6 +7566,10 @@ function renderThinkingWorkflowStageExpertDataHTML(data, workflowDiscovery = nul
                 workflowDiscovery
             )
         ));
+        sections.push(buildThinkingProgressFactsSectionHTML(
+            data.progress_facts,
+            THINKING_CARD_MODE_EXPERT
+        ));
     } else if (data.stage_id === 'workflow_discovery') {
         facts.push(
             { label: 'Search sources', value: data.search_sources },
@@ -7739,14 +7921,31 @@ function normaliseThinkingSelectedWorkflowExecution(rawExecution, workflowDiscov
             duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
             sequence_no: Number.isFinite(entry.sequence_no) ? Number(entry.sequence_no) : null,
             at_utc: normaliseThinkingActivityString(entry.at_utc) || null,
+            progress_facts: normaliseThinkingProgressFacts(entry.progress_facts),
         }));
-    const latestEvent = events.length > 0
+    let latestEvent = events.length > 0
         ? events[events.length - 1]
         : (
             rawExecution.latest_event && typeof rawExecution.latest_event === 'object'
                 ? normaliseThinkingSelectedWorkflowExecution({ events: [rawExecution.latest_event] }, workflowDiscovery)?.latest_event
                 : null
         );
+    if (
+        latestEvent
+        && (!Array.isArray(latestEvent.progress_facts) || latestEvent.progress_facts.length === 0)
+        && rawExecution.latest_event
+        && typeof rawExecution.latest_event === 'object'
+    ) {
+        const rawLatestProgressFacts = normaliseThinkingProgressFacts(
+            rawExecution.latest_event.progress_facts
+        );
+        if (rawLatestProgressFacts.length > 0) {
+            latestEvent = {
+                ...latestEvent,
+                progress_facts: rawLatestProgressFacts
+            };
+        }
+    }
     const workflowId = normaliseThinkingActivityString(rawExecution.selected_workflow_id)
         || normaliseThinkingActivityString(rawExecution.workflow_id)
         || normaliseThinkingActivityString(latestEvent?.selected_workflow_id)
@@ -7774,6 +7973,9 @@ function normaliseThinkingSelectedWorkflowExecution(rawExecution, workflowDiscov
             : events.length,
         latest_event: latestEvent,
         events,
+        progress_facts: normaliseThinkingProgressFacts(
+            rawExecution.progress_facts || latestEvent?.progress_facts
+        ),
         summary_text: normaliseThinkingActivityString(rawExecution.summary_text)
             || formatThinkingSelectedWorkflowExecutionEvent(latestEvent, workflowDiscovery)
             || null,
@@ -7847,9 +8049,14 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
             workflowDiscovery
         );
         if (latestLine) {
+            const projectedFactsLine = formatThinkingProgressFactsInline(
+                execution?.latest_event?.progress_facts || execution?.progress_facts,
+                THINKING_CARD_MODE_DEFAULT
+            );
+            const detailLine = [latestLine, projectedFactsLine].filter(Boolean).join(' · ');
             return {
-                text: latestLine,
-                html: escapeHtml(latestLine)
+                text: detailLine,
+                html: escapeHtml(detailLine)
             };
         }
         if (execution?.summary_text) {
@@ -8468,7 +8675,11 @@ function buildSelectedWorkflowExecutionStageRow(summary, workflowDiscovery = nul
     const detailBits = [
         workflowText ? `Workflow: ${workflowText}` : '',
         instanceId ? `Instance: ${instanceId}` : '',
-        eventLine || summary?.summary_text || ''
+        eventLine || summary?.summary_text || '',
+        formatThinkingProgressFactsInline(
+            summary?.latest_event?.progress_facts || summary?.progress_facts,
+            THINKING_CARD_MODE_DEFAULT
+        )
     ].filter(Boolean);
     const latestStatus = normaliseThinkingActivityString(summary?.latest_event?.status);
     const state = summary?.action_failure_count > 0 || latestStatus === 'workflow_execution_failed'
@@ -8493,7 +8704,10 @@ function buildSelectedWorkflowExecutionStageRow(summary, workflowDiscovery = nul
             selected_workflow_name: normaliseThinkingActivityString(summary?.selected_workflow_name) || null,
             workflow_instance_id: instanceId || null,
             selected_workflow_execution: summary?.events ? { ...summary } : null,
-            custom_workflow_execution: { ...summary }
+            custom_workflow_execution: { ...summary },
+            progress_facts: normaliseThinkingProgressFacts(
+                summary?.latest_event?.progress_facts || summary?.progress_facts
+            )
         }
     };
 }

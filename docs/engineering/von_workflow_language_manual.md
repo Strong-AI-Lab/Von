@@ -692,8 +692,64 @@ Per-state metadata keys currently used:
 - `fork_id`
 - `join_fork_id`
 - `variable_declarations`
+- `progress_projection`
 
-### 8.1 Runtime Policy Metadata
+### 8.1 Thinking-Card Progress Projection Metadata
+
+Workflow and state metadata MAY declare `progress_projection` (also accepted
+as `workflow_progress_projection` or `thinking_card_progress_projection`) to
+name specific facts that the Thinking card may show while a step runs or
+completes. This is the authored surface for user-visible salient progress
+facts. Python support code may validate, redact, truncate, transport, and
+render the facts, but it MUST NOT infer domain-specific items such as email
+subjects or paper titles from workflow IDs, tool names, or source strings.
+
+Example:
+
+```json
+{
+  "schema_version": "workflow_progress_projection.v1",
+  "facts": [
+    {
+      "fact_id": "email_subject",
+      "label": "Email subject",
+      "source_path": "context.email.subject",
+      "value_kind": "title",
+      "visibility": "default",
+      "contract_id": "#V#email_subject_progress_fact"
+    },
+    {
+      "fact_id": "paper_concept",
+      "label": "Paper concept",
+      "source_path": "action_outputs.paper.concept_id",
+      "value_kind": "concept_id",
+      "visibility": "expert"
+    }
+  ]
+}
+```
+
+Projection facts are evaluated against `context`, `context_after`,
+`context_before`, `action_outputs`/`output_payload`, and `event` roots. Each
+fact SHOULD include a stable `fact_id`, a human label, `source_path`,
+`value_kind`, `visibility`, and, where useful, a Vontology `contract_id` that
+names the projection contract.
+
+Visibility is a display-density hint:
+
+- `default`, `display`, `user`, or `thinking_card_default`: eligible for the
+  compact user card when the value is available and not redacted.
+- `expert`: shown only in expert/debug expanded details.
+- `debug`: shown only in debug expanded details.
+- `hidden`, `none`, or `telemetry_only`: carried only as telemetry and not
+  displayed by the Thinking card.
+
+Sensitive facts MUST either declare a redaction policy or explicitly set
+`allow_raw=true`. Sensitive facts without a redaction policy fail closed:
+telemetry records that the projection existed and was redacted, but no raw
+value is rendered.
+
+### 8.2 Runtime Policy Metadata
 
 Canonical workflow-step runtime policy payloads are stored as singleton text relations on the step concept:
 

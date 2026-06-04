@@ -50,6 +50,11 @@ from .plan_state_runtime import (
     evaluate_workflow_completion_gate,
     mark_workflow_plan_state_entry,
 )
+from .progress_projection import (
+    LAST_WORKFLOW_PROGRESS_FACTS_KEY,
+    WORKFLOW_PROGRESS_FACTS_KEY,
+    build_progress_facts_for_step,
+)
 from .trace_model import WorkflowExecutionTrace
 
 logger = logging.getLogger(__name__)
@@ -1956,6 +1961,7 @@ class WorkflowExecutor:
         *,
         definition: WorkflowDefinition,
         state_id: str,
+        state_metadata: Mapping[str, Any],
         action_id: str,
         state_attempt: int,
         result: WorkflowActionResult,
@@ -1981,6 +1987,25 @@ class WorkflowExecutor:
             context_after=context,
         )
         step_envelope["state_attempt"] = state_attempt
+        progress_facts = build_progress_facts_for_step(
+            workflow_id=definition.workflow_id,
+            state_id=state_id,
+            action_id=action_id,
+            workflow_metadata=definition.metadata,
+            state_metadata=state_metadata,
+            context_before=context_before,
+            context_after=context,
+            action_outputs=action_output_snapshot,
+            state_attempt=state_attempt,
+        )
+        if progress_facts:
+            step_envelope["progress_facts"] = progress_facts
+            existing_facts = context.get(WORKFLOW_PROGRESS_FACTS_KEY)
+            if not isinstance(existing_facts, list):
+                existing_facts = []
+                context[WORKFLOW_PROGRESS_FACTS_KEY] = existing_facts
+            existing_facts.extend(progress_facts)
+            context[LAST_WORKFLOW_PROGRESS_FACTS_KEY] = progress_facts[-1]
         append_step_result_envelope(context=context, envelope=step_envelope)
 
         if environment.step_callback:
@@ -2125,6 +2150,7 @@ class WorkflowExecutor:
                 self._append_step_execution_envelope(
                     definition=definition,
                     state_id=state_id,
+                    state_metadata=state_spec.metadata,
                     action_id=action_id,
                     state_attempt=state_attempt,
                     result=result,

@@ -35414,11 +35414,36 @@ class InternalMCPChatOrchestrator:
                     "state_attempt": envelope.get("state_attempt"),
                     "duration_ms": envelope.get("duration_ms"),
                 }
+                progress_facts = envelope.get("progress_facts")
+                if isinstance(progress_facts, list) and progress_facts:
+                    payload["progress_facts"] = [
+                        dict(item) for item in progress_facts if isinstance(item, Mapping)
+                    ]
                 if (
                     isinstance(selected_workflow_id, str)
                     and selected_workflow_id.strip()
                     and workflow_id == selected_workflow_id
                 ):
+                    selected_execution_event: dict[str, Any] = {
+                        "status": status,
+                        "event_kind": status,
+                        "workflow_id": workflow_id,
+                        "selected_workflow_id": selected_workflow_id,
+                        "state_id": envelope.get("state_id"),
+                        "action_id": envelope.get("action_id"),
+                        "action_status": envelope.get("action_status"),
+                        "action_outcome": envelope.get("action_outcome")
+                        or envelope.get("outcome"),
+                        "execution_mode": envelope.get("execution_mode"),
+                        "state_attempt": envelope.get("state_attempt"),
+                        "duration_ms": envelope.get("duration_ms"),
+                    }
+                    if isinstance(progress_facts, list) and progress_facts:
+                        selected_execution_event["progress_facts"] = [
+                            dict(item)
+                            for item in progress_facts
+                            if isinstance(item, Mapping)
+                        ]
                     payload.update(
                         {
                             "stage": "selected_workflow_execution",
@@ -35427,20 +35452,7 @@ class InternalMCPChatOrchestrator:
                             "workflow_stage_id": "selected_workflow_execution",
                             "selected_workflow_id": selected_workflow_id,
                             "selected_execution_mode": "custom_workflow",
-                            "selected_workflow_execution_event": {
-                                "status": status,
-                                "event_kind": status,
-                                "workflow_id": workflow_id,
-                                "selected_workflow_id": selected_workflow_id,
-                                "state_id": envelope.get("state_id"),
-                                "action_id": envelope.get("action_id"),
-                                "action_status": envelope.get("action_status"),
-                                "action_outcome": envelope.get("action_outcome")
-                                or envelope.get("outcome"),
-                                "execution_mode": envelope.get("execution_mode"),
-                                "state_attempt": envelope.get("state_attempt"),
-                                "duration_ms": envelope.get("duration_ms"),
-                            },
+                            "selected_workflow_execution_event": selected_execution_event,
                         }
                     )
                 progress_tracker.emit(payload)

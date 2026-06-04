@@ -153,6 +153,92 @@ def test_selected_workflow_execution_events_survive_finalising_progress(monkeypa
     assert serialised["stage"] == "response_finalising"
 
 
+def test_selected_workflow_execution_progress_facts_survive_serialisation(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=1200.0)
+
+    progress_facts = [
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "email_subject",
+            "label": "Email subject",
+            "status": "available",
+            "present": True,
+            "redacted": False,
+            "truncated": False,
+            "value": "Research digest: arXiv attention paper",
+            "value_kind": "title",
+            "visibility": "default",
+            "source_path": "context.email.subject",
+            "resolved_path": "context.email.subject",
+            "contract_id": "#V#email_subject_progress_fact",
+        },
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "paper_concept",
+            "label": "Paper concept",
+            "status": "available",
+            "present": True,
+            "redacted": False,
+            "truncated": False,
+            "value": "#V#paper_attention_is_all_you_need",
+            "value_kind": "concept_id",
+            "visibility": "expert",
+            "source_path": "action_outputs.paper.concept_id",
+        },
+    ]
+
+    von_routes._set_tool_progress(
+        "scope-workflow-facts",
+        "req-workflow-facts",
+        {
+            "status": "workflow_step_complete",
+            "stage": "selected_workflow_execution",
+            "phase": "selected_workflow_execution",
+            "selected_workflow_id": "#V#research_triage_workflow",
+            "selected_workflow_execution_event": {
+                "status": "workflow_step_complete",
+                "event_kind": "workflow_step_complete",
+                "workflow_id": "#V#research_triage_workflow",
+                "selected_workflow_id": "#V#research_triage_workflow",
+                "state_id": "read_message",
+                "action_id": "gmail_read",
+                "progress_facts": progress_facts,
+            },
+        },
+    )
+    clock["now"] += 1.0
+    von_routes._set_tool_progress(
+        "scope-workflow-facts",
+        "req-workflow-facts",
+        {
+            "status": "heartbeat",
+            "stage": "response_finalising",
+            "phase": "response_finalising",
+        },
+    )
+
+    state = von_routes._get_tool_progress(
+        "scope-workflow-facts",
+        "req-workflow-facts",
+    )
+    assert state is not None
+    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+
+    selected_execution = serialised["selected_workflow_execution"]
+    latest_event = selected_execution["latest_event"]
+    assert latest_event["progress_facts"][0]["label"] == "Email subject"
+    assert latest_event["progress_facts"][0]["value"] == (
+        "Research digest: arXiv attention paper"
+    )
+    assert latest_event["progress_facts"][1]["visibility"] == "expert"
+    assert serialised["progress_facts"][0]["fact_id"] == "email_subject"
+    heartbeat = serialised["diagnostic_events"][-1]
+    assert heartbeat["status"] == "heartbeat"
+    assert "progress_facts" not in heartbeat
+
+
 def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     monkeypatch,
 ) -> None:
