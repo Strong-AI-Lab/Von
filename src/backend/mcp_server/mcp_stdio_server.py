@@ -488,6 +488,9 @@ app = Server("vontology-mcp")
 
 _LOG = logging.getLogger(__name__)
 
+_STDIO_MAX_RESPONSE_CHARS_DEFAULT = 100_000
+_STDIO_MAX_RESPONSE_CHARS_MIN = 10_000
+
 _TOOL_LIST_CACHE: list[Tool] | None = None
 _TOOL_LIST_CACHE_PATH = (
     Path(project_root) / "data" / "mcp_tool_cache" / "vontology_tools_runtime.json"
@@ -1007,8 +1010,44 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
         ]
 
 
+def _get_stdio_max_response_chars() -> int:
+    raw_value = os.getenv("VON_MCP_STDIO_MAX_RESPONSE_CHARS")
+    if raw_value:
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            parsed = _STDIO_MAX_RESPONSE_CHARS_DEFAULT
+        return max(_STDIO_MAX_RESPONSE_CHARS_MIN, parsed)
+    return _STDIO_MAX_RESPONSE_CHARS_DEFAULT
+
+
 def _json_text(payload: Any) -> TextContent:
-    return TextContent(type="text", text=json.dumps(payload, indent=2, default=str))
+    text = json.dumps(payload, indent=2, default=str)
+    max_response_chars = _get_stdio_max_response_chars()
+    if len(text) <= max_response_chars:
+        return TextContent(type="text", text=text)
+
+    guarded_payload = make_error_response(
+        error_code="payload_too_large",
+        message=(
+            "MCP tool response exceeded the safe stdio payload size; request a "
+            "bounded projection or explicit detail section."
+        ),
+        details={
+            "approximate_response_chars": len(text),
+            "max_response_chars": max_response_chars,
+            "response_guard": "vontology_stdio_text_content",
+        },
+        suggestions=[
+            "For live turn progress, call turn_execution_get_live_progress without a section for the bounded snapshot.",
+            "For live turn progress details, call turn_execution_get_live_progress with section, limit, and offset.",
+            "Use a narrower query or paginated detail tool for large read results.",
+        ],
+    )
+    return TextContent(
+        type="text",
+        text=json.dumps(guarded_payload, indent=2, default=str),
+    )
 
 
 def _json_error(

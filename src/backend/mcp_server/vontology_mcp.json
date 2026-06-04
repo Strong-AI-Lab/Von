@@ -2726,13 +2726,16 @@
                     "profile"
                 ],
                 "additionalProperties": false,
-                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call. The 'limit' alias maps to max_results; order/order_by, scope, and include_metadata are accepted as read-only planning hints.",
+                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call. The 'limit' alias maps to max_results; order/order_by/sort, scope, and include_metadata are accepted as read-only planning hints.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",
                     "user_id": "profile",
                     "q": "query",
-                    "limit": "max_results"
+                    "limit": "max_results",
+                    "sort": "order_by",
+                    "sort_by": "order_by",
+                    "order_field": "order_by"
                 },
                 "x-von-batch-propagated-fields": [
                     "profile"
@@ -5427,7 +5430,7 @@
         },
         {
             "name": "turn_execution_get_live_progress",
-            "description": "Fetch the serialised live progress snapshot for an active turn so thinking telemetry can be dereferenced through MCP.",
+            "description": "Fetch a bounded live progress snapshot for an active turn so thinking telemetry can be dereferenced through MCP without oversized stdio responses. Detail sections are available with section, limit, and offset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5463,13 +5466,25 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "section": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
                     }
                 },
                 "required": [
                     "request_id"
                 ],
                 "additionalProperties": true,
-                "description": "Fetch the current live progress snapshot for an in-flight turn request."
+                "description": "Fetch a bounded live progress snapshot for an in-flight turn request, or pass section/limit/offset for explicit detail hydration."
             }
         },
         {

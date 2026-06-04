@@ -236,10 +236,15 @@ atexit.register(_close_all_active_leases)
 
 def _build_current_helper_record(script_path: str) -> dict[str, Any]:
     now_epoch = time.time()
+    explicit_owner_token = os.getenv("VON_MCP_HELPER_OWNER_TOKEN")
+    owner_token_is_explicit = bool(
+        isinstance(explicit_owner_token, str) and explicit_owner_token.strip()
+    )
     owner_token = (
-        os.getenv("VON_MCP_HELPER_OWNER_TOKEN")
-        or f"parent:{os.getppid()}"
-    ).strip()
+        explicit_owner_token.strip()
+        if owner_token_is_explicit and explicit_owner_token is not None
+        else f"parent:{os.getppid()}"
+    )
     owner_label = (os.getenv("VON_MCP_HELPER_OWNER_LABEL") or "").strip()
     return {
         "schema_version": _LEASE_SCHEMA_VERSION,
@@ -248,6 +253,7 @@ def _build_current_helper_record(script_path: str) -> dict[str, Any]:
         "pid": os.getpid(),
         "parent_pid": os.getppid(),
         "owner_token": owner_token,
+        "owner_token_is_explicit": owner_token_is_explicit,
         "owner_label": owner_label,
         "hostname": socket.gethostname(),
         "started_at_utc": _utc_now_iso(),
@@ -296,6 +302,15 @@ def _harvest_same_owner_duplicates(
     owner_token = str(current_record.get("owner_token") or "")
     current_pid = int(current_record.get("pid") or 0)
     current_started = _safe_float(current_record.get("started_at_epoch_sec")) or 0.0
+    if not bool(current_record.get("owner_token_is_explicit")):
+        return {
+            "matched": 0,
+            "terminated": 0,
+            "killed": 0,
+            "failed": 0,
+            "harvested_pids": [],
+            "skipped": "owner_token_not_explicit",
+        }
 
     matched = 0
     terminated = 0
@@ -310,6 +325,8 @@ def _harvest_same_owner_duplicates(
         if str(payload.get("helper_kind") or "") != helper_kind:
             continue
         if str(payload.get("owner_token") or "") != owner_token:
+            continue
+        if not bool(payload.get("owner_token_is_explicit")):
             continue
 
         started = _safe_float(payload.get("started_at_epoch_sec")) or 0.0
@@ -394,6 +411,7 @@ def activate_mcp_helper_lifecycle(
         "pid": current_record["pid"],
         "parent_pid": current_record["parent_pid"],
         "owner_token": current_record["owner_token"],
+        "owner_token_is_explicit": current_record["owner_token_is_explicit"],
         "registry_dir": str(registry_dir),
         "lease_path": str(lease_path),
         "prune_report": prune_report,
@@ -422,6 +440,9 @@ def get_mcp_helper_inventory() -> dict[str, Any]:
                 "pid": pid,
                 "parent_pid": int(payload.get("parent_pid") or 0),
                 "owner_token": payload.get("owner_token"),
+                "owner_token_is_explicit": bool(
+                    payload.get("owner_token_is_explicit")
+                ),
                 "owner_label": payload.get("owner_label"),
                 "hostname": payload.get("hostname"),
                 "started_at_utc": payload.get("started_at_utc"),

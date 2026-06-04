@@ -29648,7 +29648,7 @@ function buildThinkingDiagnosticsLocatorPayload(request) {
                     user_concept_id: namespaceContext.user_id || null,
                     window_session_id: getWindowSessionId()
                 },
-                'Fetch the live progress snapshot for this active turn.'
+                'Fetch the bounded live progress snapshot for this active turn; pass section, limit, and offset only when explicit detail hydration is needed.'
             ),
             turn_execution_get_diagnostics: buildMcpToolAccess(
                 'turn_execution_get_diagnostics',

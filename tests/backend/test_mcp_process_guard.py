@@ -106,6 +106,7 @@ def _write_lease(
     pid: int,
     parent_pid: int,
     owner_token: str,
+    owner_token_is_explicit: bool = True,
     started_at_epoch_sec: float = 1.0,
 ) -> None:
     payload = {
@@ -115,6 +116,7 @@ def _write_lease(
         "pid": pid,
         "parent_pid": parent_pid,
         "owner_token": owner_token,
+        "owner_token_is_explicit": owner_token_is_explicit,
         "started_at_utc": "2026-04-18T00:00:00+00:00",
         "started_at_epoch_sec": started_at_epoch_sec,
         "last_heartbeat_utc": "2026-04-18T00:00:00+00:00",
@@ -393,6 +395,56 @@ def test_activate_mcp_helper_lifecycle_reclaims_older_same_owner_duplicate(
     assert 101 not in live_pids
     assert 102 in live_pids
     assert 200 in live_pids
+
+
+def test_activate_mcp_helper_lifecycle_does_not_reclaim_parent_fallback_owner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    older_same_parent = _DummyProcess(
+        pid=101,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    current_proc = _DummyProcess(
+        pid=200,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    _install_fake_psutil(monkeypatch, [older_same_parent, current_proc])
+
+    registry_dir = tmp_path / "leases"
+    registry_dir.mkdir()
+    _write_lease(
+        registry_dir / "101.json",
+        helper_kind="mcp_stdio_server",
+        pid=101,
+        parent_pid=50,
+        owner_token="parent:50",
+        owner_token_is_explicit=False,
+        started_at_epoch_sec=10.0,
+    )
+
+    monkeypatch.setattr(process_guard.os, "getpid", lambda: 200)
+    monkeypatch.setattr(process_guard.os, "getppid", lambda: 50)
+    monkeypatch.setenv("VON_MCP_HELPER_REGISTRY_DIR", str(registry_dir))
+    monkeypatch.delenv("VON_MCP_HELPER_OWNER_TOKEN", raising=False)
+    monkeypatch.setenv("VON_MCP_HELPER_HEARTBEAT_SEC", "0")
+    monkeypatch.setenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "0")
+
+    result = process_guard.activate_mcp_helper_lifecycle(
+        "src/backend/mcp_server/mcp_stdio_server.py"
+    )
+
+    harvest = result["harvest_report"]
+    assert harvest["matched"] == 0
+    assert harvest["terminated"] == 0
+    assert harvest["skipped"] == "owner_token_not_explicit"
+    assert older_same_parent.terminated is False
+
+    inventory = process_guard.get_mcp_helper_inventory()
+    live_pids = sorted(helper["pid"] for helper in inventory["helpers"])
+    assert live_pids == [101, 200]
 
 
 def test_activate_mcp_helper_lifecycle_prunes_dead_lease_files(

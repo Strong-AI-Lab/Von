@@ -13083,6 +13083,9 @@ def _turn_execution_get_live_progress(**kwargs):
         window_session_id=_clean_optional_string(kwargs.get("window_session_id")),
         anonymous_session_id=_clean_optional_string(kwargs.get("anonymous_session_id")),
         scope_key=_clean_optional_string(kwargs.get("scope_key")),
+        section=_clean_optional_string(kwargs.get("section")),
+        limit=kwargs.get("limit"),
+        offset=kwargs.get("offset"),
     )
     if not isinstance(payload, dict):
         return make_error_response(
@@ -29639,17 +29642,22 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "window_session_id": (str, type(None)),
                     "anonymous_session_id": (str, type(None)),
                     "scope_key": (str, type(None)),
+                    "section": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
                 },
                 allow_unknown=True,
                 description=(
-                    "Fetch the current live progress snapshot for an in-flight turn request."
+                    "Fetch a bounded live progress snapshot for an in-flight turn request, "
+                    "or pass section/limit/offset for explicit detail hydration."
                 ),
             ),
             output_schema=None,
             category="read",
             description=(
-                "Fetch the serialised live progress snapshot for an active turn so thinking "
-                "telemetry can be dereferenced through MCP."
+                "Fetch a bounded live progress snapshot for an active turn so thinking "
+                "telemetry can be dereferenced through MCP without oversized stdio "
+                "responses. Detail sections are available with section, limit, and offset."
             ),
         ),
         MethodDefinition(
