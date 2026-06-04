@@ -21,6 +21,9 @@ class _FakeCollection:
         self.payload = update["$set"]
         return _FakeResult()
 
+    def find_one(self, _filter, **_kwargs):
+        return dict(self.payload or {})
+
 
 class _FakeBlobStore:
     def __init__(self) -> None:
@@ -38,6 +41,9 @@ class _FakeBlobStore:
         )
 
     def get_bytes(self, key):
+        for write in self.writes:
+            if write["key"] == key:
+                return write["data"]
         raise KeyError(key)
 
     def exists(self, key):
@@ -68,21 +74,19 @@ def test_turn_execution_record_projection_offloads_large_diagnostics(
         lambda: store,
     )
 
+    diagnostic_events = [
+        {
+            "event_kind": "tool_call_end",
+            "llm_request": {
+                "context_messages": [{"role": "tool", "content": "x" * 2000}]
+            },
+        }
+    ]
+
     result = service.upsert_turn_execution_record_projection(
         record={
             "request_id": "req-ter-blob",
-            "execution": {
-                "diagnostic_events": [
-                    {
-                        "event_kind": "tool_call_end",
-                        "llm_request": {
-                            "context_messages": [
-                                {"role": "tool", "content": "x" * 2000}
-                            ]
-                        },
-                    }
-                ]
-            },
+            "execution": {"diagnostic_events": diagnostic_events},
         },
         namespace="#V#michael@org",
         session_id="session-blob",
@@ -91,6 +95,14 @@ def test_turn_execution_record_projection_offloads_large_diagnostics(
     assert result["updated"] is True
     assert store.writes
     assert isinstance(coll.payload, dict)
-    diagnostic_events = coll.payload["execution"]["diagnostic_events"]
-    assert diagnostic_events["schema_version"] == "debug_payload_blob_ref.v1"
-    assert diagnostic_events["field_path"] == "execution.diagnostic_events"
+    stored_diagnostic_events = coll.payload["execution"]["diagnostic_events"]
+    assert stored_diagnostic_events["schema_version"] == "debug_payload_blob_ref.v1"
+    assert stored_diagnostic_events["field_path"] == "execution.diagnostic_events"
+
+    latest = service.get_latest_turn_execution_record_projection(
+        session_id="session-blob",
+        namespace="#V#michael@org",
+    )
+
+    assert latest is not None
+    assert latest["execution"]["diagnostic_events"] == diagnostic_events

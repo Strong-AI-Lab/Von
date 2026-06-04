@@ -4,6 +4,7 @@ import json
 from typing import Any, Mapping
 
 import pytest
+from bson import BSON
 
 from src.backend.services.blob_spillway import BlobSpillwayQueue
 from src.backend.services.blob_store import BlobRef
@@ -13,7 +14,9 @@ from src.backend.services.workflow_payload_store import (
     hydrate_workflow_payload_blob_refs,
     load_workflow_payload_blob_ref,
 )
+from src.backend.db.mongo_client import get_db
 from src.backend.workflows import trace_store
+from src.backend.workflows.durable import instance_manager as instance_manager_module
 from src.backend.workflows.durable.instance_manager import WorkflowInstanceManager
 
 
@@ -65,9 +68,29 @@ class _FakeBlobStore:
         ]
 
 
+class _FailingBlobStore:
+    def put_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        raise RuntimeError("blob store unavailable")
+
+
 @pytest.fixture(autouse=True)
 def _disable_spillway_by_default(monkeypatch) -> None:
     monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
+
+
+def _reset_mock_workflow_instances(monkeypatch) -> None:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    db = get_db()
+    assert db is not None
+    db.drop_collection(instance_manager_module.WORKFLOW_INSTANCES_COLLECTION)
+    instance_manager_module._indexes_ensured = False
 
 
 def test_compact_workflow_payload_offloads_known_heavy_field(monkeypatch) -> None:
@@ -251,6 +274,54 @@ def test_workflow_payload_hydration_retries_backend_read_once(monkeypatch) -> No
     assert backend_store.calls == 2
 
 
+def test_workflow_payload_hydration_rejects_stored_size_mismatch(
+    monkeypatch,
+) -> None:
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    payload = {"actions": [{"state_id": "llm", "output": "x" * 2000}]}
+    compacted = compact_workflow_payload_for_storage(
+        payload,
+        record_family="workflow_executions",
+        record_id="execution-1",
+        threshold_bytes=512,
+        fail_soft=False,
+    )
+    ref = dict(compacted.payload["actions"])
+    blob_ref = dict(ref["blob_ref"])
+    blob_ref["size_bytes"] = int(blob_ref["size_bytes"]) + 1
+    ref["blob_ref"] = blob_ref
+
+    with pytest.raises(ValueError, match="stored size mismatch"):
+        load_workflow_payload_blob_ref(ref)
+
+
+def test_workflow_payload_hydration_rejects_stored_sha_mismatch(
+    monkeypatch,
+) -> None:
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    payload = {"actions": [{"state_id": "llm", "output": "x" * 2000}]}
+    compacted = compact_workflow_payload_for_storage(
+        payload,
+        record_family="workflow_executions",
+        record_id="execution-1",
+        threshold_bytes=512,
+        fail_soft=False,
+    )
+    ref = dict(compacted.payload["actions"])
+    ref["sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="stored SHA-256 mismatch"):
+        load_workflow_payload_blob_ref(ref)
+
+
 def test_workflow_payload_candidate_count_skips_existing_refs(monkeypatch) -> None:
     store = _FakeBlobStore()
     monkeypatch.setattr(
@@ -301,6 +372,145 @@ def test_instance_manager_compacts_workflow_payload_field(monkeypatch) -> None:
     )
     hydrated = hydrate_workflow_payload_blob_refs(compacted, fail_soft=False)
     assert hydrated.payload == workflow_data
+
+
+def test_instance_manager_checkpoint_stores_bounded_blob_ref_and_hydrates(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    monkeypatch.setenv("VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#episode_evaluation_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    workflow_data = {
+        "paper_id": "#V#paper_1",
+        "last_action_outputs": {
+            "tool": "evidence_loader",
+            "messages": [{"role": "tool", "content": "x" * 10_000}],
+        },
+    }
+
+    assert manager.checkpoint(
+        instance_id,
+        current_state="collect_evidence",
+        workflow_data=workflow_data,
+        step_index=2,
+    )
+    db = get_db()
+    assert db is not None
+    raw_doc = db[instance_manager_module.WORKFLOW_INSTANCES_COLLECTION].find_one(
+        {"instance_id": instance_id}
+    )
+    assert raw_doc is not None
+    raw_payload = raw_doc["workflow_data"]
+    original_bson_size = len(BSON.encode({"workflow_data": workflow_data}))
+    stored_bson_size = len(BSON.encode({"workflow_data": raw_payload}))
+
+    assert raw_payload["last_action_outputs"]["schema_version"] == (
+        "workflow_payload_blob_ref.v1"
+    )
+    assert stored_bson_size < original_bson_size
+    assert stored_bson_size < 32_000
+    assert store.writes
+
+    hydrated_instance = manager.get_instance(instance_id)
+    assert hydrated_instance is not None
+    assert hydrated_instance.workflow_data == workflow_data
+
+
+def test_instance_manager_completed_outputs_store_bounded_ref_and_hydrate(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    monkeypatch.setenv("VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#episode_evaluation_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    outputs = {
+        "workflow_result_envelope": {
+            "status": "completed",
+            "diagnostic_evidence": [{"content": "y" * 10_000}],
+        },
+    }
+
+    assert manager.mark_completed(
+        instance_id,
+        outputs=outputs,
+        final_state="done",
+    )
+    db = get_db()
+    assert db is not None
+    raw_doc = db[instance_manager_module.WORKFLOW_INSTANCES_COLLECTION].find_one(
+        {"instance_id": instance_id}
+    )
+    assert raw_doc is not None
+    raw_payload = raw_doc["outputs"]
+
+    assert raw_payload["workflow_result_envelope"]["schema_version"] == (
+        "workflow_payload_blob_ref.v1"
+    )
+    assert len(BSON.encode({"outputs": raw_payload})) < len(
+        BSON.encode({"outputs": outputs})
+    )
+
+    hydrated_instance = manager.get_instance(instance_id)
+    assert hydrated_instance is not None
+    assert hydrated_instance.outputs == outputs
+
+
+def test_instance_manager_checkpoint_preserves_payload_when_blob_store_unavailable(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _FailingBlobStore(),
+    )
+    monkeypatch.setenv("VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#episode_evaluation_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    workflow_data = {
+        "last_action_outputs": {
+            "tool": "evidence_loader",
+            "messages": [{"role": "tool", "content": "x" * 2000}],
+        },
+    }
+
+    assert manager.checkpoint(
+        instance_id,
+        current_state="collect_evidence",
+        workflow_data=workflow_data,
+    )
+
+    instance = manager.get_instance(instance_id)
+    assert instance is not None
+    assert instance.workflow_data == workflow_data
 
 
 def test_trace_store_compacts_and_hydrates_execution_trace(monkeypatch) -> None:

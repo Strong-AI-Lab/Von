@@ -243,6 +243,25 @@ def load_workflow_payload_blob_ref(
         if first_error is not None:
             raise first_error
         raise RuntimeError("Workflow payload blob read failed")
+
+    expected_stored_size = blob_ref.get("size_bytes")
+    try:
+        if (
+            expected_stored_size is not None
+            and int(expected_stored_size) > 0
+            and int(expected_stored_size) != len(compressed)
+        ):
+            raise ValueError("Workflow payload blob stored size mismatch")
+    except ValueError:
+        raise
+    except Exception:
+        pass
+
+    expected_stored_sha = ref_payload.get("sha256") or blob_ref.get("etag")
+    if isinstance(expected_stored_sha, str) and expected_stored_sha.strip():
+        if hashlib.sha256(compressed).hexdigest() != expected_stored_sha.strip():
+            raise ValueError("Workflow payload blob stored SHA-256 mismatch")
+
     if ref_payload.get("compression") == "gzip":
         raw_bytes = gzip.decompress(compressed)
     else:
