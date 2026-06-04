@@ -1252,6 +1252,12 @@ def _compute_retry_delay_ms(
     return min(initial_delay_ms * (2**multiplier), max_delay_ms)
 
 
+def _sleep_retry_delay(seconds: float) -> None:
+    """Sleep before a represented workflow retry attempt."""
+
+    time.sleep(seconds)
+
+
 def _build_idempotency_key(
     *,
     workflow_id: str,
@@ -2050,7 +2056,7 @@ class WorkflowExecutor:
                 verdict=retry_event,
             )
         if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
+            _sleep_retry_delay(delay_ms / 1000.0)
         return True
 
     def _execute_state_actions(

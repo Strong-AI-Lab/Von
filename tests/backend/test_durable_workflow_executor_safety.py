@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
 from bson import BSON
 from pymongo.errors import PyMongoError
 
@@ -35,6 +36,14 @@ from src.backend.workflows.engine import (
     WorkflowTransitionSpec,
     build_transition_condition,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_trace_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+        lambda _trace_doc: "trace-test",
+    )
 
 
 def _build_instance(workflow_id: str) -> WorkflowInstance:
@@ -1475,7 +1484,7 @@ def test_durable_executor_retries_until_success_with_shared_runtime_policy(
     manager.extend_lock.return_value = True
     manager.checkpoint.return_value = True
 
-    monkeypatch.setattr("src.backend.workflows.engine.time.sleep", _sleep)
+    monkeypatch.setattr("src.backend.workflows.engine._sleep_retry_delay", _sleep)
 
     executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
     with (
