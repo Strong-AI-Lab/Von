@@ -439,6 +439,7 @@ def create_concept(
     organisation_concept_id: Optional[str] = None,
     event_namespace: Optional[str] = None,
     visibility_scope_mode: Optional[str] = None,
+    defer_text_relations: bool = False,
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
@@ -449,6 +450,11 @@ def create_concept(
     - None/default: user+organisation scoped when authenticated context is available
     - organisation_general: organisation scoped, not user scoped
     - global_general: no user/org restriction
+
+    defer_text_relations is reserved for internal bulk materialisation surfaces
+    that create non-user-facing graph artefacts and immediately store their
+    authoritative payload in concept_data. Normal concept creation should leave
+    this false so canonical names/descriptions are attached as text relations.
     """
     # Use repository for concepts collection access
     concepts_coll = ConceptsRepository.collection()
@@ -554,7 +560,7 @@ def create_concept(
         # CRITICAL: Create name as text_relation immediately (modern approach)
         # This prevents migrate-on-read from triggering and creating duplicates
         concept_identifier = concept_doc.get("concept_id")
-        if concept_identifier:
+        if concept_identifier and not defer_text_relations:
             try:
                 from .text_value_service import upsert_text_for_concept
 

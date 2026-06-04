@@ -17,6 +17,8 @@ from src.backend.services.paper_representation_workflow_vontology_service import
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+    SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+    SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
     diff_canonical_paper_representation_workflow_repo_seed_bundle,
     export_canonical_paper_representation_workflow_repo_seed_bundle,
@@ -42,8 +44,19 @@ from src.backend.workflows import (
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
+from src.backend.workflows.durable.paper_representation_workflow import (
+    register_paper_representation_actions,
+)
+from src.backend.workflows.durable.subworkflow_actions import (
+    register_subworkflow_actions,
+)
 from src.backend.workflows.durable import registry_factory
-from src.backend.workflows.engine import WorkflowExecutor
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowExecutor,
+    WorkflowStateSpec,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
@@ -395,7 +408,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 3
+    assert counts.get("workflows_published") == 5
     assert counts.get("errors") == 0
     support_concepts = report.get("support_concepts") or {}
     assert support_concepts.get("errors") == []
@@ -438,6 +451,85 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    source_neutral_definition = load_workflow_definition_from_vontology(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    )
+    assert source_neutral_definition is not None
+    item_definition = load_workflow_definition_from_vontology(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
+    )
+    assert item_definition is not None
+    source_initial_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        state_id="normalise_reference_set",
+    )
+    source_dispatch_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        state_id="dispatch_reference_items",
+    )
+    assert source_neutral_definition.initial_state == source_initial_state_id
+    source_initial_action = source_neutral_definition.states[
+        source_initial_state_id
+    ].actions[0]
+    assert source_initial_action.action_id == "paper_reference.normalise_reference_set"
+    source_dispatch_action = source_neutral_definition.states[
+        source_dispatch_state_id
+    ].actions[0]
+    assert source_dispatch_action.action_id == "workflow_control.for_each"
+    assert source_dispatch_action.inputs["workflow_id"] == (
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
+    )
+    assert source_dispatch_action.inputs["success_policy"] == "allow_partial"
+
+    item_prepare_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        state_id="prepare_reference_context",
+    )
+    item_prepare_transitions = {
+        transition.reason: transition
+        for transition in item_definition.states[item_prepare_state_id].transitions
+    }
+    assert item_prepare_transitions["arxiv_reference"].to_state == (
+        authority_service._step_concept_id(
+            workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+            state_id="ingest_arxiv_reference",
+        )
+    )
+    assert item_prepare_transitions["doi_reference"].to_state == (
+        authority_service._step_concept_id(
+            workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+            state_id="ingest_metadata_reference",
+        )
+    )
+    assert item_prepare_transitions["file_copy_reference"].to_state == (
+        authority_service._step_concept_id(
+            workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+            state_id="ingest_file_copy_reference",
+        )
+    )
+    ingest_arxiv_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        state_id="ingest_arxiv_reference",
+    )
+    ingest_arxiv_state = item_definition.states[ingest_arxiv_state_id]
+    assert ingest_arxiv_state.actions[0].action_id == "workflow_invoke_subworkflow"
+    assert ingest_arxiv_state.metadata["subworkflow_contract"]["workflow_id"] == (
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    ingest_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        state_id="ingest_metadata_reference",
+    )
+    assert item_definition.states[ingest_metadata_state_id].metadata[
+        "subworkflow_contract"
+    ]["workflow_id"] == SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID
+    ingest_file_state_id = authority_service._step_concept_id(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
+        state_id="ingest_file_copy_reference",
+    )
+    assert item_definition.states[ingest_file_state_id].metadata[
+        "subworkflow_contract"
+    ]["workflow_id"] == SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
     route_arxiv_targets_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="route_arxiv_targets",
@@ -521,6 +613,8 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         decide_metadata_transitions["prompt_text_available"].to_state
         == extract_metadata_state_id
     )
+
+
     extract_metadata_action = metadata_definition.states[
         extract_metadata_state_id
     ].actions[0]
@@ -1096,12 +1190,327 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "#V#workflow_step" in step_types
 
 
+def _build_stub_representation_definition(
+    *,
+    workflow_id: str,
+    action_id: str,
+) -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="represent",
+        states={
+            "represent": WorkflowStateSpec(
+                state_id="represent",
+                actions=(WorkflowActionInvocation(action_id=action_id),),
+                terminal=True,
+            )
+        },
+    )
+
+
+def _build_source_neutral_execution_registry(
+    *,
+    parent_definition: WorkflowDefinition,
+    item_definition: WorkflowDefinition,
+) -> tuple[ActionRegistry, list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+    child_definitions = {
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID: parent_definition,
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID: item_definition,
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID: _build_stub_representation_definition(
+            workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+            action_id="stub.represent_arxiv_paper",
+        ),
+        SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID: (
+            _build_stub_representation_definition(
+                workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+                action_id="stub.represent_metadata_paper",
+            )
+        ),
+        SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID: _build_stub_representation_definition(
+            workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+            action_id="stub.represent_file_copy_paper",
+        ),
+    }
+
+    def _loader(workflow_id: str) -> WorkflowDefinition | None:
+        return child_definitions.get(workflow_id)
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=_loader)
+    register_subworkflow_actions(registry, definition_loader=_loader)
+    register_paper_representation_actions(registry)
+
+    def _stub_handler(label: str):
+        def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+            calls.append(
+                {
+                    "label": label,
+                    "inputs": dict(request.inputs),
+                    "data": dict(request.data),
+                }
+            )
+            paper_concept_id = f"#V#stub_{label}_paper_{len(calls)}"
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "paper_concept_id": paper_concept_id,
+                    "file_copy_concept_id": request.inputs.get("file_copy_concept_id")
+                    or f"#V#stub_{label}_file_{len(calls)}",
+                    "article_readback": {
+                        "concept_id": paper_concept_id,
+                        "label": label,
+                    },
+                },
+            )
+
+        return _handle
+
+    registry.register(
+        ActionSpec(
+            action_id="stub.represent_arxiv_paper",
+            handler=_stub_handler("arxiv"),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="stub.represent_metadata_paper",
+            handler=_stub_handler("metadata"),
+        )
+    )
+    registry.register(
+        ActionSpec(
+            action_id="stub.represent_file_copy_paper",
+            handler=_stub_handler("file_copy"),
+        )
+    )
+    return registry, calls
+
+
+def _load_source_neutral_test_definitions() -> tuple[WorkflowDefinition, WorkflowDefinition]:
+    parent_definition = load_workflow_definition_from_vontology(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    )
+    item_definition = load_workflow_definition_from_vontology(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
+    )
+    assert parent_definition is not None
+    assert item_definition is not None
+    return parent_definition, item_definition
+
+
+def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_partial_success(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    parent_definition, item_definition = _load_source_neutral_test_definitions()
+    registry, calls = _build_source_neutral_execution_registry(
+        parent_definition=parent_definition,
+        item_definition=item_definition,
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent_definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "paper_reference_set": {
+                "schema_version": "paper_reference_set.v1",
+                "items": [
+                    {
+                        "reference_kind": "arxiv",
+                        "arxiv_id": "2603.24621",
+                        "source_uri": "https://arxiv.org/abs/2603.24621",
+                    },
+                    {
+                        "reference_kind": "doi",
+                        "doi": "10.1145/3743093.3770985",
+                        "source_uri": "https://doi.org/10.1145/3743093.3770985",
+                    },
+                    {
+                        "reference_kind": "file_copy",
+                        "file_copy_concept_id": "#V#uploaded_scholarly_pdf",
+                    },
+                    {
+                        "reference_kind": "metadata",
+                        "paper_metadata": {
+                            "title": "A Source Neutral Paper",
+                            "authors": ["Ada Lovelace"],
+                        },
+                    },
+                    {
+                        "reference_kind": "unsupported_reference",
+                        "source_uri": "urn:example:not-a-paper",
+                    },
+                ],
+                "source_context": {
+                    "source_kind": "direct_prompt",
+                    "provenance_required": True,
+                },
+            }
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state.endswith("_completed")
+    assert result.data["paper_reference_item_count"] == 5
+    assert result.data["for_each_success_count"] == 4
+    assert result.data["for_each_error_count"] == 1
+    assert result.data["for_each_partial_success"] is True
+    assert [call["label"] for call in calls] == [
+        "arxiv",
+        "metadata",
+        "file_copy",
+        "metadata",
+    ]
+    assert calls[0]["data"]["arxiv_id"] == "2603.24621"
+    assert calls[1]["data"]["doi"] == "10.1145/3743093.3770985"
+    assert calls[2]["data"]["file_copy_concept_id"] == "#V#uploaded_scholarly_pdf"
+    assert calls[3]["data"]["paper_metadata"]["title"] == "A Source Neutral Paper"
+    errors = [
+        item
+        for item in result.data["iteration_results"]
+        if item.get("completed") is False
+    ]
+    assert len(errors) == 1
+    assert errors[0]["error"] == "paper_reference_kind_unsupported"
+
+
+def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    parent_definition, item_definition = _load_source_neutral_test_definitions()
+    registry, calls = _build_source_neutral_execution_registry(
+        parent_definition=parent_definition,
+        item_definition=item_definition,
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent_definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={
+            "preview_only": True,
+            "paper_references": [
+                {"reference_kind": "arxiv", "arxiv_id": "2603.24621"},
+                {
+                    "reference_kind": "doi",
+                    "doi": "10.1145/3743093.3770985",
+                },
+            ],
+        },
+    )
+
+    assert result.completed is True
+    assert result.data["for_each_success_count"] == 2
+    assert result.data["for_each_error_count"] == 0
+    assert calls == []
+    statuses = [
+        item.get("result", {}).get("paper_reference_item_status")
+        for item in result.data["iteration_results"]
+    ]
+    assert statuses == ["preview", "preview"]
+
+
+def test_source_neutral_paper_reference_workflow_fails_closed_without_references(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+    parent_definition, item_definition = _load_source_neutral_test_definitions()
+    registry, _calls = _build_source_neutral_execution_registry(
+        parent_definition=parent_definition,
+        item_definition=item_definition,
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent_definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+            user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+            org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+        ),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error == "paper_reference_set_missing"
+    assert result.data["last_action_outputs"]["paper_reference_error_code"] == (
+        "paper_reference_set_missing"
+    )
+
+
+def test_source_neutral_paper_reference_launch_contract_and_exemplars_are_source_neutral(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    launch_contract, launch_contract_source = resolve_workflow_launch_input_contract(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    )
+    assert launch_contract is not None
+    assert launch_contract_source.startswith("text_relation:")
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        contract=launch_contract,
+        inputs={
+            "prompt": (
+                "请处理 https://arxiv.org/abs/2603.24621 and "
+                "https://doi.org/10.1145/3743093.3770985"
+            ),
+            "source_context": {"source_kind": "direct_prompt"},
+        },
+    )
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.resolved_inputs["arxiv_ids"] == ["2603.24621"]
+    assert "prompt" in resolution.resolved_inputs
+    assert resolution.resolved_inputs["source_context"] == {
+        "source_kind": "direct_prompt"
+    }
+
+    exemplars, source = resolve_workflow_discovery_exemplars(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    )
+    assert source.startswith("text_relation:")
+    assert exemplars is not None
+    exemplar_text = json.dumps(exemplars, ensure_ascii=False)
+    assert "请把这些 arXiv 和 DOI 论文加入知识库" in exemplar_text
+    assert "Tafadhali ingiza" in exemplar_text
+    assert "Tēnā whakaurua" in exemplar_text
+    assert "non-mail paper ingestion" in exemplars.get("keywords", [])
+
+    routing_profile, routing_profile_source = resolve_workflow_routing_profile(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
+    )
+    assert routing_profile_source.startswith("text_relation:")
+    assert routing_profile is not None
+    assert routing_profile.get("prefer_existing_capability") is True
+    routing_profile_rows = get_texts_for_concept(
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowRoutingProfileJson",
+        limit=1,
+    )
+    assert routing_profile_rows
+    routing_profile_text = routing_profile_rows[0].get("text") or ""
+    assert "Do not restrict selection to Gmail" in routing_profile_text
+    assert "English wording" in routing_profile_text
+
+
 def test_bootstrap_skips_republication_when_workflow_family_is_current(
     _reset_mock_db: Any,
 ) -> None:
     first_report = bootstrap_canonical_paper_representation_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 3
+    assert first_counts.get("workflows_published") == 5
 
     second_report = bootstrap_canonical_paper_representation_workflows()
     second_authority = second_report.get("authority_contract") or {}
@@ -1241,7 +1650,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "13" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "14" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2061,6 +2470,8 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
         SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID,
+        SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
     ]
 
     payload = json.loads(tmp_asset_path.read_text(encoding="utf-8"))

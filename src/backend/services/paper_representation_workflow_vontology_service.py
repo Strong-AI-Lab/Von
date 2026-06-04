@@ -32,6 +32,12 @@ SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID = (
 )
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
 ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#arxiv_paper_representation_workflow"
+SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID = (
+    "#V#source_neutral_paper_reference_ingestion_workflow"
+)
+SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID = (
+    "#V#source_neutral_paper_reference_item_ingestion_workflow"
+)
 
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -205,6 +211,8 @@ __all__ = [
     "ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID",
     "SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID",
+    "SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID",
+    "SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID",
     "bootstrap_canonical_paper_representation_workflows",
     "diff_canonical_paper_representation_workflow_repo_seed_bundle",
     "export_canonical_paper_representation_workflow_repo_seed_bundle",

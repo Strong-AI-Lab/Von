@@ -2140,6 +2140,7 @@ def _ensure_context_input_mapping_concept(
                 ),
                 parent_concept_ids=[],
                 create_as_instance=True,
+                defer_text_relations=True,
             )
             created = True
             existing_doc, load_error = _load_concept(mapping_concept_id)
@@ -2182,6 +2183,7 @@ def _ensure_context_input_mapping_concept(
         concept_service.update_concept(
             mapping_concept_id,
             {"concept_data.workflow_mapping_spec": target_spec},
+            defer_side_effects=True,
         )
     except Exception as exc:  # pragma: no cover - defensive
         return False, f"mapping_update_failed:{exc}"
@@ -2221,6 +2223,7 @@ def _ensure_tool_output_mapping_concept(
                 ),
                 parent_concept_ids=[],
                 create_as_instance=True,
+                defer_text_relations=True,
             )
             created = True
             existing_doc, load_error = _load_concept(mapping_concept_id)
@@ -2260,6 +2263,7 @@ def _ensure_tool_output_mapping_concept(
         concept_service.update_concept(
             mapping_concept_id,
             {"concept_data.workflow_mapping_spec": target_spec},
+            defer_side_effects=True,
         )
     except Exception as exc:  # pragma: no cover - defensive
         return False, f"mapping_update_failed:{exc}"

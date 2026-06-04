@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -47,11 +48,38 @@ ARXIV_NORMALISE_SOURCE_ACTION_ID = "arxiv.normalise_source"
 ARXIV_INSPECT_EXISTING_STATE_ACTION_ID = "arxiv.inspect_existing_state"
 ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID = "arxiv.decide_acquisition_mode"
 ARXIV_BUILD_COMPLETION_REPORT_ACTION_ID = "arxiv.build_completion_report"
+PAPER_REFERENCE_NORMALISE_SET_ACTION_ID = "paper_reference.normalise_reference_set"
+PAPER_REFERENCE_FAIL_ITEM_ACTION_ID = "paper_reference.fail_item"
 
 ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY = "existing_file_copy"
 ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF = "finalise_cached_pdf"
 ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE = "reacquire_partial_cache"
 ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE = "download_from_source"
+
+_DOI_CANDIDATE_PATTERN = re.compile(
+    r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+",
+    re.IGNORECASE,
+)
+_PAPER_REFERENCE_KIND_ALIASES = {
+    "arxiv": "arxiv",
+    "arxiv_id": "arxiv",
+    "arxiv_url": "arxiv",
+    "doi": "doi",
+    "doi_url": "doi",
+    "source": "source_uri",
+    "source_url": "source_uri",
+    "source_uri": "source_uri",
+    "url": "source_uri",
+    "web": "source_uri",
+    "file": "file_copy",
+    "file_copy": "file_copy",
+    "uploaded_file": "file_copy",
+    "uploaded_pdf": "file_copy",
+    "pdf": "file_copy",
+    "metadata": "metadata",
+    "bibliographic_metadata": "metadata",
+    "pasted_metadata": "metadata",
+}
 
 
 def _clean_text(value: Any) -> str:
@@ -83,6 +111,320 @@ def _coerce_string_list(value: Any) -> list[str]:
         seen.add(lowered)
         values.append(text)
     return values
+
+
+def _normalise_reference_kind(value: Any) -> str:
+    text = _clean_text(value).lower().replace("-", "_").replace(" ", "_")
+    return _PAPER_REFERENCE_KIND_ALIASES.get(text, text or "unknown")
+
+
+def _clean_doi(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    if text.lower().startswith("https://doi.org/"):
+        text = text[len("https://doi.org/") :]
+    elif text.lower().startswith("http://doi.org/"):
+        text = text[len("http://doi.org/") :]
+    return text.strip().rstrip(".,;)]}")
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _clean_text(value).lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
+def _extract_doi_candidates(value: Any) -> list[str]:
+    values: list[Any]
+    if isinstance(value, Mapping):
+        values = list(value.values())
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        values = list(value)
+    else:
+        values = [value]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = _clean_text(item)
+        if not text:
+            continue
+        for match in _DOI_CANDIDATE_PATTERN.finditer(text):
+            doi = _clean_doi(match.group(0))
+            lowered = doi.casefold()
+            if doi and lowered not in seen:
+                seen.add(lowered)
+                candidates.append(doi)
+    return candidates
+
+
+def _normalise_source_context(value: Any, *, provenance_required: bool = True) -> dict[str, Any]:
+    source_context = _coerce_mapping(value)
+    if "provenance_required" not in source_context:
+        source_context["provenance_required"] = provenance_required
+    return source_context
+
+
+def _coerce_reference_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    text = _clean_text(value)
+    if not text:
+        return None
+    return {"source_uri": text}
+
+
+def _extend_reference_items_from_value(
+    result: list[dict[str, Any]],
+    value: Any,
+) -> None:
+    if isinstance(value, Mapping):
+        items = value.get("items")
+        if isinstance(items, Sequence) and not isinstance(
+            items, (str, bytes, bytearray)
+        ):
+            for item in items:
+                item_mapping = _coerce_reference_mapping(item)
+                if item_mapping is not None:
+                    result.append(item_mapping)
+            return
+        item_mapping = _coerce_reference_mapping(value)
+        if item_mapping is not None:
+            result.append(item_mapping)
+        return
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            item_mapping = _coerce_reference_mapping(item)
+            if item_mapping is not None:
+                result.append(item_mapping)
+        return
+
+    item_mapping = _coerce_reference_mapping(value)
+    if item_mapping is not None:
+        result.append(item_mapping)
+
+
+def _paper_reference_source_uri_from_item(item: Mapping[str, Any]) -> str:
+    return _first_non_empty_text(
+        item.get("source_uri"),
+        item.get("source_url"),
+        item.get("url"),
+        item.get("uri"),
+        item.get("href"),
+    ) or ""
+
+
+def _paper_reference_metadata_from_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    for key in ("paper_metadata", "metadata", "scholarly_metadata"):
+        value = item.get(key)
+        if isinstance(value, Mapping):
+            return dict(value)
+    metadata: dict[str, Any] = {}
+    for source_key, target_key in (
+        ("title", "title"),
+        ("paper_title", "title"),
+        ("summary", "summary"),
+        ("abstract", "abstract"),
+        ("publication_date", "publication_date"),
+        ("doi", "doi"),
+        ("source_uri", "source_uri"),
+        ("source_url", "source_uri"),
+    ):
+        value = item.get(source_key)
+        if value not in (None, "", [], {}):
+            metadata[target_key] = value
+    authors = _coerce_string_list(item.get("author_names") or item.get("authors"))
+    if authors:
+        metadata["authors"] = authors
+    topics = _coerce_string_list(
+        item.get("topic_labels") or item.get("keywords") or item.get("categories")
+    )
+    if topics:
+        metadata["categories"] = topics
+    return metadata
+
+
+def _normalise_paper_reference_item(
+    item: Mapping[str, Any],
+    *,
+    source_context: Mapping[str, Any],
+    default_preview_only: bool,
+    index: int,
+) -> dict[str, Any]:
+    source_uri = _paper_reference_source_uri_from_item(item)
+    arxiv_id = _first_non_empty_text(item.get("arxiv_id"), item.get("arxiv"))
+    if not arxiv_id:
+        arxiv_candidates = extract_arxiv_id_candidates(
+            [source_uri, item.get("prompt"), item.get("text")]
+        )
+        arxiv_id = arxiv_candidates[0] if arxiv_candidates else None
+
+    doi = _clean_doi(_first_non_empty_text(item.get("doi"), item.get("doi_url")))
+    if not doi:
+        doi_candidates = _extract_doi_candidates(
+            [source_uri, item.get("prompt"), item.get("text"), item.get("metadata")]
+        )
+        doi = doi_candidates[0] if doi_candidates else ""
+
+    file_copy_concept_id = _first_non_empty_text(
+        item.get("file_copy_concept_id"),
+        item.get("source_file_copy_concept_id"),
+        item.get("computer_file_copy_concept_id"),
+    )
+    metadata = _paper_reference_metadata_from_item(item)
+    if doi and "doi" not in metadata:
+        metadata["doi"] = doi
+    if source_uri and "source_uri" not in metadata:
+        metadata["source_uri"] = source_uri
+
+    reference_kind = _normalise_reference_kind(item.get("reference_kind"))
+    if reference_kind == "unknown":
+        if arxiv_id:
+            reference_kind = "arxiv"
+        elif doi:
+            reference_kind = "doi"
+        elif file_copy_concept_id:
+            reference_kind = "file_copy"
+        elif metadata:
+            reference_kind = "metadata"
+        elif source_uri:
+            reference_kind = "source_uri"
+
+    preview_only = item.get("preview_only")
+    if not isinstance(preview_only, bool):
+        preview_only = default_preview_only
+
+    normalised: dict[str, Any] = {
+        "reference_index": index,
+        "reference_kind": reference_kind,
+        "source_context": dict(source_context),
+        "provenance_required": bool(source_context.get("provenance_required", True)),
+        "preview_only": preview_only,
+    }
+    for key, value in (
+        ("arxiv_id", arxiv_id),
+        ("doi", doi),
+        ("source_uri", source_uri),
+        ("file_copy_concept_id", file_copy_concept_id),
+        ("paper_concept_id", _first_non_empty_text(item.get("paper_concept_id"))),
+        ("title", _first_non_empty_text(item.get("title"), item.get("paper_title"))),
+        ("summary", _first_non_empty_text(item.get("summary"), item.get("abstract"))),
+        ("publication_date", _first_non_empty_text(item.get("publication_date"))),
+        ("prompt", _first_non_empty_text(item.get("prompt"), item.get("text"))),
+    ):
+        if value not in (None, "", [], {}):
+            normalised[key] = value
+
+    authors = _coerce_string_list(item.get("author_names") or item.get("authors"))
+    if authors:
+        normalised["author_names"] = authors
+    topics = _coerce_string_list(
+        item.get("topic_labels") or item.get("keywords") or item.get("categories")
+    )
+    if topics:
+        normalised["topic_labels"] = topics
+    if metadata:
+        normalised["paper_metadata"] = metadata
+    if reference_kind == "unknown":
+        normalised["error_code"] = "paper_reference_kind_unresolved"
+        normalised["error_message"] = (
+            "Reference did not include an arXiv id, DOI, source URI, file copy, "
+            "or bibliographic metadata."
+        )
+    return normalised
+
+
+def _build_reference_item_candidates(request: WorkflowActionRequest) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source in (
+        request.inputs.get("paper_reference_set"),
+        request.data.get("paper_reference_set"),
+        request.inputs.get("paper_references"),
+        request.data.get("paper_references"),
+        request.inputs.get("references"),
+        request.data.get("references"),
+        request.inputs.get("items"),
+        request.data.get("items"),
+        request.inputs.get("paper_reference"),
+        request.data.get("paper_reference"),
+    ):
+        _extend_reference_items_from_value(candidates, source)
+
+    for arxiv_id in _coerce_string_list(
+        request.inputs.get("arxiv_ids") or request.data.get("arxiv_ids")
+    ):
+        candidates.append({"reference_kind": "arxiv", "arxiv_id": arxiv_id})
+    arxiv_id = _first_non_empty_text(
+        request.inputs.get("arxiv_id"),
+        request.data.get("arxiv_id"),
+    )
+    if arxiv_id:
+        candidates.append({"reference_kind": "arxiv", "arxiv_id": arxiv_id})
+
+    doi = _first_non_empty_text(request.inputs.get("doi"), request.data.get("doi"))
+    if doi:
+        candidates.append({"reference_kind": "doi", "doi": doi})
+    source_uri = _first_non_empty_text(
+        request.inputs.get("source_uri"),
+        request.inputs.get("source_url"),
+        request.data.get("source_uri"),
+        request.data.get("source_url"),
+    )
+    if source_uri:
+        candidates.append({"source_uri": source_uri})
+    file_copy_concept_id = _first_non_empty_text(
+        request.inputs.get("file_copy_concept_id"),
+        request.data.get("file_copy_concept_id"),
+    )
+    if file_copy_concept_id:
+        candidates.append(
+            {
+                "reference_kind": "file_copy",
+                "file_copy_concept_id": file_copy_concept_id,
+            }
+        )
+
+    metadata = _extract_metadata_from_context(request)
+    if metadata:
+        candidates.append({"reference_kind": "metadata", "paper_metadata": metadata})
+
+    prompt = _first_non_empty_text(request.inputs.get("prompt"), request.data.get("prompt"))
+    if prompt:
+        for arxiv_candidate in extract_arxiv_id_candidates(prompt):
+            candidates.append({"reference_kind": "arxiv", "arxiv_id": arxiv_candidate})
+        for doi_candidate in _extract_doi_candidates(prompt):
+            candidates.append({"reference_kind": "doi", "doi": doi_candidate})
+
+    return candidates
+
+
+def _dedupe_reference_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        identity = _first_non_empty_text(
+            item.get("arxiv_id"),
+            item.get("doi"),
+            item.get("file_copy_concept_id"),
+            item.get("source_uri"),
+            item.get("title"),
+            item.get("prompt"),
+        )
+        key = (_normalise_reference_kind(item.get("reference_kind")), identity or str(item))
+        lowered_key = (key[0], key[1].casefold())
+        if lowered_key in seen:
+            continue
+        seen.add(lowered_key)
+        item["reference_index"] = len(deduped)
+        deduped.append(item)
+    return deduped
 
 
 def _relationship_targets(concept_doc: Mapping[str, Any] | None, predicate: str) -> list[str]:
@@ -1119,6 +1461,105 @@ def _build_arxiv_normalise_source_handler():
     return _handle
 
 
+def _build_paper_reference_normalise_set_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        source_context = _normalise_source_context(
+            request.inputs.get("source_context")
+            or request.data.get("source_context")
+            or {},
+            provenance_required=True,
+        )
+        preview_only = _coerce_bool(
+            request.inputs.get("preview_only") or request.data.get("preview_only"),
+            default=False,
+        )
+        candidate_items = _build_reference_item_candidates(request)
+        normalised_items = [
+            _normalise_paper_reference_item(
+                item,
+                source_context=source_context,
+                default_preview_only=preview_only,
+                index=index,
+            )
+            for index, item in enumerate(candidate_items)
+        ]
+        normalised_items = _dedupe_reference_items(normalised_items)
+        if not normalised_items:
+            return WorkflowActionResult(
+                status="failed",
+                error="paper_reference_set_missing",
+                outputs={
+                    "paper_reference_error_code": "paper_reference_set_missing",
+                    "paper_reference_error_message": (
+                        "No paper references were supplied in the launch inputs "
+                        "or shared workflow context."
+                    ),
+                    "paper_reference_items": [],
+                    "paper_reference_item_count": 0,
+                    "paper_reference_preview_only": preview_only,
+                    "normalised_paper_reference_set": {
+                        "schema_version": "paper_reference_set.v1",
+                        "items": [],
+                        "source_context": source_context,
+                    },
+                },
+            )
+
+        reference_set = {
+            "schema_version": "paper_reference_set.v1",
+            "items": normalised_items,
+            "source_context": source_context,
+        }
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": reference_set,
+                "normalised_paper_reference_set": reference_set,
+                "paper_reference_items": normalised_items,
+                "paper_reference_item_count": len(normalised_items),
+                "paper_reference_preview_only": preview_only,
+                "paper_reference_kinds": [
+                    item.get("reference_kind") for item in normalised_items
+                ],
+                "paper_reference_error_code": None,
+            },
+        )
+
+    return _handle
+
+
+def _build_paper_reference_fail_item_handler():
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        error_code = _first_non_empty_text(
+            request.inputs.get("error_code"),
+            request.data.get("paper_reference_error_code"),
+            "paper_reference_ingestion_failed",
+        )
+        error_message = _first_non_empty_text(
+            request.inputs.get("error_message"),
+            request.data.get("paper_reference_error_message"),
+            error_code,
+        )
+        outputs = {
+            "paper_reference_item_status": "failed",
+            "paper_reference_error_code": error_code,
+            "paper_reference_error_message": error_message,
+            "paper_reference_kind": _first_non_empty_text(
+                request.inputs.get("reference_kind"),
+                request.data.get("paper_reference_kind"),
+                "unknown",
+            ),
+            "paper_reference_index": request.data.get("paper_reference_index"),
+        }
+        return WorkflowActionResult(
+            status="failed",
+            error=error_code,
+            outputs=outputs,
+        )
+
+    return _handle
+
+
 def _build_arxiv_inspect_existing_state_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         arxiv_id = _extract_arxiv_id_from_request(request)
@@ -1382,11 +1823,30 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
             description="Aggregate ingestion outcomes into a structured completion report.",
         )
     )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=PAPER_REFERENCE_NORMALISE_SET_ACTION_ID,
+            handler=_build_paper_reference_normalise_set_handler(),
+            description=(
+                "Normalise caller-supplied scholarly paper references into a "
+                "source-neutral reference-set schema for represented workflow fan-out."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=PAPER_REFERENCE_FAIL_ITEM_ACTION_ID,
+            handler=_build_paper_reference_fail_item_handler(),
+            description="Fail a source-neutral paper reference item with typed outputs.",
+        )
+    )
 
 
 __all__ = [
     "ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID",
     "ARXIV_NORMALISE_SOURCE_ACTION_ID",
+    "PAPER_REFERENCE_FAIL_ITEM_ACTION_ID",
+    "PAPER_REFERENCE_NORMALISE_SET_ACTION_ID",
     "SCHOLARLY_PAPER_ENRICH_ACTION_ID",
     "SCHOLARLY_PAPER_MATERIALISE_ACTION_ID",
     "SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID",
