@@ -170,23 +170,30 @@ Cleanup expectations:
 Canonical local Von restart:
 
 - Restart the local backend through the repository launcher:
-  `.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180`
+  - on macOS/Linux: `./run.sh restart -NoBrowser -HealthTimeoutSec 180`
+  - on Windows/PowerShell: `.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180`
+- Use the host-native launcher by default: `run.sh` on macOS/Linux and
+  `run.ps1` on Windows. Use PowerShell on macOS/Linux only when deliberately
+  testing the PowerShell launcher.
 - Do not manually restart the backend with `Start-Process`,
   `python src/workflows/von/main.py`, or another direct process spawn. Those
   paths can bypass launcher setup such as `.env` loading, import-path setup,
   admin/shutdown handling, logs, and health/version checks.
-- After restart, verify the process with `.\run.ps1 status -NoBrowser` and
-  `/health`. Confirm the reported branch and commit match the checkout you are
-  testing before running replay or acceptance evidence.
+- After restart, verify the process with the matching launcher
+  (`./run.sh status -NoBrowser` or `.\run.ps1 status -NoBrowser`) and `/health`.
+  Confirm the reported branch and commit match the checkout you are testing
+  before running replay or acceptance evidence.
 - If there is already a listener on port 5000, inspect it first. If it is the
-  wrong branch or a stale process, stop/restart through `.\run.ps1` rather than
-  leaving the old process alive and moving to another port.
+  wrong branch or a stale process, stop/restart through the host-native
+  repository launcher rather than leaving the old process alive and moving to
+  another port.
 
 Isolated coding-agent replay backend:
 
 - For automated replay, live prompt sampling, or acceptance evidence that
   should not disturb the user-facing local server, use:
-  `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`
+  - on macOS/Linux: `./run.sh restart -AgentTest -HealthTimeoutSec 180`
+  - on Windows/PowerShell: `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`
 - `-AgentTest` defaults to port `5010`, implies `-NoBrowser`, preserves other
   Von server processes, and skips shared background workers/startup maintenance.
   Maintained live replay/testing tools default to `http://127.0.0.1:5010` and
@@ -194,7 +201,8 @@ Isolated coding-agent replay backend:
   interactive server fails clearly.
 - If port `5010` is already deliberately in use, choose an explicit isolated
   port such as:
-  `.\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180`
+  - on macOS/Linux: `./run.sh restart -AgentTest -Port 5011 -HealthTimeoutSec 180`
+  - on Windows/PowerShell: `.\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180`
   and set `VON_AGENT_TEST_BASE_URL=http://127.0.0.1:5011` or pass the matching
   `--base-url` to the replay tool.
 - Use replay-tool `--allow-non-agent-test-server` only when the test's purpose
