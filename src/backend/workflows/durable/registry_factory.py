@@ -38,7 +38,7 @@ from ..vontology_loader import (
     resolve_workflow_description,
 )
 from ..workflow_concept_authority_service import (
-    build_seed_canonical_workflow_definitions,
+    build_repo_seed_workflow_definitions,
     build_workflow_concept_authority_report,
 )
 from ..workflow_description_quality_service import (
@@ -69,7 +69,7 @@ def _is_agent_test_instance() -> bool:
 
 @lru_cache(maxsize=1)
 def _agent_test_seed_workflow_definitions() -> Dict[str, WorkflowDefinition]:
-    return build_seed_canonical_workflow_definitions()
+    return build_repo_seed_workflow_definitions()
 
 
 def _load_agent_test_seed_workflow_definition(

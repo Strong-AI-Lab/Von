@@ -44,10 +44,26 @@ _DEFAULT_RESULT_TTL_SEC = 10 * 60
 _MAX_WORKERS = 4
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_PROGRESS_HISTORY_LIMIT = 200
 
 
 def _is_active_status(status: str) -> bool:
     return status in {"pending", "running"}
+
+
+def _append_progress_history(
+    task_status: "TaskStatus",
+    progress: Mapping[str, Any],
+) -> None:
+    progress_payload = dict(progress) if isinstance(progress, Mapping) else {}
+    if not progress_payload:
+        return
+    entry = dict(progress_payload)
+    entry.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+    task_status.progress_history = [
+        *task_status.progress_history[-(_PROGRESS_HISTORY_LIMIT - 1) :],
+        entry,
+    ]
 
 
 @dataclass
@@ -62,6 +78,7 @@ class TaskStatus:
     result: Any = None
     error: str | None = None
     progress: dict[str, Any] = field(default_factory=dict)
+    progress_history: list[dict[str, Any]] = field(default_factory=list)
     # For cancellation support (Phase 3)
     cancellation_requested: bool = False
     # For result retrieval filtering (Phase 4)
@@ -81,6 +98,7 @@ class TaskStatus:
             "has_result": self.result is not None,
             "error": self.error,
             "progress": self.progress,
+            "progress_history": list(self.progress_history),
             "cancellation_requested": self.cancellation_requested,
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -171,6 +189,7 @@ class BackgroundTaskRegistry:
                         task_status = self._tasks.get(task_id)
                         if task_status and _is_active_status(task_status.status):
                             task_status.progress = dict(info)
+                            _append_progress_history(task_status, task_status.progress)
                     if progress_callback:
                         try:
                             progress_callback(info)
@@ -201,6 +220,7 @@ class BackgroundTaskRegistry:
                             task_status.completed_at = datetime.now(timezone.utc)
                             task_status.result = result
                             task_status.progress["status"] = "completed"
+                            _append_progress_history(task_status, task_status.progress)
 
                     return result
 
@@ -215,6 +235,7 @@ class BackgroundTaskRegistry:
                             task_status.completed_at = datetime.now(timezone.utc)
                             task_status.error = str(exc)
                             task_status.progress["status"] = "cancelled"
+                            _append_progress_history(task_status, task_status.progress)
                     raise
 
                 except Exception as exc:
@@ -229,6 +250,7 @@ class BackgroundTaskRegistry:
                             task_status.error = str(exc)
                             task_status.progress["status"] = "failed"
                             task_status.progress["error"] = str(exc)
+                            _append_progress_history(task_status, task_status.progress)
                     raise
 
             future = self._executor.submit(_run_task)
@@ -278,6 +300,7 @@ class BackgroundTaskRegistry:
                     session_id=session_id,
                     user_id=user_id,
                 )
+                _append_progress_history(task_status, progress_payload)
                 self._tasks[task_id] = task_status
                 return task_status
 
@@ -288,6 +311,7 @@ class BackgroundTaskRegistry:
                     task_status.result = result
                     task_status.error = None
                     task_status.progress = progress_payload
+                    _append_progress_history(task_status, progress_payload)
                     return task_status
                 if task_status.result is None and result is not None:
                     task_status.result = result
@@ -295,6 +319,7 @@ class BackgroundTaskRegistry:
                     task_status.error = error
                 if not task_status.progress and progress_payload:
                     task_status.progress = progress_payload
+                    _append_progress_history(task_status, progress_payload)
                 return task_status
 
             task_status.status = terminal_status
@@ -304,6 +329,7 @@ class BackgroundTaskRegistry:
             task_status.result = result
             task_status.error = error
             task_status.progress = progress_payload
+            _append_progress_history(task_status, progress_payload)
             if task_status.session_id is None and session_id is not None:
                 task_status.session_id = session_id
             if task_status.user_id is None and user_id is not None:
@@ -338,6 +364,7 @@ class BackgroundTaskRegistry:
             if status is None or not _is_active_status(status.status):
                 return False
             status.progress = progress_payload
+            _append_progress_history(status, progress_payload)
             return True
 
     def get_task_result(self, task_id: str) -> Any:
@@ -400,6 +427,7 @@ class BackgroundTaskRegistry:
                 }
             )
             status.progress = progress_payload
+            _append_progress_history(status, progress_payload)
             _logger.info("[background_task] Task %s marked cancelled", task_id)
             return True
 

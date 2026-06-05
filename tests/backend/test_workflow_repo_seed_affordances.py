@@ -50,6 +50,103 @@ def test_repo_workflow_seed_bundles_declare_seed_version() -> None:
     assert missing == []
 
 
+def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata() -> None:
+    definitions = authority_service.build_repo_seed_workflow_definitions(
+        target_workflow_ids=["#V#zhan_gmail_arxiv_ingestion_workflow"]
+    )
+
+    definition = definitions["#V#zhan_gmail_arxiv_ingestion_workflow"]
+
+    assert "Gmail-to-arXiv" in str(definition.purpose)
+    metadata = dict(definition.metadata)
+    assert metadata["description_source"].startswith("repo_seed_text_relation:")
+    assert metadata["discovery_exemplars_source"].startswith(
+        "repo_seed_text_relation:"
+    )
+    exemplars = metadata["discovery_exemplars"]
+    assert "recent email messages about arxiv papers" in exemplars["keywords"]
+    assert any("recent email messages" in item for item in exemplars["examples"])
+    assert metadata["routing_profile"]["execution_mode"] == "tool_pipeline"
+    assert metadata["launch_input_contract"]["schema_version"] == (
+        "workflow_launch_input_contract.v1"
+    )
+
+
+def test_repo_seed_workflow_definitions_include_gmail_arxiv_progress_projection_metadata() -> (
+    None
+):
+    definitions = authority_service.build_repo_seed_workflow_definitions(
+        target_workflow_ids=[
+            "#V#zhan_gmail_arxiv_ingestion_workflow",
+            "#V#email_arxiv_ingestion_from_message_workflow",
+            "#V#arxiv_resource_ingestion_from_email_reference_workflow",
+            "#V#arxiv_paper_representation_workflow",
+        ]
+    )
+
+    parent = definitions["#V#zhan_gmail_arxiv_ingestion_workflow"]
+    parent_projection = parent.metadata["progress_projection"]
+    assert parent.metadata["progress_projection_source"].startswith(
+        "repo_seed_text_relation:"
+    )
+    assert {
+        fact["contract_id"] for fact in parent_projection["facts"]
+    } >= {
+        "#V#gmail_arxiv_messages_scanned_progress_fact",
+        "#V#gmail_arxiv_messages_completed_progress_fact",
+        "#V#gmail_arxiv_messages_failed_progress_fact",
+    }
+    assert {
+        fact["contract_id"]
+        for fact in parent.states["process_messages"].metadata[
+            "progress_projection"
+        ]["facts"]
+    } >= {"#V#gmail_arxiv_batch_result_progress_fact"}
+
+    message = definitions["#V#email_arxiv_ingestion_from_message_workflow"]
+    message_normalise_facts = message.states["normalise_message"].metadata[
+        "progress_projection"
+    ]["facts"]
+    assert {
+        fact["contract_id"] for fact in message_normalise_facts
+    } >= {"#V#gmail_arxiv_email_message_subject_progress_fact"}
+    assert {
+        fact["source_path"]
+        for fact in message_normalise_facts
+        if fact["contract_id"] == "#V#gmail_arxiv_email_message_subject_progress_fact"
+    } == {"context.message_subject"}
+    assert {
+        fact["contract_id"]
+        for fact in message.states["ingest_arxiv_resources"].metadata[
+            "progress_projection"
+        ]["facts"]
+    } >= {"#V#gmail_arxiv_message_result_progress_fact"}
+
+    resource = definitions[
+        "#V#arxiv_resource_ingestion_from_email_reference_workflow"
+    ]
+    assert {
+        fact["contract_id"]
+        for fact in resource.states["normalise_reference"].metadata[
+            "progress_projection"
+        ]["facts"]
+    } >= {"#V#gmail_arxiv_paper_id_progress_fact"}
+    assert {
+        fact["contract_id"]
+        for fact in resource.states["represent_arxiv_paper"].metadata[
+            "progress_projection"
+        ]["facts"]
+    } >= {"#V#gmail_arxiv_resource_result_progress_fact"}
+
+    paper = definitions["#V#arxiv_paper_representation_workflow"]
+    assert {
+        fact["contract_id"]
+        for fact in paper.states["fetch_arxiv_metadata"].metadata[
+            "progress_projection"
+        ]["facts"]
+    } >= {"#V#gmail_arxiv_paper_title_progress_fact"}
+
+
 def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishing(
     monkeypatch,
 ) -> None:

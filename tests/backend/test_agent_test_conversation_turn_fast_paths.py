@@ -13,6 +13,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
 from src.backend.workflows.definitions import (
+    CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
@@ -177,7 +178,8 @@ def test_agent_test_expected_outcome_fast_path_marks_relation_tools(
     assert result.status == "success"
     payload = result.outputs["validated_json"]
     assert payload["required_tools"] == ["get_text_relations_summary"]
-    assert "tool-calling workflow" in payload["selector_guidance"]
+    assert "most specific represented workflow" in payload["selector_guidance"]
+    assert "generic tool-calling workflow only" in payload["selector_guidance"]
 
 
 def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
@@ -213,7 +215,8 @@ def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
         "get_paper_metadata",
         "search_arxiv",
     ]
-    assert "tool-calling workflow" in payload["selector_guidance"]
+    assert "most specific represented workflow" in payload["selector_guidance"]
+    assert "generic tool-calling workflow only" in payload["selector_guidance"]
 
 
 def test_agent_test_selector_fast_path_routes_relation_prompt_to_tools(
@@ -268,6 +271,100 @@ def test_agent_test_selector_fast_path_routes_gmail_arxiv_prompt_to_tools(
     assert result.status == "success"
     selector_payload = json.loads(result.outputs["final_response"])
     assert selector_payload["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+
+def test_agent_test_selector_fast_path_reuses_prepared_candidate(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_prompt": (
+                "Look in the last 20 email messages for arXiv papers and "
+                "represent any papers you find in Vontology."
+            ),
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+            "selector_candidate_ids": [
+                represented_workflow_id,
+                TOOL_CALLING_WORKFLOW_ID,
+            ],
+        },
+        llm_policy={"policy_stage": "classifier"},
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="selector_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    selector_payload = json.loads(result.outputs["final_response"])
+    assert selector_payload["workflow_id"] == represented_workflow_id
+    assert "selector-prepared candidate" in selector_payload["reasoning"]
+
+
+def test_agent_test_selector_fast_path_prefers_discovery_order_over_policy_order(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    general_mail_workflow_id = "#V#general_mail_review_workflow"
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_prompt": (
+                "Look in the last 20 email messages for arXiv papers and "
+                "represent any papers you find in Vontology."
+            ),
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+            "turn_expected_required_tools": [
+                "gmail_list_messages",
+                "gmail_get_message",
+                "search_arxiv",
+            ],
+            "workflow_discovery_result": {
+                "matches": [
+                    {
+                        "concept_id": represented_workflow_id,
+                        "candidate_source": "workflow_discovery",
+                        "routing_eligible": True,
+                        "is_executable": True,
+                        "is_policy_safe": True,
+                    },
+                    {
+                        "concept_id": general_mail_workflow_id,
+                        "candidate_source": "workflow_discovery",
+                        "routing_eligible": True,
+                        "is_executable": True,
+                        "is_policy_safe": True,
+                    },
+                ],
+            },
+            "selector_candidate_ids": [
+                CHAT_NARRATION_WORKFLOW_ID,
+                general_mail_workflow_id,
+                represented_workflow_id,
+                TOOL_CALLING_WORKFLOW_ID,
+            ],
+        },
+        llm_policy={"policy_stage": "classifier"},
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="selector_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    selector_payload = json.loads(result.outputs["final_response"])
+    assert selector_payload["workflow_id"] == represented_workflow_id
+    assert "workflow-discovery candidate" in selector_payload["reasoning"]
 
 
 def test_agent_test_selector_preparation_uses_local_tool_candidate(
@@ -405,7 +502,149 @@ def test_agent_test_selector_preparation_prefers_represented_discovery_candidate
     outputs = orchestrator._prepare_turn_selector_context_outputs(request)
 
     assert represented_workflow_id in outputs["selector_candidate_ids"]
+    assert outputs["selector_authoritative_candidate_ids"] == [
+        represented_workflow_id
+    ]
+    assert outputs["selector_authoritative_candidate_source"] == (
+        "workflow_discovery_pre_policy"
+    )
     assert outputs["workflow_discovery_result"].get("agent_test_local_replay") is None
+
+
+def test_agent_test_route_uses_represented_selector_decision_for_gmail_arxiv(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    target_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    policy_preferred_workflow_id = CHAT_NARRATION_WORKFLOW_ID
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_discovered_candidate_turn_launchability",
+        lambda **_kwargs: {
+            target_workflow_id: {"launchable": True},
+            policy_preferred_workflow_id: {"launchable": True},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        lambda *_args, **_kwargs: {
+            "matches": [
+                {
+                    "concept_id": target_workflow_id,
+                    "name": "Zhan Gmail arXiv ingestion workflow",
+                    "description": (
+                        "Scan recent Gmail messages, identify arXiv references, "
+                        "and represent the papers in Vontology."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": target_workflow_id,
+                    "name": "Zhan Gmail arXiv ingestion workflow",
+                    "description": "Represent arXiv papers found in Gmail.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "routing_matches": [],
+            "query": "gmail arxiv prompt",
+            "match_count": 1,
+            "candidate_count": 1,
+            "selector_fast_path_policy": {
+                "candidate_scores": [
+                    {
+                        "workflow_id": policy_preferred_workflow_id,
+                        "score": 1.0,
+                    },
+                    {
+                        "workflow_id": target_workflow_id,
+                        "score": 0.5,
+                    },
+                ],
+                "recommended_workflow_id": policy_preferred_workflow_id,
+                "guidance_mode": "agent_test_policy_order_probe",
+            },
+        },
+    )
+    prompt = (
+        "Look in the last 20 email messages for arXiv papers and represent any "
+        "papers you find in Vontology."
+    )
+    data: dict[str, Any] = {
+        "prompt": prompt,
+        "user_prompt": prompt,
+        "requested_model": "gemma4:e4b",
+        "selected_model_provider": "ollama",
+        "gmail_profile": "zhan-gmail",
+        "aux_llm_calls": [],
+        "llm_calls": [],
+    }
+    env = WorkflowEnvironment(
+        llm_client=_ExplodingLLM(),
+        model="gemma4:e4b",
+        user_namespace="#V#zhan@org",
+    )
+    prepare_request = type(
+        "Request",
+        (),
+        {
+            "data": data,
+            "environment": env,
+        },
+    )()
+    prepare_result = orchestrator._action_turn_execution_prepare_selector_context(
+        prepare_request
+    )
+    data.update(prepare_result.outputs)
+
+    selector_result = execute_llm_step(
+        WorkflowActionRequest(
+            action_id="llm.action",
+            inputs={},
+            environment=env,
+            data=data,
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="selector_decision",
+        )
+    )
+    data["selector_raw_response"] = selector_result.outputs["final_response"]
+
+    route_result = orchestrator._action_turn_execution_route(
+        type(
+            "Request",
+            (),
+            {
+                "data": data,
+                "environment": env,
+            },
+        )()
+    )
+
+    assert route_result.status == "success"
+    selector_payload = json.loads(selector_result.outputs["final_response"])
+    assert selector_payload["workflow_id"] == target_workflow_id
+    assert "workflow-discovery candidate" in selector_payload["reasoning"]
+    assert route_result.outputs["selector_authoritative_candidate_ids"] == [
+        target_workflow_id
+    ]
+    assert route_result.outputs["selected_workflow_id"] == target_workflow_id
+    assert route_result.outputs["workflow_routing"]["workflow_id"] == target_workflow_id
 
 
 def test_agent_test_selector_preparation_bounds_local_discovery_timeout(

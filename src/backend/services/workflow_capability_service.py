@@ -679,7 +679,7 @@ class WorkflowCapabilityIndex:
         skipped_missing_purpose = 0
         skipped_invalid_workflow_id = 0
         pending_entries: Dict[str, _CapabilityEntry] = {}
-        candidate_rows: list[tuple[str, Any, Any]] = []
+        candidate_rows: list[tuple[str, Any, Any, Mapping[str, Any] | None]] = []
         authoritative_workflow_ids: list[str] = []
 
         def _index_candidate(
@@ -723,8 +723,11 @@ class WorkflowCapabilityIndex:
                     "description_source": reason,
                     "purpose": _normalise_capability_text(purpose),
                     "summary_text": text.split("\n\n", 1)[0].strip(),
-                    "has_authoritative_routing_text": reason.startswith(
-                        "text_relation:"
+                    "has_authoritative_routing_text": (
+                        _capability_text_reason_is_authoritative(
+                            reason=reason,
+                            source=source,
+                        )
                     ),
                     "routing_profile": (
                         dict(routing_metadata.get("routing_profile"))
@@ -772,7 +775,15 @@ class WorkflowCapabilityIndex:
             purpose = reg.purpose if reg else None
             source = reg.source if reg else None
             if workflow_id:
-                candidate_rows.append((workflow_id, purpose, source))
+                definition_metadata = (
+                    dict(getattr(reg.definition, "metadata", {}) or {})
+                    if reg is not None
+                    and isinstance(getattr(reg.definition, "metadata", None), Mapping)
+                    else None
+                )
+                candidate_rows.append(
+                    (workflow_id, purpose, source, definition_metadata)
+                )
                 if str(source or "").strip().lower() == "vontology":
                     authoritative_workflow_ids.append(workflow_id)
 
@@ -783,7 +794,18 @@ class WorkflowCapabilityIndex:
             purpose = lazy.purpose if lazy else None
             source = lazy.source if lazy else None
             if workflow_id:
-                candidate_rows.append((workflow_id, purpose, source))
+                definition_metadata = None
+                resolved_registration = getattr(lazy, "_resolved", None) if lazy else None
+                resolved_definition = (
+                    getattr(resolved_registration, "definition", None)
+                    if resolved_registration is not None
+                    else None
+                )
+                if isinstance(getattr(resolved_definition, "metadata", None), Mapping):
+                    definition_metadata = dict(resolved_definition.metadata)
+                candidate_rows.append(
+                    (workflow_id, purpose, source, definition_metadata)
+                )
                 if str(source or "").strip().lower() == "vontology":
                     authoritative_workflow_ids.append(workflow_id)
 
@@ -800,12 +822,16 @@ class WorkflowCapabilityIndex:
             except Exception:
                 authoritative_routing_metadata = {}
 
-        for workflow_id, purpose, source in candidate_rows:
+        for workflow_id, purpose, source, definition_metadata in candidate_rows:
+            routing_metadata = (
+                authoritative_routing_metadata.get(workflow_id)
+                or definition_metadata
+            )
             _index_candidate(
                 workflow_id=workflow_id,
                 purpose=purpose,
                 source=source,
-                routing_metadata=authoritative_routing_metadata.get(workflow_id),
+                routing_metadata=routing_metadata,
             )
 
         count = len(pending_entries)
@@ -1126,6 +1152,67 @@ _AUTHORITATIVE_CAPABILITY_SOURCES: frozenset[str] = frozenset(
 )
 
 
+def _capability_discovery_exemplar_text(
+    discovery_exemplars: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(discovery_exemplars, Mapping):
+        return []
+    capability_parts: list[str] = []
+    keywords = discovery_exemplars.get("keywords") or []
+    if isinstance(keywords, Sequence) and not isinstance(keywords, str):
+        keyword_text = ", ".join(
+            str(item).strip()
+            for item in keywords
+            if isinstance(item, str) and str(item).strip()
+        )
+        if keyword_text:
+            capability_parts.append(f"Keywords: {keyword_text}")
+    examples = discovery_exemplars.get("examples") or []
+    if isinstance(examples, Sequence) and not isinstance(examples, str):
+        example_lines = [
+            str(item).strip()
+            for item in examples
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if example_lines:
+            capability_parts.append(
+                "Example requests: " + " | ".join(example_lines)
+            )
+    return capability_parts
+
+
+def _authoritative_discovery_exemplar_source(
+    *,
+    source_token: str,
+    discovery_exemplars_source: str,
+) -> bool:
+    source_text = str(discovery_exemplars_source or "").strip()
+    if source_text.startswith("text_relation:"):
+        return True
+    return (
+        source_token == "repo_seed_agent_test"
+        and source_text.startswith("repo_seed_text_relation:")
+    )
+
+
+def _capability_text_reason_is_authoritative(
+    *,
+    reason: str,
+    source: Any,
+) -> bool:
+    reason_text = str(reason or "").strip()
+    if reason_text.startswith("text_relation:"):
+        return True
+    source_token = str(source or "").strip().lower()
+    return (
+        source_token == "repo_seed_agent_test"
+        and (
+            reason_text == "authoritative_registration_purpose"
+            or "repo_seed_text_relation:" in reason_text
+        )
+    )
+
+
 def _resolve_authoritative_capability_text(
     *,
     workflow_id: str,
@@ -1173,40 +1260,30 @@ def _resolve_authoritative_capability_text(
             discovery_exemplars = None
             discovery_exemplars_source = ""
 
+    exemplar_parts = _capability_discovery_exemplar_text(discovery_exemplars)
+    exemplar_source_is_authoritative = _authoritative_discovery_exemplar_source(
+        source_token=source_token,
+        discovery_exemplars_source=discovery_exemplars_source,
+    )
+
     if relation_text and relation_source.startswith("text_relation:"):
         capability_parts = [relation_text]
-        if isinstance(discovery_exemplars, Mapping):
-            keywords = discovery_exemplars.get("keywords") or []
-            if isinstance(keywords, Sequence) and not isinstance(keywords, str):
-                keyword_text = ", ".join(
-                    str(item).strip()
-                    for item in keywords
-                    if isinstance(item, str) and str(item).strip()
-                )
-                if keyword_text:
-                    capability_parts.append(f"Keywords: {keyword_text}")
-            examples = discovery_exemplars.get("examples") or []
-            if isinstance(examples, Sequence) and not isinstance(examples, str):
-                example_lines = [
-                    str(item).strip()
-                    for item in examples
-                    if isinstance(item, str) and str(item).strip()
-                ]
-                if example_lines:
-                    capability_parts.append(
-                        "Example requests: " + " | ".join(example_lines)
-                    )
+        if exemplar_source_is_authoritative:
+            capability_parts.extend(exemplar_parts)
         source_parts = [relation_source]
-        if (
-            isinstance(discovery_exemplars_source, str)
-            and discovery_exemplars_source.startswith("text_relation:")
-        ):
+        if exemplar_source_is_authoritative:
             source_parts.append(discovery_exemplars_source)
         return "\n\n".join(capability_parts), "+".join(source_parts)
 
     purpose_text = _normalise_capability_text(purpose)
     if not purpose_text:
         return None, "missing_authoritative_purpose"
+
+    if exemplar_source_is_authoritative and exemplar_parts:
+        source = "authoritative_registration_purpose"
+        if isinstance(discovery_exemplars_source, str) and discovery_exemplars_source:
+            source = f"{source}+{discovery_exemplars_source}"
+        return "\n\n".join([purpose_text, *exemplar_parts]), source
 
     return purpose_text, "authoritative_registration_purpose"
 

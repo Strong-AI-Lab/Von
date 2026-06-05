@@ -427,6 +427,158 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     assert result.response_text == "Custom analysis complete."
 
 
+def test_top_level_selector_applies_represented_fast_path_before_llm(monkeypatch):
+    """Represented candidate policy should route the top-level path without selector LLM drift."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    custom_workflow_id = "#V#custom_contract_covering_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=custom_workflow_id,
+        purpose="Runs a custom external-source scan and representation workflow.",
+    )
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=custom_workflow_id,
+        data={"final_response": "Represented fast-path workflow completed."},
+    )
+
+    candidate = {
+        "concept_id": custom_workflow_id,
+        "name": "Custom Contract Covering Workflow",
+        "description": "Runs a custom external-source scan and representation workflow.",
+        "relevance_score": 0.98,
+        "is_executable": True,
+        "is_policy_safe": True,
+        "routing_eligible": True,
+        "candidate_source": "workflow_discovery",
+        "selector_fast_path_policy": {
+            "enabled": True,
+            "rule": "unique_candidate_covers_contract",
+            "authority_source": "repo_seed_text_relation:#V#hasWorkflowSelectorFastPathPolicyJson",
+            "require_contract_coverage": True,
+        },
+        "covers_expected_tool_set": True,
+        "covers_success_contract": True,
+        "satisfies_expected_outcome_contract": True,
+        "selector_fast_path_eligible": True,
+        "turn_launchable": True,
+    }
+    llm = _CapturingLLM([])
+
+    result = orchestrator.run(
+        prompt="Run the represented external-source scan.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [candidate],
+            "candidates": [candidate],
+            "match_count": 1,
+            "selector_fast_path_policy": candidate["selector_fast_path_policy"],
+        },
+    )
+
+    assert llm.calls == []
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == custom_workflow_id
+    assert result.workflow_routing.source == "represented_fast_path"
+    assert result.response_text == "Represented fast-path workflow completed."
+
+    fast_path_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_selector_represented_fast_path"
+    )
+    assert fast_path_entry["applied"] is True
+    assert fast_path_entry["selected_workflow_id"] == custom_workflow_id
+
+    selector_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == custom_workflow_id
+    assert selector_entry["selection_source"] == "represented_fast_path"
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "represented_fast_path"
+    )
+
+
+def test_agent_test_top_level_selector_reuses_authoritative_discovery_candidate(
+    monkeypatch,
+):
+    """AgentTest local replay should not let the selector LLM reorder discovery."""
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    custom_workflow_id = "#V#custom_authoritative_discovery_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=custom_workflow_id,
+        purpose="Runs an authoritative discovered workflow for local replay.",
+    )
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=custom_workflow_id,
+        data={"final_response": "AgentTest authoritative discovery workflow completed."},
+    )
+
+    candidate = {
+        "concept_id": custom_workflow_id,
+        "name": "Custom Authoritative Discovery Workflow",
+        "description": "Runs an authoritative discovered workflow for local replay.",
+        "relevance_score": 0.98,
+        "is_executable": True,
+        "is_policy_safe": True,
+        "routing_eligible": True,
+        "candidate_source": "workflow_discovery",
+        "turn_launchable": True,
+    }
+    llm = _CapturingLLM([])
+
+    result = orchestrator.run(
+        prompt="Run the authoritative discovered local replay workflow.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [candidate],
+            "candidates": [candidate],
+            "match_count": 1,
+        },
+    )
+
+    assert llm.calls == []
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == custom_workflow_id
+    assert result.workflow_routing.source == "agent_test_authoritative_discovery"
+    assert result.response_text == "AgentTest authoritative discovery workflow completed."
+
+    fast_path_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict)
+        and e.get("type") == "workflow_selector_agent_test_authoritative_discovery"
+    )
+    assert fast_path_entry["selected_workflow_id"] == custom_workflow_id
+
+    selector_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == custom_workflow_id
+    assert selector_entry["selection_source"] == "agent_test_authoritative_discovery"
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "agent_test_authoritative_discovery"
+    )
+
+
 def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
     """Non-executable discovered workflows should not reach selector candidates by default."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)

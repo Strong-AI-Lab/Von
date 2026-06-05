@@ -1671,8 +1671,16 @@ def _normalise_workflow_routing_profile(
         explicit_workflow_context_required = role == "maintenance"
     if prefer_existing_capability is None:
         prefer_existing_capability = role == "authoring"
+    raw_execution_mode = _normalise_non_empty_text(
+        raw_profile.get("execution_mode")
+        or raw_profile.get("selected_execution_mode")
+        or raw_profile.get("dispatch_execution_mode")
+    )
+    execution_mode = (
+        str(raw_execution_mode or "").strip().lower().replace("-", "_")
+    )
 
-    return {
+    payload = {
         "schema_version": WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION,
         "role": role,
         "authoring_intent_required": bool(authoring_intent_required),
@@ -1681,6 +1689,9 @@ def _normalise_workflow_routing_profile(
         ),
         "prefer_existing_capability": bool(prefer_existing_capability),
     }
+    if execution_mode in {"custom_workflow", "direct_response", "tool_pipeline"}:
+        payload["execution_mode"] = execution_mode
+    return payload
 
 
 def _parse_workflow_routing_profile_text_value(

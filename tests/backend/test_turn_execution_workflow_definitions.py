@@ -228,6 +228,144 @@ def test_durable_turn_selector_prepare_routes_on_user_prompt_before_contract(
     )
 
 
+def test_agent_test_turn_route_preserves_gmail_arxiv_selector_choice(
+    monkeypatch,
+) -> None:
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
+    from src.backend.workflows.durable.registry_factory import (
+        invalidate_shared_workflow_registry_read_only,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    invalidate_shared_workflow_registry_read_only()
+
+    class _ExplodingLLM:
+        def generate(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("AgentTest selector fast path should not call the LLM")
+
+    class _DummyGateway:
+        enabled = True
+
+        def describe_methods(self):
+            return {}
+
+    source = build_repo_seed_workflow_definitions()[
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    ]
+    workflow = WorkflowDefinition(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        initial_state="selector_preparation",
+        states={
+            "selector_preparation": source.states["selector_preparation"],
+            "selector_decision": source.states["selector_decision"],
+            "routing": WorkflowStateSpec(
+                state_id="routing",
+                actions=source.states["routing"].actions,
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="completed",
+                        condition=lambda _context: True,
+                        reason="routing_resolved",
+                    ),
+                ),
+                metadata=source.states["routing"].metadata,
+            ),
+            "completed": WorkflowStateSpec(state_id="completed", terminal=True),
+        },
+        termination_states=("completed",),
+        metadata=source.metadata,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    prompt = (
+        "Look in the last 20 email messages for arXiv papers and represent any "
+        "papers you find in Vontology."
+    )
+    required_tools = [
+        "gmail_list_messages",
+        "gmail_get_message",
+        "search_arxiv",
+    ]
+    discovery_contract_data = {
+        "prompt": prompt,
+        "user_prompt": prompt,
+        "turn_expected_required_tools": required_tools,
+    }
+    expected_contract = orchestrator._build_turn_expected_outcome_contract_object(
+        discovery_contract_data
+    )
+    discovery_query_input = orchestrator._build_turn_discovery_query_text(
+        turn_text=prompt,
+        expected_outcome_contract=expected_contract,
+    )
+    discovery_query_input = discovery_query_input or prompt
+    discovery_candidate = {
+        "concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+        "name": "Zhan Gmail arXiv ingestion workflow",
+        "description": (
+            "Scan recent Gmail messages, identify arXiv references, and "
+            "represent the papers in Vontology."
+        ),
+        "is_executable": True,
+        "executability_reason": "executable_now",
+        "is_policy_safe": True,
+        "routing_eligible": True,
+        "candidate_source": "workflow_discovery",
+    }
+
+    result = WorkflowExecutor(
+        registry=orchestrator._action_registry,
+        max_transitions=5,
+    ).run(
+        workflow,
+        environment=WorkflowEnvironment(
+            llm_client=_ExplodingLLM(),
+            model="gemma4:e4b",
+            user_namespace="#V#zhan_von_witbrock",
+        ),
+        data={
+            "prompt": prompt,
+            "user_prompt": prompt,
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+            "turn_expected_required_tools": required_tools,
+            "workflow_discovery_result": {
+                "matches": [dict(discovery_candidate)],
+                "candidates": [dict(discovery_candidate)],
+                "routing_matches": [dict(discovery_candidate)],
+                "query": discovery_query_input,
+                "discovery_query_input": discovery_query_input,
+                "requested_query": prompt,
+                "match_count": 1,
+                "candidate_count": 1,
+            },
+            "llm_calls": [],
+            "aux_llm_calls": [],
+        },
+    )
+
+    assert result.completed is True
+    assert result.data["selector_authoritative_candidate_ids"][0] == (
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+    assert result.data["selected_workflow_id"] == (
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+    assert result.data["workflow_routing"]["workflow_id"] == (
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    )
+    assert result.data["workflow_routing"]["verdict"] != "tool_contract_override"
+
+
 def test_durable_turn_selector_prepare_reuses_turn_scoped_discovery_memo(
     monkeypatch,
 ) -> None:
@@ -566,6 +704,24 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     )
     assert selector_decision_policy.get("context_lineage_context_key") == (
         "selector_context_lineage"
+    )
+    selector_context_fields = selector_decision_policy.get("context_fields")
+    assert isinstance(selector_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "selector_authoritative_candidate_ids"
+        for field in selector_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key")
+        == "selector_authoritative_candidate_entries"
+        for field in selector_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "selector_policy_recommendation"
+        for field in selector_context_fields
     )
     selector_decision_mappings = (
         selector_decision.metadata.get("tool_output_context_mappings") or []

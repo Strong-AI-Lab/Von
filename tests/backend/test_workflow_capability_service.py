@@ -498,6 +498,65 @@ class TestIndexFromRegistry:
         assert results
         assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
 
+    def test_agent_test_repo_seed_metadata_supplies_discovery_exemplars(
+        self,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
+        from src.backend.workflows.workflow_registry import WorkflowRegistration
+
+        workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+        definition = WorkflowDefinition(
+            workflow_id=workflow_id,
+            initial_state="done",
+            states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+            termination_states=("done",),
+            purpose="Recurring Gmail-to-arXiv representation convergence.",
+            metadata={
+                "description_text": (
+                    "Represent arXiv papers discovered in Gmail source messages."
+                ),
+                "description_source": "repo_seed_text_relation:#V#hasDescription",
+                "discovery_exemplars": {
+                    "schema_version": "workflow_discovery_exemplars.v1",
+                    "keywords": [
+                        "recent email messages about arxiv papers",
+                        "gmail arxiv paper representation",
+                    ],
+                    "examples": [
+                        (
+                            "Look for recent email messages about arxiv "
+                            "papers and represent them."
+                        )
+                    ],
+                },
+                "discovery_exemplars_source": (
+                    "repo_seed_text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+                ),
+            },
+        )
+        registry = WorkflowRegistry()
+        registry.register(
+            WorkflowRegistration(
+                workflow_id=workflow_id,
+                definition=definition,
+                purpose=definition.purpose,
+                source="repo_seed_agent_test",
+            )
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+
+        assert count == 1
+        entry = index._entries[workflow_id]
+        assert "Keywords: recent email messages about arxiv papers" in entry.text
+        assert "Example requests: Look for recent email messages" in entry.text
+        assert entry.metadata["has_authoritative_routing_text"] is True
+        results = index.search("Look for recent email messages about arxiv papers")
+        assert results
+        assert results[0].workflow_id == workflow_id
+
     def test_rebuild_replaces_stale_retrieval_docs(
         self,
     ) -> None:

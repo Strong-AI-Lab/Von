@@ -31,7 +31,12 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowProgressProjectionJson",
+          "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"gmail_arxiv_message_count\",\"label\":\"Messages scanned\",\"source_path\":\"context.message_item_count\",\"value_kind\":\"number\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_messages_scanned_progress_fact\"},{\"fact_id\":\"gmail_arxiv_success_count\",\"label\":\"Messages completed\",\"source_path\":\"context.message_success_count\",\"value_kind\":\"number\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_messages_completed_progress_fact\"},{\"fact_id\":\"gmail_arxiv_error_count\",\"label\":\"Messages failed\",\"source_path\":\"context.message_error_count\",\"value_kind\":\"number\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_messages_failed_progress_fact\"}]}",
           "lang": "en-NZ"
         }
       ],
@@ -68,6 +73,15 @@
         ],
         "required_inputs": [],
         "schema_version": "workflow_launch_input_contract.v1"
+      },
+      "step_text_relations": {
+        "process_messages": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"gmail_arxiv_batch_result\",\"label\":\"Result\",\"source_path\":\"context.last_action_outcome\",\"value_kind\":\"status\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_batch_result_progress_fact\"},{\"fact_id\":\"gmail_arxiv_batch_success_count\",\"label\":\"Messages completed\",\"source_path\":\"context.message_success_count\",\"value_kind\":\"number\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_batch_success_count_progress_fact\"},{\"fact_id\":\"gmail_arxiv_batch_error_count\",\"label\":\"Messages failed\",\"source_path\":\"context.message_error_count\",\"value_kind\":\"number\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_batch_error_count_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ]
       },
       "publication_spec": {
         "initial_state": "resolve_done_hint",
@@ -405,6 +419,22 @@
         ],
         "schema_version": "workflow_launch_input_contract.v1"
       },
+      "step_text_relations": {
+        "normalise_message": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"gmail_message_subject\",\"label\":\"Email message\",\"source_path\":\"context.message_subject\",\"value_kind\":\"title\",\"visibility\":\"default\",\"sensitive\":true,\"redaction_policy\":\"private_redacted\",\"contract_id\":\"#V#gmail_arxiv_email_message_subject_progress_fact\"},{\"fact_id\":\"gmail_message_id\",\"label\":\"Email message id\",\"source_path\":\"context.message_id\",\"value_kind\":\"identifier\",\"visibility\":\"debug\",\"contract_id\":\"#V#gmail_arxiv_email_message_id_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ],
+        "ingest_arxiv_resources": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"message_arxiv_resource_count\",\"label\":\"arXiv links\",\"source_path\":\"context.arxiv_item_count\",\"value_kind\":\"number\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_resource_count_progress_fact\"},{\"fact_id\":\"message_arxiv_result\",\"label\":\"Result\",\"source_path\":\"context.last_action_outcome\",\"value_kind\":\"status\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_message_result_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ]
+      },
       "publication_spec": {
         "initial_state": "normalise_message",
         "steps": [
@@ -424,6 +454,15 @@
                       "current_message.message_id",
                       "current_message.id",
                       "message_id"
+                    ]
+                  },
+                  {
+                    "key": "message_subject",
+                    "value_from_context_options": [
+                      "current_message.subject",
+                      "current_message.title",
+                      "subject",
+                      "message_subject"
                     ]
                   },
                   {
@@ -840,6 +879,22 @@
           "lang": "en-NZ"
         }
       ],
+      "step_text_relations": {
+        "normalise_reference": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"arxiv_paper_id\",\"label\":\"arXiv paper\",\"source_path\":\"context.arxiv_id\",\"value_kind\":\"identifier\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_paper_id_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ],
+        "represent_arxiv_paper": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"arxiv_paper_concept\",\"label\":\"Paper concept\",\"source_path\":\"context.paper_concept_id\",\"value_kind\":\"concept_id\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_paper_concept_progress_fact\"},{\"fact_id\":\"arxiv_resource_result\",\"label\":\"Result\",\"source_path\":\"context.last_action_outcome\",\"value_kind\":\"status\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_resource_result_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ]
+      },
       "publication_spec": {
         "initial_state": "normalise_reference",
         "steps": [

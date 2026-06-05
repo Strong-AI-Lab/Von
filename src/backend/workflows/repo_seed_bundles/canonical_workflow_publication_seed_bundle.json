@@ -3719,6 +3719,9 @@
               "selector_prompt_provenance",
               "selector_prompt_failure_reason",
               "selector_prompt_failure_detail",
+              "selector_authoritative_candidate_entries",
+              "selector_authoritative_candidate_ids",
+              "selector_authoritative_candidate_source",
               "selector_candidate_entries",
               "selector_candidate_ids",
               "selector_excluded_candidate_entries",
@@ -3752,6 +3755,26 @@
               "context_lineage_context_key": "selector_context_lineage",
               "response_contract_text": "Return JSON only.",
               "context_fields": [
+                {
+                  "context_key": "selector_authoritative_candidate_ids",
+                  "label": "Authoritative workflow-discovery candidate IDs prepared before selector policy ordering."
+                },
+                {
+                  "context_key": "selector_authoritative_candidate_entries",
+                  "label": "Authoritative workflow-discovery candidate entries prepared before selector policy ordering."
+                },
+                {
+                  "context_key": "selector_authoritative_candidate_source",
+                  "label": "Source for the authoritative workflow-discovery candidate projection."
+                },
+                {
+                  "context_key": "selector_candidate_ids",
+                  "label": "Selector candidate IDs after represented candidate preparation."
+                },
+                {
+                  "context_key": "selector_policy_recommendation",
+                  "label": "Learned selector policy recommendation and ordering, if present."
+                },
                 {
                   "context_key": "workflow_success_guidance_history",
                   "label": "Historical successful-run guidance: soft hints from prior successful executions."

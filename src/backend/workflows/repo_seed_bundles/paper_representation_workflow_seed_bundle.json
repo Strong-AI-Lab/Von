@@ -1667,6 +1667,22 @@
         ],
         "schema_version": "workflow_launch_input_contract.v1"
       },
+      "step_text_relations": {
+        "fetch_arxiv_metadata": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"arxiv_paper_title\",\"label\":\"arXiv paper\",\"source_path\":\"context.title\",\"value_kind\":\"title\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_paper_title_progress_fact\"},{\"fact_id\":\"arxiv_paper_id\",\"label\":\"arXiv id\",\"source_path\":\"context.arxiv_id\",\"value_kind\":\"identifier\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_metadata_arxiv_id_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ],
+        "delegate_to_general_paper_workflow": [
+          {
+            "predicate": "#V#hasWorkflowProgressProjectionJson",
+            "text": "{\"schema_version\":\"workflow_progress_projection.v1\",\"facts\":[{\"fact_id\":\"paper_concept\",\"label\":\"Paper concept\",\"source_path\":\"context.paper_concept_id\",\"value_kind\":\"concept_id\",\"visibility\":\"expert\",\"contract_id\":\"#V#gmail_arxiv_general_paper_concept_progress_fact\"},{\"fact_id\":\"paper_representation_result\",\"label\":\"Result\",\"source_path\":\"context.last_action_outcome\",\"value_kind\":\"status\",\"visibility\":\"default\",\"contract_id\":\"#V#gmail_arxiv_paper_representation_result_progress_fact\"}]}",
+            "lang": "en-NZ"
+          }
+        ]
+      },
       "publication_spec": {
         "initial_state": "route_arxiv_targets",
         "steps": [

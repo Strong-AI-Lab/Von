@@ -199,3 +199,48 @@ def test_classify_replay_reports_selector_blocker_before_running_timeout() -> No
     assert "#V#kb_mutation_postcondition_critic_workflow" in analysis["blocker"][
         "observed_workflow_ids"
     ]
+
+
+def test_classify_replay_reports_expected_workflow_action_blocker() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={
+            "last_task_status": {
+                "status": "cancelled",
+                "progress": {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "import_arxiv_pdf_from_url",
+                    "action_id": "import_url_file_copy",
+                    "phase": "cancelled",
+                },
+            }
+        },
+        selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[
+            replay.GMAIL_ARXIV_WORKFLOW_ID,
+            "#V#arxiv_paper_representation_workflow",
+        ],
+        selector_diagnostics=[
+            {
+                "selected_workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
+                "workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
+            }
+        ],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["selected_expected_workflow"] is True
+    assert analysis["blocker"]["type"] == "workflow_action_terminal_state_blocker"
+    assert analysis["blocker"]["last_workflow_id"] == (
+        "#V#arxiv_paper_representation_workflow"
+    )
+    assert analysis["blocker"]["last_state_id"] == "import_arxiv_pdf_from_url"
+    assert analysis["blocker"]["last_action_id"] == "import_url_file_copy"
+    assert (
+        "#V#gmail_arxiv_email_message_subject_progress_fact"
+        in analysis["blocker"]["missing_contract_ids"]
+    )

@@ -708,6 +708,42 @@ def _contains_gmail_oauth_blocker_text(value: Any) -> bool:
     return gmailish and authish
 
 
+def _terminal_workflow_action_blocker(
+    *,
+    terminal_status: str,
+    last_task_status: Mapping[str, Any],
+    selected_workflow_ids: Sequence[str],
+    observed_workflow_ids: Sequence[str],
+    missing_fact_ids: Sequence[str],
+    missing_contract_ids: Sequence[str],
+) -> dict[str, Any]:
+    progress = _as_mapping(last_task_status.get("progress"))
+    workflow_id = _safe_text(progress.get("workflow_id")) or None
+    state_id = _safe_text(progress.get("state_id")) or None
+    action_id = _safe_text(progress.get("action_id")) or None
+    phase = _safe_text(progress.get("phase")) or None
+    reason_parts = [f"Background task ended with status {terminal_status!r}"]
+    if workflow_id or state_id or action_id:
+        location = "/".join(
+            item for item in (workflow_id, state_id, action_id) if item
+        )
+        reason_parts.append(f"after reaching {location}")
+    return {
+        "type": "workflow_action_terminal_state_blocker",
+        "reason": "; ".join(reason_parts) + ".",
+        "terminal_task_status": terminal_status,
+        "last_workflow_id": workflow_id,
+        "last_state_id": state_id,
+        "last_action_id": action_id,
+        "last_phase": phase,
+        "selected_workflow_ids": list(selected_workflow_ids),
+        "observed_workflow_ids": list(observed_workflow_ids),
+        "missing_progress_fact_ids": list(missing_fact_ids),
+        "missing_contract_ids": list(missing_contract_ids),
+        "last_task_status": dict(last_task_status),
+    }
+
+
 def classify_replay(
     *,
     case: ReplayCase,
@@ -761,6 +797,19 @@ def classify_replay(
             "observed_workflow_ids": list(observed_workflow_ids),
             "selector_diagnostics": [dict(item) for item in selector_diagnostics],
         }
+    elif (
+        terminal_status not in {"completed"}
+        and selected_expected_workflow
+        and route_evidence_present
+    ):
+        blocker = _terminal_workflow_action_blocker(
+            terminal_status=terminal_status,
+            last_task_status=last_task_status,
+            selected_workflow_ids=selected_workflow_ids,
+            observed_workflow_ids=observed_workflow_ids,
+            missing_fact_ids=missing_fact_ids,
+            missing_contract_ids=missing_contract_ids,
+        )
     elif terminal_status not in {"completed"}:
         blocker = {
             "type": "task_terminal_state_blocker",

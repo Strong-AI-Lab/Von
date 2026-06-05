@@ -30,6 +30,7 @@ from src.backend.services.workflow_discovery_service import (
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
+    _agent_test_registry_capability_search_should_block,
     _annotate_and_rank_candidates,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
@@ -64,6 +65,25 @@ def _stub_capability_search(monkeypatch: pytest.MonkeyPatch) -> None:
             "build_in_progress": False,
             "last_error": None,
         },
+    )
+
+
+def test_agent_test_registry_capability_search_blocks_for_local_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+
+    assert _agent_test_registry_capability_search_should_block(
+        workflow_registry=object()
+    )
+    assert not _agent_test_registry_capability_search_should_block(
+        workflow_registry=None
+    )
+
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+
+    assert not _agent_test_registry_capability_search_should_block(
+        workflow_registry=object()
     )
 
 

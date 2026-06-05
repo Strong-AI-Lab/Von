@@ -491,6 +491,21 @@ def _compute_capability_index_wait_seconds(timeout_seconds: float) -> float:
     )
 
 
+def _agent_test_registry_capability_search_should_block(
+    *,
+    workflow_registry: Any | None,
+) -> bool:
+    if workflow_registry is None:
+        return False
+    return str(os.getenv("VON_AGENT_TEST_INSTANCE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+
+
 def _derive_capability_index_unavailability_errors(
     *,
     runtime_state: Mapping[str, Any],
@@ -1385,7 +1400,9 @@ def _search_workflow_capabilities(
             query,
             max_results=limit,
             min_score=0.01,
-            non_blocking=True,
+            non_blocking=not _agent_test_registry_capability_search_should_block(
+                workflow_registry=workflow_registry,
+            ),
             max_wait_seconds=effective_max_wait_seconds,
             workflow_registry=workflow_registry,
         )

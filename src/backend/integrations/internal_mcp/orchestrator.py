@@ -144,6 +144,7 @@ from ...workflows.workflow_launch_input_contracts import (
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
 from ...workflows.workflow_selector import (
+    WorkflowSelection,
     WorkflowSelectionPrompt,
     WorkflowSelector,
     build_selector_call_prompt,
@@ -4153,6 +4154,52 @@ class InternalMCPChatOrchestrator:
             == cleaned_workflow_id
         )
 
+    @staticmethod
+    def _normalise_declared_workflow_execution_mode(value: Any) -> str | None:
+        text = str(value or "").strip().lower().replace("-", "_")
+        if text in {"custom_workflow", "direct_response", "tool_pipeline"}:
+            return text
+        return None
+
+    def _selected_workflow_declared_execution_mode(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> str | None:
+        workflow_id_text = (
+            selected_workflow_id.strip()
+            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+            else None
+        )
+        if not workflow_id_text:
+            return None
+
+        _registration, workflow_definition = (
+            self._resolve_workflow_registration_and_definition(workflow_id_text)
+        )
+        metadata = getattr(workflow_definition, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return None
+
+        for source in (
+            metadata,
+            metadata.get("routing_profile"),
+            metadata.get("workflow_execution_contract"),
+        ):
+            if not isinstance(source, Mapping):
+                continue
+            for key in (
+                "execution_mode",
+                "selected_execution_mode",
+                "dispatch_execution_mode",
+            ):
+                execution_mode = self._normalise_declared_workflow_execution_mode(
+                    source.get(key)
+                )
+                if execution_mode:
+                    return execution_mode
+        return None
+
     def _selected_workflow_prefers_direct_response(
         self,
         *,
@@ -4186,6 +4233,11 @@ class InternalMCPChatOrchestrator:
         )
         if not cleaned_workflow_id:
             return None
+        declared_execution_mode = self._selected_workflow_declared_execution_mode(
+            selected_workflow_id=cleaned_workflow_id
+        )
+        if declared_execution_mode:
+            return declared_execution_mode
         if self._selected_workflow_uses_action_contract(
             selected_workflow_id=cleaned_workflow_id,
             required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
@@ -33139,6 +33191,37 @@ class InternalMCPChatOrchestrator:
             if isinstance(item, str) and str(item).strip()
         ]
 
+    @staticmethod
+    def _agent_test_authoritative_selector_candidate_id(
+        candidate_entries: Sequence[Mapping[str, Any]],
+    ) -> str | None:
+        """Return the first authoritative discovery candidate for local replay.
+
+        This is confined to AgentTest so local replay does not let a small local
+        selector model reorder already-authoritative pre-policy discovery
+        evidence. Production routing continues through represented fast-path
+        policy or the selector LLM.
+        """
+
+        if not _is_agent_test_instance():
+            return None
+        for entry in candidate_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = str(entry.get("concept_id") or "").strip()
+            if not concept_id or concept_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+                continue
+            if entry.get("routing_eligible") is False:
+                continue
+            if entry.get("is_executable") is False:
+                continue
+            if entry.get("is_policy_safe") is False:
+                continue
+            if entry.get("turn_launchable") is False:
+                continue
+            return concept_id
+        return None
+
     def _emit_selector_preparation_summary_progress(
         self,
         emit_progress: Callable[[Mapping[str, Any]], None] | None,
@@ -33154,6 +33237,9 @@ class InternalMCPChatOrchestrator:
         )
         selector_discovered_workflow_ids = self._clean_selector_progress_ids(
             outputs.get("selector_discovered_workflow_ids")
+        )
+        selector_authoritative_candidate_ids = self._clean_selector_progress_ids(
+            outputs.get("selector_authoritative_candidate_ids")
         )
         workflow_discovery_result = (
             outputs.get("workflow_discovery_result")
@@ -33175,9 +33261,15 @@ class InternalMCPChatOrchestrator:
                     "excluded candidate(s)."
                 ),
                 "selector_candidate_ids": selector_candidate_ids,
+                "selector_authoritative_candidate_ids": (
+                    selector_authoritative_candidate_ids
+                ),
                 "selector_excluded_candidate_ids": selector_excluded_candidate_ids,
                 "selector_discovered_workflow_ids": selector_discovered_workflow_ids,
                 "selector_candidate_count": len(selector_candidate_ids),
+                "selector_authoritative_candidate_count": len(
+                    selector_authoritative_candidate_ids
+                ),
                 "selector_excluded_candidate_count": len(
                     selector_excluded_candidate_ids
                 ),
@@ -33328,6 +33420,9 @@ class InternalMCPChatOrchestrator:
                 },
                 "selector_prompt_failure_reason": None,
                 "selector_prompt_failure_detail": None,
+                "selector_authoritative_candidate_entries": [],
+                "selector_authoritative_candidate_ids": [],
+                "selector_authoritative_candidate_source": "agent_test_local_replay_synthetic",
                 "selector_candidate_entries": [dict(tool_candidate)],
                 "selector_candidate_ids": [TOOL_CALLING_WORKFLOW_ID],
                 "selector_excluded_candidate_entries": [],
@@ -33533,9 +33628,23 @@ class InternalMCPChatOrchestrator:
             prompt=prompt_text,
             candidate_turn_launchability=candidate_turn_launchability,
         )
+        selector_authoritative_candidate_entries = [
+            {str(key): value for key, value in item.items() if isinstance(key, str)}
+            for item in discovered_matches
+            if isinstance(item, Mapping)
+        ]
+        selector_authoritative_candidate_ids = [
+            str(item.get("concept_id")).strip()
+            for item in selector_authoritative_candidate_entries
+            if isinstance(item.get("concept_id"), str)
+            and str(item.get("concept_id")).strip()
+        ]
         self._emit_selector_preparation_summary_progress(
             progress_update,
             {
+                "selector_authoritative_candidate_ids": (
+                    selector_authoritative_candidate_ids
+                ),
                 "selector_candidate_ids": [
                     str(item.get("concept_id")).strip()
                     for item in selector_candidate_matches
@@ -33718,6 +33827,11 @@ class InternalMCPChatOrchestrator:
             ),
             "selector_prompt_failure_reason": selector_prompt.prompt_failure_reason,
             "selector_prompt_failure_detail": selector_prompt.prompt_failure_detail,
+            "selector_authoritative_candidate_entries": (
+                selector_authoritative_candidate_entries
+            ),
+            "selector_authoritative_candidate_ids": selector_authoritative_candidate_ids,
+            "selector_authoritative_candidate_source": "workflow_discovery_pre_policy",
             "selector_candidate_entries": selector_candidate_entries,
             "selector_candidate_ids": selector_candidate_ids,
             "selector_excluded_candidate_entries": selector_excluded_candidate_entries,
@@ -38295,6 +38409,7 @@ class InternalMCPChatOrchestrator:
             try:
                 classifier_model = None
                 selector_candidate = None
+                selector_fast_path_evaluation: dict[str, Any] | None = None
                 if not selector_prompt.prompt_text:
                     _emit_progress_local(
                         {
@@ -38318,71 +38433,198 @@ class InternalMCPChatOrchestrator:
                         )
                     )
                 else:
-                    selector_prompt_text = selector_prompt.prompt_text
-                    selector_context, selector_context_telemetry = (
-                        self._build_stage_llm_context(
-                            base_context=augmented_context,
-                            stage="workflow_dispatch",
-                            base_context_source="augmented_context",
-                            stage_messages=(
-                                [
+                    selector_fast_path_evaluation = (
+                        self._workflow_selector.evaluate_represented_fast_path(
+                            selection_prompt=selector_prompt
+                        )
+                    )
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "workflow_selector_represented_fast_path",
+                                "stage": "selector_decision",
+                                **dict(selector_fast_path_evaluation),
+                            },
+                            stage="selector_decision",
+                            component="workflow_selector",
+                            function="evaluate_represented_fast_path",
+                            decision_class="workflow_selector_fast_path",
+                            decision_source="represented_selector_fast_path_policy",
+                            changed_outcome=bool(
+                                selector_fast_path_evaluation.get("applied")
+                            ),
+                            reason_code=str(
+                                selector_fast_path_evaluation.get("reason")
+                                or "not_evaluated"
+                            ),
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
+                    selector_selection = None
+                    if bool(selector_fast_path_evaluation.get("applied")):
+                        selector_selection = (
+                            self._workflow_selector.resolve_represented_fast_path_selection(
+                                selection_prompt=selector_prompt
+                            )
+                        )
+                    if selector_selection is None:
+                        agent_test_authoritative_candidate_id = (
+                            self._agent_test_authoritative_selector_candidate_id(
+                                discovered_matches
+                            )
+                        )
+                        if agent_test_authoritative_candidate_id:
+                            reasoning = (
+                                "AgentTest local replay reused the first "
+                                "authoritative workflow-discovery candidate so "
+                                "represented workflow discovery remains "
+                                "authoritative over selector policy ordering."
+                            )
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
                                     {
-                                        "role": "system",
-                                        "content": selector_prompt_text,
-                                    }
-                                ]
+                                        "type": "workflow_selector_agent_test_authoritative_discovery",
+                                        "stage": "selector_decision",
+                                        "selected_workflow_id": (
+                                            agent_test_authoritative_candidate_id
+                                        ),
+                                        "candidate_ids": [
+                                            str(item.get("concept_id")).strip()
+                                            for item in discovered_matches
+                                            if isinstance(item, Mapping)
+                                            and isinstance(
+                                                item.get("concept_id"), str
+                                            )
+                                            and str(item.get("concept_id")).strip()
+                                        ],
+                                    },
+                                    stage="selector_decision",
+                                    component="internal_mcp_orchestrator",
+                                    function=(
+                                        "_agent_test_authoritative_selector_candidate_id"
+                                    ),
+                                    decision_class="workflow_selector_fast_path",
+                                    decision_source=(
+                                        "agent_test_authoritative_workflow_discovery"
+                                    ),
+                                    changed_outcome=True,
+                                    reason_code=(
+                                        "agent_test_authoritative_discovery_candidate"
+                                    ),
+                                    possible_inappropriate_python_code_use=False,
+                                )
+                            )
+                            selector_selection = WorkflowSelection(
+                                workflow_id=agent_test_authoritative_candidate_id,
+                                verdict="rag_selected",
+                                prompt_id=selector_prompt.prompt_id,
+                                prompt_used=selector_prompt.prompt_text,
+                                raw_response=json.dumps(
+                                    {
+                                        "workflow_id": (
+                                            agent_test_authoritative_candidate_id
+                                        ),
+                                        "confidence": 1.0,
+                                        "reasoning": reasoning,
+                                    },
+                                    ensure_ascii=True,
+                                    sort_keys=True,
+                                ),
+                                discovered_workflow_ids=(
+                                    selector_prompt.discovered_workflow_ids
+                                ),
+                                confidence_score=1.0,
+                                reasoning=reasoning,
+                                selection_source=(
+                                    "agent_test_authoritative_discovery"
+                                ),
+                                selection_metadata={
+                                    "selection_resolution": (
+                                        "agent_test_authoritative_discovery"
+                                    ),
+                                    "selected_workflow_id": (
+                                        agent_test_authoritative_candidate_id
+                                    ),
+                                    "selector_authoritative_candidate_ids": [
+                                        str(item.get("concept_id")).strip()
+                                        for item in discovered_matches
+                                        if isinstance(item, Mapping)
+                                        and isinstance(item.get("concept_id"), str)
+                                        and str(item.get("concept_id")).strip()
+                                    ],
+                                    "selector_authoritative_candidate_source": (
+                                        "workflow_discovery_pre_policy"
+                                    ),
+                                },
+                            )
+                    if selector_selection is None:
+                        selector_prompt_text = selector_prompt.prompt_text
+                        selector_context, selector_context_telemetry = (
+                            self._build_stage_llm_context(
+                                base_context=augmented_context,
+                                stage="workflow_dispatch",
+                                base_context_source="augmented_context",
+                                stage_messages=(
+                                    [
+                                        {
+                                            "role": "system",
+                                            "content": selector_prompt_text,
+                                        }
+                                    ]
+                                ),
+                            )
+                        )
+                        self._attach_memory_context_lineage(
+                            selector_context_telemetry,
+                            turn_memory_context_state=turn_memory_context_state,
+                        )
+                        selector_prompt_payload["context_lineage"] = (
+                            dict(selector_context_telemetry)
+                            if isinstance(selector_context_telemetry, Mapping)
+                            else None
+                        )
+                        if trace_enabled and trace is not None:
+                            trace.metadata["workflow_selector_prompt"] = dict(
+                                selector_prompt_payload
+                            )
+                        selector_response_text, classifier_model, selector_candidate = (
+                            self._run_llm_with_fallbacks(
+                                stage="workflow_dispatch",
+                                policy_stage="classifier",
+                                prompt=build_selector_call_prompt(prompt),
+                                context=selector_context,
+                                default_client=llm_client,
+                                default_model=model,
+                                policy_state=policy_state,
+                                registry_snapshot=registry_snapshot,
+                                user_concept_id=user_concept_id,
+                                org_concept_id=org_concept_id,
+                                llm_calls_log=llm_calls,
+                                aux_log=aux_llm_calls,
+                                record_llm_call=_record_llm_call,
+                                emit_progress=_emit_selector_progress,
+                                context_telemetry=selector_context_telemetry,
+                                prefer_default_model=prefer_default_model,
+                                check_cancellation=_check_cancellation_local,
+                                workflow_stage_id="selector_preparation",
+                            )
+                        )
+                        selector_selection = self._workflow_selector.resolve_selection(
+                            raw_response=selector_response_text,
+                            prompt_id=selector_prompt.prompt_id,
+                            prompt_used=selector_prompt_text,
+                            discovered_workflow_ids=(
+                                selector_prompt.discovered_workflow_ids
+                            ),
+                            candidate_entries=(
+                                tuple(selector_prompt.candidate_entries)
+                                + tuple(
+                                    item
+                                    for item in excluded_discovered_matches
+                                    if isinstance(item, Mapping)
+                                )
                             ),
                         )
-                    )
-                    self._attach_memory_context_lineage(
-                        selector_context_telemetry,
-                        turn_memory_context_state=turn_memory_context_state,
-                    )
-                    selector_prompt_payload["context_lineage"] = (
-                        dict(selector_context_telemetry)
-                        if isinstance(selector_context_telemetry, Mapping)
-                        else None
-                    )
-                    if trace_enabled and trace is not None:
-                        trace.metadata["workflow_selector_prompt"] = dict(
-                            selector_prompt_payload
-                        )
-                    selector_response_text, classifier_model, selector_candidate = (
-                        self._run_llm_with_fallbacks(
-                            stage="workflow_dispatch",
-                            policy_stage="classifier",
-                            prompt=build_selector_call_prompt(prompt),
-                            context=selector_context,
-                            default_client=llm_client,
-                            default_model=model,
-                            policy_state=policy_state,
-                            registry_snapshot=registry_snapshot,
-                            user_concept_id=user_concept_id,
-                            org_concept_id=org_concept_id,
-                            llm_calls_log=llm_calls,
-                            aux_log=aux_llm_calls,
-                            record_llm_call=_record_llm_call,
-                            emit_progress=_emit_selector_progress,
-                            context_telemetry=selector_context_telemetry,
-                            prefer_default_model=prefer_default_model,
-                            check_cancellation=_check_cancellation_local,
-                            workflow_stage_id="selector_preparation",
-                        )
-                    )
-                    selector_selection = self._workflow_selector.resolve_selection(
-                        raw_response=selector_response_text,
-                        prompt_id=selector_prompt.prompt_id,
-                        prompt_used=selector_prompt_text,
-                        discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
-                        candidate_entries=(
-                            tuple(selector_prompt.candidate_entries)
-                            + tuple(
-                                item
-                                for item in excluded_discovered_matches
-                                if isinstance(item, Mapping)
-                            )
-                        ),
-                    )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
                 selection_source = (
                     selector_selection.selection_source

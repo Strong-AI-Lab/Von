@@ -909,6 +909,17 @@ def _normalise_routing_profile(value: Any) -> dict[str, Any] | None:
     routing_eligible = _coerce_bool(raw.get("routing_eligible"))
     if routing_eligible is not None:
         payload["routing_eligible"] = routing_eligible
+    execution_mode = (
+        _clean_text(
+            raw.get("execution_mode")
+            or raw.get("selected_execution_mode")
+            or raw.get("dispatch_execution_mode")
+        )
+        .lower()
+        .replace("-", "_")
+    )
+    if execution_mode in {"custom_workflow", "direct_response", "tool_pipeline"}:
+        payload["execution_mode"] = execution_mode
     return payload
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -60,6 +60,8 @@ from .vontology_loader import (
     _tool_output_mapping_pair_from_concept_id,
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
+    resolve_workflow_long_horizon_policies,
+    resolve_workflow_step_runtime_policies,
 )
 from .workflow_action_contracts import (
     WORKFLOW_ACTION_CONTRACT_SPEC_CONCEPT_DATA_KEY,
@@ -826,13 +828,83 @@ def _load_repo_seed_workflow_bundle_cached(
         if isinstance(launch_input_contract, Mapping):
             workflow_launch_input_contracts[workflow_id] = dict(launch_input_contract)
 
+        raw_step_text_relations = item.get("step_text_relations")
+        if isinstance(raw_step_text_relations, Mapping):
+            for raw_state_id, raw_relations in raw_step_text_relations.items():
+                state_id_text = _normalise_seed_bundle_text(raw_state_id)
+                if not state_id_text:
+                    continue
+                step_text_specs = list(
+                    step_text_relations.get(
+                        _step_concept_id(
+                            workflow_id=workflow_id,
+                            state_id=state_id_text,
+                        )
+                    )
+                    or ()
+                )
+                if isinstance(raw_relations, Mapping):
+                    raw_relations_iterable = (raw_relations,)
+                elif isinstance(raw_relations, Sequence) and not isinstance(
+                    raw_relations,
+                    str,
+                ):
+                    raw_relations_iterable = raw_relations
+                else:
+                    raw_relations_iterable = ()
+                for raw_relation in raw_relations_iterable:
+                    _append_seed_bundle_text_relation_mapping(
+                        target=step_text_specs,
+                        raw_item=raw_relation,
+                    )
+                if step_text_specs:
+                    step_text_relations[
+                        _step_concept_id(
+                            workflow_id=workflow_id,
+                            state_id=state_id_text,
+                        )
+                    ] = tuple(step_text_specs)
+
+        publication_spec_payload = item.get("publication_spec")
+        raw_steps_payload = (
+            publication_spec_payload.get("steps")
+            if isinstance(publication_spec_payload, Mapping)
+            else None
+        )
+        if isinstance(raw_steps_payload, Sequence) and not isinstance(
+            raw_steps_payload,
+            str,
+        ):
+            for raw_step in raw_steps_payload:
+                if not isinstance(raw_step, Mapping):
+                    continue
+                state_id_text = _normalise_seed_bundle_text(raw_step.get("state_id"))
+                if not state_id_text:
+                    continue
+                step_concept_id = _step_concept_id(
+                    workflow_id=workflow_id,
+                    state_id=state_id_text,
+                )
+                step_text_specs = list(step_text_relations.get(step_concept_id) or ())
+                for raw_relation in raw_step.get("text_relations") or ():
+                    _append_seed_bundle_text_relation_mapping(
+                        target=step_text_specs,
+                        raw_item=raw_relation,
+                    )
+                if step_text_specs:
+                    step_text_relations[step_concept_id] = tuple(step_text_specs)
+
         raw_step_notes = item.get("step_notes")
         if isinstance(raw_step_notes, Mapping):
             for state_id, notes in raw_step_notes.items():
                 state_id_text = _normalise_seed_bundle_text(state_id)
                 if not state_id_text:
                     continue
-                step_text_specs: list[dict[str, Any]] = []
+                step_concept_id = _step_concept_id(
+                    workflow_id=workflow_id,
+                    state_id=state_id_text,
+                )
+                step_text_specs = list(step_text_relations.get(step_concept_id) or ())
                 for note in notes or ():
                     _append_seed_bundle_text_relation_spec(
                         target=step_text_specs,
@@ -841,12 +913,7 @@ def _load_repo_seed_workflow_bundle_cached(
                     )
                 if not step_text_specs:
                     continue
-                step_text_relations[
-                    _step_concept_id(
-                        workflow_id=workflow_id,
-                        state_id=state_id_text,
-                    )
-                ] = tuple(step_text_specs)
+                step_text_relations[step_concept_id] = tuple(step_text_specs)
 
     return {
         "asset_path": str(path),
@@ -917,6 +984,347 @@ def build_seed_canonical_workflow_definitions(
             if workflow_id in allowed_ids
         }
     return _build_definition_map_from_publication_specs(publication_specs)
+
+
+def _repo_seed_workflow_bundle_paths(
+    *,
+    bundle_dir: Path = REPO_SEED_WORKFLOW_BUNDLE_DIR,
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for path in sorted(bundle_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("schema_version") == REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION
+        ):
+            paths.append(path)
+    return tuple(paths)
+
+
+def _normalise_repo_seed_predicate_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("#v#"):
+        text = text[3:]
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _repo_seed_text_relation(
+    relation_specs: Sequence[Mapping[str, Any]],
+    *predicate_names: str,
+) -> tuple[Mapping[str, Any] | None, str]:
+    wanted = {
+        _normalise_repo_seed_predicate_token(predicate)
+        for predicate in predicate_names
+        if str(predicate or "").strip()
+    }
+    if not wanted:
+        return None, ""
+    for relation in relation_specs:
+        if not isinstance(relation, Mapping):
+            continue
+        predicate = str(relation.get("predicate") or "").strip()
+        if _normalise_repo_seed_predicate_token(predicate) in wanted:
+            return relation, predicate
+    return None, ""
+
+
+def _repo_seed_json_text_relation_payload(
+    relation_specs: Sequence[Mapping[str, Any]],
+    *predicate_names: str,
+) -> tuple[dict[str, Any] | None, str]:
+    relation, predicate = _repo_seed_text_relation(relation_specs, *predicate_names)
+    text = str(relation.get("text") or "").strip() if isinstance(relation, Mapping) else ""
+    if not text:
+        return None, ""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None, ""
+    if isinstance(payload, Mapping):
+        return (
+            {
+                str(key): value
+                for key, value in payload.items()
+                if isinstance(key, str)
+            },
+            predicate,
+        )
+    return None, ""
+
+
+def _repo_seed_relation_runtime_policy_cache(
+    *,
+    concept_id: str,
+    relation_specs: Sequence[Mapping[str, Any]],
+) -> Dict[str, List[Mapping[str, Any]]]:
+    return {
+        concept_id: [
+            {
+                str(key): value
+                for key, value in relation.items()
+                if isinstance(key, str)
+            }
+            for relation in relation_specs
+            if isinstance(relation, Mapping)
+        ]
+    }
+
+
+def _repo_seed_workflow_runtime_metadata(
+    *,
+    workflow_id: str,
+    relation_specs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not relation_specs:
+        return {}
+    policies, warnings = resolve_workflow_long_horizon_policies(
+        workflow_id,
+        text_cache=_repo_seed_relation_runtime_policy_cache(
+            concept_id=workflow_id,
+            relation_specs=relation_specs,
+        ),
+    )
+    metadata: dict[str, Any] = {}
+    progress_projection = policies.get("progress_projection")
+    if isinstance(progress_projection, Mapping):
+        metadata["progress_projection"] = dict(progress_projection)
+        _relation, predicate = _repo_seed_text_relation(
+            relation_specs,
+            "#V#hasWorkflowProgressProjectionJson",
+            "hasWorkflowProgressProjectionJson",
+            "#V#has_workflow_progress_projection_json",
+            "has_workflow_progress_projection_json",
+        )
+        if predicate:
+            metadata["progress_projection_source"] = (
+                f"repo_seed_text_relation:{predicate}"
+            )
+    if warnings:
+        metadata["repo_seed_workflow_policy_warnings"] = list(warnings)
+    return metadata
+
+
+def _repo_seed_step_runtime_metadata(
+    *,
+    step_concept_id: str,
+    relation_specs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not relation_specs:
+        return {}
+    policies, warnings = resolve_workflow_step_runtime_policies(
+        step_concept_id,
+        text_cache=_repo_seed_relation_runtime_policy_cache(
+            concept_id=step_concept_id,
+            relation_specs=relation_specs,
+        ),
+    )
+    metadata = {
+        str(key): value
+        for key, value in policies.items()
+        if isinstance(key, str) and value is not None
+    }
+    progress_projection = metadata.get("progress_projection")
+    if isinstance(progress_projection, Mapping):
+        _relation, predicate = _repo_seed_text_relation(
+            relation_specs,
+            "#V#hasWorkflowProgressProjectionJson",
+            "hasWorkflowProgressProjectionJson",
+            "#V#has_workflow_progress_projection_json",
+            "has_workflow_progress_projection_json",
+        )
+        if predicate:
+            metadata["progress_projection_source"] = (
+                f"repo_seed_text_relation:{predicate}"
+            )
+    if warnings:
+        metadata["repo_seed_step_policy_warnings"] = list(warnings)
+    return metadata
+
+
+def _repo_seed_description_text(
+    relation_specs: Sequence[Mapping[str, Any]],
+) -> tuple[str | None, str]:
+    relation, predicate = _repo_seed_text_relation(
+        relation_specs,
+        "hasDescription",
+        "#V#hasDescription",
+    )
+    text = str(relation.get("text") or "").strip() if isinstance(relation, Mapping) else ""
+    return (text or None), predicate
+
+
+def _repo_seed_definition_metadata(
+    *,
+    workflow_id: str,
+    bundle: Mapping[str, Any],
+) -> dict[str, Any]:
+    workflow_text_relations = bundle.get("workflow_text_relations")
+    relation_specs = (
+        tuple(workflow_text_relations.get(workflow_id) or ())
+        if isinstance(workflow_text_relations, Mapping)
+        else ()
+    )
+    launch_contracts = bundle.get("workflow_launch_input_contracts")
+    launch_input_contract = (
+        launch_contracts.get(workflow_id)
+        if isinstance(launch_contracts, Mapping)
+        else None
+    )
+    description_text, description_predicate = _repo_seed_description_text(relation_specs)
+    discovery_exemplars, discovery_predicate = _repo_seed_json_text_relation_payload(
+        relation_specs,
+        WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE,
+        "hasWorkflowDiscoveryExemplarsJson",
+        "#V#has_workflow_discovery_exemplars_json",
+        "has_workflow_discovery_exemplars_json",
+    )
+    routing_profile, routing_profile_predicate = _repo_seed_json_text_relation_payload(
+        relation_specs,
+        WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE,
+        "hasWorkflowRoutingProfileJson",
+        "#V#has_workflow_routing_profile_json",
+        "has_workflow_routing_profile_json",
+    )
+    lifecycle, lifecycle_predicate = _repo_seed_json_text_relation_payload(
+        relation_specs,
+        WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE,
+        "hasWorkflowLifecycleJson",
+        "#V#has_workflow_lifecycle_json",
+        "has_workflow_lifecycle_json",
+    )
+
+    metadata: dict[str, Any] = {
+        "repo_seed_bundle_asset_path": str(bundle.get("asset_path") or ""),
+        "repo_seed_family_id": str(bundle.get("family_id") or ""),
+        "repo_seed_source_tag": str(bundle.get("source_tag") or ""),
+        "repo_seed_version": str(bundle.get("seed_version") or ""),
+    }
+    if description_text:
+        metadata["description_text"] = description_text
+        metadata["description_source"] = f"repo_seed_text_relation:{description_predicate}"
+    if discovery_exemplars:
+        metadata["discovery_exemplars"] = discovery_exemplars
+        metadata["discovery_exemplars_source"] = (
+            f"repo_seed_text_relation:{discovery_predicate}"
+        )
+    if routing_profile:
+        metadata["routing_profile"] = routing_profile
+        metadata["routing_profile_source"] = f"repo_seed_text_relation:{routing_profile_predicate}"
+    if lifecycle:
+        metadata["publication_lifecycle"] = lifecycle
+        metadata["publication_lifecycle_source"] = (
+            f"repo_seed_text_relation:{lifecycle_predicate}"
+        )
+    metadata.update(
+        _repo_seed_workflow_runtime_metadata(
+            workflow_id=workflow_id,
+            relation_specs=relation_specs,
+        )
+    )
+    if isinstance(launch_input_contract, Mapping):
+        metadata["launch_input_contract"] = dict(launch_input_contract)
+        metadata["launch_input_contract_source"] = "repo_seed_bundle:launch_input_contract"
+    return {key: value for key, value in metadata.items() if value not in ("", None)}
+
+
+def build_repo_seed_workflow_definitions(
+    *,
+    bundle_paths: Sequence[str | Path] | None = None,
+    target_workflow_ids: Sequence[str] | None = None,
+) -> Dict[str, WorkflowDefinition]:
+    """Build DB-free workflow definitions from repo seed workflow bundles.
+
+    This is intended for isolated AgentTest/replay support. It keeps repo-side
+    seed bundles in their fixture role while preserving their represented text
+    relations as routing metadata for the local capability index.
+    """
+
+    selected_paths = (
+        tuple(Path(path) for path in bundle_paths)
+        if bundle_paths is not None
+        else _repo_seed_workflow_bundle_paths()
+    )
+    allowed_ids = (
+        {
+            str(item).strip()
+            for item in target_workflow_ids
+            if isinstance(item, str) and str(item).strip()
+        }
+        if target_workflow_ids is not None
+        else None
+    )
+    definitions: Dict[str, WorkflowDefinition] = {}
+    for path in selected_paths:
+        bundle = load_repo_seed_workflow_bundle(path)
+        publication_specs = bundle.get("publication_specs") or {}
+        if allowed_ids is not None:
+            publication_specs = {
+                workflow_id: spec
+                for workflow_id, spec in publication_specs.items()
+                if workflow_id in allowed_ids
+            }
+        bundle_definitions = _build_definition_map_from_publication_specs(
+            publication_specs
+        )
+        publication_purposes = bundle.get("publication_purposes") or {}
+        for workflow_id, definition in bundle_definitions.items():
+            metadata = {
+                **(
+                    dict(definition.metadata)
+                    if isinstance(definition.metadata, Mapping)
+                    else {}
+                ),
+                **_repo_seed_definition_metadata(
+                    workflow_id=workflow_id,
+                    bundle=bundle,
+                ),
+            }
+            description_text = metadata.get("description_text")
+            purpose = (
+                str(publication_purposes.get(workflow_id) or "").strip()
+                or (description_text if isinstance(description_text, str) else "")
+                or definition.purpose
+            )
+            step_text_relations = bundle.get("step_text_relations")
+            states = dict(definition.states)
+            if isinstance(step_text_relations, Mapping):
+                for state_id, state_spec in list(states.items()):
+                    if not isinstance(state_spec, WorkflowStateSpec):
+                        continue
+                    step_concept_id = _step_concept_id(
+                        workflow_id=workflow_id,
+                        state_id=state_id,
+                    )
+                    relation_specs = tuple(
+                        step_text_relations.get(step_concept_id) or ()
+                    )
+                    runtime_metadata = _repo_seed_step_runtime_metadata(
+                        step_concept_id=step_concept_id,
+                        relation_specs=relation_specs,
+                    )
+                    if not runtime_metadata:
+                        continue
+                    states[state_id] = replace(
+                        state_spec,
+                        metadata={
+                            **(
+                                dict(state_spec.metadata)
+                                if isinstance(state_spec.metadata, Mapping)
+                                else {}
+                            ),
+                            **runtime_metadata,
+                        },
+                    )
+            definitions[workflow_id] = replace(
+                definition,
+                purpose=purpose,
+                states=states,
+                metadata=metadata,
+            )
+    return definitions
 
 
 def seed_canonical_workflow_text_relations() -> Dict[str, tuple[dict[str, Any], ...]]:

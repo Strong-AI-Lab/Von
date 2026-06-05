@@ -32,6 +32,7 @@ class TestTaskStatus:
             created_at=now,
             started_at=now,
             progress={"phase": "tool_execute"},
+            progress_history=[{"phase": "tool_execute"}],
         )
 
         result = status.to_dict()
@@ -44,6 +45,7 @@ class TestTaskStatus:
         assert result["has_result"] is False
         assert result["error"] is None
         assert result["progress"] == {"phase": "tool_execute"}
+        assert result["progress_history"] == [{"phase": "tool_execute"}]
         assert result["cancellation_requested"] is False
 
     def test_to_dict_with_completed_task(self) -> None:
@@ -392,6 +394,50 @@ class TestBackgroundTaskRegistry:
         assert status is not None
         assert status.progress.get("status") == "completed"
 
+        registry.shutdown(wait=True)
+
+    def test_update_progress_records_bounded_history(self) -> None:
+        """update_progress() should preserve recent progress snapshots."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow_task() -> str:
+            started.set()
+            release.wait(timeout=2)
+            return "done"
+
+        registry.submit_task(task_id="history-task", callable=_slow_task)
+        assert started.wait(timeout=2)
+
+        for index in range(205):
+            updated = registry.update_progress(
+                "history-task",
+                {
+                    "status": "workflow_step_complete",
+                    "sequence": index,
+                    "progress_facts": [
+                        {
+                            "fact_id": f"fact_{index}",
+                            "label": "Fact",
+                            "source_path": "context.value",
+                            "status": "available",
+                        }
+                    ],
+                },
+            )
+            assert updated is True
+
+        status = registry.get_task_status("history-task")
+        assert status is not None
+        assert len(status.progress_history) == 200
+        assert status.progress_history[0]["sequence"] == 5
+        assert status.progress_history[-1]["sequence"] == 204
+        assert status.to_dict()["progress_history"][-1]["progress_facts"][0][
+            "fact_id"
+        ] == "fact_204"
+
+        release.set()
         registry.shutdown(wait=True)
 
     def test_cancellation_exception_sets_cancelled_status(self) -> None:

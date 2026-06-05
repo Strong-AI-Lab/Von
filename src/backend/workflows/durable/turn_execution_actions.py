@@ -531,6 +531,9 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             "selector_prompt_provenance",
             "selector_prompt_failure_reason",
             "selector_prompt_failure_detail",
+            "selector_authoritative_candidate_entries",
+            "selector_authoritative_candidate_ids",
+            "selector_authoritative_candidate_source",
             "selector_candidate_entries",
             "selector_candidate_ids",
             "selector_excluded_candidate_entries",
@@ -590,6 +593,12 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             "durable_selector_prompt_unavailable",
         )
         outputs.setdefault("selector_prompt_failure_detail", None)
+        outputs.setdefault("selector_authoritative_candidate_entries", candidate_entries)
+        outputs.setdefault("selector_authoritative_candidate_ids", candidate_ids)
+        outputs.setdefault(
+            "selector_authoritative_candidate_source",
+            "durable_workflow_discovery_pre_policy",
+        )
         outputs.setdefault("selector_candidate_entries", candidate_entries)
         outputs.setdefault("selector_candidate_ids", candidate_ids)
         outputs.setdefault("selector_excluded_candidate_entries", [])

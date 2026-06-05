@@ -580,6 +580,7 @@ class WorkflowSelector:
     ) -> str | None:
         for key in (
             "authority_concept_id",
+            "authority_source",
             "policy_concept_id",
             "rule_concept_id",
             "source_concept_id",

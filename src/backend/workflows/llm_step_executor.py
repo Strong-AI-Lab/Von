@@ -32,6 +32,7 @@ from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
 )
@@ -63,6 +64,13 @@ _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
 _AGENT_TEST_LOCAL_PROVIDER_NAME = "ollama"
+_AGENT_TEST_GENERIC_SELECTOR_WORKFLOW_IDS = frozenset(
+    {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }
+)
 _PREMIUM_MODEL_PROVIDER_PREFIXES = frozenset(
     {"openai", "anthropic", "gemini", "azure_openai"}
 )
@@ -168,13 +176,88 @@ def _agent_test_required_tools(request: WorkflowActionRequest) -> list[str]:
     )
 
 
+def _agent_test_selector_candidate_ids(request: WorkflowActionRequest) -> list[str]:
+    raw_candidate_ids = request.data.get("selector_candidate_ids")
+    if not isinstance(raw_candidate_ids, Sequence) or isinstance(
+        raw_candidate_ids,
+        (str, bytes, bytearray),
+    ):
+        return []
+    return [
+        str(item).strip()
+        for item in raw_candidate_ids
+        if isinstance(item, str) and str(item).strip()
+    ]
+
+
+def _agent_test_selector_authoritative_candidate_ids(
+    request: WorkflowActionRequest,
+) -> list[str]:
+    raw_candidate_ids = request.data.get("selector_authoritative_candidate_ids")
+    if isinstance(raw_candidate_ids, Sequence) and not isinstance(
+        raw_candidate_ids,
+        (str, bytes, bytearray),
+    ):
+        cleaned = [
+            str(item).strip()
+            for item in raw_candidate_ids
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if cleaned:
+            return cleaned
+
+    raw_discovery = request.data.get("workflow_discovery_result")
+    if not isinstance(raw_discovery, Mapping):
+        raw_discovery = request.data.get("workflow_discovery")
+    if not isinstance(raw_discovery, Mapping):
+        return []
+
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    for key in ("matches", "routing_matches", "candidates"):
+        raw_entries = raw_discovery.get(key)
+        if not isinstance(raw_entries, Sequence) or isinstance(
+            raw_entries,
+            (str, bytes, bytearray),
+        ):
+            continue
+        for entry in raw_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = _context_string(
+                entry.get("concept_id")
+                or entry.get("workflow_id")
+                or entry.get("id")
+            )
+            if not concept_id:
+                continue
+            if concept_id in _AGENT_TEST_GENERIC_SELECTOR_WORKFLOW_IDS:
+                continue
+            if entry.get("routing_eligible") is False:
+                continue
+            if entry.get("is_executable") is False:
+                continue
+            if entry.get("is_policy_safe") is False:
+                continue
+            dedupe_key = concept_id.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            candidate_ids.append(concept_id)
+    return candidate_ids
+
+
 def _build_agent_test_expected_outcome_response(
     request: WorkflowActionRequest,
 ) -> str:
     required_tools = _agent_test_required_tools(request)
     user_prompt = _context_string(request.data.get("user_prompt") or request.data.get("prompt"))
     if required_tools:
-        selector_guidance = "Use the generic tool-calling workflow so the required evidence tools can run."
+        selector_guidance = (
+            "Prefer the most specific represented workflow already prepared "
+            "for the selector; use the generic tool-calling workflow only "
+            "when no specialised represented workflow is eligible."
+        )
         if "get_text_relations_summary" in required_tools:
             summary = "Answer the represented-relation request using grounded Vontology tool evidence."
             answering_guidance = "Report the text relation predicates and counts found by the relation-summary tool."
@@ -213,16 +296,44 @@ def _build_agent_test_selector_response(request: WorkflowActionRequest) -> str:
         request.data.get("turn_expected_required_tools"),
         _agent_test_required_tools(request),
     )
-    workflow_id = TOOL_CALLING_WORKFLOW_ID if required_tools else CHAT_ASSISTANT_WORKFLOW_ID
+    authoritative_candidate_ids = _agent_test_selector_authoritative_candidate_ids(
+        request
+    )
+    candidate_ids = _agent_test_selector_candidate_ids(request)
+    non_generic_candidate_id = next(
+        (
+            candidate_id
+            for candidate_id in candidate_ids
+            if candidate_id not in _AGENT_TEST_GENERIC_SELECTOR_WORKFLOW_IDS
+        ),
+        None,
+    )
+    if authoritative_candidate_ids:
+        workflow_id = authoritative_candidate_ids[0]
+        reasoning = (
+            "AgentTest explicit local replay reused the first authoritative "
+            "workflow-discovery candidate so represented workflow discovery "
+            "remains authoritative over selector policy ordering."
+        )
+    elif non_generic_candidate_id:
+        workflow_id = non_generic_candidate_id
+        reasoning = (
+            "AgentTest explicit local replay reused the first non-generic "
+            "selector-prepared candidate."
+        )
+    elif required_tools:
+        workflow_id = TOOL_CALLING_WORKFLOW_ID
+        reasoning = (
+            "AgentTest explicit local replay selected the tool-calling route "
+            "because the turn requires grounded tool evidence."
+        )
+    else:
+        workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+        reasoning = "AgentTest explicit local replay selected the default chat route."
     payload = {
         "workflow_id": workflow_id,
         "confidence": 1.0,
-        "reasoning": (
-            "AgentTest explicit local replay selected the tool-calling route "
-            "because the turn requires grounded tool evidence."
-            if workflow_id == TOOL_CALLING_WORKFLOW_ID
-            else "AgentTest explicit local replay selected the default chat route."
-        ),
+        "reasoning": reasoning,
     }
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
