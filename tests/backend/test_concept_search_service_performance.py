@@ -19,8 +19,8 @@ def test_modern_text_relation_hits_skip_legacy_regex_scan(monkeypatch) -> None:
     concept_find_calls: list[dict[str, Any]] = []
 
     def fake_text_values_find(query, *args, **kwargs):
-        if query == {"text": {"$regex": "^paper$", "$options": "i"}}:
-            return [{"_id": "507f1f77bcf86cd799439011", "text": "paper"}]
+        if query.get("fingerprint"):
+            return [{"_id": "507f1f77bcf86cd799439011"}]
         return []
 
     def fake_text_relations_find(query, *args, **kwargs):
@@ -83,3 +83,76 @@ def test_legacy_regex_fallback_filters_duplicates_without_mongo_nin(monkeypatch)
     fallback_query = concept_find_calls[1]
     assert "$or" in fallback_query
     assert fallback_query.get("concept_id", {}).get("$nin") is None
+
+
+def test_text_relations_substring_uses_bounded_id_only_text_search(
+    monkeypatch,
+) -> None:
+    text_value_id = "507f1f77bcf86cd799439011"
+    concept_docs = [_concept(f"#V#workflow_{index}") for index in range(10)]
+    text_value_calls: list[dict[str, Any]] = []
+    relation_calls: list[dict[str, Any]] = []
+
+    def fake_text_values_find(query, *args, **kwargs):
+        text_value_calls.append({"query": query, **kwargs})
+        if "$text" in query:
+            return [{"_id": text_value_id}]
+        return []
+
+    def fake_text_relations_find(query, *args, **kwargs):
+        relation_calls.append({"query": query, **kwargs})
+        return [
+            {
+                "subject_concept_id": concept_doc["concept_id"],
+                "object_text_id": text_value_id,
+                "predicate": "hasName",
+            }
+            for concept_doc in concept_docs
+        ]
+
+    def fake_concepts_find(query, *args, **kwargs):
+        assert "$or" not in query
+        return list(concept_docs)
+
+    monkeypatch.setattr(svc.TextValuesRepository, "find", fake_text_values_find)
+    monkeypatch.setattr(svc.TextRelationsRepository, "find", fake_text_relations_find)
+    monkeypatch.setattr(svc.ConceptsRepository, "find", fake_concepts_find)
+    monkeypatch.setattr(svc, "_determine_concept_kind", lambda _doc: "individual")
+
+    result = svc.search_concepts("workflow", match_type="substring", limit=5)
+
+    text_queries = [call["query"] for call in text_value_calls]
+    assert not any("text" in query and "$regex" in query["text"] for query in text_queries)
+    assert text_queries[0]["fingerprint"]["$type"] == "string"
+    assert text_queries[1] == {"$text": {"$search": "workflow"}}
+    assert text_value_calls[1]["projection"] == {"_id": 1}
+    assert text_value_calls[1]["limit"] == 200
+    assert relation_calls[0]["projection"] == {"subject_concept_id": 1}
+    assert relation_calls[0]["limit"] == 800
+    assert result["match_types_used"] == ["text_relations"]
+
+
+def test_text_value_fingerprint_search_uses_partial_index_shape(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_text_values_find(query, *args, **kwargs):
+        calls.append({"query": query, **kwargs})
+        return [{"_id": "507f1f77bcf86cd799439011"}]
+
+    monkeypatch.setattr(svc.TextValuesRepository, "find", fake_text_values_find)
+
+    result = svc._find_text_values_by_fingerprint("AI Researcher".casefold(), limit=7)
+
+    assert result == [{"_id": "507f1f77bcf86cd799439011"}]
+    assert calls == [
+        {
+            "query": {
+                "fingerprint": {
+                    "$regex": r"^ai\ researcher\|\|",
+                    "$type": "string",
+                }
+            },
+            "projection": {"_id": 1},
+            "limit": 7,
+        }
+    ]

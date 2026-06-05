@@ -63,6 +63,9 @@ DESCRIPTION_TEXT_PREDICATE_PRECEDENCE = (
     ("hasDescription", "#V#hasDescription"),
     ("hasContent", "#V#hasContent"),
 )
+TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT = 500
+TEXT_RELATION_DEFAULT_RELATION_LIMIT = 1000
+TEXT_VALUE_ID_PROJECTION: Dict[str, int] = {"_id": 1}
 
 
 class ConceptSearchError(Exception):
@@ -290,31 +293,47 @@ def _normalize_text_for_match(text: str) -> str:
 
 
 def _find_text_values_by_fingerprint(
-    normalized_query: str, limit: int = 500
+    normalized_query: str,
+    *,
+    limit: int = TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT,
 ) -> list[dict]:
-    coll = TextValuesRepository.collection()
-    if coll is None:
-        return []
-    try:
-        langs = [
-            lang
-            for lang in coll.distinct("lang")
-            if isinstance(lang, str) and lang.strip()
-        ]
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Failed to fetch distinct text_value langs: %s", exc)
-        langs = []
-
-    if not langs:
-        langs = ["en"]
-
-    fingerprints = [f"{normalized_query}||{lang.lower()}" for lang in langs]
-    if not fingerprints:
+    if not normalized_query:
         return []
 
+    escaped_query = re.escape(normalized_query)
     return list(
-        TextValuesRepository.find({"fingerprint": {"$in": fingerprints}}, limit=limit)
+        TextValuesRepository.find(
+            {
+                "fingerprint": {
+                    "$regex": f"^{escaped_query}\\|\\|",
+                    "$type": "string",
+                }
+            },
+            projection=TEXT_VALUE_ID_PROJECTION,
+            limit=limit,
+        )
     )
+
+
+def _text_relation_candidate_limits(
+    result_limit: Optional[int],
+) -> tuple[int, int]:
+    if not result_limit or result_limit <= 0:
+        return (
+            TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT,
+            TEXT_RELATION_DEFAULT_RELATION_LIMIT,
+        )
+
+    safe_limit = max(1, result_limit)
+    text_value_limit = min(
+        TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT,
+        max(200, safe_limit * 20),
+    )
+    relation_limit = min(
+        TEXT_RELATION_DEFAULT_RELATION_LIMIT,
+        max(100, safe_limit * 40, text_value_limit * 4),
+    )
+    return text_value_limit, relation_limit
 
 
 def _scan_text_values_for_match(
@@ -378,6 +397,7 @@ def _search_text_relations(
     exact: bool = False,
     prefix: bool = False,
     include_description: bool = False,
+    result_limit: Optional[int] = None,
 ) -> set[str]:
     """Search modern text_relations schema for matching concept IDs.
 
@@ -390,6 +410,7 @@ def _search_text_relations(
         exact: If True, require exact match
         prefix: If True, match query at start of text (prefix match)
         include_description: If True, search hasDescription predicate too
+        result_limit: Caller result window used to bound intermediate candidates
 
     Returns:
         Set of concept_ids that have matching text relations
@@ -406,48 +427,54 @@ def _search_text_relations(
     predicates = ["hasName"]
     if include_description:
         predicates.extend(["hasDescription", "hasContent"])
+    text_value_limit, relation_limit = _text_relation_candidate_limits(result_limit)
 
     # Strategy: search text_values directly, then join to text_relations by predicate.
-    matching_texts: list[dict] = []
-    if exact or prefix:
+    matching_texts = _find_text_values_by_fingerprint(
+        normalized_query,
+        limit=text_value_limit,
+    )
+    if not matching_texts and prefix:
         flexible_pattern = re.escape(collapsed_query).replace(" ", r"\s+")
-        if exact:
-            text_query = {"text": {"$regex": f"^{flexible_pattern}$", "$options": "i"}}
-        else:
-            text_query = {"text": {"$regex": f"^{flexible_pattern}", "$options": "i"}}
-        matching_texts = list(TextValuesRepository.find(text_query, limit=500))
-    else:
-        flexible_exact_pattern = re.escape(collapsed_query).replace(" ", r"\s+")
-        exact_query = {
-            "text": {"$regex": f"^{flexible_exact_pattern}$", "$options": "i"}
-        }
-        matching_texts = list(TextValuesRepository.find(exact_query, limit=500))
-
-        if not matching_texts:
-            try:
-                text_search_query = {"$text": {"$search": collapsed_query}}
-                matching_texts = list(
-                    TextValuesRepository.find(text_search_query, limit=500)
+        text_query = {"text": {"$regex": f"^{flexible_pattern}", "$options": "i"}}
+        matching_texts = list(
+            TextValuesRepository.find(
+                text_query,
+                projection=TEXT_VALUE_ID_PROJECTION,
+                limit=text_value_limit,
+            )
+        )
+    elif not matching_texts and not exact:
+        try:
+            text_search_query = {"$text": {"$search": collapsed_query}}
+            matching_texts = list(
+                TextValuesRepository.find(
+                    text_search_query,
+                    projection=TEXT_VALUE_ID_PROJECTION,
+                    limit=text_value_limit,
                 )
-            except Exception as e:
-                logger.debug(f"Text search failed: {e}")
-                substring_query = {
-                    "text": {"$regex": re.escape(collapsed_query), "$options": "i"}
-                }
-                matching_texts = list(
-                    TextValuesRepository.find(substring_query, limit=500)
+            )
+        except Exception as e:
+            logger.debug(f"Text search failed: {e}")
+            substring_query = {
+                "text": {"$regex": re.escape(collapsed_query), "$options": "i"}
+            }
+            matching_texts = list(
+                TextValuesRepository.find(
+                    substring_query,
+                    projection=TEXT_VALUE_ID_PROJECTION,
+                    limit=text_value_limit,
                 )
+            )
 
     if not matching_texts:
-        if exact:
-            matching_texts = _find_text_values_by_fingerprint(normalized_query)
-        if not matching_texts:
-            matching_texts = _scan_text_values_for_match(
-                normalized_query,
-                predicates,
-                exact=exact,
-                prefix=prefix,
-            )
+        matching_texts = _scan_text_values_for_match(
+            normalized_query,
+            predicates,
+            exact=exact,
+            prefix=prefix,
+            limit=relation_limit,
+        )
 
     if not matching_texts:
         return set()
@@ -468,7 +495,8 @@ def _search_text_relations(
                 "object_text_id": {"$in": text_value_ids},
                 "predicate": {"$in": predicates},
             },
-            limit=1000,
+            projection={"subject_concept_id": 1},
+            limit=relation_limit,
         )
     )
 
@@ -874,6 +902,7 @@ def search_concepts(
                     exact=use_exact,
                     prefix=use_prefix,
                     include_description=include_description,
+                    result_limit=limit,
                 )
 
                 if text_relations_concept_ids:
