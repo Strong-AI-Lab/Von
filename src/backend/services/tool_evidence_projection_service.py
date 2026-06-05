@@ -57,7 +57,6 @@ _SURFACEABLE_PATH_MARKERS = {
     "surfaceable",
 }
 _SURFACEABLE_LIST_KEYS = {
-    "concept_ids",
     "created_concept_ids",
     "materialised_concept_ids",
     "materialized_concept_ids",
@@ -66,7 +65,10 @@ _SURFACEABLE_LIST_KEYS = {
     "file_copy_concept_ids",
     "computer_file_copy_concept_ids",
     "source_file_copy_concept_ids",
+}
+_CONDITIONALLY_SURFACEABLE_LIST_KEYS = {
     "artefact_ids",
+    "concept_ids",
 }
 _NON_SURFACEABLE_CONCEPT_KEYS = {
     "actor_concept_id",
@@ -173,6 +175,31 @@ def project_surfaceable_concept_evidence(
             return "represented_artefact"
         return None
 
+    def _mutation_kind_from_key_or_path(
+        key: str,
+        path: tuple[str, ...],
+    ) -> str | None:
+        lowered_key = key.lower().strip()
+        if lowered_key in {"existing_concept_id", "existing_concept_ids"}:
+            return "existing"
+        if lowered_key in {"created_concept_id", "created_concept_ids"}:
+            return "created"
+        if lowered_key in {"materialised_concept_id", "materialised_concept_ids"}:
+            return "materialised"
+        if lowered_key in {"materialized_concept_id", "materialized_concept_ids"}:
+            return "materialised"
+
+        lowered_path = {part.lower().strip() for part in path}
+        if lowered_path.intersection({"created", "created_concepts", "new_concepts"}):
+            return "created"
+        if lowered_path.intersection(
+            {"materialised", "materialized", "materialisation", "materialization"}
+        ):
+            return "materialised"
+        if lowered_path.intersection({"linked", "links"}):
+            return "linked"
+        return None
+
     def _truthy_creation_flag(value: Any) -> bool:
         if value is True:
             return True
@@ -258,8 +285,16 @@ def project_surfaceable_concept_evidence(
         source_key = path[-1] if path else "text"
         if source_key.lower() not in {"_preview", "preview", "content", "text"}:
             return
+        lowered_path = {part.lower() for part in path}
+        if not lowered_path.intersection(_SURFACEABLE_PATH_MARKERS):
+            return
         for match in _CONCEPT_ID_RE.finditer(stripped):
-            _add(match.group(0), source_key=source_key, source_path=path)
+            _add(
+                match.group(0),
+                source_key=source_key,
+                source_path=path,
+                mutation_kind=_mutation_kind_from_key_or_path(source_key, path),
+            )
 
     def _walk(value: Any, *, path: tuple[str, ...], depth: int) -> None:
         if len(entries) >= max_items or depth > max_depth:
@@ -284,7 +319,8 @@ def project_surfaceable_concept_evidence(
                         source_key=key,
                         source_path=next_path,
                         container=container,
-                        mutation_kind=mutation_kind,
+                        mutation_kind=mutation_kind
+                        or _mutation_kind_from_key_or_path(key, next_path),
                         artefact_type=artefact_type,
                     )
                     continue
@@ -298,7 +334,8 @@ def project_surfaceable_concept_evidence(
                         source_key=key,
                         source_path=next_path,
                         container=container,
-                        mutation_kind=mutation_kind,
+                        mutation_kind=mutation_kind
+                        or _mutation_kind_from_key_or_path(key, next_path),
                         artefact_type=artefact_type,
                     )
                     continue
@@ -315,7 +352,27 @@ def project_surfaceable_concept_evidence(
                             source_key=key,
                             source_path=(*next_path, str(index)),
                             container=container,
-                            mutation_kind=mutation_kind,
+                            mutation_kind=mutation_kind
+                            or _mutation_kind_from_key_or_path(key, next_path),
+                            artefact_type=artefact_type,
+                        )
+                    continue
+                if (
+                    lowered_key in _CONDITIONALLY_SURFACEABLE_LIST_KEYS
+                    and _container_marks_surfaceable(container, next_path)
+                    and isinstance(nested, Sequence)
+                    and not isinstance(nested, (str, bytes, bytearray))
+                ):
+                    for index, item in enumerate(nested):
+                        if not isinstance(item, str):
+                            continue
+                        _add(
+                            item,
+                            source_key=key,
+                            source_path=(*next_path, str(index)),
+                            container=container,
+                            mutation_kind=mutation_kind
+                            or _mutation_kind_from_key_or_path(key, next_path),
                             artefact_type=artefact_type,
                         )
                     continue
@@ -378,13 +435,21 @@ def render_surfaceable_concept_lines(
         if clean_id in existing:
             continue
         artefact_type = _clean_str(entry.get("artefact_type")) or "concept"
-        mutation_kind = (_clean_str(entry.get("mutation_kind")) or "created").lower()
+        mutation_kind = (_clean_str(entry.get("mutation_kind")) or "").lower()
         if artefact_type in {"paper_concept", "paper"}:
-            label = "Created paper concept"
+            label = (
+                "Created paper concept"
+                if mutation_kind == "created"
+                else "Paper concept"
+            )
         elif artefact_type in {"file_copy", "computer_file_copy", "source_file_copy"}:
-            label = "Linked file copy"
+            label = (
+                "Linked file copy" if mutation_kind == "linked" else "File copy concept"
+            )
         elif mutation_kind in _CREATED_MUTATION_KINDS:
             label = f"{mutation_kind.replace('_', ' ').capitalize()} concept"
+        elif mutation_kind == "existing":
+            label = "Existing concept"
         else:
             label = "Concept"
         line = f"{label}: {clean_id}."

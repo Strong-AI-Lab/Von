@@ -13,7 +13,9 @@ def test_finalise_llm_debug_info_passes_supervised_structured_outputs_into_turn_
     def _fake_build_turn_execution_record(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
         return {
-            "workflow_routing_diagnostics": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "workflow_routing_diagnostics": {
+                "selected_workflow_id": "#V#chat_assistant_workflow"
+            },
             "execution": {
                 "selected_workflow_trace": kwargs.get("selected_workflow_trace"),
             },
@@ -22,7 +24,9 @@ def test_finalise_llm_debug_info_passes_supervised_structured_outputs_into_turn_
             "completion_report": kwargs.get("completion_report"),
         }
 
-    monkeypatch.setattr(von_routes, "build_turn_execution_record", _fake_build_turn_execution_record)
+    monkeypatch.setattr(
+        von_routes, "build_turn_execution_record", _fake_build_turn_execution_record
+    )
     monkeypatch.setattr(
         von_routes,
         "get_runtime_code_version_info",
@@ -72,10 +76,54 @@ def test_finalise_llm_debug_info_passes_supervised_structured_outputs_into_turn_
         "workflow_id": "#V#chat_assistant_workflow",
     }
     turn_execution_record = result["turn_execution_record"]
-    assert turn_execution_record["execution"]["selected_workflow_trace"] == captured[
-        "selected_workflow_trace"
-    ]
+    assert (
+        turn_execution_record["execution"]["selected_workflow_trace"]
+        == captured["selected_workflow_trace"]
+    )
     assert turn_execution_record["critic"]["verdict"] == {"verdict": "pass"}
-    assert turn_execution_record["completion_gate_verdict"] == {
-        "decision": "completed"
-    }
+    assert turn_execution_record["completion_gate_verdict"] == {"decision": "completed"}
+
+
+def test_created_concept_label_extractor_ignores_existing_concept_results() -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    labels = von_routes._extract_created_concept_labels_from_payload(
+        {
+            "results": [
+                {
+                    "success": False,
+                    "requested_name": "Tool Calling Workflow",
+                    "existing_concept_id": "#V#tool_calling_workflow",
+                    "error_code": "already_exists",
+                    "duplicate_prevented": True,
+                },
+                {
+                    "success": True,
+                    "name": "Scholarly Article",
+                    "concept_id": "#V#scholarly_article",
+                },
+            ],
+            "created_concept_ids": [],
+        }
+    )
+
+    assert labels == []
+
+
+def test_created_concept_label_extractor_prefers_named_created_ids() -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    labels = von_routes._extract_created_concept_labels_from_payload(
+        {
+            "created_concept_ids": ["#V#new_review_workflow"],
+            "results": [
+                {
+                    "success": True,
+                    "requested_name": "New Review Workflow",
+                    "concept_id": "#V#new_review_workflow",
+                }
+            ],
+        }
+    )
+
+    assert labels == ["New Review Workflow (#V#new_review_workflow)"]

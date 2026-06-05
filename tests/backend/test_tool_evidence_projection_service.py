@@ -321,8 +321,52 @@ def test_surfaceable_concept_projection_collects_nested_workflow_outputs() -> No
         "#V#paper_on_arxiv_2603_24621_eb7a21c4",
     ]
     assert render_surfaceable_concept_lines(evidence)[:2] == [
-        "Created paper concept: #V#paper_on_arxiv_2402_18144_c100899e.",
-        "Linked file copy: #V#file_copy_arxiv_2402_18144_c100899e.",
+        "Paper concept: #V#paper_on_arxiv_2402_18144_c100899e.",
+        "File copy concept: #V#file_copy_arxiv_2402_18144_c100899e.",
+    ]
+
+
+def test_surfaceable_concept_projection_does_not_treat_search_hits_as_created() -> None:
+    evidence = project_surfaceable_concept_evidence(
+        {
+            "results": [
+                {
+                    "success": True,
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling Workflow",
+                    "kind": "individual",
+                },
+                {
+                    "concept_id": "#V#scholarly_article",
+                    "name": "Scholarly Article",
+                    "kind": "type",
+                },
+            ],
+            "total_count": 2,
+        }
+    )
+
+    assert evidence == []
+    assert render_surfaceable_concept_lines(evidence) == []
+
+
+def test_surfaceable_concept_projection_uses_explicit_created_metadata() -> None:
+    evidence = project_surfaceable_concept_evidence(
+        {
+            "created_concept_ids": ["#V#new_workflow_marker"],
+            "results": [
+                {
+                    "success": True,
+                    "concept_id": "#V#used_support_type",
+                    "name": "Used support type",
+                }
+            ],
+        }
+    )
+
+    assert surfaceable_concept_ids_from_evidence(evidence) == ["#V#new_workflow_marker"]
+    assert render_surfaceable_concept_lines(evidence) == [
+        "Created concept: #V#new_workflow_marker."
     ]
 
 
@@ -364,6 +408,44 @@ def test_orchestrator_format_preserves_surfaceable_concepts_when_payload_truncat
         "#V#paper_on_arxiv_2603_24621_eb7a21c4",
         "#V#file_copy_arxiv_2603_24621_eb7a21c4",
     ]
+
+
+def test_orchestrator_format_does_not_surface_search_concepts_as_created() -> None:
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, object()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_concepts",
+        {
+            "success": True,
+            "results": [
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling Workflow",
+                    "kind": "individual",
+                },
+                {
+                    "concept_id": "#V#scholarly_article",
+                    "name": "Scholarly Article",
+                    "kind": "type",
+                },
+            ],
+            "total_count": 2,
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    assert parsed["tool"] == "search_concepts"
+    payload = parsed["payload"]
+    assert "_surfaceable_concepts" not in payload
+    assert "Tool Calling Workflow" in json.dumps(payload, default=str)
 
 
 def test_gmail_list_projection_preserves_collection_identifiers_for_follow_up(

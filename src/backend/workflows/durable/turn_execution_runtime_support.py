@@ -869,9 +869,9 @@ def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[st
     paper_concept_id = _coerce_non_empty_text(data.get("paper_concept_id"))
     file_copy_concept_id = _coerce_non_empty_text(data.get("file_copy_concept_id"))
     if paper_concept_id:
-        lines.append(f"Created paper concept: {paper_concept_id}.")
+        lines.append(f"Paper concept: {paper_concept_id}.")
     if file_copy_concept_id:
-        lines.append(f"Linked file copy: {file_copy_concept_id}.")
+        lines.append(f"File copy concept: {file_copy_concept_id}.")
 
     workflow_execution_summary = data.get("workflow_execution_summary")
     durable_side_effects = (
@@ -898,7 +898,8 @@ def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[st
                     file_copy_concept_id,
                 }:
                     lines.append(
-                        f"Created {artefact_type.replace('_', ' ')}: {first_id}."
+                        f"{mutation_kind.replace('_', ' ').capitalize()} "
+                        f"{artefact_type.replace('_', ' ')}: {first_id}."
                     )
     for line in render_surfaceable_concept_lines(
         surfaceable_evidence,
@@ -2886,10 +2887,7 @@ def run_turn_execution_completion_gate(
     response_text = _safe_str(data.get("response_text"))
     current_response = _safe_str(data.get("current_response"))
     final_response = (
-        _safe_str(data.get("final_response"))
-        or current_response
-        or response_text
-        or ""
+        _safe_str(data.get("final_response")) or current_response or response_text or ""
     )
     if selected_workflow_user_response:
         final_response = selected_workflow_user_response

@@ -34,14 +34,14 @@ from orchestrator_test_harness import (
 
 _EXPECTED_OUTCOME_RESPONSE = (
     '{"expected_outcome_summary":"If permitted, route the bare arXiv URL through '
-    'the specialised representation workflow or the tool workflow and report only '
+    "the specialised representation workflow or the tool workflow and report only "
     'grounded mutation status.",'
     '"grounding_requirement":"Only claim created concepts, linked file copies, or '
     'mutation outcomes when grounded in workflow or tool results.",'
     '"precision_policy":"Prefer explicit uncertainty or partial completion status '
     'over claiming verified representation without evidence.",'
     '"selector_guidance":"Prefer the specialised arXiv representation workflow when '
-    'it is available and executable; otherwise use the tool workflow for the '
+    "it is available and executable; otherwise use the tool workflow for the "
     'download/representation path.",'
     '"answering_guidance":"Summarise grounded created artefacts or truthful failure/'
     'partial-completion status, and avoid speculative completion claims.",'
@@ -129,15 +129,14 @@ class _TurnAwareLLM:
             return self._url_prompt_fallback_response
         if not self._responses:
             raise AssertionError(
-                "No stubbed LLM responses remaining for prompt: "
-                f"{stripped[:120]!r}"
+                f"No stubbed LLM responses remaining for prompt: {stripped[:120]!r}"
             )
         return self._responses.pop(0)
 
 
 def _write_request_evidence_response(tool_name: str) -> str:
     return (
-        '{'
+        "{"
         '"schema_version":"write_tool_request_evidence.v1",'
         '"tool_evidence":['
         "{"
@@ -345,6 +344,7 @@ def _make_app(
     if callable(workflow_discovery_result):
         discovery_handler = workflow_discovery_result
     else:
+
         def discovery_handler(*_args, **_kwargs):
             return workflow_discovery_result
 
@@ -476,8 +476,8 @@ def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_cre
     body = response.get_json()
     assert isinstance(body, dict)
     text = body.get("response") or ""
-    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in text
-    assert "Linked file copy: #V#uploaded_file_copy_2510_06248." in text
+    assert "Paper concept: #V#paper_on_arxiv_2510_06248." in text
+    assert "File copy concept: #V#uploaded_file_copy_2510_06248." in text
     assert "Downloaded and represented the paper." in text
 
     llm_debug = body.get("llm_debug") or {}
@@ -494,7 +494,7 @@ def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_cre
     assert completion_report.get("file_copy_concept_id") == (
         "#V#uploaded_file_copy_2510_06248"
     )
-    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in (
+    assert "Paper concept: #V#paper_on_arxiv_2510_06248." in (
         completion_report.get("response_text") or ""
     )
     _assert_prompt_seen(llm, "expected-success inference policy")
@@ -594,12 +594,14 @@ def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_special
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
     client = app.test_client()
-    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    response = client.post(
+        "/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"}
+    )
     assert response.status_code == 200
 
     body = response.get_json()
     assert isinstance(body, dict)
-    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in (
+    assert "Paper concept: #V#paper_on_arxiv_2510_06248." in (
         body.get("response") or ""
     )
 
@@ -787,7 +789,9 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
     app = _make_app(monkeypatch, llm=llm)
 
     client = app.test_client()
-    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    response = client.post(
+        "/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"}
+    )
     assert response.status_code == 200
 
     body = response.get_json()
@@ -857,7 +861,9 @@ def test_generate_bare_arxiv_url_fails_closed_on_noisy_initial_tool_plan_output(
     app = _make_app(monkeypatch, llm=llm)
 
     client = app.test_client()
-    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    response = client.post(
+        "/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"}
+    )
     assert response.status_code == 200
 
     body = response.get_json()
@@ -929,7 +935,9 @@ def test_generate_bare_arxiv_url_without_selector_defaults_to_direct_response_wi
     app = _make_app(monkeypatch, llm=llm, selector_enabled=False)
 
     client = app.test_client()
-    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    response = client.post(
+        "/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"}
+    )
     assert response.status_code == 200
 
     body = response.get_json()
@@ -982,7 +990,9 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     )
 
     client = app.test_client()
-    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2602.20478"})
+    response = client.post(
+        "/von/generate", json={"prompt": "https://arxiv.org/abs/2602.20478"}
+    )
     assert response.status_code == 200
 
     body = response.get_json()
@@ -1007,7 +1017,10 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
         "arxiv_id": "2602.20478",
         "namespace": "#V#test_user",
     }
-    assert download_record.get("error") == "arXiv proxy timed out while downloading the PDF."
+    assert (
+        download_record.get("error")
+        == "arXiv proxy timed out while downloading the PDF."
+    )
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     tool_history = diagnostics.get("tool_history") or []
@@ -1057,7 +1070,9 @@ def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeyp
     client = app.test_client()
     response = client.post(
         "/von/generate",
-        json={"prompt": "Do not download or store this: https://arxiv.org/abs/2510.06248"},
+        json={
+            "prompt": "Do not download or store this: https://arxiv.org/abs/2510.06248"
+        },
     )
     assert response.status_code == 200
 

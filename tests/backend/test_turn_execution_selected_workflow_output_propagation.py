@@ -302,7 +302,7 @@ def test_selected_workflow_outputs_preserve_parent_dispatch_telemetry() -> None:
     assert outputs["aux_llm_calls"] == parent_aux
 
 
-def test_selected_workflow_outputs_surface_nested_created_paper_concepts() -> None:
+def test_selected_workflow_outputs_surface_nested_paper_concept_handles() -> None:
     outputs = build_turn_execution_selected_workflow_outputs(
         selected_workflow_id="#V#represent_papers_from_arxiv_results_workflow",
         child_completed=True,
@@ -347,9 +347,7 @@ def test_selected_workflow_outputs_surface_nested_created_paper_concepts() -> No
     response_text = outputs["response_text"]
     assert "#V#paper_on_arxiv_2402_18144_c100899e" in response_text
     assert "#V#paper_on_arxiv_2603_24621_eb7a21c4" in response_text
-    assert (
-        "Created paper concept: #V#paper_on_arxiv_2402_18144_c100899e." in response_text
-    )
+    assert "Paper concept: #V#paper_on_arxiv_2402_18144_c100899e." in response_text
     assert outputs["completion_report"]["surfaceable_concept_ids"] == [
         "#V#paper_on_arxiv_2402_18144_c100899e",
         "#V#file_copy_arxiv_2402_18144_c100899e",
@@ -1097,8 +1095,7 @@ def test_selected_workflow_renderer_preserves_grounded_success_response() -> Non
     )
 
     assert response == (
-        "You are Michael Witbrock. Grounded papers: Learning to Tell Two "
-        "Spirals Apart."
+        "You are Michael Witbrock. Grounded papers: Learning to Tell Two Spirals Apart."
     )
 
 

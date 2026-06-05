@@ -1083,9 +1083,9 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
     ]
     assert "selector candidate summary" in progress_markers
     assert "prepare_selection_prompt" in progress_markers
-    assert progress_markers.index("selector candidate summary") < progress_markers.index(
-        "prepare_selection_prompt"
-    )
+    assert progress_markers.index(
+        "selector candidate summary"
+    ) < progress_markers.index("prepare_selection_prompt")
     selector_context = llm_calls[0]["context"]
     assert any(
         isinstance(message, dict)
@@ -1940,8 +1940,7 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
         SimpleNamespace(
             data={
                 "user_prompt": (
-                    "What research interests of mine are explicitly represented "
-                    "here?"
+                    "What research interests of mine are explicitly represented here?"
                 ),
                 "workflow_discovery_result": {
                     "requested_query": (
@@ -2434,13 +2433,13 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert report["result_snapshot"]["paper_concept_id"] == "#V#paper_123"
     assert report["result_snapshot"]["file_copy_concept_id"] == "#V#file_copy_456"
     assert (
-        "Created paper concept: #V#paper_123."
+        "Paper concept: #V#paper_123."
         in result.outputs["selected_workflow_user_response"]
     )
-    assert "Created paper concept: #V#paper_123." in report["response_text"]
-    assert "Linked file copy: #V#file_copy_456." in report["response_text"]
-    assert "Created paper concept: #V#paper_123." in result.outputs["response_text"]
-    assert "Linked file copy: #V#file_copy_456." in result.outputs["response_text"]
+    assert "Paper concept: #V#paper_123." in report["response_text"]
+    assert "File copy concept: #V#file_copy_456." in report["response_text"]
+    assert "Paper concept: #V#paper_123." in result.outputs["response_text"]
+    assert "File copy concept: #V#file_copy_456." in result.outputs["response_text"]
 
 
 def test_execute_selected_progress_includes_selector_route_evidence(

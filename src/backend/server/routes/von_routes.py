@@ -162,9 +162,11 @@ def _mark_live_foreground_turn() -> None:
         payload = request.get_json(silent=True)
     except Exception:
         payload = None
-    background_mode = bool(payload.get("background", False)) if isinstance(
-        payload, Mapping
-    ) else False
+    background_mode = (
+        bool(payload.get("background", False))
+        if isinstance(payload, Mapping)
+        else False
+    )
     if background_mode:
         return
     increment_live_turns()
@@ -405,7 +407,9 @@ def _normalise_selected_workflow_execution_event(
     if not isinstance(raw_event, Mapping):
         return None
 
-    event = {str(key): value for key, value in raw_event.items() if isinstance(key, str)}
+    event = {
+        str(key): value for key, value in raw_event.items() if isinstance(key, str)
+    }
     status = _progress_str(event.get("status")) or _progress_str(update.get("status"))
     event_kind = _progress_str(event.get("event_kind")) or status
     workflow_id = (
@@ -459,7 +463,9 @@ def _append_selected_workflow_execution_event(
     existing_execution: Any,
     event: Mapping[str, Any],
 ) -> dict[str, Any]:
-    existing_payload = existing_execution if isinstance(existing_execution, Mapping) else {}
+    existing_payload = (
+        existing_execution if isinstance(existing_execution, Mapping) else {}
+    )
     existing_events = existing_payload.get("events")
     events = (
         [dict(item) for item in existing_events if isinstance(item, Mapping)]
@@ -485,7 +491,9 @@ def _append_selected_workflow_execution_event(
         "events": events,
     }
     for key in ("selected_workflow_name", "selected_execution_mode"):
-        value = _progress_str(event.get(key)) or _progress_str(existing_payload.get(key))
+        value = _progress_str(event.get(key)) or _progress_str(
+            existing_payload.get(key)
+        )
         if value:
             payload[key] = value
     return payload
@@ -1094,9 +1102,11 @@ def _extract_selected_workflow_identity_from_progress(
 
     selected_execution = payload.get("selected_workflow_execution")
     if isinstance(selected_execution, Mapping):
-        selected_workflow_id = selected_workflow_id or _progress_str(
-            selected_execution.get("selected_workflow_id")
-        ) or _progress_str(selected_execution.get("workflow_id"))
+        selected_workflow_id = (
+            selected_workflow_id
+            or _progress_str(selected_execution.get("selected_workflow_id"))
+            or _progress_str(selected_execution.get("workflow_id"))
+        )
         selected_workflow_name = selected_workflow_name or _progress_str(
             selected_execution.get("selected_workflow_name")
         )
@@ -1147,7 +1157,10 @@ def _selected_workflow_evidence_sources(
         if present and source not in sources:
             sources.append(source)
 
-    _note("progress.selected_workflow_id", bool(_progress_str(payload.get("selected_workflow_id"))))
+    _note(
+        "progress.selected_workflow_id",
+        bool(_progress_str(payload.get("selected_workflow_id"))),
+    )
 
     routing_diagnostics = payload.get("workflow_routing_diagnostics")
     if isinstance(routing_diagnostics, Mapping):
@@ -1257,8 +1270,8 @@ def _build_thinking_interpretability_payload(
                 tool_names.append(tool_name)
 
     tool_count = _coerce_non_negative_int(payload.get("tool_call_count"))
-    has_tool_evidence = bool(tool_names) or tool_count > 0 or bool(
-        stage and stage.startswith("tool_")
+    has_tool_evidence = (
+        bool(tool_names) or tool_count > 0 or bool(stage and stage.startswith("tool_"))
     )
 
     if selected_workflow_id:
@@ -2014,9 +2027,7 @@ def _extract_live_stage_diagnostic_map(
             ),
             "latest_error": _progress_str(summary.get("latest_error")),
             "latest_subtask": _progress_str(summary.get("latest_subtask")),
-            "latest_workflow_task": _progress_str(
-                summary.get("latest_workflow_task")
-            ),
+            "latest_workflow_task": _progress_str(summary.get("latest_workflow_task")),
             "latest_tool": _progress_str(summary.get("latest_tool")),
         }
         for stage_id, summary in summary_map.items()
@@ -4805,10 +4816,12 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry["selector_excluded_candidate_count"] = int(
                 max(0.0, selector_excluded_candidate_count)
             )
-        selected_workflow_execution_event = _normalise_selected_workflow_execution_event(
-            safe_update,
-            sequence_no=sequence_no,
-            at_utc=now_utc,
+        selected_workflow_execution_event = (
+            _normalise_selected_workflow_execution_event(
+                safe_update,
+                sequence_no=sequence_no,
+                at_utc=now_utc,
+            )
         )
         if not progress_facts and selected_workflow_execution_event is not None:
             progress_facts = _normalise_progress_facts(
@@ -4877,9 +4890,7 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                     "latest_workflow_task": (
                         latest_workflow_task
                         if latest_workflow_task
-                        else _progress_str(
-                            existing_summary.get("latest_workflow_task")
-                        )
+                        else _progress_str(existing_summary.get("latest_workflow_task"))
                     ),
                     "latest_tool": (
                         latest_tool
@@ -4957,9 +4968,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         if isinstance(persistence_telemetry, Mapping):
             with _TOOL_PROGRESS_LOCK:
                 current = _TOOL_PROGRESS.get((scope_key, request_id))
-                if isinstance(current, dict) and current.get("sequence_no") == merged.get(
+                if isinstance(current, dict) and current.get(
                     "sequence_no"
-                ):
+                ) == merged.get("sequence_no"):
                     current["progress_persistence"] = dict(persistence_telemetry)
     except Exception:
         pass
@@ -5153,7 +5164,9 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
         "response": response_text,
         "request_id": request_id,
         "workflow_instance_id": getattr(instance, "instance_id", None),
-        "workflow_instance_status": getattr(getattr(instance, "status", None), "value", None)
+        "workflow_instance_status": getattr(
+            getattr(instance, "status", None), "value", None
+        )
         or str(getattr(instance, "status", "") or ""),
         "workflow_instance_current_state": getattr(instance, "current_state", None),
         "background_result_source": "durable_conversation_turn_instance",
@@ -5409,7 +5422,9 @@ def _resolve_generate_requested_model(
                 model_name = requested_openai_model or requested_model_name
             else:
                 model_name = requested_model_name
-        elif requested_openai_model and _looks_like_openai_model(requested_openai_model):
+        elif requested_openai_model and _looks_like_openai_model(
+            requested_openai_model
+        ):
             explicit_client_type = "openai"
             model_name = requested_openai_model
         elif requested_ollama_model and _looks_like_ollama_model(requested_model_name):
@@ -7305,12 +7320,13 @@ def _append_presenter_detector_event(
 def _extract_created_concept_labels_from_payload(
     payload: dict[str, Any], *, max_items: int = 3
 ) -> list[str]:
-    """Extract stable, human-readable created concept labels from tool payloads."""
+    """Extract stable labels only for concepts explicitly reported as created."""
     if not isinstance(payload, dict):
         return []
 
     labels: list[str] = []
     seen: set[str] = set()
+    labelled_created_ids: set[str] = set()
 
     def _append_label(label: str | None) -> None:
         if not isinstance(label, str):
@@ -7321,10 +7337,38 @@ def _extract_created_concept_labels_from_payload(
         seen.add(cleaned)
         labels.append(cleaned)
 
+    created_ids = payload.get("created_concept_ids")
+    created_id_set: set[str] = set()
+    created_id_list: list[str] = []
+    if isinstance(created_ids, list):
+        for concept_id in created_ids:
+            if isinstance(concept_id, str) and concept_id.strip():
+                clean_id = concept_id.strip()
+                if clean_id not in created_id_set:
+                    created_id_set.add(clean_id)
+                    created_id_list.append(clean_id)
+
     results = payload.get("results")
     if isinstance(results, list):
         for item in results:
             if not isinstance(item, dict) or not bool(item.get("success")):
+                continue
+            if (
+                item.get("duplicate_prevented") is True
+                or item.get("error_code") == "already_exists"
+            ):
+                continue
+            item_mutation_kind = item.get("mutation_kind")
+            item_created = (
+                item.get("created") is True or item.get("was_created") is True
+            )
+            if isinstance(item_mutation_kind, str):
+                item_created = item_created or item_mutation_kind.strip().lower() in {
+                    "created",
+                    "materialised",
+                    "materialized",
+                }
+            if not created_id_set and not item_created:
                 continue
             requested_name_raw = (
                 item.get("requested_name") or item.get("input_name") or item.get("name")
@@ -7336,7 +7380,7 @@ def _extract_created_concept_labels_from_payload(
             )
 
             concept_id_value: str | None = None
-            for key in ("concept_id", "canonical_concept_id", "existing_concept_id"):
+            for key in ("concept_id", "canonical_concept_id"):
                 raw = item.get(key)
                 if isinstance(raw, str) and raw.strip():
                     concept_id_value = raw.strip()
@@ -7348,18 +7392,25 @@ def _extract_created_concept_labels_from_payload(
                     if isinstance(nested_id, str) and nested_id.strip():
                         concept_id_value = nested_id.strip()
 
+            if (
+                created_id_set
+                and isinstance(concept_id_value, str)
+                and concept_id_value not in created_id_set
+            ):
+                continue
+
             if requested_name and concept_id_value:
                 _append_label(f"{requested_name} ({concept_id_value})")
+                labelled_created_ids.add(concept_id_value)
             elif concept_id_value:
                 _append_label(concept_id_value)
+                labelled_created_ids.add(concept_id_value)
             elif requested_name:
                 _append_label(requested_name)
 
-    created_ids = payload.get("created_concept_ids")
-    if isinstance(created_ids, list):
-        for concept_id in created_ids:
-            if isinstance(concept_id, str) and concept_id.strip():
-                _append_label(concept_id.strip())
+    for concept_id in created_id_list:
+        if concept_id not in labelled_created_ids:
+            _append_label(concept_id)
 
     return labels[: max(1, max_items)]
 
@@ -7513,9 +7564,13 @@ def _extract_nested_workflow_tool_evidence(
             error_text = error_text or _progress_str(mcp_result.get("error"))
         if error_code or error_text:
             workflow_evidence_seen = True
-            label = nested_tool or _progress_str(mapping.get("tool")) or tool_name or "tool"
+            label = (
+                nested_tool or _progress_str(mapping.get("tool")) or tool_name or "tool"
+            )
             detail = ": ".join(
-                part for part in (error_code, error_text) if isinstance(part, str) and part
+                part
+                for part in (error_code, error_text)
+                if isinstance(part, str) and part
             )
             _append_unique_presenter_line(
                 blocker_lines,
@@ -10497,9 +10552,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # Update existing system message to include user/org context
                 existing_system = enhanced_context[0]["content"]
                 if not any(part in existing_system for part in system_message_parts):
-                    enhanced_context[0][
-                        "content"
-                    ] = f"{existing_system} | {' | '.join(system_message_parts)}"
+                    enhanced_context[0]["content"] = (
+                        f"{existing_system} | {' | '.join(system_message_parts)}"
+                    )
 
         # Ensure user-specific system prompt is included even when the orchestrator
         # is disabled/unavailable.
@@ -11056,7 +11111,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                         try:
                             result = gateway.invoke(tool_name, payload)  # type: ignore[union-attr]
-                            tool_payload = orchestrator._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")  # type: ignore[attr-defined]
+                            tool_payload = orchestrator._format_tool_result(
+                                tool_name, result.payload, result.duration_ms, "ok"
+                            )  # type: ignore[attr-defined]
                             response_text = tool_payload
                             tool_messages = [{"role": "tool", "content": tool_payload}]
                             tool_invocations = [
@@ -11067,7 +11124,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 }
                             ]
                         except Exception as exc:
-                            tool_payload = orchestrator._format_tool_result(tool_name, None, None, "error", str(exc))  # type: ignore[attr-defined]
+                            tool_payload = orchestrator._format_tool_result(
+                                tool_name, None, None, "error", str(exc)
+                            )  # type: ignore[attr-defined]
                             response_text = tool_payload
                             tool_messages = [{"role": "tool", "content": tool_payload}]
                             tool_invocations = [
@@ -11797,11 +11856,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         return cleaned_summary
                     if cleaned_summary in cleaned_base:
                         return cleaned_base
-                    return (
-                        f"{cleaned_base}\n\n"
-                        "Operational summary:\n"
-                        f"{cleaned_summary}"
-                    )
+                    return f"{cleaned_base}\n\nOperational summary:\n{cleaned_summary}"
 
                 screen_candidate = None
                 screen_backfill_source = None
@@ -12818,10 +12873,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
         buttonify_workflow_contract: dict[str, Any] | None = None
-        agent_test_instance = (
-            str(os.getenv("VON_AGENT_TEST_INSTANCE") or "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        agent_test_instance = str(
+            os.getenv("VON_AGENT_TEST_INSTANCE") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         buttonify_setting_enabled = get_buttonify_model_enabled()
         buttonify_enabled = (
             buttonify_setting_enabled and not skip_buttonify and not agent_test_instance
@@ -14024,7 +14078,11 @@ def history_llm_call_log():
 
     payload = get_turn_llm_call_log_payload(
         request_id=request_id.strip(),
-        namespace=(namespace.strip() if isinstance(namespace, str) and namespace.strip() else None),
+        namespace=(
+            namespace.strip()
+            if isinstance(namespace, str) and namespace.strip()
+            else None
+        ),
         offset=offset,
         limit=limit,
     )
@@ -14871,10 +14929,12 @@ def history_sessions():
             if isinstance(session_row, dict)
         ]
         combined.sort(
-            key=lambda s: chat_history_service._coerce_datetime(
-                s.get("last_message_at") if isinstance(s, dict) else None
-            )
-            or datetime(1970, 1, 1, tzinfo=timezone.utc),
+            key=lambda s: (
+                chat_history_service._coerce_datetime(
+                    s.get("last_message_at") if isinstance(s, dict) else None
+                )
+                or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            ),
             reverse=True,
         )
 
