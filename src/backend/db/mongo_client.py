@@ -10,6 +10,11 @@ from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure
 import datetime  # Added for type hinting and __main__ example
 from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
+from ..services.mongo_observability_service import (
+    build_mongo_command_shape,
+    extract_n_returned_from_reply,
+    record_mongo_command_observation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,24 @@ def _coll_and_shape_from_started_command(event) -> tuple[str, str]:
         return "", ""
 
 
+def _command_shape_from_started_command(event) -> dict[str, object]:
+    try:
+        body = getattr(event, "command", None)
+        shape = build_mongo_command_shape(
+            str(getattr(event, "command_name", "") or ""),
+            body if isinstance(body, dict) else None,
+        )
+        if shape.get("collection"):
+            return shape
+        coll, filter_shape = _coll_and_shape_from_started_command(event)
+        shape["collection"] = coll
+        shape["filter_shape"] = shape.get("filter_shape") or filter_shape
+        return shape
+    except Exception:
+        coll, filter_shape = _coll_and_shape_from_started_command(event)
+        return {"collection": coll, "filter_shape": filter_shape}
+
+
 class _VonMongoFailureLogger(monitoring.CommandListener):
     """Emit a structured warning whenever a Mongo command fails.
 
@@ -59,54 +82,80 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
     _MAX_IN_FLIGHT = 4096  # cap to prevent unbounded growth on listener bugs
 
     def __init__(self) -> None:
-        self._in_flight: dict[int, tuple[str, str]] = {}
+        self._in_flight: dict[int, dict[str, object]] = {}
         self._lock = threading.Lock()
 
     def started(self, event):
-        if len(self._in_flight) >= self._MAX_IN_FLIGHT:
-            # Drop silently rather than block traffic; capacity loss is logged
-            # only as missing context on subsequent failures.
-            return
-        coll, shape = _coll_and_shape_from_started_command(event)
         with self._lock:
-            self._in_flight[event.request_id] = (coll, shape)
+            if len(self._in_flight) >= self._MAX_IN_FLIGHT:
+                # Drop silently rather than block traffic; capacity loss is logged
+                # only as missing context on subsequent failures.
+                return
+            shape = _command_shape_from_started_command(event)
+            self._in_flight[event.request_id] = shape
 
-    def _pop_context(self, request_id: int) -> tuple[str, str]:
+    def _pop_context(self, request_id: int) -> dict[str, object]:
         with self._lock:
-            return self._in_flight.pop(request_id, ("", ""))
+            return self._in_flight.pop(request_id, {})
 
     def succeeded(self, event):
-        coll, shape = self._pop_context(getattr(event, "request_id", -1))
+        shape = self._pop_context(getattr(event, "request_id", -1))
         try:
             duration_ms = float(event.duration_micros) / 1000.0
         except Exception:
             return
         if duration_ms < self._SLOW_COMMAND_DURATION_MS:
             return
+        n_returned = extract_n_returned_from_reply(
+            str(getattr(event, "command_name", "") or ""),
+            getattr(event, "reply", None),
+        )
+        record_mongo_command_observation(
+            command_name=str(getattr(event, "command_name", "") or ""),
+            database=str(getattr(event, "database_name", "") or ""),
+            command_shape=shape,
+            duration_ms=duration_ms,
+            request_id=getattr(event, "request_id", ""),
+            n_returned=n_returned,
+            source="command_listener_slow_success",
+        )
         logger.warning(
-            "[mongo_slow] cmd=%s db=%s coll=%s filter_shape=%s duration_ms=%.1f "
-            "request_id=%s",
+            "[mongo_slow] cmd=%s db=%s coll=%s filter_shape=%s sort_shape=%s "
+            "projection_shape=%s n_returned=%s duration_ms=%.1f request_id=%s",
             getattr(event, "command_name", ""),
             getattr(event, "database_name", ""),
-            coll,
-            shape,
+            shape.get("collection", ""),
+            shape.get("filter_shape", ""),
+            shape.get("sort_shape", ""),
+            shape.get("projection_shape", ""),
+            n_returned,
             duration_ms,
             getattr(event, "request_id", ""),
         )
 
     def failed(self, event):
-        coll, shape = self._pop_context(getattr(event, "request_id", -1))
+        shape = self._pop_context(getattr(event, "request_id", -1))
         try:
             duration_ms = float(event.duration_micros) / 1000.0
         except Exception:
             duration_ms = -1.0
+        record_mongo_command_observation(
+            command_name=str(getattr(event, "command_name", "") or ""),
+            database=str(getattr(event, "database_name", "") or ""),
+            command_shape=shape,
+            duration_ms=duration_ms if duration_ms >= 0 else None,
+            request_id=getattr(event, "request_id", ""),
+            source="command_listener_failure",
+        )
         logger.warning(
-            "[mongo_command_failed] cmd=%s db=%s coll=%s filter_shape=%s "
-            "duration_ms=%.1f request_id=%s failure=%r",
+            "[mongo_command_failed] cmd=%s db=%s coll=%s filter_shape=%s sort_shape=%s "
+            "projection_shape=%s duration_ms=%.1f request_id=%s failure=%r",
             getattr(event, "command_name", ""),
             getattr(event, "database_name", ""),
-            coll,
-            shape,
+            shape.get("collection", ""),
+            shape.get("filter_shape", ""),
+            shape.get("sort_shape", ""),
+            shape.get("projection_shape", ""),
             duration_ms,
             getattr(event, "request_id", ""),
             getattr(event, "failure", ""),
@@ -949,7 +998,9 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
 def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
     existing_indexes = {idx["name"] for idx in coll.list_indexes()}
     if "queue_id_1_unique" not in existing_indexes:
-        coll.create_index([("queue_id", ASCENDING)], name="queue_id_1_unique", unique=True)
+        coll.create_index(
+            [("queue_id", ASCENDING)], name="queue_id_1_unique", unique=True
+        )
     if "scope_status_created_at" not in existing_indexes:
         coll.create_index(
             [
