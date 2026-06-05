@@ -1,13 +1,15 @@
 # Mongo Query Targeting Diagnostics
 
 **Status:** Operational guide  
-**Related Jira:** `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
+**Related Jira:** `JVNAUTOSCI-2429`, `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
 
-Von now has three complementary Mongo query-targeting diagnostics surfaces:
+Von now has four complementary Mongo query-targeting diagnostics surfaces:
 
 1. In-process slow command telemetry from the global PyMongo command listener.
 2. A bounded profiler report command over MongoDB `system.profile`.
 3. A read-only Atlas Admin API report for Query Shape Insights.
+4. A read-only Atlas report review loop that compares reports and drafts or
+   upserts Jira review tasks.
 
 These surfaces are designed as support plumbing only. They record query shape,
 execution counters, and operational attribution; they must not become a hidden
@@ -205,6 +207,88 @@ print either credential class in reports, Jira comments, logs, or screenshots.
 `scripts/atlas_query_insights_report.py` uses these endpoints only as read-only
 diagnostics. It never creates or drops indexes, and it does not include slow-log
 bodies in the redacted report.
+
+## Running The Atlas Review Loop
+
+`scripts/atlas_query_insights_review.py` compares two redacted Atlas reports and
+groups query shapes as new, persistent, resolved, regressed, or improved. It can
+also generate Jira-ready task payloads for high-impact candidates. The default
+mode is dry-run; Jira writes require both `--apply-jira` and `--approved`.
+
+Compare two saved reports:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_review.py \
+  --previous-report .von/atlas_query_reviews/previous.json \
+  --current-report .von/atlas_query_reviews/current.json \
+  --json
+```
+
+Fetch a fresh Atlas report, compare it with the previous saved report, and
+persist the current report for later review:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_review.py \
+  --previous-report .von/atlas_query_reviews/current.json \
+  --fetch-current \
+  --group-id "$ATLAS_GROUP_ID" \
+  --cluster-name "$ATLAS_CLUSTER_NAME" \
+  --since 2026-06-05T00:00:00Z \
+  --until 2026-06-05T01:00:00Z \
+  --namespace von_db.workflow_use_episodes \
+  --include-suggested-indexes \
+  --process-id "$ATLAS_PROCESS_ID" \
+  --store-current-report .von/atlas_query_reviews/current.json \
+  --json
+```
+
+Use an external scheduler, cron, launchd, GitHub Actions runner, or Von
+operator task to invoke the same command only when the schedule gate is enabled:
+
+```sh
+VON_ATLAS_QUERY_REVIEW_SCHEDULE_ENABLED=1 \
+  .venv/bin/python scripts/atlas_query_insights_review.py \
+  --schedule-enabled-only \
+  --use-default-store \
+  --fetch-current \
+  --json
+```
+
+Dry-run output includes candidate Jira payloads. To create or update deduplicated
+Jira tasks, use:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_review.py \
+  --previous-report .von/atlas_query_reviews/previous.json \
+  --current-report .von/atlas_query_reviews/current.json \
+  --apply-jira \
+  --approved \
+  --json
+```
+
+Generated task descriptions include the Atlas time window, cluster, namespace,
+command, query shape hash, redacted shape text when available, execution
+counters, examined/returned ratios, Atlas suggested-index evidence, repo-owned
+index evidence, and a recommended next diagnostic step. Generated tasks link
+back to `JVNAUTOSCI-2427` through the payload and text. Duplicate suppression is
+based on a stable query-shape fingerprint.
+
+The review loop groups candidates into evidence categories such as:
+
+- `missing_index`
+- `likely_query_shape_index_mismatch`
+- `expensive_regex_text_scan`
+- `high_frequency_low_latency_hot_path`
+- `aggregate_recomputation`
+- `possible_data_model_issue`
+
+These categories are review labels, not live mutation policy. They are intended
+to help an operator choose the next investigation step.
+
+After an index materialisation or query rewrite, such as the `JVNAUTOSCI-2426`
+class of fix, run the review over a comparable post-deployment Atlas time window.
+Treat shapes that move to `resolved` or `improved` as verification evidence, and
+open or update tasks only for shapes that remain persistent or regress.
 
 ## Environment Controls
 

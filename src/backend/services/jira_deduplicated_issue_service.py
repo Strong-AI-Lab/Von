@@ -81,9 +81,7 @@ def _normalise_labels(
     final_labels: list[str] = []
     seen: set[str] = set()
     candidate_values = [search_label]
-    if isinstance(labels, Sequence) and not isinstance(
-        labels, (str, bytes, bytearray)
-    ):
+    if isinstance(labels, Sequence) and not isinstance(labels, (str, bytes, bytearray)):
         candidate_values.extend(labels)
     fingerprint_label = f"{fingerprint_label_prefix}-{fingerprint}"
     candidate_values.append(fingerprint_label[:255])
@@ -128,7 +126,9 @@ def _invoke_mcp_tool(tool_name: str, payload: Mapping[str, Any]) -> dict[str, An
             return dict(response_payload)
         return {"success": True, "result": result.payload}
     except Exception as exc:
-        logger.warning("[jira_deduplicated_issue_service] %s failed: %s", tool_name, exc)
+        logger.warning(
+            "[jira_deduplicated_issue_service] %s failed: %s", tool_name, exc
+        )
         return {
             "success": False,
             "error_code": "mcp_invoke_failed",
@@ -149,6 +149,8 @@ def upsert_deduplicated_jira_issue(
     request_id: str | None = None,
     existing_comment: str | None = None,
     assignee_account_id: str | None = None,
+    link_issue_key: str | None = None,
+    link_type: str = "Relates",
     fields: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create or update a deduplicated Jira issue keyed by a stable fingerprint."""
@@ -199,6 +201,13 @@ def upsert_deduplicated_jira_issue(
     existing_keys = _extract_search_issue_keys(search_result)
     if existing_keys:
         issue_key = existing_keys[0]
+        link_result = _link_issue_if_requested(
+            source_issue_key=issue_key,
+            target_issue_key=link_issue_key,
+            link_type=link_type,
+            request_id=request_id,
+            fingerprint=fingerprint_text,
+        )
         if existing_comment:
             comment_result = _invoke_mcp_tool(
                 "jira_add_comment",
@@ -219,6 +228,7 @@ def upsert_deduplicated_jira_issue(
             "issue_key": issue_key,
             "fingerprint": fingerprint_text,
             "search_jql": search_jql,
+            "link_result": link_result,
         }
 
     resolved_assignee = _normalise_text(assignee_account_id)
@@ -267,6 +277,13 @@ def upsert_deduplicated_jira_issue(
         }
 
     issue_key = _extract_issue_key(_coerce_mapping(create_result))
+    link_result = _link_issue_if_requested(
+        source_issue_key=issue_key,
+        target_issue_key=link_issue_key,
+        link_type=link_type,
+        request_id=request_id,
+        fingerprint=fingerprint_text,
+    )
     return {
         "success": True,
         "mode": "created_new",
@@ -274,7 +291,33 @@ def upsert_deduplicated_jira_issue(
         "fingerprint": fingerprint_text,
         "project_key": project,
         "search_jql": search_jql,
+        "link_result": link_result,
     }
+
+
+def _link_issue_if_requested(
+    *,
+    source_issue_key: str | None,
+    target_issue_key: str | None,
+    link_type: str,
+    request_id: str | None,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    source = _normalise_text(source_issue_key)
+    target = _normalise_text(target_issue_key)
+    link_name = _normalise_text(link_type) or "Relates"
+    if not source or not target:
+        return None
+    return _invoke_mcp_tool(
+        "jira_link_issue",
+        {
+            "source_issue_key": source,
+            "target_issue_key": target,
+            "link_type": link_name,
+            "request_id": request_id or f"jira-link:{fingerprint}:{target}",
+            "confirm": True,
+        },
+    )
 
 
 __all__ = ["upsert_deduplicated_jira_issue"]
