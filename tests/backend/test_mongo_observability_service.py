@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from flask import Flask
+from pymongo.errors import OperationFailure
 
+from src.backend.integrations.internal_mcp import build_default_catalogue
+from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.db.mongo_client import _safe_mongo_failure_summary
 from src.backend.services import chat_history_service
 from src.backend.services.mongo_observability_service import (
     build_mongo_operation_comment,
@@ -15,7 +20,7 @@ from src.backend.services.mongo_observability_service import (
     reset_mongo_operation_audit_snapshot,
     reset_mongo_query_shape_telemetry,
 )
-from scripts import mongo_query_targeting_report as query_targeting_script
+from src.backend.services import mongo_query_diagnostics_service as diagnostics_service
 
 
 def test_mongo_operation_comment_includes_safe_route_context(monkeypatch):
@@ -39,6 +44,28 @@ def test_mongo_operation_comment_includes_safe_route_context(monkeypatch):
     assert comment["route"]["path"] == "/api/settings/db/info"
     assert "token" not in str(comment)
     assert "secret" not in str(comment)
+
+
+def test_mongo_command_failure_summary_omits_raw_command_body():
+    failure = {
+        "ok": 0.0,
+        "errmsg": 'not authorized on von_db to execute command { find: "system.profile", token: "secret" }',
+        "code": 13,
+        "codeName": "Unauthorized",
+        "$clusterTime": {"signature": {"hash": b"secret-hash"}},
+    }
+
+    summary = _safe_mongo_failure_summary(failure)
+
+    rendered = str(summary)
+    assert summary == {
+        "type": "dict",
+        "code": 13,
+        "code_name": "Unauthorized",
+        "message_class": "not_authorized",
+    }
+    assert "system.profile" not in rendered
+    assert "secret" not in rendered
 
 
 def test_mongo_operation_audit_snapshot_aggregates_without_payload_content(monkeypatch):
@@ -332,7 +359,7 @@ def test_profiler_report_builder_uses_redacted_rows_without_printing_profile_val
             assert key == "system.profile"
             return FakeCollection()
 
-    report = query_targeting_script.build_profiler_query_targeting_report(
+    report = diagnostics_service.build_profiler_query_targeting_report(
         FakeDb(),
         namespace=None,
         min_millis=0,
@@ -345,3 +372,111 @@ def test_profiler_report_builder_uses_redacted_rows_without_printing_profile_val
     assert report["profile_sample_count"] == 1
     assert report["rows"][0]["namespace"] == "von_db.workflow_instances"
     assert "pending" not in str(report)
+
+
+def test_von_mongo_query_diagnostics_requires_explicit_operator_gate():
+    report = diagnostics_service.build_von_mongo_query_diagnostics_report(
+        source="in_process",
+    )
+
+    assert report["success"] is False
+    assert report["status"] == "blocked"
+    assert report["error_code"] == "operator_diagnostics_not_allowed"
+    assert report["direct_index_mutation"] is False
+
+
+def test_von_mongo_query_diagnostics_bounds_parameters_and_uses_in_process_rows(
+    monkeypatch,
+):
+    monkeypatch.setenv("VON_MONGO_QUERY_SHAPE_TELEMETRY_ENABLED", "1")
+    reset_mongo_query_shape_telemetry()
+    record_mongo_query_shape_observation(
+        command_name="find",
+        database="von_db",
+        collection="workflow_instances",
+        filter_shape="status,lock_expires_at{$lte}",
+        duration_ms=200.0,
+        request_id="safe-request-id",
+        n_returned=1,
+    )
+
+    report = diagnostics_service.build_von_mongo_query_diagnostics_report(
+        allow_operator_diagnostics=True,
+        source="in-process",
+        sample_limit=99_999,
+        report_limit=99_999,
+        explain_samples=99_999,
+        explain_max_time_ms=99_999,
+    )
+
+    assert report["success"] is True
+    assert report["status"] == "ok"
+    assert report["options"]["source"] == "in_process"
+    assert report["parameter_bounds"]["sample_limit"]["effective"] == 500
+    assert report["parameter_bounds"]["report_limit"]["effective"] == 50
+    assert report["parameter_bounds"]["explain_samples"]["effective"] == 5
+    assert report["parameter_bounds"]["explain_max_time_ms"]["effective"] == 5000
+    assert (
+        report["reports"]["in_process"]["rows"][0]["collection"] == "workflow_instances"
+    )
+    assert "safe-request-id" in str(report)
+    assert ".env" in str(report["privacy"]["omits"])
+
+
+def test_von_mongo_query_diagnostics_reports_profiler_unavailable(monkeypatch):
+    class FakeCollection:
+        def find(self, *_args, **_kwargs):
+            raise OperationFailure("not authorised")
+
+    class FakeDb(dict):
+        def __getitem__(self, key):
+            assert key == "system.profile"
+            return FakeCollection()
+
+    monkeypatch.setattr(diagnostics_service, "get_db", lambda: FakeDb())
+
+    report = diagnostics_service.build_von_mongo_query_diagnostics_report(
+        allow_operator_diagnostics=True,
+        source="profiler",
+        sample_limit=10,
+        report_limit=5,
+    )
+
+    assert report["success"] is True
+    assert report["reports"]["profiler"]["status"] == "profiler_unavailable"
+    assert report["reports"]["profiler"]["error_type"] == "OperationFailure"
+    assert report["reports"]["profiler"]["error"] == "Mongo diagnostic read failed"
+    assert "system.profile" not in str(report["reports"]["profiler"])
+    assert report["summary"]["rows"] == []
+
+
+def test_internal_mcp_gateway_exposes_mongo_query_diagnostics_report(monkeypatch):
+    monkeypatch.setenv("VON_MONGO_QUERY_SHAPE_TELEMETRY_ENABLED", "1")
+    reset_mongo_query_shape_telemetry()
+    record_mongo_query_shape_observation(
+        command_name="find",
+        database="von_db",
+        collection="concepts",
+        filter_shape="relationships.is_an_instance_of",
+        duration_ms=10.0,
+        n_returned=2,
+    )
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "mongo_query_diagnostics_report",
+        {
+            "allow_operator_diagnostics": True,
+            "source": "in_process",
+            "report_limit": 3,
+        },
+    )
+
+    payload = result.payload
+    assert payload["success"] is True
+    assert payload["summary"]["rows"][0]["collection"] == "concepts"
+    assert payload["direct_index_mutation"] is False

@@ -1025,6 +1025,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "list_recent_screenshots",
     "list_my_tasks",
     "merge_concepts",
+    "mongo_query_diagnostics_report",
     "qna_search",
     "renderer_resolve_applicability",
     "upsert_renderer_profile",

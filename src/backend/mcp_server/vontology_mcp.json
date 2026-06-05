@@ -3626,6 +3626,73 @@
             }
         },
         {
+            "name": "mongo_query_diagnostics_report",
+            "description": "Run read-only Mongo query-targeting diagnostics for trusted operator conversation or VWL maintenance workflows. Reports structural query shapes, scanned/returned ratios, plan/index evidence where available, and recommended next diagnostic steps. Never creates/drops indexes or returns credentials, .env contents, query values, update values, or document bodies.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "allow_operator_diagnostics": {
+                        "type": "boolean"
+                    },
+                    "source": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "combined",
+                            "in_process",
+                            "profiler"
+                        ]
+                    },
+                    "mongo_namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace_filter": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "min_millis": {
+                        "type": "integer"
+                    },
+                    "sample_limit": {
+                        "type": "integer"
+                    },
+                    "report_limit": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "explain_samples": {
+                        "type": "integer"
+                    },
+                    "explain_max_time_ms": {
+                        "type": "integer"
+                    },
+                    "reset_in_process": {
+                        "type": "boolean"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "allow_operator_diagnostics"
+                ],
+                "additionalProperties": true,
+                "description": "Build a bounded, redacted Mongo query-targeting diagnostics report. Requires allow_operator_diagnostics=true. Use mongo_namespace for Mongo namespaces such as von_db.workflow_instances; namespace is accepted only as Von workflow/user scope context."
+            }
+        },
+        {
             "name": "preview_remove_relationship",
             "description": "Preview relationship removal effects without mutating data. Supports relation_id or triple selectors and returns impact/warning diagnostics.",
             "inputSchema": {

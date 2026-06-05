@@ -17539,6 +17539,38 @@ def _rag_get_status(**kwargs):
         )
 
 
+def _mongo_query_diagnostics_report(**kwargs):
+    """Build a bounded, redacted Mongo query-targeting diagnostics report."""
+
+    from ...services.mongo_query_diagnostics_service import (
+        build_von_mongo_query_diagnostics_report,
+    )
+
+    try:
+        return build_von_mongo_query_diagnostics_report(
+            allow_operator_diagnostics=bool(kwargs.get("allow_operator_diagnostics")),
+            source=kwargs.get("source"),
+            namespace=kwargs.get("mongo_namespace") or kwargs.get("namespace_filter"),
+            min_millis=kwargs.get("min_millis"),
+            sample_limit=kwargs.get("sample_limit"),
+            report_limit=kwargs.get("report_limit") or kwargs.get("limit"),
+            explain_samples=kwargs.get("explain_samples"),
+            explain_max_time_ms=kwargs.get("explain_max_time_ms"),
+            reset_in_process=kwargs.get("reset_in_process"),
+        )
+    except Exception as exc:
+        return make_error_response(
+            "mongo_query_diagnostics_failed",
+            f"Failed to build Mongo query diagnostics report: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Retry with allow_operator_diagnostics=true only for trusted operator diagnostics",
+                "Use source='in_process' if Mongo profiler is unavailable",
+                "Use Atlas Query Insights for cluster-side evidence when Atlas credentials are configured",
+            ],
+        )
+
+
 def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
     """Resolve a user-provided collection selector.
 
@@ -20748,7 +20780,9 @@ def _gmail_set_profile_scope(**kwargs):
             {"attributes.oauth_scopes": scope_strings},
         )
     except Exception as exc:  # noqa: BLE001
-        from ...services.concept_service import ConceptNotFoundError as _ConceptNotFoundError
+        from ...services.concept_service import (
+            ConceptNotFoundError as _ConceptNotFoundError,
+        )
 
         if not isinstance(exc, _ConceptNotFoundError):
             return make_error_response(
@@ -20767,14 +20801,18 @@ def _gmail_set_profile_scope(**kwargs):
 
             actor_user_id, _actor_org = resolve_event_actor_context()
             if not actor_user_id:
-                raise RuntimeError("Cannot resolve user concept ID for profile bootstrap")
+                raise RuntimeError(
+                    "Cannot resolve user concept ID for profile bootstrap"
+                )
             bootstrap_result = materialise_gmail_profile_resources_for_user(
                 user_concept_id=actor_user_id,
                 profile_ids=[profile_id_arg],
                 profile_scopes={profile_id_arg: scope_strings},
             )
             if not bootstrap_result.get("success"):
-                raise RuntimeError(f"Bootstrap reported failure: {bootstrap_result.get('errors')}")
+                raise RuntimeError(
+                    f"Bootstrap reported failure: {bootstrap_result.get('errors')}"
+                )
             auto_bootstrapped = True
         except Exception as bootstrap_exc:  # noqa: BLE001
             return make_error_response(
@@ -28244,7 +28282,13 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         },
     )
     gmail_get_auth_config_output_schema = Schema(
-        required={"success": bool, "profile_id": str, "scopes": list, "scope_source": str, "token_status": str},
+        required={
+            "success": bool,
+            "profile_id": str,
+            "scopes": list,
+            "scope_source": str,
+            "token_status": str,
+        },
         optional={
             "message": str,
             "concept_id": str,
@@ -28275,7 +28319,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         ),
     )
     gmail_set_profile_scope_output_schema = Schema(
-        required={"success": bool, "profile_id": str, "scopes_set": list, "reauth_required": bool},
+        required={
+            "success": bool,
+            "profile_id": str,
+            "scopes_set": list,
+            "reauth_required": bool,
+        },
         optional={
             "concept_id": str,
             "reauth_advisory": str,
@@ -29517,6 +29566,50 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             output_schema=None,
             category="read",
             description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status.",
+        ),
+        MethodDefinition(
+            name="mongo_query_diagnostics_report",
+            handler=_mongo_query_diagnostics_report,
+            input_schema=Schema(
+                required={"allow_operator_diagnostics": bool},
+                optional={
+                    "source": (str, type(None)),
+                    "mongo_namespace": (str, type(None)),
+                    "namespace_filter": (str, type(None)),
+                    "min_millis": (int,),
+                    "sample_limit": (int,),
+                    "report_limit": (int,),
+                    "limit": (int,),
+                    "explain_samples": (int,),
+                    "explain_max_time_ms": (int,),
+                    "reset_in_process": (bool,),
+                    # Accepted for workflow/orchestrator consistency; this is
+                    # not used as the Mongo namespace filter to avoid confusion
+                    # with Von user/org namespaces.
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                enum_values={
+                    "source": ("combined", "in_process", "profiler"),
+                },
+                description=(
+                    "Build a bounded, redacted Mongo query-targeting diagnostics report. "
+                    "Requires allow_operator_diagnostics=true. Use mongo_namespace for "
+                    "Mongo namespaces such as von_db.workflow_instances; namespace is "
+                    "accepted only as Von workflow/user scope context."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Run read-only Mongo query-targeting diagnostics for trusted operator "
+                "conversation or VWL maintenance workflows. Reports structural query "
+                "shapes, scanned/returned ratios, plan/index evidence where available, "
+                "and recommended next diagnostic steps. Never creates/drops indexes or "
+                "returns credentials, .env contents, query values, update values, or "
+                "document bodies."
+            ),
         ),
         MethodDefinition(
             name="rag_list_collections",

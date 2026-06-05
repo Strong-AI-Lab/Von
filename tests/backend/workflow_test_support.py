@@ -45,6 +45,10 @@ from src.backend.workflows.durable.workflow_introspection_maintenance_workflow i
     WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
     build_workflow_introspection_maintenance_workflow_test_registration,
 )
+from src.backend.workflows.durable.mongo_query_diagnostics_maintenance_workflow import (
+    MONGO_QUERY_DIAGNOSTICS_MAINTENANCE_WORKFLOW_ID,
+    build_mongo_query_diagnostics_maintenance_workflow_test_registration,
+)
 from src.backend.workflows.durable.entity_identity_resolution_workflow import (
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
     build_entity_identity_resolution_workflow_test_registration,
@@ -167,6 +171,10 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Diagnose workflow and prompt incidents, plan bounded repairs, and verify "
         "maintenance outcomes."
     ),
+    MONGO_QUERY_DIAGNOSTICS_MAINTENANCE_WORKFLOW_ID: (
+        "Collect redacted Mongo query-targeting diagnostics for conversation or "
+        "recurring maintenance review."
+    ),
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID: (
         "Detect duplicate entities, apply confidence-scored resolutions, and "
         "summarise identity-maintenance results."
@@ -221,6 +229,7 @@ AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
     ENRICHMENT_WORKFLOW_ID,
     WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+    MONGO_QUERY_DIAGNOSTICS_MAINTENANCE_WORKFLOW_ID,
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
     MULTILINGUAL_CONCEPT_ENRICHMENT_WORKFLOW_ID,
@@ -436,6 +445,7 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
         build_rag_text_relation_sync_workflow_test_registration(),
         build_enrichment_workflow_test_registration(),
         build_workflow_introspection_maintenance_workflow_test_registration(),
+        build_mongo_query_diagnostics_maintenance_workflow_test_registration(),
         build_entity_identity_resolution_workflow_test_registration(),
         build_multilingual_concept_enrichment_workflow_test_registration(),
         build_representation_workflow_routing_coverage_audit_test_registration(),

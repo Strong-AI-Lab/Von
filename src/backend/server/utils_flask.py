@@ -461,6 +461,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.jira_task_incremental_import_workflow_vontology_service import (
             bootstrap_canonical_jira_task_incremental_import_workflow,
         )
+        from ..services.mongo_query_diagnostics_maintenance_workflow_vontology_service import (
+            bootstrap_canonical_mongo_query_diagnostics_maintenance_workflow,
+        )
         from ..services.representation_workflow_routing_coverage_audit_vontology_service import (
             bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow,
         )
@@ -593,6 +596,14 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 bootstrap_fn=bootstrap_canonical_jira_task_incremental_import_workflow,
             )
         )
+        mongo_query_diagnostics_maintenance_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="Mongo query diagnostics maintenance workflow",
+                bootstrap_fn=(
+                    bootstrap_canonical_mongo_query_diagnostics_maintenance_workflow
+                ),
+            )
+        )
         representation_routing_audit_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="representation routing coverage audit workflow",
             bootstrap_fn=(
@@ -667,6 +678,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         )
         result["jira_task_incremental_import_workflow_bootstrap"] = (
             jira_task_incremental_import_workflow_bootstrap_report
+        )
+        result["mongo_query_diagnostics_maintenance_workflow_bootstrap"] = (
+            mongo_query_diagnostics_maintenance_workflow_bootstrap_report
         )
         result["representation_routing_audit_workflow_bootstrap"] = (
             representation_routing_audit_workflow_bootstrap_report

@@ -3,13 +3,15 @@
 **Status:** Operational guide  
 **Related Jira:** `JVNAUTOSCI-2429`, `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
 
-Von now has four complementary Mongo query-targeting diagnostics surfaces:
+Von now has five complementary Mongo query-targeting diagnostics surfaces:
 
 1. In-process slow command telemetry from the global PyMongo command listener.
 2. A bounded profiler report command over MongoDB `system.profile`.
 3. A read-only Atlas Admin API report for Query Shape Insights.
 4. A read-only Atlas report review loop that compares reports and drafts or
    upserts Jira review tasks.
+5. A Von-internal MCP tool, `mongo_query_diagnostics_report`, for trusted
+   operator conversation and VWL maintenance workflows.
 
 These surfaces are designed as support plumbing only. They record query shape,
 execution counters, and operational attribution; they must not become a hidden
@@ -302,3 +304,60 @@ open or update tasks only for shapes that remain persistent or regress.
 The profiler report command is read-only unless `--explain-samples` is used.
 `explain` remains read-only, but it can still consume database resources, so keep
 sample counts and max time bounded.
+
+## Running Diagnostics Through Von
+
+`JVNAUTOSCI-2450` exposes the local Mongo query-targeting diagnostic as the
+internal MCP tool `mongo_query_diagnostics_report`. This is the conversation and
+workflow-facing form of the local profiler/in-process report; it does not shell
+out to `scripts/mongo_query_targeting_report.py`.
+
+The tool is read-only and requires an explicit operator gate:
+
+```json
+{
+  "allow_operator_diagnostics": true,
+  "source": "combined",
+  "mongo_namespace": "von_db.workflow_instances",
+  "min_millis": 0,
+  "sample_limit": 200,
+  "report_limit": 20,
+  "explain_samples": 0,
+  "explain_max_time_ms": 2000
+}
+```
+
+Supported `source` values:
+
+- `in_process`: current-process command-listener telemetry only.
+- `profiler`: bounded `system.profile` samples, optionally with read-only
+  `explain("executionStats")`.
+- `combined`: both surfaces, with a merged ranked summary.
+
+Use `mongo_namespace` for Mongo namespaces such as
+`von_db.workflow_instances`. The normal Von `namespace` argument is accepted for
+workflow/user-scope propagation, but it is not interpreted as a Mongo namespace
+filter. This avoids mixing user/org tenancy scope with database collection
+scope.
+
+The tool returns:
+
+- a merged ranked `summary`;
+- per-source reports under `reports`;
+- parameter bounds showing requested versus effective limits;
+- `direct_index_mutation: false`;
+- privacy metadata listing the omitted secret/private value classes.
+
+Conversation-level operator prompts can ask Von to run the tool when diagnosing
+Mongo/Vontology slowness. Recurring rumination or maintenance behaviour should
+invoke the same tool through VWL, for example via `workflow_mcp.invoke_tool`,
+and keep scheduling/escalation policy in the authored workflow rather than in
+the Python tool. Generated recommendations are evidence and next diagnostic
+steps only; index creation/drop remains explicit reviewed code or operator
+work.
+
+The Atlas review loop still requires Atlas Admin API configuration
+(`ATLAS_GROUP_ID`/`MONGODB_ATLAS_GROUP_ID`, cluster name, and read-only Atlas
+credentials). If those are absent, the Atlas CLI/tooling should fail closed with
+a typed blocker such as `missing_project_id` rather than falling back to local
+Mongo data.

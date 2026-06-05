@@ -67,6 +67,29 @@ def _command_shape_from_started_command(event) -> dict[str, object]:
         return {"collection": coll, "filter_shape": filter_shape}
 
 
+def _safe_mongo_failure_summary(failure) -> dict[str, object]:
+    """Summarise a PyMongo command failure without raw command/server bodies."""
+
+    summary: dict[str, object] = {
+        "type": type(failure).__name__,
+    }
+    if isinstance(failure, dict):
+        code = failure.get("code")
+        if isinstance(code, int):
+            summary["code"] = code
+        code_name = failure.get("codeName")
+        if isinstance(code_name, str) and code_name.strip():
+            summary["code_name"] = code_name.strip()[:96]
+        errmsg = failure.get("errmsg")
+        if isinstance(errmsg, str) and "not authorized" in errmsg.lower():
+            summary["message_class"] = "not_authorized"
+        elif isinstance(errmsg, str) and errmsg.strip():
+            summary["message_class"] = "mongo_command_error"
+    elif failure:
+        summary["message_class"] = "mongo_command_error"
+    return summary
+
+
 class _VonMongoFailureLogger(monitoring.CommandListener):
     """Emit a structured warning whenever a Mongo command fails.
 
@@ -149,7 +172,7 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
         )
         logger.warning(
             "[mongo_command_failed] cmd=%s db=%s coll=%s filter_shape=%s sort_shape=%s "
-            "projection_shape=%s duration_ms=%.1f request_id=%s failure=%r",
+            "projection_shape=%s duration_ms=%.1f request_id=%s failure_summary=%r",
             getattr(event, "command_name", ""),
             getattr(event, "database_name", ""),
             shape.get("collection", ""),
@@ -158,7 +181,7 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
             shape.get("projection_shape", ""),
             duration_ms,
             getattr(event, "request_id", ""),
-            getattr(event, "failure", ""),
+            _safe_mongo_failure_summary(getattr(event, "failure", "")),
         )
 
 

@@ -622,6 +622,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#enrichment_workflow" in def_ids
     assert "#V#workflow_introspection_maintenance_workflow" in def_ids
+    assert "#V#mongo_query_diagnostics_maintenance_workflow" in def_ids
     assert "#V#entity_identity_resolution_workflow" in def_ids
     assert "#V#jira_task_incremental_import_workflow" in def_ids
     assert "#V#planning_workflow" in def_ids
@@ -642,6 +643,10 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert source_by_workflow_id["#V#enrichment_workflow"] == "vontology"
     assert (
         source_by_workflow_id["#V#workflow_introspection_maintenance_workflow"]
+        == "vontology"
+    )
+    assert (
+        source_by_workflow_id["#V#mongo_query_diagnostics_maintenance_workflow"]
         == "vontology"
     )
     assert (

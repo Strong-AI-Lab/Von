@@ -134,6 +134,7 @@ if TYPE_CHECKING:
         _chat_history_get_debug_entry,
         _chat_history_get_segments,
         _conversation_telemetry_get_locator,
+        _mongo_query_diagnostics_report,
         _testing_verify_arxiv_paper_ingestion_result,
         _turn_execution_backfill_from_chat_history,
         _turn_execution_build_benchmark,
@@ -3620,6 +3621,16 @@ async def _handle_coding_agent_mcp_access_profile(
     )
 
 
+async def _handle_mongo_query_diagnostics_report(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _mongo_query_diagnostics_report,
+        arguments,
+        tool_family_label="Internal",
+    )
+
+
 async def _handle_workflow_materialisation_diagnostics(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4581,6 +4592,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_delete_event_binding": _handle_workflow_delete_event_binding,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
     "coding_agent_mcp_access_profile": _handle_coding_agent_mcp_access_profile,
+    "mongo_query_diagnostics_report": _handle_mongo_query_diagnostics_report,
     "workflow_materialisation_diagnostics": _handle_workflow_materialisation_diagnostics,
     "workflow_create_instance": _handle_workflow_create_instance,
     "workflow_execute": _handle_workflow_execute,
