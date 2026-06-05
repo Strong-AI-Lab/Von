@@ -46,6 +46,63 @@ def test_extract_progress_facts_from_nested_progress_payloads() -> None:
     assert replay.extract_selected_workflow_ids(payload) == [
         replay.GMAIL_ARXIV_WORKFLOW_ID
     ]
+    assert replay.extract_observed_workflow_ids(payload) == []
+
+
+def test_build_report_uses_task_status_snapshots_for_route_and_progress_evidence() -> (
+    None
+):
+    report = replay.build_replay_report(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        environment={},
+        window_session_id="window-1",
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        chat_session={},
+        submission={"task_id": "task-1"},
+        task_evidence={
+            "task_statuses": [
+                {
+                    "status": "running",
+                    "progress": {
+                        "selected_workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
+                        "workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
+                        "progress_facts": [
+                            {
+                                "fact_id": "gmail_message_subject",
+                                "contract_id": (
+                                    "#V#gmail_arxiv_email_message_subject_progress_fact"
+                                ),
+                                "redacted": True,
+                                "source_path": "context.current_message.subject",
+                            }
+                        ],
+                    },
+                }
+            ],
+            "progress_snapshots": [],
+            "last_task_status": {"status": "running"},
+            "last_progress": {},
+            "task_result": {},
+        },
+    )
+
+    assert report["task_status_snapshot_count"] == 1
+    assert report["analysis"]["selected_workflow_ids"] == [
+        replay.GMAIL_ARXIV_WORKFLOW_ID
+    ]
+    assert report["analysis"]["observed_workflow_ids"] == [
+        replay.GMAIL_ARXIV_WORKFLOW_ID
+    ]
+    assert report["thinking_card_progress_facts"] == [
+        {
+            "fact_id": "gmail_message_subject",
+            "contract_id": "#V#gmail_arxiv_email_message_subject_progress_fact",
+            "redacted": True,
+            "source_path": "context.current_message.subject",
+        }
+    ]
 
 
 def test_classify_replay_reports_auth_blocker_before_workflow_assertions() -> None:
@@ -56,6 +113,8 @@ def test_classify_replay_reports_auth_blocker_before_workflow_assertions() -> No
         gmail_preflight={},
         task_evidence={"last_task_status": {"status": "unknown"}},
         selected_workflow_ids=[],
+        observed_workflow_ids=[],
+        selector_diagnostics=[],
         progress_facts=[],
     )
 
@@ -76,6 +135,8 @@ def test_classify_replay_reports_gmail_profile_blocker_when_auth_ready() -> None
         },
         task_evidence={"last_task_status": {"status": "completed"}},
         selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        selector_diagnostics=[],
         progress_facts=[],
     )
 
@@ -104,6 +165,8 @@ def test_classify_replay_passes_when_expected_workflow_and_projection_seen() -> 
         },
         task_evidence={"last_task_status": {"status": "completed"}},
         selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        selector_diagnostics=[],
         progress_facts=facts,
     )
 
@@ -111,3 +174,28 @@ def test_classify_replay_passes_when_expected_workflow_and_projection_seen() -> 
     assert analysis["blocker"] is None
     assert analysis["missing_progress_fact_ids"] == []
     assert analysis["missing_contract_ids"] == []
+
+
+def test_classify_replay_reports_selector_blocker_before_running_timeout() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={"last_task_status": {"status": "running"}},
+        selected_workflow_ids=[],
+        observed_workflow_ids=["#V#kb_mutation_postcondition_critic_workflow"],
+        selector_diagnostics=[
+            {
+                "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+                "phase": "tool_plan",
+            }
+        ],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "selector_or_dispatch_blocker"
+    assert "#V#kb_mutation_postcondition_critic_workflow" in analysis["blocker"][
+        "observed_workflow_ids"
+    ]

@@ -4777,6 +4777,34 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry["workflow_candidate_count"] = int(
                 max(0.0, workflow_candidate_count)
             )
+        for field_name in (
+            "selector_candidate_ids",
+            "selector_discovered_workflow_ids",
+            "selector_excluded_candidate_ids",
+        ):
+            raw_values = merged.get(field_name)
+            if isinstance(raw_values, list):
+                clean_values = [
+                    item.strip()
+                    for item in raw_values
+                    if isinstance(item, str) and item.strip()
+                ]
+                if clean_values:
+                    event_entry[field_name] = clean_values[:40]
+        selector_candidate_count = _progress_number(
+            merged.get("selector_candidate_count")
+        )
+        if selector_candidate_count is not None:
+            event_entry["selector_candidate_count"] = int(
+                max(0.0, selector_candidate_count)
+            )
+        selector_excluded_candidate_count = _progress_number(
+            merged.get("selector_excluded_candidate_count")
+        )
+        if selector_excluded_candidate_count is not None:
+            event_entry["selector_excluded_candidate_count"] = int(
+                max(0.0, selector_excluded_candidate_count)
+            )
         selected_workflow_execution_event = _normalise_selected_workflow_execution_event(
             safe_update,
             sequence_no=sequence_no,

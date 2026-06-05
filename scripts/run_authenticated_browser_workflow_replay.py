@@ -443,6 +443,7 @@ def poll_replay_task(
     request_id: str,
     timeout_seconds: float,
     poll_interval_seconds: float,
+    cancel_on_timeout: bool,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + max(float(timeout_seconds), 1.0)
     task_statuses: list[dict[str, Any]] = []
@@ -489,6 +490,22 @@ def poll_replay_task(
             timeout_seconds=45.0,
         )
     elif _safe_text(last_task_status.get("status")) not in TERMINAL_TASK_STATUSES:
+        if not cancel_on_timeout:
+            task_result = {
+                "timeout_without_cancellation": True,
+                "message": (
+                    "Replay timeout reached; cancellation was skipped by "
+                    "harness option."
+                ),
+                "task_id": task_id,
+            }
+            return {
+                "task_statuses": task_statuses,
+                "progress_snapshots": progress_snapshots,
+                "last_task_status": last_task_status,
+                "last_progress": last_progress,
+                "task_result": task_result,
+            }
         try:
             task_result = _request_json(
                 session,
@@ -565,6 +582,86 @@ def extract_selected_workflow_ids(*payloads: Any) -> list[str]:
     return workflow_ids
 
 
+def extract_observed_workflow_ids(*payloads: Any) -> list[str]:
+    workflow_ids: list[str] = []
+    for payload in payloads:
+        for value in _walk_json(payload):
+            if not isinstance(value, Mapping):
+                continue
+            workflow_id = _safe_text(value.get("workflow_id"))
+            if workflow_id and workflow_id not in workflow_ids:
+                workflow_ids.append(workflow_id)
+    return workflow_ids
+
+
+def extract_selector_diagnostics(*payloads: Any) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    diagnostic_keys = (
+        "workflow_selection",
+        "workflow_routing_diagnostics",
+        "selected_workflow_execution",
+        "workflow_stage_path",
+    )
+    scalar_keys = (
+        "selected_workflow_id",
+        "dispatch_workflow_id",
+        "workflow_id",
+        "state_id",
+        "phase",
+        "status",
+        "selection_resolution",
+        "verdict",
+    )
+    list_keys = (
+        "discovered_workflow_ids",
+        "candidate_workflow_ids",
+        "eligible_specialised_candidate_ids",
+        "selector_candidate_ids",
+        "selector_discovered_workflow_ids",
+        "selector_excluded_candidate_ids",
+    )
+    for payload in payloads:
+        for value in _walk_json(payload):
+            if not isinstance(value, Mapping):
+                continue
+            entry: dict[str, Any] = {}
+            for key in scalar_keys:
+                text = _safe_text(value.get(key))
+                if text:
+                    entry[key] = text
+            for key in list_keys:
+                raw_items = value.get(key)
+                if isinstance(raw_items, list):
+                    items = [_safe_text(item) for item in raw_items]
+                    entry[key] = [item for item in items if item][:20]
+            for key in diagnostic_keys:
+                raw_value = value.get(key)
+                if isinstance(raw_value, Mapping):
+                    nested_entry: dict[str, Any] = {}
+                    for nested_key in scalar_keys:
+                        text = _safe_text(raw_value.get(nested_key))
+                        if text:
+                            nested_entry[nested_key] = text
+                    for nested_key in list_keys:
+                        raw_items = raw_value.get(nested_key)
+                        if isinstance(raw_items, list):
+                            items = [_safe_text(item) for item in raw_items]
+                            nested_entry[nested_key] = [
+                                item for item in items if item
+                            ][:20]
+                    if nested_entry:
+                        entry[key] = nested_entry
+            if not entry:
+                continue
+            identity = json.dumps(entry, sort_keys=True, ensure_ascii=True)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            diagnostics.append(entry)
+    return diagnostics[:80]
+
+
 def extract_visible_answer(task_result: Mapping[str, Any]) -> str | None:
     result = _as_mapping(task_result.get("result"))
     response_text = _safe_text(result.get("response_text"))
@@ -619,6 +716,8 @@ def classify_replay(
     gmail_preflight: Mapping[str, Any],
     task_evidence: Mapping[str, Any],
     selected_workflow_ids: Sequence[str],
+    observed_workflow_ids: Sequence[str],
+    selector_diagnostics: Sequence[Mapping[str, Any]],
     progress_facts: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     missing_fact_ids = sorted(set(case.expected_progress_fact_ids) - _fact_ids(progress_facts))
@@ -626,6 +725,9 @@ def classify_replay(
     selected_expected_workflow = (
         not case.expected_workflow_id
         or case.expected_workflow_id in set(selected_workflow_ids)
+    )
+    route_evidence_present = bool(
+        selected_workflow_ids or observed_workflow_ids or selector_diagnostics
     )
     last_task_status = _as_mapping(task_evidence.get("last_task_status"))
     terminal_status = _safe_text(last_task_status.get("status")) or "unknown"
@@ -644,6 +746,21 @@ def classify_replay(
             "reason": "Gmail profile/tokens are not ready for an authenticated Gmail-backed replay.",
             "gmail_preflight": dict(gmail_preflight),
         }
+    elif (
+        not selected_expected_workflow
+        and (route_evidence_present or terminal_status == "completed")
+    ):
+        blocker = {
+            "type": "selector_or_dispatch_blocker",
+            "reason": (
+                f"Expected {case.expected_workflow_id} but observed "
+                f"selected/dispatch workflow IDs {list(selected_workflow_ids)!r} "
+                f"and execution workflow IDs {list(observed_workflow_ids)!r}."
+            ),
+            "selected_workflow_ids": list(selected_workflow_ids),
+            "observed_workflow_ids": list(observed_workflow_ids),
+            "selector_diagnostics": [dict(item) for item in selector_diagnostics],
+        }
     elif terminal_status not in {"completed"}:
         blocker = {
             "type": "task_terminal_state_blocker",
@@ -652,11 +769,14 @@ def classify_replay(
         }
     elif not selected_expected_workflow:
         blocker = {
-            "type": "selector_blocker",
+            "type": "selector_or_dispatch_blocker",
             "reason": (
-                f"Expected {case.expected_workflow_id} but observed "
-                f"{list(selected_workflow_ids)!r}."
+                f"Expected {case.expected_workflow_id} but no selected, "
+                "dispatch, or execution workflow evidence was captured."
             ),
+            "selected_workflow_ids": list(selected_workflow_ids),
+            "observed_workflow_ids": list(observed_workflow_ids),
+            "selector_diagnostics": [dict(item) for item in selector_diagnostics],
         }
     elif missing_fact_ids or missing_contract_ids:
         blocker = {
@@ -676,6 +796,8 @@ def classify_replay(
         "blocker": blocker,
         "selected_expected_workflow": selected_expected_workflow,
         "selected_workflow_ids": list(selected_workflow_ids),
+        "observed_workflow_ids": list(observed_workflow_ids),
+        "selector_diagnostics": [dict(item) for item in selector_diagnostics],
         "observed_progress_fact_ids": sorted(_fact_ids(progress_facts)),
         "observed_contract_ids": sorted(_contract_ids(progress_facts)),
         "missing_progress_fact_ids": missing_fact_ids,
@@ -697,16 +819,26 @@ def build_replay_report(
     task_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     task_result = _as_mapping(task_evidence.get("task_result"))
+    task_statuses = _as_list(task_evidence.get("task_statuses"))
     progress_snapshots = _as_list(task_evidence.get("progress_snapshots"))
-    selected_workflow_ids = extract_selected_workflow_ids(
+    evidence_payloads = (
+        task_statuses,
         progress_snapshots,
         task_result,
         task_evidence.get("last_progress"),
+        task_evidence.get("last_task_status"),
+    )
+    selected_workflow_ids = extract_selected_workflow_ids(
+        *evidence_payloads,
+    )
+    observed_workflow_ids = extract_observed_workflow_ids(
+        *evidence_payloads,
+    )
+    selector_diagnostics = extract_selector_diagnostics(
+        *evidence_payloads,
     )
     progress_facts = extract_progress_facts(
-        progress_snapshots,
-        task_result,
-        task_evidence.get("last_progress"),
+        *evidence_payloads,
     )
     analysis = classify_replay(
         case=case,
@@ -715,6 +847,8 @@ def build_replay_report(
         gmail_preflight=gmail_preflight,
         task_evidence=task_evidence,
         selected_workflow_ids=selected_workflow_ids,
+        observed_workflow_ids=observed_workflow_ids,
+        selector_diagnostics=selector_diagnostics,
         progress_facts=progress_facts,
     )
     return {
@@ -739,7 +873,11 @@ def build_replay_report(
         or None,
         "visible_answer": extract_visible_answer(task_result),
         "thinking_card_progress_facts": progress_facts,
+        "selector_diagnostics": selector_diagnostics,
+        "task_status_snapshot_count": len(task_statuses),
         "progress_snapshot_count": len(progress_snapshots),
+        "task_statuses": task_statuses,
+        "progress_snapshots": progress_snapshots,
         "last_progress": _as_mapping(task_evidence.get("last_progress")),
         "last_task_status": _as_mapping(task_evidence.get("last_task_status")),
         "task_result": task_result,
@@ -760,6 +898,7 @@ def run_replay(
     auth_login_timeout_seconds: float,
     allow_non_agent_test_server: bool,
     run_despite_gmail_preflight_blocker: bool,
+    cancel_on_timeout: bool,
 ) -> dict[str, Any]:
     session = requests.Session()
     environment = collect_run_environment(session=session, base_url=base_url)
@@ -831,6 +970,7 @@ def run_replay(
                 request_id=request_id,
                 timeout_seconds=timeout_seconds,
                 poll_interval_seconds=poll_interval_seconds,
+                cancel_on_timeout=cancel_on_timeout,
             )
 
     return build_replay_report(
@@ -882,6 +1022,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--auth-login-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--output-json", default=None)
     parser.add_argument(
+        "--skip-cancel-on-timeout",
+        action="store_true",
+        help=(
+            "Write the evidence report at timeout without calling the task "
+            "cancel endpoint. Useful when diagnosing cancellation/read-back hangs."
+        ),
+    )
+    parser.add_argument(
         "--run-despite-gmail-preflight-blocker",
         action="store_true",
         help=(
@@ -914,6 +1062,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_despite_gmail_preflight_blocker=bool(
             args.run_despite_gmail_preflight_blocker
         ),
+        cancel_on_timeout=not bool(args.skip_cancel_on_timeout),
     )
     _write_output(args.output_json, report)
     verdict = _safe_text(_as_mapping(report.get("analysis")).get("verdict"))

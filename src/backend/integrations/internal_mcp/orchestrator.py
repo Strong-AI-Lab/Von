@@ -33129,11 +33129,81 @@ class InternalMCPChatOrchestrator:
             prompt_failure_detail=prompt_failure_detail,
         )
 
+    @staticmethod
+    def _clean_selector_progress_ids(raw_values: Any) -> list[str]:
+        if not isinstance(raw_values, list):
+            return []
+        return [
+            str(item).strip()
+            for item in raw_values
+            if isinstance(item, str) and str(item).strip()
+        ]
+
+    def _emit_selector_preparation_summary_progress(
+        self,
+        emit_progress: Callable[[Mapping[str, Any]], None] | None,
+        outputs: Mapping[str, Any],
+    ) -> None:
+        if not callable(emit_progress):
+            return
+        selector_candidate_ids = self._clean_selector_progress_ids(
+            outputs.get("selector_candidate_ids")
+        )
+        selector_excluded_candidate_ids = self._clean_selector_progress_ids(
+            outputs.get("selector_excluded_candidate_ids")
+        )
+        selector_discovered_workflow_ids = self._clean_selector_progress_ids(
+            outputs.get("selector_discovered_workflow_ids")
+        )
+        workflow_discovery_result = (
+            outputs.get("workflow_discovery_result")
+            if isinstance(outputs.get("workflow_discovery_result"), Mapping)
+            else {}
+        )
+        emit_progress(
+            {
+                "status": "thinking",
+                "stage": "selector_preparation",
+                "phase": "selector_preparation",
+                "phase_label": self._PHASE_LABELS.get(
+                    "selector_preparation", "Preparing selector context"
+                ),
+                "subtask": "selector candidate summary",
+                "result_summary": (
+                    f"Prepared {len(selector_candidate_ids)} selector "
+                    f"candidate(s), with {len(selector_excluded_candidate_ids)} "
+                    "excluded candidate(s)."
+                ),
+                "selector_candidate_ids": selector_candidate_ids,
+                "selector_excluded_candidate_ids": selector_excluded_candidate_ids,
+                "selector_discovered_workflow_ids": selector_discovered_workflow_ids,
+                "selector_candidate_count": len(selector_candidate_ids),
+                "selector_excluded_candidate_count": len(
+                    selector_excluded_candidate_ids
+                ),
+                "workflow_discovery": {
+                    "query": workflow_discovery_result.get("query"),
+                    "candidate_count": workflow_discovery_result.get(
+                        "candidate_count"
+                    ),
+                    "match_count": workflow_discovery_result.get("match_count"),
+                    "search_sources": workflow_discovery_result.get("search_sources"),
+                    "discovery_payload_origin": workflow_discovery_result.get(
+                        "discovery_payload_origin"
+                    ),
+                    "agent_test_local_replay": workflow_discovery_result.get(
+                        "agent_test_local_replay"
+                    ),
+                },
+            }
+        )
+
     def _prepare_turn_selector_context_outputs(
         self,
         request: Any,
         *,
         progress_note: Callable[[str, str], None] | None = None,
+        progress_update: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         from ...services.workflow_discovery_memo_service import (
             discover_workflows_for_turn_memoized,
@@ -33158,7 +33228,7 @@ class InternalMCPChatOrchestrator:
             expected_outcome_contract=expected_outcome_contract,
         )
         discovery_query_input = discovery_query_text or prompt_text
-        if (
+        agent_test_local_selector_requested = (
             _is_agent_test_instance()
             and _explicit_model_request_uses_local_provider(
                 llm_client=env.llm_client,
@@ -33169,11 +33239,16 @@ class InternalMCPChatOrchestrator:
                 or "text relation" in prompt_text.lower()
                 or "represented relation" in prompt_text.lower()
             )
-        ):
+        )
+
+        def _build_agent_test_local_selector_outputs() -> dict[str, Any]:
             if callable(progress_note):
                 progress_note(
                     "Use AgentTest selector defaults",
-                    "Using a deterministic local selector candidate for grounded tool evidence.",
+                    (
+                        "Using a deterministic local selector candidate because "
+                        "represented workflow discovery found no candidates."
+                    ),
                 )
             tool_candidate = next(
                 (
@@ -33389,6 +33464,20 @@ class InternalMCPChatOrchestrator:
                 "discovery_payload_origin": "prepare_turn_selector_context_skipped_no_query",
             }
 
+        discovery_candidate_count = 0
+        if isinstance(workflow_discovery_result, Mapping):
+            for key in ("candidates", "matches", "routing_matches"):
+                raw_candidates = workflow_discovery_result.get(key)
+                if isinstance(raw_candidates, list) and raw_candidates:
+                    discovery_candidate_count = len(raw_candidates)
+                    break
+            if discovery_candidate_count <= 0:
+                raw_count = workflow_discovery_result.get("candidate_count")
+                if isinstance(raw_count, int):
+                    discovery_candidate_count = max(discovery_candidate_count, raw_count)
+        if agent_test_local_selector_requested and discovery_candidate_count <= 0:
+            return _build_agent_test_local_selector_outputs()
+
         continuation_routing_context_text = None
         raw_continuation_context = data.get("continuation_context")
         if isinstance(raw_continuation_context, Mapping):
@@ -33443,6 +33532,33 @@ class InternalMCPChatOrchestrator:
             workflow_discovery_result=workflow_discovery_result,
             prompt=prompt_text,
             candidate_turn_launchability=candidate_turn_launchability,
+        )
+        self._emit_selector_preparation_summary_progress(
+            progress_update,
+            {
+                "selector_candidate_ids": [
+                    str(item.get("concept_id")).strip()
+                    for item in selector_candidate_matches
+                    if isinstance(item.get("concept_id"), str)
+                    and str(item.get("concept_id")).strip()
+                ],
+                "selector_excluded_candidate_ids": [
+                    str(item.get("concept_id")).strip()
+                    for item in excluded_discovered_matches
+                    if isinstance(item.get("concept_id"), str)
+                    and str(item.get("concept_id")).strip()
+                ],
+                "selector_discovered_workflow_ids": [
+                    str(item.get("concept_id")).strip()
+                    for item in [
+                        *discovered_matches,
+                        *excluded_discovered_matches,
+                    ]
+                    if isinstance(item.get("concept_id"), str)
+                    and str(item.get("concept_id")).strip()
+                ],
+                "workflow_discovery_result": workflow_discovery_result,
+            },
         )
 
         selector_prompt = WorkflowSelectionPrompt(
@@ -33677,8 +33793,10 @@ class InternalMCPChatOrchestrator:
         outputs = self._prepare_turn_selector_context_outputs(
             request,
             progress_note=_emit_prepare_progress,
+            progress_update=emit_progress,
         )
         duration_ms = int((time.perf_counter() - prepare_start) * 1000)
+        self._emit_selector_preparation_summary_progress(emit_progress, outputs)
 
         if isinstance(aux_llm_calls, list):
             aux_llm_calls.append(
@@ -33808,7 +33926,20 @@ class InternalMCPChatOrchestrator:
         data = request.data
         data_mutable = cast(MutableMapping[str, Any], data)
         env = request.environment
-        prepared_outputs = self._prepare_turn_selector_context_outputs(request)
+        emit_progress_for_route_raw = data.get("emit_progress")
+        emit_progress_for_route = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_for_route_raw)
+            if callable(emit_progress_for_route_raw)
+            else None
+        )
+        prepared_outputs = self._prepare_turn_selector_context_outputs(
+            request,
+            progress_update=emit_progress_for_route,
+        )
+        self._emit_selector_preparation_summary_progress(
+            emit_progress_for_route,
+            prepared_outputs,
+        )
         selector_prompt = self._build_selector_prompt_from_context(
             {
                 **prepared_outputs,
@@ -34741,6 +34872,40 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("workflow_routing"), Mapping)
             else {}
         )
+        selector_trace_candidate_ids = self._clean_selector_progress_ids(
+            selected_workflow_trace_payload.get("selector_candidate_ids")
+        ) or self._clean_selector_progress_ids(data.get("selector_candidate_ids"))
+        selector_trace_excluded_candidate_ids = self._clean_selector_progress_ids(
+            selected_workflow_trace_payload.get("selector_excluded_candidate_ids")
+        ) or self._clean_selector_progress_ids(
+            selected_workflow_trace_payload.get("excluded_candidate_ids")
+        ) or self._clean_selector_progress_ids(data.get("selector_excluded_candidate_ids"))
+        selector_trace_discovered_workflow_ids = self._clean_selector_progress_ids(
+            data.get("selector_discovered_workflow_ids")
+        )
+        if not selector_trace_discovered_workflow_ids:
+            selector_trace_discovered_workflow_ids = self._clean_selector_progress_ids(
+                workflow_routing_payload.get("discovered_workflow_ids")
+            )
+        selector_trace_progress_payload: dict[str, Any] = {}
+        if selector_trace_candidate_ids:
+            selector_trace_progress_payload["selector_candidate_ids"] = (
+                selector_trace_candidate_ids
+            )
+            selector_trace_progress_payload["selector_candidate_count"] = len(
+                selector_trace_candidate_ids
+            )
+        if selector_trace_excluded_candidate_ids:
+            selector_trace_progress_payload["selector_excluded_candidate_ids"] = (
+                selector_trace_excluded_candidate_ids
+            )
+            selector_trace_progress_payload["selector_excluded_candidate_count"] = len(
+                selector_trace_excluded_candidate_ids
+            )
+        if selector_trace_discovered_workflow_ids:
+            selector_trace_progress_payload["selector_discovered_workflow_ids"] = (
+                selector_trace_discovered_workflow_ids
+            )
         child_outputs: dict[str, Any] = {}
         rendered_child_response_text: str | None = None
         completed = False
@@ -34800,6 +34965,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_id": selected_workflow_id,
                 "selected_workflow_id": selected_workflow_id,
                 "selected_execution_mode": selected_execution_mode or "custom_workflow",
+                **selector_trace_progress_payload,
             }
             if isinstance(final_state_value, str) and final_state_value.strip():
                 event["final_state"] = final_state_value.strip()
@@ -34818,6 +34984,7 @@ class InternalMCPChatOrchestrator:
                     "workflow_id": selected_workflow_id,
                     "selected_execution_mode": selected_execution_mode
                     or "custom_workflow",
+                    **selector_trace_progress_payload,
                     "selected_workflow_execution_event": event,
                 }
             )

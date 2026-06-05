@@ -994,6 +994,7 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
         selector_enabled=True,
     )
     llm_calls: list[dict[str, Any]] = []
+    progress_events: list[dict[str, Any]] = []
 
     class _CapturingRouteLLM:
         def generate(self, prompt, context=None, model=None):
@@ -1001,6 +1002,20 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
                 {"prompt": prompt, "context": list(context or []), "model": model}
             )
             return CHAT_ASSISTANT_WORKFLOW_ID
+
+    original_prepare_selection_prompt = (
+        orchestrator._workflow_selector.prepare_selection_prompt
+    )
+
+    def _capturing_prepare_selection_prompt(*args, **kwargs):
+        progress_events.append({"marker": "prepare_selection_prompt"})
+        return original_prepare_selection_prompt(*args, **kwargs)
+
+    monkeypatch.setattr(
+        orchestrator._workflow_selector,
+        "prepare_selection_prompt",
+        _capturing_prepare_selection_prompt,
+    )
 
     aux_llm_calls: list[dict[str, Any]] = []
     result = orchestrator._action_turn_execution_route(
@@ -1041,6 +1056,7 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
                 "registry_snapshot": None,
                 "llm_calls": [],
                 "aux_llm_calls": aux_llm_calls,
+                "emit_progress": progress_events.append,
                 "augmented_context": [
                     {
                         "role": "system",
@@ -1060,6 +1076,16 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
     assert result.status == "success"
     assert result.outputs["selected_workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
     assert llm_calls
+    progress_markers = [
+        str(event.get("subtask") or event.get("marker") or "")
+        for event in progress_events
+        if isinstance(event, dict)
+    ]
+    assert "selector candidate summary" in progress_markers
+    assert "prepare_selection_prompt" in progress_markers
+    assert progress_markers.index("selector candidate summary") < progress_markers.index(
+        "prepare_selection_prompt"
+    )
     selector_context = llm_calls[0]["context"]
     assert any(
         isinstance(message, dict)
@@ -2415,6 +2441,69 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert "Linked file copy: #V#file_copy_456." in report["response_text"]
     assert "Created paper concept: #V#paper_123." in result.outputs["response_text"]
     assert "Linked file copy: #V#file_copy_456." in result.outputs["response_text"]
+
+
+def test_execute_selected_progress_includes_selector_route_evidence(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={},
+        ),
+    )
+    progress_events: list[dict[str, Any]] = []
+
+    result = orchestrator._action_turn_execution_execute_selected(
+        SimpleNamespace(
+            data={
+                "selected_workflow_id": "#V#specialised_route",
+                "selected_workflow_trace": {
+                    "selector_candidate_ids": [
+                        "#V#specialised_route",
+                        "#V#tool_calling_workflow",
+                    ],
+                    "excluded_candidate_ids": ["#V#excluded_route"],
+                },
+                "selector_discovered_workflow_ids": ["#V#specialised_route"],
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+                "emit_progress": progress_events.append,
+            },
+            environment=SimpleNamespace(
+                llm_client=_DummyLLM(),
+                model="test-model",
+                user_namespace="#V#user",
+                auxiliary_system_prompt=None,
+            ),
+            trace=None,
+        )
+    )
+
+    assert result.status == "success"
+    execution_events = [
+        event
+        for event in progress_events
+        if isinstance(event.get("selected_workflow_execution_event"), dict)
+    ]
+    assert execution_events
+    first_event = execution_events[0]
+    assert first_event["selector_candidate_ids"] == [
+        "#V#specialised_route",
+        "#V#tool_calling_workflow",
+    ]
+    assert first_event["selector_discovered_workflow_ids"] == ["#V#specialised_route"]
+    assert first_event["selector_excluded_candidate_ids"] == ["#V#excluded_route"]
+    nested_event = first_event["selected_workflow_execution_event"]
+    assert nested_event["selector_candidate_ids"] == [
+        "#V#specialised_route",
+        "#V#tool_calling_workflow",
+    ]
 
 
 def test_execute_selected_captures_child_failure_for_recovery_path(

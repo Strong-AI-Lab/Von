@@ -1223,6 +1223,52 @@ def test_progress_goal_label_and_candidate_count_are_serialised(monkeypatch) -> 
     assert summary.get("goal_label") == serialised["goal_label"]
 
 
+def test_selector_candidate_progress_fields_are_serialised(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=1_800_000_000.0)
+
+    von_routes._set_tool_progress(
+        "scope-selector",
+        "req-selector",
+        {
+            "status": "thinking",
+            "phase": "selector_preparation",
+            "request_id": "req-selector",
+            "selector_candidate_ids": [
+                "#V#zhan_gmail_arxiv_ingestion_workflow",
+                "",
+                "#V#tool_calling_workflow",
+            ],
+            "selector_discovered_workflow_ids": [
+                "#V#zhan_gmail_arxiv_ingestion_workflow"
+            ],
+            "selector_excluded_candidate_ids": ["#V#excluded_workflow"],
+            "selector_candidate_count": 2,
+            "selector_excluded_candidate_count": 1,
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-selector", "req-selector")
+    assert state is not None
+
+    serialised = von_routes._serialise_tool_progress_state(
+        state, now_epoch=clock["now"]
+    )
+    events = serialised.get("diagnostic_events")
+    assert isinstance(events, list)
+    assert events[-1].get("selector_candidate_ids") == [
+        "#V#zhan_gmail_arxiv_ingestion_workflow",
+        "#V#tool_calling_workflow",
+    ]
+    assert events[-1].get("selector_discovered_workflow_ids") == [
+        "#V#zhan_gmail_arxiv_ingestion_workflow"
+    ]
+    assert events[-1].get("selector_excluded_candidate_ids") == [
+        "#V#excluded_workflow"
+    ]
+    assert events[-1].get("selector_candidate_count") == 2
+    assert events[-1].get("selector_excluded_candidate_count") == 1
+
+
 def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=4200.0)
 

@@ -275,16 +275,25 @@ def test_agent_test_selector_preparation_uses_local_tool_candidate(
 ) -> None:
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    calls: list[dict[str, Any]] = []
 
-    def _unexpected_discovery(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("AgentTest selector prep should not call discovery")
+    def _empty_discovery(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "relation prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
 
     def _unexpected_prompt_render(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("AgentTest selector prep should not render prompts")
+        raise AssertionError("AgentTest fallback should not render prompts")
 
     monkeypatch.setattr(
-        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
-        _unexpected_discovery,
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _empty_discovery,
     )
     monkeypatch.setattr(
         orchestrator,
@@ -311,9 +320,92 @@ def test_agent_test_selector_preparation_uses_local_tool_candidate(
 
     outputs = orchestrator._prepare_turn_selector_context_outputs(request)
 
+    assert calls
     assert outputs["selector_prompt_available"] is True
     assert outputs["selector_candidate_ids"] == [TOOL_CALLING_WORKFLOW_ID]
     assert outputs["workflow_discovery_result"]["agent_test_local_replay"] is True
+
+
+def test_agent_test_selector_preparation_prefers_represented_discovery_candidate(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+
+    def _represented_discovery(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "matches": [
+                {
+                    "concept_id": represented_workflow_id,
+                    "name": "Zhan Gmail arXiv ingestion workflow",
+                    "description": "Ingest Gmail messages that reference arXiv papers.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": represented_workflow_id,
+                    "name": "Zhan Gmail arXiv ingestion workflow",
+                    "description": "Ingest Gmail messages that reference arXiv papers.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "routing_matches": [],
+            "query": "gmail arxiv prompt",
+            "match_count": 1,
+            "candidate_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _represented_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_discovered_candidate_turn_launchability",
+        lambda **_kwargs: {represented_workflow_id: {"launchable": True}},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": (
+                    "Look in the last 20 email messages for arXiv papers and "
+                    "represent any papers you find in Vontology."
+                ),
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+                "turn_expected_required_tools": [
+                    "gmail_list_messages",
+                    "gmail_get_message",
+                    "search_arxiv",
+                ],
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace=None,
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert represented_workflow_id in outputs["selector_candidate_ids"]
+    assert outputs["workflow_discovery_result"].get("agent_test_local_replay") is None
 
 
 def test_agent_test_selector_preparation_bounds_local_discovery_timeout(
@@ -336,7 +428,7 @@ def test_agent_test_selector_preparation_bounds_local_discovery_timeout(
         }
 
     monkeypatch.setattr(
-        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
         _capturing_discovery,
     )
     monkeypatch.setattr(
