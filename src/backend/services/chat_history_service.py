@@ -394,6 +394,11 @@ def _ensure_chat_history_indexes(collection) -> None:
                     [("user_id", ASCENDING), ("session_id", ASCENDING)],
                     name="user_id_1_session_id_1",
                 )
+            if "session_id_1_created_at_1" not in existing_indexes:
+                collection.create_index(
+                    [("session_id", ASCENDING), ("created_at", ASCENDING)],
+                    name="session_id_1_created_at_1",
+                )
             if "user_id_1_session_id_1_namespace_1" not in existing_indexes:
                 collection.create_index(
                     [
