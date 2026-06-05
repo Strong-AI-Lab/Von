@@ -1405,6 +1405,25 @@ def update_concept(
                     concept_id,
                     reconcile_err,
                 )
+            try:
+                concept_identifier = (
+                    updated_concept_doc.get("concept_id")
+                    if updated_concept_doc
+                    else previous_concept_id
+                )
+                concept_identifier = concept_identifier or concept_id
+                if concept_identifier:
+                    from .relationship_extent_index_service import (
+                        sync_relationship_extent_index_for_concept_id,
+                    )
+
+                    sync_relationship_extent_index_for_concept_id(concept_identifier)
+            except Exception:
+                logger.debug(
+                    "update_concept: relationship extent index sync failed for %s",
+                    concept_id,
+                    exc_info=True,
+                )
 
         if (not defer_side_effects) and get_event_workflow_integration_enabled(
             default=True

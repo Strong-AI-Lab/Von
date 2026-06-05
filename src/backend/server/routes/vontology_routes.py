@@ -51,6 +51,10 @@ from ...services.concept_service import (
 )
 from ...services.text_value_service import get_texts_for_concept
 from ...services.concept_relation_service import build_concept_relations_payload
+from ...services.relationship_extent_index_service import (
+    incoming_dynamic_extent_rows_for_target,
+    relationship_extent_index_ready,
+)
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
@@ -278,6 +282,89 @@ def _expand_relation_payload_entry_for_extent(
                 "uncertainty": uncertainty_payload,
             }
         )
+    return rows
+
+
+def _legacy_incoming_dynamic_relationship_extent_rows(
+    concept_id: str,
+    *,
+    requested_predicate: str | None = None,
+) -> list[dict[str, Any]]:
+    """Correctness fallback before the derived extent index has been built."""
+
+    incoming_pipeline = [
+        {"$match": {"relationships": {"$type": "object"}}},
+        {
+            "$project": {
+                "concept_id": 1,
+                "updated_at": 1,
+                "relationship_items": {"$objectToArray": "$relationships"},
+            }
+        },
+        {"$unwind": "$relationship_items"},
+        {
+            "$project": {
+                "concept_id": 1,
+                "updated_at": 1,
+                "predicate": "$relationship_items.k",
+                "targets": "$relationship_items.v",
+            }
+        },
+        {"$match": {"targets": concept_id}},
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for item in ConceptsRepository.aggregate(incoming_pipeline):
+        source_concept_id = item.get("concept_id")
+        if not isinstance(source_concept_id, str) or not source_concept_id.strip():
+            continue
+        source_concept_id = source_concept_id.strip()
+        if source_concept_id == concept_id:
+            continue
+
+        predicate_id = _canonicalise_relationship_predicate(item.get("predicate"))
+        if not predicate_id:
+            continue
+        if predicate_id in get_relationship_kinds_set():
+            continue
+        if requested_predicate and predicate_id != requested_predicate:
+            continue
+
+        targets = _normalise_relationship_value_list(item.get("targets"))
+        if not targets:
+            continue
+
+        raw_updated_at = item.get("updated_at")
+        updated_at = None
+        isoformat_fn = getattr(raw_updated_at, "isoformat", None)
+        if callable(isoformat_fn):
+            try:
+                updated_at = isoformat_fn()
+            except Exception:
+                updated_at = None
+
+        for target_index, target_value in enumerate(targets):
+            if target_value != concept_id:
+                continue
+            rows.append(
+                {
+                    "relation_id": f"struct::{source_concept_id}::{predicate_id}::incoming::{target_index}",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": predicate_id,
+                    "arg1_value": source_concept_id,
+                    "arg1_is_concept": source_concept_id.startswith("#V#"),
+                    "arg2_value": target_value,
+                    "arg2_is_concept": True,
+                    "arg2_index": target_index + 2,
+                    "source_concept_id": source_concept_id,
+                    "target_value": target_value,
+                    "updated_at": updated_at,
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+            )
     return rows
 
 
@@ -3415,17 +3502,27 @@ def get_relationships_extent_route():
         concept_id = concept_id.strip()
 
         rows: list[dict[str, Any]] = []
+        wants_arg1 = role_filter in {"any", "arg1"}
+        wants_arg2 = role_filter in {"any", "arg2"}
+        wants_structured = source_filter in {"", "structured"}
+        wants_text_relations = source_filter in {"", "text_relations"}
+        wants_uncertain = source_filter in {"", "uncertain_assertions"}
+        incoming_index_ready = (
+            wants_arg2 and wants_structured and relationship_extent_index_ready()
+        )
 
         base_payload = build_concept_relations_payload(
             concept_doc,
-            include_relations_arg1=True,
-            include_relations_any_arg=True,
-            include_text_relations_arg1=True,
+            include_relations_arg1=wants_arg1 and wants_structured,
+            include_relations_any_arg=(
+                wants_arg2 and wants_structured and not incoming_index_ready
+            ),
+            include_text_relations_arg1=wants_arg1 and wants_text_relations,
             predicate_filter=[requested_predicate] if requested_predicate else None,
             limit=_RELATIONSHIP_EXTENT_MAX_LIMIT,
             offset=0,
-            include_concept_preview=True,
-            include_uncertain=include_uncertain,
+            include_concept_preview=False,
+            include_uncertain=include_uncertain and wants_uncertain,
             uncertainty_mode=uncertainty_mode,
             uncertainty_statuses=uncertainty_statuses or None,
         )
@@ -3435,78 +3532,20 @@ def get_relationships_extent_route():
             )
 
         # Supplement incoming dynamic predicates where this concept appears as arg2.
-        # build_concept_relations_payload currently covers incoming structural edges.
-        incoming_pipeline = [
-            {"$match": {"relationships": {"$type": "object"}}},
-            {
-                "$project": {
-                    "concept_id": 1,
-                    "updated_at": 1,
-                    "relationship_items": {"$objectToArray": "$relationships"},
-                }
-            },
-            {"$unwind": "$relationship_items"},
-            {
-                "$project": {
-                    "concept_id": 1,
-                    "updated_at": 1,
-                    "predicate": "$relationship_items.k",
-                    "targets": "$relationship_items.v",
-                }
-            },
-            {"$match": {"targets": concept_id}},
-        ]
-
-        for item in ConceptsRepository.aggregate(incoming_pipeline):
-            source_concept_id = item.get("concept_id")
-            if not isinstance(source_concept_id, str) or not source_concept_id.strip():
-                continue
-            source_concept_id = source_concept_id.strip()
-            if source_concept_id == concept_id:
-                continue
-
-            predicate_id = _canonicalise_relationship_predicate(item.get("predicate"))
-            if not predicate_id:
-                continue
-            if predicate_id in get_relationship_kinds_set():
-                continue
-            if requested_predicate and predicate_id != requested_predicate:
-                continue
-
-            targets = _normalise_relationship_value_list(item.get("targets"))
-            if not targets:
-                continue
-
-            raw_updated_at = item.get("updated_at")
-            updated_at = None
-            isoformat_fn = getattr(raw_updated_at, "isoformat", None)
-            if callable(isoformat_fn):
-                try:
-                    updated_at = isoformat_fn()
-                except Exception:
-                    updated_at = None
-
-            for target_index, target_value in enumerate(targets):
-                if target_value != concept_id:
-                    continue
-                rows.append(
-                    {
-                        "relation_id": f"struct::{source_concept_id}::{predicate_id}::incoming::{target_index}",
-                        "source": "structured",
-                        "relation_kind": "binary",
-                        "role": "arg2",
-                        "predicate_id": predicate_id,
-                        "arg1_value": source_concept_id,
-                        "arg1_is_concept": source_concept_id.startswith("#V#"),
-                        "arg2_value": target_value,
-                        "arg2_is_concept": True,
-                        "arg2_index": target_index + 2,
-                        "source_concept_id": source_concept_id,
-                        "target_value": target_value,
-                        "updated_at": updated_at,
-                        "is_asserted": True,
-                        "relation_state": "asserted",
-                    }
+        # The derived index avoids unwinding every concept document on the hot path.
+        if wants_arg2 and wants_structured:
+            indexed_rows, used_extent_index = incoming_dynamic_extent_rows_for_target(
+                concept_id,
+                requested_predicate=requested_predicate,
+                exclude_structural_predicates=False,
+            )
+            rows.extend(indexed_rows)
+            if not used_extent_index:
+                rows.extend(
+                    _legacy_incoming_dynamic_relationship_extent_rows(
+                        concept_id,
+                        requested_predicate=requested_predicate,
+                    )
                 )
 
         filtered_rows: list[dict[str, Any]] = []

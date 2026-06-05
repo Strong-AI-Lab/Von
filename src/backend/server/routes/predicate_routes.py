@@ -12,6 +12,9 @@ from bson import ObjectId
 
 from ...db.mongo_client import get_text_relations_collection, get_concepts_collection
 from ...db.repositories.text_value_repository import TextValuesRepository
+from ...services.relationship_extent_index_service import (
+    query_relationship_extent_index,
+)
 
 
 predicate_bp = Blueprint("predicates", __name__, url_prefix="/api/predicates")
@@ -318,19 +321,25 @@ def _query_text_relations_extent(
             .limit(limit)
         )
 
-        extent_items = []
-        for rel in cursor:
-            # Fetch the text value
-            text_value = TextValuesRepository.find_one(
-                {"_id": ObjectId(rel.get("object_text_id"))}
-            )
+        relations = list(cursor)
+        text_values_by_id = _get_text_values_by_relation_object_ids(relations)
+        concept_names = _get_concept_names(
+            [
+                rel.get("subject_concept_id")
+                for rel in relations
+                if isinstance(rel.get("subject_concept_id"), str)
+            ]
+        )
 
-            # Fetch subject concept for name
-            subject_name = _get_concept_name(rel.get("subject_concept_id"))
+        extent_items = []
+        for rel in relations:
+            text_value = text_values_by_id.get(str(rel.get("object_text_id") or ""))
+            subject_id = rel.get("subject_concept_id")
+            subject_name = concept_names.get(subject_id)
 
             extent_items.append(
                 {
-                    "subject": rel.get("subject_concept_id"),
+                    "subject": subject_id,
                     "subject_name": subject_name,
                     "predicate": predicate_concept_id,
                     "object": text_value.get("text") if text_value else None,
@@ -365,17 +374,31 @@ def _query_structured_relations_extent(
         if concepts_coll is None:
             return [], 0
 
+        object_ids: Optional[set[str]] = None
+        if object_type:
+            object_ids = _resolve_object_type_ids(object_type, concepts_coll)
+            if not object_ids:
+                return [], 0
+
+        if subject_type is None:
+            indexed_items, indexed_count = _query_structured_relations_extent_index(
+                predicate_concept_id=predicate_concept_id,
+                object_ids=object_ids,
+                limit=limit,
+                offset=offset,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+            if indexed_count >= 0:
+                return indexed_items, indexed_count
+
         # Build query to find concepts with this predicate in their relationships
         # Note: This queries for the predicate as a key in the relationships object
         query_filter: Dict[str, Any] = {
             f"relationships.{predicate_concept_id}": {"$exists": True, "$ne": None}
         }
 
-        object_ids: Optional[set[str]] = None
         if object_type:
-            object_ids = _resolve_object_type_ids(object_type, concepts_coll)
-            if not object_ids:
-                return [], 0
             query_filter[f"relationships.{predicate_concept_id}"] = {
                 "$in": list(object_ids)
             }
@@ -389,9 +412,20 @@ def _query_structured_relations_extent(
 
         # Query with pagination
         cursor = concepts_coll.find(query_filter).skip(offset).limit(limit)
+        concepts = list(cursor)
+        object_name_ids = []
+        for concept in concepts:
+            relationships = concept.get("relationships", {})
+            object_values = relationships.get(predicate_concept_id)
+            if not isinstance(object_values, list):
+                object_values = [object_values] if object_values else []
+            object_name_ids.extend(
+                [obj for obj in object_values if isinstance(obj, str) and obj.startswith("#")]
+            )
+        object_names = _get_concept_names(object_name_ids)
 
         extent_items = []
-        for concept in cursor:
+        for concept in concepts:
             subject_id = concept.get("concept_id")
             subject_name = concept.get("name") or subject_id
 
@@ -410,9 +444,7 @@ def _query_structured_relations_extent(
 
             # Create extent items (one per object if multiple)
             for obj_value in object_values:
-                obj_name = (
-                    _get_concept_name(obj_value) if isinstance(obj_value, str) else None
-                )
+                obj_name = object_names.get(obj_value) if isinstance(obj_value, str) else None
 
                 extent_items.append(
                     {
@@ -461,15 +493,24 @@ def _sample_text_relations_extent(
             {"$sample": {"size": sample_size}},
         ]
 
+        relations = list(text_rel_coll.aggregate(pipeline))
+        text_values_by_id = _get_text_values_by_relation_object_ids(relations)
+        concept_names = _get_concept_names(
+            [
+                rel.get("subject_concept_id")
+                for rel in relations
+                if isinstance(rel.get("subject_concept_id"), str)
+            ]
+        )
+
         extent_items = []
-        for rel in text_rel_coll.aggregate(pipeline):
-            text_value = TextValuesRepository.find_one(
-                {"_id": ObjectId(rel.get("object_text_id"))}
-            )
-            subject_name = _get_concept_name(rel.get("subject_concept_id"))
+        for rel in relations:
+            text_value = text_values_by_id.get(str(rel.get("object_text_id") or ""))
+            subject_id = rel.get("subject_concept_id")
+            subject_name = concept_names.get(subject_id)
             extent_items.append(
                 {
-                    "subject": rel.get("subject_concept_id"),
+                    "subject": subject_id,
                     "subject_name": subject_name,
                     "predicate": predicate_concept_id,
                     "object": text_value.get("text") if text_value else None,
@@ -523,8 +564,20 @@ def _sample_structured_relations_extent(
             {"$sample": {"size": sample_size}},
         ]
 
+        concepts = list(concepts_coll.aggregate(pipeline))
+        object_name_ids = []
+        for concept in concepts:
+            relationships = concept.get("relationships", {})
+            object_values = relationships.get(predicate_concept_id)
+            if not isinstance(object_values, list):
+                object_values = [object_values] if object_values else []
+            object_name_ids.extend(
+                [obj for obj in object_values if isinstance(obj, str) and obj.startswith("#")]
+            )
+        object_names = _get_concept_names(object_name_ids)
+
         extent_items = []
-        for concept in concepts_coll.aggregate(pipeline):
+        for concept in concepts:
             subject_id = concept.get("concept_id")
             subject_name = concept.get("name") or subject_id
 
@@ -539,9 +592,7 @@ def _sample_structured_relations_extent(
                     continue
 
             for obj_value in object_values:
-                obj_name = (
-                    _get_concept_name(obj_value) if isinstance(obj_value, str) else None
-                )
+                obj_name = object_names.get(obj_value) if isinstance(obj_value, str) else None
                 extent_items.append(
                     {
                         "subject": subject_id,
@@ -577,6 +628,114 @@ def _sort_extent_items(
         return value
 
     return sorted(items, key=sort_key, reverse=reverse)
+
+
+def _get_text_values_by_relation_object_ids(
+    relations: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    object_ids = []
+    object_id_keys: Dict[ObjectId, str] = {}
+    for rel in relations:
+        raw_id = rel.get("object_text_id")
+        if raw_id is None:
+            continue
+        try:
+            object_id = ObjectId(raw_id)
+        except Exception:
+            continue
+        object_ids.append(object_id)
+        object_id_keys[object_id] = str(raw_id)
+
+    if not object_ids:
+        return {}
+
+    values = TextValuesRepository.find(
+        {"_id": {"$in": object_ids}},
+        {"text": 1, "lang": 1},
+    )
+    return {object_id_keys[value["_id"]]: value for value in values if value.get("_id") in object_id_keys}
+
+
+def _get_concept_names(concept_ids: List[Any]) -> Dict[str, Optional[str]]:
+    ids = sorted(
+        {
+            concept_id.strip()
+            for concept_id in concept_ids
+            if isinstance(concept_id, str) and concept_id.strip()
+        }
+    )
+    if not ids:
+        return {}
+
+    concepts_coll = get_concepts_collection()
+    if concepts_coll is None:
+        return {}
+
+    cursor = concepts_coll.find({"concept_id": {"$in": ids}}, {"concept_id": 1, "name": 1})
+    return {
+        doc.get("concept_id"): doc.get("name")
+        for doc in cursor
+        if isinstance(doc.get("concept_id"), str)
+    }
+
+
+def _relationship_index_sort(sort_by: str, sort_order: str) -> List[tuple[str, int]]:
+    direction = 1 if sort_order == "asc" else -1
+    sort_field = {
+        "subject": "source_concept_id",
+        "object": "target_value",
+        "updated_at": "updated_at",
+        "created_at": "updated_at",
+    }.get(sort_by, "updated_at")
+    return [(sort_field, direction), ("source_concept_id", 1), ("target_index", 1)]
+
+
+def _query_structured_relations_extent_index(
+    *,
+    predicate_concept_id: str,
+    object_ids: Optional[set[str]],
+    limit: int,
+    offset: int,
+    sort_by: str,
+    sort_order: str,
+) -> tuple[List[Dict[str, Any]], int]:
+    docs, total = query_relationship_extent_index(
+        predicate_id=predicate_concept_id,
+        target_values=object_ids,
+        limit=limit,
+        offset=offset,
+        sort=_relationship_index_sort(sort_by, sort_order),
+    )
+    if total < 0:
+        return [], -1
+
+    concept_names = _get_concept_names(
+        [
+            value
+            for doc in docs
+            for value in (doc.get("source_concept_id"), doc.get("target_value"))
+            if isinstance(value, str) and value.startswith("#")
+        ]
+    )
+
+    extent_items: List[Dict[str, Any]] = []
+    for doc in docs:
+        subject_id = doc.get("source_concept_id")
+        obj_value = doc.get("target_value")
+        extent_items.append(
+            {
+                "subject": subject_id,
+                "subject_name": concept_names.get(subject_id) or subject_id,
+                "predicate": predicate_concept_id,
+                "object": obj_value,
+                "object_name": concept_names.get(obj_value)
+                if isinstance(obj_value, str)
+                else None,
+                "source": "structured",
+                "updated_at": doc.get("updated_at"),
+            }
+        )
+    return extent_items, total
 
 
 def _get_concept_name(concept_id: str) -> Optional[str]:
@@ -722,9 +881,16 @@ def _calculate_extent_statistics(predicate_id: str) -> Dict[str, int]:
 
         # Count from structured relations
         if concepts_coll is not None:
-            struct_count = concepts_coll.count_documents(
-                {f"relationships.{predicate_id}": {"$exists": True, "$ne": None}}
+            _, indexed_struct_count = query_relationship_extent_index(
+                predicate_id=predicate_id,
+                limit=1,
             )
+            if indexed_struct_count >= 0:
+                struct_count = indexed_struct_count
+            else:
+                struct_count = concepts_coll.count_documents(
+                    {f"relationships.{predicate_id}": {"$exists": True, "$ne": None}}
+                )
             stats["total_uses"] += struct_count
 
         return stats

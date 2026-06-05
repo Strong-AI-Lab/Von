@@ -296,6 +296,20 @@ class ConceptsRepository:
                 )
                 changed = changed or inverse_changed
 
+        if changed:
+            try:
+                from ...services.relationship_extent_index_service import (
+                    sync_relationship_extent_index_for_concept_id,
+                )
+
+                sync_relationship_extent_index_for_concept_id(source_id)
+            except Exception:
+                logger.debug(
+                    "[relationship_extent_index] Best-effort sync failed for %s",
+                    source_id,
+                    exc_info=True,
+                )
+
         return changed
 
     @staticmethod

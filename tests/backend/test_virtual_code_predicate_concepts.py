@@ -356,13 +356,31 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     )
     monkeypatch.setattr(
         "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
-        lambda *a, **k: [
-            {
-                "concept_id": "#V#other",
-                "predicate": "#V#attended_event",
-                "targets": ["#V#focus"],
-            }
-        ],
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy scan used")),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",
+        lambda *a, **k: (
+            [
+                {
+                    "relation_id": "struct::#V#other::#V#attended_event::incoming::0",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": "#V#attended_event",
+                    "arg1_value": "#V#other",
+                    "arg1_is_concept": True,
+                    "arg2_value": "#V#focus",
+                    "arg2_is_concept": True,
+                    "arg2_index": 2,
+                    "source_concept_id": "#V#other",
+                    "target_value": "#V#focus",
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+            ],
+            True,
+        ),
     )
 
     resp = client.get(
@@ -377,6 +395,44 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     assert rows[0]["predicate_id"] == "#V#attended_event"
     assert rows[0]["arg1_value"] == "#V#other"
     assert rows[0]["arg2_value"] == "#V#focus"
+
+
+def test_relationship_extent_route_falls_back_before_extent_index_build(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {"relations": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",
+        lambda *a, **k: ([], False),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [
+            {
+                "concept_id": "#V#other",
+                "predicate": "#V#attended_event",
+                "targets": ["#V#focus"],
+            }
+        ],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?concept_id=%23V%23focus&role=arg2"
+    )
+    assert resp.status_code == 200
+    rows = resp.get_json().get("rows") or []
+    assert rows
+    assert rows[0]["role"] == "arg2"
+    assert rows[0]["predicate_id"] == "#V#attended_event"
 
 
 def test_relationship_extent_route_supports_uncertain_filters(app_client, monkeypatch):

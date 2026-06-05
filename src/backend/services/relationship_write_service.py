@@ -167,6 +167,24 @@ def _invalidate_workflow_routing_projection_for_relationship_change(
         pass
 
 
+def _sync_relationship_extent_index_for_sources(source_ids: List[str]) -> None:
+    """Best-effort refresh of the derived relationship extent query index."""
+
+    try:
+        from .relationship_extent_index_service import (
+            sync_relationship_extent_index_for_concept_id,
+        )
+
+        for source_id in source_ids:
+            if isinstance(source_id, str) and source_id.strip():
+                sync_relationship_extent_index_for_concept_id(source_id.strip())
+    except Exception:
+        _logger.debug(
+            "relationship_write_service: relationship extent index sync failed",
+            exc_info=True,
+        )
+
+
 def normalise_structural_predicate(predicate: str) -> str:
     """Normalise a predicate string to its canonical form.
 
@@ -541,6 +559,10 @@ def add_structural_relationship(
             result["inverse_error"] = str(e)
 
     if bool(result.get("forward_modified")) or bool(result.get("inverse_modified")):
+        sync_sources = [source_id]
+        if bool(result.get("inverse_modified")):
+            sync_sources.append(target_id)
+        _sync_relationship_extent_index_for_sources(sync_sources)
         try:
             from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
 
@@ -631,6 +653,7 @@ def add_dynamic_relationship(
         "modified": update.modified_count > 0,
     }
     if bool(result.get("modified")):
+        _sync_relationship_extent_index_for_sources([source_id])
         try:
             from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
 

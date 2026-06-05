@@ -468,6 +468,7 @@ TEXT_RELATIONS_COLLECTION_NAME = (
     "text_relations"  # New collection linking concepts to text values
 )
 META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation elicitation meta-data (JVNAUTOSCI-371)
+RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME = "relationship_extent_index"
 
 # Agent Gmail OAuth token storage (JVNAUTOSCI-801)
 AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
@@ -970,6 +971,14 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("predicate", ASCENDING)], name="predicate_1")
     coll.create_index([("object_text_id", ASCENDING)], name="object_text_id_1")
     coll.create_index(
+        [("predicate", ASCENDING), ("created_at", DESCENDING)],
+        name="predicate_created_at_desc",
+    )
+    coll.create_index(
+        [("predicate", ASCENDING), ("updated_at", DESCENDING)],
+        name="predicate_updated_at_desc",
+    )
+    coll.create_index(
         [
             ("subject_concept_id", ASCENDING),
             ("predicate", ASCENDING),
@@ -1014,6 +1023,38 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
             [("type", ASCENDING), ("predicate_id", ASCENDING)],
             name="type_1_predicate_id_1",
         )
+    if "updated_at_-1" not in existing_indexes:
+        coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+
+
+def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "relation_id_1_unique" not in existing_indexes:
+        coll.create_index(
+            [("relation_id", ASCENDING)],
+            name="relation_id_1_unique",
+            unique=True,
+        )
+    if "target_predicate_source_lookup" not in existing_indexes:
+        coll.create_index(
+            [
+                ("target_value", ASCENDING),
+                ("predicate_id", ASCENDING),
+                ("source_concept_id", ASCENDING),
+            ],
+            name="target_predicate_source_lookup",
+        )
+    if "predicate_source_target_lookup" not in existing_indexes:
+        coll.create_index(
+            [
+                ("predicate_id", ASCENDING),
+                ("source_concept_id", ASCENDING),
+                ("target_value", ASCENDING),
+            ],
+            name="predicate_source_target_lookup",
+        )
+    if "source_concept_id_1" not in existing_indexes:
+        coll.create_index([("source_concept_id", ASCENDING)], name="source_concept_id_1")
     if "updated_at_-1" not in existing_indexes:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
@@ -1255,6 +1296,23 @@ def get_meta_relations_collection() -> Collection | None:
             db,
             META_RELATIONS_COLLECTION_NAME,
             _ensure_meta_relations_indexes,
+        )
+    return None
+
+
+def get_relationship_extent_index_collection() -> Collection | None:
+    """Returns the derived relationship extent index collection.
+
+    The collection is a query support surface only. Canonical relationship
+    authority remains in the concepts collection's ``relationships`` field.
+    """
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME,
+            _ensure_relationship_extent_index_indexes,
         )
     return None
 
