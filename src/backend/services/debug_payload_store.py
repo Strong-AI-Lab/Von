@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from .blob_store import BlobRef
 from .blob_uploads import BlobUploadError, put_bytes_durable
+from .mongo_observability_service import record_blob_hydration_observation
 
 
 logger = logging.getLogger(__name__)
@@ -321,6 +322,11 @@ def resolve_debug_payload_blob_ref(
             status = "remote_committed_local_hit"
         elif remote_state == "pending" or blob_backend == "spillway":
             status = "pending_local"
+        record_blob_hydration_observation(
+            family="debug_payload",
+            status=status,
+            hydrated_count=1,
+        )
         return DebugPayloadBlobLoadResult(
             payload=payload,
             status=status,
@@ -329,6 +335,11 @@ def resolve_debug_payload_blob_ref(
     except KeyError as exc:
         local_error = exc
     except Exception as exc:
+        record_blob_hydration_observation(
+            family="debug_payload",
+            status="local_corrupt",
+            error_count=1,
+        )
         return DebugPayloadBlobLoadResult(
             payload=None,
             status="local_corrupt",
@@ -347,6 +358,11 @@ def resolve_debug_payload_blob_ref(
             expected_raw_sha256=expected_raw_sha256,
         )
     except Exception as exc:
+        record_blob_hydration_observation(
+            family="debug_payload",
+            status="missing_both",
+            error_count=1,
+        )
         return DebugPayloadBlobLoadResult(
             payload=None,
             status="missing_both",
@@ -394,6 +410,11 @@ def resolve_debug_payload_blob_ref(
     status = "local_miss_remote_hit"
     if local_error is not None and blob_ref.get("backend") == "spillway":
         status = "pending_local_miss_remote_hit"
+    record_blob_hydration_observation(
+        family="debug_payload",
+        status=status,
+        hydrated_count=1,
+    )
     return DebugPayloadBlobLoadResult(
         payload=payload,
         status=status,
@@ -445,6 +466,13 @@ def hydrate_debug_payload_blob_refs(
         return value
 
     hydrated_payload = _walk(payload)
+    if hydrated_count or error_count:
+        record_blob_hydration_observation(
+            family="debug_payload_walk",
+            status="completed",
+            hydrated_count=hydrated_count,
+            error_count=error_count,
+        )
     return DebugPayloadHydrationResult(
         payload=hydrated_payload,
         hydrated_count=hydrated_count,

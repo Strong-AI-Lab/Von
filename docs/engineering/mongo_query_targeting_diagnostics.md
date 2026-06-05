@@ -3,7 +3,8 @@
 **Status:** Operational guide  
 **Related Jira:** `JVNAUTOSCI-2429`, `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
 
-Von now has five complementary Mongo query-targeting diagnostics surfaces:
+Von now has six complementary Mongo query-targeting and cost diagnostics
+surfaces:
 
 1. In-process slow command telemetry from the global PyMongo command listener.
 2. A bounded profiler report command over MongoDB `system.profile`.
@@ -12,10 +13,67 @@ Von now has five complementary Mongo query-targeting diagnostics surfaces:
    upserts Jira review tasks.
 5. A Von-internal MCP tool, `mongo_query_diagnostics_report`, for trusted
    operator conversation and VWL maintenance workflows.
+6. A compact cost guardrail report at `/api/settings/db/guardrails` and through
+   the Von-internal MCP tool `mongo_cost_guardrails_report`.
 
 These surfaces are designed as support plumbing only. They record query shape,
 execution counters, and operational attribution; they must not become a hidden
 workflow, prompt, routing, or index-creation policy surface.
+
+## Mongo Cost Guardrail Report
+
+`JVNAUTOSCI-2395` adds a compact redacted guardrail report for local/dev
+runtimes connected to paid or remote MongoDB. It is intended for early warning:
+it does not disable research/debugging work, mutate indexes, or decide workflow
+policy.
+
+HTTP surface:
+
+```sh
+curl http://127.0.0.1:5000/api/settings/db/guardrails
+```
+
+Von-internal MCP surface:
+
+```json
+{
+  "tool": "mongo_cost_guardrails_report",
+  "arguments": {
+    "local_development": true
+  }
+}
+```
+
+The report includes:
+
+- recent Mongo operation volume and per-minute rates
+- slow operation counts using `VON_MONGO_OPERATION_AUDIT_SLOW_MS`
+- background and poller route activity
+- ranked redacted query-shape telemetry
+- size-only large write attempts observed by the PyMongo command listener
+- blob/debug/workflow hydration counters grouped by family and cache status
+- runtime posture: local, remote, or Atlas, with credentials removed
+- warning codes such as `remote_local_high_operation_rate`,
+  `background_operation_rate_high`, `slow_operation_rate_high`,
+  `large_mongo_write_attempt`, and `query_targeting_waste_high`
+
+The report intentionally omits Mongo credentials, URI query parameters, query
+values, update values, document bodies, returned rows, prompts, email bodies,
+raw debug payloads, `.env` contents, and secret values.
+
+Tuning knobs:
+
+- `VON_MONGO_GUARDRAIL_WINDOW_SECONDS` default `60`
+- `VON_MONGO_GUARDRAIL_REMOTE_OPS_PER_MIN_WARN` default `300`
+- `VON_MONGO_GUARDRAIL_BACKGROUND_OPS_PER_MIN_WARN` default `120`
+- `VON_MONGO_GUARDRAIL_SLOW_OPS_PER_MIN_WARN` default `10`
+- `VON_MONGO_OPERATION_AUDIT_SLOW_MS` default `500`
+- `VON_MONGO_LARGE_WRITE_WARN_BYTES` default `8388608`
+- `VON_MONGO_LARGE_WRITE_CRITICAL_BYTES` default `14680064`
+
+Use `reset=1` on the HTTP endpoint or `{"reset": true}` on the MCP tool only
+when deliberately starting a new observation window. Normal status views should
+read the report without resetting it.
 
 ## What Is Captured
 

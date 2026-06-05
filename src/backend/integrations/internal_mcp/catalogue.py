@@ -17571,6 +17571,40 @@ def _mongo_query_diagnostics_report(**kwargs):
         )
 
 
+def _mongo_cost_guardrails_report(**kwargs):
+    """Build a compact, redacted Mongo cost guardrail report."""
+
+    from ...db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri
+    from ...server.routes.settings_routes import (
+        _classify_mongo_sanitized_uri,
+        _sanitize_mongo_uri_for_display,
+    )
+    from ...services.mongo_observability_service import (
+        build_mongo_cost_guardrail_report,
+    )
+
+    try:
+        sanitized_uri = _sanitize_mongo_uri_for_display(get_effective_mongo_uri())
+        return build_mongo_cost_guardrail_report(
+            mongo_classification=_classify_mongo_sanitized_uri(sanitized_uri),
+            sanitized_uri=sanitized_uri,
+            using_fallback=is_using_fallback_uri(),
+            local_development=kwargs.get("local_development"),
+            reset=bool(kwargs.get("reset")),
+        )
+    except Exception as exc:
+        return make_error_response(
+            "mongo_cost_guardrails_failed",
+            f"Failed to build Mongo cost guardrail report: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=[
+                "Use /api/settings/db/guardrails for the same redacted report.",
+                "Check VON_MONGO_GUARDRAIL_* threshold environment values.",
+                "Use mongo_query_diagnostics_report for deeper query-shape investigation.",
+            ],
+        )
+
+
 def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
     """Resolve a user-provided collection selector.
 
@@ -29609,6 +29643,29 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                 "and recommended next diagnostic steps. Never creates/drops indexes or "
                 "returns credentials, .env contents, query values, update values, or "
                 "document bodies."
+            ),
+        ),
+        MethodDefinition(
+            name="mongo_cost_guardrails_report",
+            handler=_mongo_cost_guardrails_report,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "reset": (bool,),
+                    "local_development": (bool, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build a compact, redacted Mongo cost/latency guardrail report."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            timeout_sec=10.0,
+            description=(
+                "Summarise recent Mongo operation volume, slow calls, large write "
+                "attempts, hydration/cache counters, poller/background activity, "
+                "and remote-local cost warnings without raw payloads or secrets."
             ),
         ),
         MethodDefinition(

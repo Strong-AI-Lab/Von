@@ -11,13 +11,17 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 _ATTRIBUTION_JIRA_KEY = "JVNAUTOSCI-2391"
+_COST_GUARDRAIL_JIRA_KEY = "JVNAUTOSCI-2395"
 _SNAPSHOT_LOCK = threading.Lock()
 _QUERY_SHAPE_LOCK = threading.Lock()
+_RECENT_OPERATION_MAX_ROWS = 8192
+_RECENT_OPERATION_RETENTION_SECONDS = 3600
 _OPERATION_STATS: dict[tuple[str, str, str, str], dict[str, Any]] = defaultdict(
     lambda: {
         "count": 0,
@@ -26,6 +30,24 @@ _OPERATION_STATS: dict[tuple[str, str, str, str], dict[str, Any]] = defaultdict(
         "total_elapsed_ms": 0.0,
         "max_elapsed_ms": 0.0,
         "last_error_type": None,
+    }
+)
+_RECENT_OPERATION_EVENTS: deque[dict[str, Any]] = deque(maxlen=_RECENT_OPERATION_MAX_ROWS)
+_LARGE_WRITE_STATS: dict[tuple[str, str, str, str], dict[str, Any]] = defaultdict(
+    lambda: {
+        "count": 0,
+        "critical_count": 0,
+        "total_estimated_bytes": 0,
+        "max_estimated_bytes": 0,
+        "last_observed_at_utc": None,
+    }
+)
+_BLOB_HYDRATION_STATS: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+    lambda: {
+        "count": 0,
+        "hydrated_count": 0,
+        "error_count": 0,
+        "last_observed_at_utc": None,
     }
 )
 _QUERY_SHAPE_STATS: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -59,6 +81,21 @@ def _positive_float_env(name: str, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def mongo_query_attribution_enabled() -> bool:
     """Return whether MongoDB profiler comments should be attached."""
 
@@ -73,6 +110,36 @@ def mongo_operation_audit_enabled() -> bool:
 
 def mongo_operation_slow_threshold_ms() -> float:
     return _positive_float_env("VON_MONGO_OPERATION_AUDIT_SLOW_MS", 500.0)
+
+
+def mongo_guardrail_operation_window_seconds() -> int:
+    return _positive_int_env("VON_MONGO_GUARDRAIL_WINDOW_SECONDS", 60)
+
+
+def mongo_guardrail_remote_ops_per_minute_warn() -> int:
+    return _positive_int_env("VON_MONGO_GUARDRAIL_REMOTE_OPS_PER_MIN_WARN", 300)
+
+
+def mongo_guardrail_background_ops_per_minute_warn() -> int:
+    return _positive_int_env("VON_MONGO_GUARDRAIL_BACKGROUND_OPS_PER_MIN_WARN", 120)
+
+
+def mongo_guardrail_slow_ops_per_minute_warn() -> int:
+    return _positive_int_env("VON_MONGO_GUARDRAIL_SLOW_OPS_PER_MIN_WARN", 10)
+
+
+def mongo_large_write_warning_bytes() -> int:
+    return _positive_int_env(
+        "VON_MONGO_LARGE_WRITE_WARN_BYTES",
+        8 * 1024 * 1024,
+    )
+
+
+def mongo_large_write_critical_bytes() -> int:
+    return _positive_int_env(
+        "VON_MONGO_LARGE_WRITE_CRITICAL_BYTES",
+        14 * 1024 * 1024,
+    )
 
 
 def mongo_query_shape_telemetry_enabled() -> bool:
@@ -761,6 +828,79 @@ def current_mongo_route_context() -> dict[str, str]:
         return {}
 
 
+def _is_background_route(route: str) -> bool:
+    return route in {"", "background", "unknown"}
+
+
+def _is_poller_route(route: str) -> bool:
+    lowered = str(route or "").lower()
+    poller_markers = (
+        "db/info",
+        "get_db_location_info",
+        "live_progress",
+        "status",
+        "poll",
+        "heartbeat",
+    )
+    return any(marker in lowered for marker in poller_markers)
+
+
+def _prune_recent_operation_events_locked(now: float) -> None:
+    cutoff = now - _RECENT_OPERATION_RETENTION_SECONDS
+    while _RECENT_OPERATION_EVENTS and float(
+        _RECENT_OPERATION_EVENTS[0].get("observed_at", 0.0) or 0.0
+    ) < cutoff:
+        _RECENT_OPERATION_EVENTS.popleft()
+
+
+def _recent_operation_summary_locked(*, window_seconds: int) -> dict[str, Any]:
+    now = time.time()
+    window = max(1, int(window_seconds))
+    cutoff = now - window
+    selected = [
+        dict(event)
+        for event in _RECENT_OPERATION_EVENTS
+        if float(event.get("observed_at", 0.0) or 0.0) >= cutoff
+    ]
+    count = len(selected)
+    slow_count = sum(1 for event in selected if event.get("slow"))
+    failure_count = sum(1 for event in selected if not event.get("success"))
+    background_count = sum(
+        1 for event in selected if _is_background_route(str(event.get("route") or ""))
+    )
+    poller_counts: dict[str, int] = defaultdict(int)
+    route_counts: dict[str, int] = defaultdict(int)
+    for event in selected:
+        route = _safe_str(event.get("route"), max_len=160) or "background"
+        route_counts[route] += 1
+        if _is_poller_route(route):
+            poller_counts[route] += 1
+    hot_routes = [
+        {"route": route, "count": route_count}
+        for route, route_count in sorted(
+            route_counts.items(), key=lambda item: item[1], reverse=True
+        )[:10]
+    ]
+    pollers = [
+        {"route": route, "count": route_count}
+        for route, route_count in sorted(
+            poller_counts.items(), key=lambda item: item[1], reverse=True
+        )[:10]
+    ]
+    return {
+        "window_seconds": window,
+        "operation_count": count,
+        "operation_rate_per_minute": round((count / window) * 60.0, 3),
+        "slow_count": slow_count,
+        "slow_rate_per_minute": round((slow_count / window) * 60.0, 3),
+        "failure_count": failure_count,
+        "background_count": background_count,
+        "background_rate_per_minute": round((background_count / window) * 60.0, 3),
+        "poller_activity": pollers,
+        "hot_routes": hot_routes,
+    }
+
+
 def build_mongo_operation_comment(
     *,
     service: str,
@@ -815,19 +955,36 @@ def record_mongo_operation(
     )
     elapsed_value = max(0.0, float(elapsed_ms or 0.0))
     slow_threshold = mongo_operation_slow_threshold_ms()
+    now = time.time()
+    is_success = bool(success)
+    is_slow = elapsed_value >= slow_threshold
 
     with _SNAPSHOT_LOCK:
         row = _OPERATION_STATS[key]
         row["count"] += 1
         row["total_elapsed_ms"] += elapsed_value
         row["max_elapsed_ms"] = max(float(row["max_elapsed_ms"]), elapsed_value)
-        if not success:
+        row["last_observed_at_utc"] = _utcnow_iso()
+        if not is_success:
             row["failure_count"] += 1
             row["last_error_type"] = str(error_type or "unknown")[:96]
-        if elapsed_value >= slow_threshold:
+        if is_slow:
             row["slow_count"] += 1
         if isinstance(detail, str) and detail.strip():
             row["last_detail"] = detail.strip()[:96]
+        _RECENT_OPERATION_EVENTS.append(
+            {
+                "observed_at": now,
+                "service": key[0],
+                "collection": key[1],
+                "operation": key[2],
+                "route": key[3],
+                "elapsed_ms": round(elapsed_value, 3),
+                "success": is_success,
+                "slow": is_slow,
+            }
+        )
+        _prune_recent_operation_events_locked(now)
 
 
 def observe_mongo_operation(
@@ -875,10 +1032,12 @@ def get_mongo_operation_audit_snapshot(*, reset: bool = False) -> dict[str, Any]
                     "max_elapsed_ms": round(float(row["max_elapsed_ms"]), 3),
                     "last_error_type": row.get("last_error_type"),
                     "last_detail": row.get("last_detail"),
+                    "last_observed_at_utc": row.get("last_observed_at_utc"),
                 }
             )
         if reset:
             _OPERATION_STATS.clear()
+            _RECENT_OPERATION_EVENTS.clear()
 
     operations.sort(
         key=lambda item: (
@@ -901,25 +1060,417 @@ def get_mongo_operation_audit_snapshot(*, reset: bool = False) -> dict[str, Any]
 def reset_mongo_operation_audit_snapshot() -> None:
     with _SNAPSHOT_LOCK:
         _OPERATION_STATS.clear()
+        _RECENT_OPERATION_EVENTS.clear()
+
+
+def estimate_mongo_command_size_bytes(command: Mapping[str, Any] | None) -> int | None:
+    """Best-effort BSON size estimate for a Mongo command without retaining it."""
+
+    if not isinstance(command, Mapping):
+        return None
+    try:
+        from bson import BSON
+
+        return len(BSON.encode({"command": dict(command)}))
+    except Exception:
+        try:
+            return len(repr(command).encode("utf-8", errors="replace"))
+        except Exception:
+            return None
+
+
+def record_mongo_large_write_attempt(
+    *,
+    command_name: str,
+    database: str | None,
+    collection: str | None,
+    estimated_size_bytes: int,
+    request_id: Any = None,
+    source: str = "command_listener_started",
+) -> dict[str, Any] | None:
+    """Record a size-only warning for a large Mongo write command."""
+
+    size = _safe_int(estimated_size_bytes)
+    if size is None or size < mongo_large_write_warning_bytes():
+        return None
+    critical_threshold = mongo_large_write_critical_bytes()
+    warning_class = "critical" if size >= critical_threshold else "warning"
+    key = (
+        _safe_str(database, max_len=96),
+        _safe_str(collection, max_len=96),
+        _safe_str(command_name, max_len=64),
+        warning_class,
+    )
+    request_text = _safe_str(request_id, max_len=96)
+    now = _utcnow_iso()
+    with _SNAPSHOT_LOCK:
+        row = _LARGE_WRITE_STATS[key]
+        row["count"] += 1
+        row["critical_count"] += 1 if warning_class == "critical" else 0
+        row["total_estimated_bytes"] += size
+        row["max_estimated_bytes"] = max(int(row["max_estimated_bytes"] or 0), size)
+        row["last_observed_at_utc"] = now
+        row["source"] = _safe_str(source, max_len=64)
+        if request_text:
+            row["last_request_id"] = request_text
+    return {
+        "schema_version": "mongo_large_write_warning.v1",
+        "attribution_jira": _COST_GUARDRAIL_JIRA_KEY,
+        "warning_class": warning_class,
+        "database": key[0],
+        "collection": key[1],
+        "command_name": key[2],
+        "estimated_size_bytes": size,
+        "warning_threshold_bytes": mongo_large_write_warning_bytes(),
+        "critical_threshold_bytes": critical_threshold,
+        "request_id": request_text or None,
+        "source": _safe_str(source, max_len=64),
+    }
+
+
+def observe_mongo_write_command_size(
+    *,
+    command_name: str,
+    database: str | None,
+    command: Mapping[str, Any] | None,
+    command_shape: Mapping[str, Any] | None = None,
+    request_id: Any = None,
+    source: str = "command_listener_started",
+) -> dict[str, Any] | None:
+    """Measure a write command and record only size/shape metadata if risky."""
+
+    if str(command_name or "") not in {
+        "insert",
+        "update",
+        "findAndModify",
+        "findandmodify",
+        "bulkWrite",
+    }:
+        return None
+    size = estimate_mongo_command_size_bytes(command)
+    if size is None:
+        return None
+    shape = command_shape if isinstance(command_shape, Mapping) else {}
+    return record_mongo_large_write_attempt(
+        command_name=command_name,
+        database=database,
+        collection=shape.get("collection"),
+        estimated_size_bytes=size,
+        request_id=request_id,
+        source=source,
+    )
+
+
+def get_mongo_large_write_snapshot(*, reset: bool = False) -> dict[str, Any]:
+    with _SNAPSHOT_LOCK:
+        rows = []
+        for (database, collection, command_name, warning_class), row in (
+            _LARGE_WRITE_STATS.items()
+        ):
+            count = int(row.get("count") or 0)
+            rows.append(
+                {
+                    "database": database,
+                    "collection": collection,
+                    "command_name": command_name,
+                    "warning_class": warning_class,
+                    "count": count,
+                    "critical_count": int(row.get("critical_count") or 0),
+                    "total_estimated_bytes": int(
+                        row.get("total_estimated_bytes") or 0
+                    ),
+                    "average_estimated_bytes": (
+                        round(
+                            int(row.get("total_estimated_bytes") or 0) / count,
+                            3,
+                        )
+                        if count
+                        else 0.0
+                    ),
+                    "max_estimated_bytes": int(row.get("max_estimated_bytes") or 0),
+                    "last_observed_at_utc": row.get("last_observed_at_utc"),
+                    "last_request_id": row.get("last_request_id"),
+                    "source": row.get("source"),
+                }
+            )
+        if reset:
+            _LARGE_WRITE_STATS.clear()
+    rows.sort(
+        key=lambda item: (
+            int(item.get("max_estimated_bytes") or 0),
+            int(item.get("count") or 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "schema_version": "mongo_large_write_snapshot.v1",
+        "attribution_jira": _COST_GUARDRAIL_JIRA_KEY,
+        "warning_threshold_bytes": mongo_large_write_warning_bytes(),
+        "critical_threshold_bytes": mongo_large_write_critical_bytes(),
+        "rows": rows,
+    }
+
+
+def reset_mongo_large_write_snapshot() -> None:
+    with _SNAPSHOT_LOCK:
+        _LARGE_WRITE_STATS.clear()
+
+
+def record_blob_hydration_observation(
+    *,
+    family: str,
+    status: str,
+    hydrated_count: int = 0,
+    error_count: int = 0,
+) -> None:
+    """Record blob hydration/cache outcomes without keys or payloads."""
+
+    family_text = _safe_str(family, max_len=64) or "unknown"
+    status_text = _safe_str(status, max_len=64) or "unknown"
+    with _SNAPSHOT_LOCK:
+        row = _BLOB_HYDRATION_STATS[(family_text, status_text)]
+        row["count"] += 1
+        row["hydrated_count"] += max(0, int(hydrated_count or 0))
+        row["error_count"] += max(0, int(error_count or 0))
+        row["last_observed_at_utc"] = _utcnow_iso()
+
+
+def get_blob_hydration_snapshot(*, reset: bool = False) -> dict[str, Any]:
+    with _SNAPSHOT_LOCK:
+        rows = [
+            {
+                "family": family,
+                "status": status,
+                "count": int(row.get("count") or 0),
+                "hydrated_count": int(row.get("hydrated_count") or 0),
+                "error_count": int(row.get("error_count") or 0),
+                "last_observed_at_utc": row.get("last_observed_at_utc"),
+            }
+            for (family, status), row in _BLOB_HYDRATION_STATS.items()
+        ]
+        if reset:
+            _BLOB_HYDRATION_STATS.clear()
+    rows.sort(
+        key=lambda item: (
+            int(item.get("error_count") or 0),
+            int(item.get("hydrated_count") or 0),
+            int(item.get("count") or 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "schema_version": "blob_hydration_snapshot.v1",
+        "attribution_jira": _COST_GUARDRAIL_JIRA_KEY,
+        "rows": rows,
+    }
+
+
+def reset_blob_hydration_snapshot() -> None:
+    with _SNAPSHOT_LOCK:
+        _BLOB_HYDRATION_STATS.clear()
+
+
+def _runtime_is_local_dev() -> bool:
+    for name in ("VON_ENV", "APP_ENV", "FLASK_ENV", "ENVIRONMENT", "ENV"):
+        value = str(os.getenv(name) or "").strip().lower()
+        if value in {"prod", "production", "staging"}:
+            return False
+        if value in {"dev", "development", "local", "test"}:
+            return True
+    return True
+
+
+def _top_query_targeting_warning(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    rows = report.get("rows")
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        docs_ratio = _safe_float(row.get("max_docs_examined_per_returned"))
+        keys_ratio = _safe_float(row.get("max_keys_examined_per_returned"))
+        if (docs_ratio is not None and docs_ratio >= 1000) or (
+            keys_ratio is not None and keys_ratio >= 1000
+        ):
+            return {
+                "code": "query_targeting_waste_high",
+                "severity": "warning",
+                "message": "Recent Mongo telemetry contains a high scanned-per-returned query shape.",
+                "collection": row.get("collection"),
+                "command_name": row.get("command_name"),
+                "max_docs_examined_per_returned": docs_ratio,
+                "max_keys_examined_per_returned": keys_ratio,
+                "recommended_next_step": row.get("recommended_next_step"),
+            }
+    return None
+
+
+def build_mongo_cost_guardrail_report(
+    *,
+    mongo_classification: str | None = None,
+    sanitized_uri: str | None = None,
+    using_fallback: bool | None = None,
+    local_development: bool | None = None,
+    reset: bool = False,
+) -> dict[str, Any]:
+    """Return a compact redacted report for local/Atlas cost guardrails."""
+
+    window_seconds = mongo_guardrail_operation_window_seconds()
+    with _SNAPSHOT_LOCK:
+        recent_summary = _recent_operation_summary_locked(
+            window_seconds=window_seconds
+        )
+    operations = get_mongo_operation_audit_snapshot(reset=reset)
+    query_targeting = get_mongo_query_targeting_report(reset=reset)
+    large_writes = get_mongo_large_write_snapshot(reset=reset)
+    hydration = get_blob_hydration_snapshot(reset=reset)
+
+    classification = _safe_str(mongo_classification, max_len=64).lower()
+    is_remote = classification in {"atlas", "remote"}
+    is_local_dev = _runtime_is_local_dev() if local_development is None else bool(
+        local_development
+    )
+    warnings: list[dict[str, Any]] = []
+    remote_ops_threshold = mongo_guardrail_remote_ops_per_minute_warn()
+    background_threshold = mongo_guardrail_background_ops_per_minute_warn()
+    slow_threshold = mongo_guardrail_slow_ops_per_minute_warn()
+
+    if (
+        is_remote
+        and is_local_dev
+        and float(recent_summary.get("operation_rate_per_minute") or 0.0)
+        >= remote_ops_threshold
+    ):
+        warnings.append(
+            {
+                "code": "remote_local_high_operation_rate",
+                "severity": "warning",
+                "message": "Local/dev runtime is issuing a high Mongo operation rate against a remote MongoDB.",
+                "observed_rate_per_minute": recent_summary.get(
+                    "operation_rate_per_minute"
+                ),
+                "threshold_per_minute": remote_ops_threshold,
+            }
+        )
+    if (
+        float(recent_summary.get("background_rate_per_minute") or 0.0)
+        >= background_threshold
+    ):
+        warnings.append(
+            {
+                "code": "background_operation_rate_high",
+                "severity": "warning",
+                "message": "Background Mongo activity is above the configured guardrail threshold.",
+                "observed_rate_per_minute": recent_summary.get(
+                    "background_rate_per_minute"
+                ),
+                "threshold_per_minute": background_threshold,
+            }
+        )
+    if float(recent_summary.get("slow_rate_per_minute") or 0.0) >= slow_threshold:
+        warnings.append(
+            {
+                "code": "slow_operation_rate_high",
+                "severity": "warning",
+                "message": "Slow Mongo operation rate is above the configured guardrail threshold.",
+                "observed_rate_per_minute": recent_summary.get(
+                    "slow_rate_per_minute"
+                ),
+                "threshold_per_minute": slow_threshold,
+            }
+        )
+    if large_writes.get("rows"):
+        top_write = large_writes["rows"][0]
+        warnings.append(
+            {
+                "code": "large_mongo_write_attempt",
+                "severity": (
+                    "critical"
+                    if int(top_write.get("critical_count") or 0) > 0
+                    else "warning"
+                ),
+                "message": "Large Mongo write attempts were observed by size-only guardrails.",
+                "collection": top_write.get("collection"),
+                "command_name": top_write.get("command_name"),
+                "max_estimated_bytes": top_write.get("max_estimated_bytes"),
+                "warning_threshold_bytes": large_writes.get(
+                    "warning_threshold_bytes"
+                ),
+                "critical_threshold_bytes": large_writes.get(
+                    "critical_threshold_bytes"
+                ),
+            }
+        )
+    query_warning = _top_query_targeting_warning(query_targeting)
+    if query_warning is not None:
+        warnings.append(query_warning)
+
+    return {
+        "schema_version": "mongo_cost_guardrail_report.v1",
+        "attribution_jira": _COST_GUARDRAIL_JIRA_KEY,
+        "related_jira": [_ATTRIBUTION_JIRA_KEY, _QUERY_TARGETING_JIRA_KEY],
+        "status": "warning" if warnings else "ok",
+        "runtime_posture": {
+            "mongo_classification": classification or None,
+            "sanitized_uri": _safe_str(sanitized_uri, max_len=200) or None,
+            "using_fallback": bool(using_fallback) if using_fallback is not None else None,
+            "local_development": is_local_dev,
+            "remote_mongo": is_remote,
+        },
+        "thresholds": {
+            "window_seconds": window_seconds,
+            "remote_ops_per_minute_warn": remote_ops_threshold,
+            "background_ops_per_minute_warn": background_threshold,
+            "slow_ops_per_minute_warn": slow_threshold,
+            "operation_slow_ms": mongo_operation_slow_threshold_ms(),
+            "large_write_warning_bytes": mongo_large_write_warning_bytes(),
+            "large_write_critical_bytes": mongo_large_write_critical_bytes(),
+        },
+        "warnings": warnings,
+        "recent_operations": recent_summary,
+        "operation_audit": operations,
+        "query_targeting": query_targeting,
+        "large_write_attempts": large_writes,
+        "cache_and_hydration": hydration,
+        "privacy": {
+            "redacted": True,
+            "omits": [
+                "Mongo credentials and URI query parameters",
+                "query values and update values",
+                "document bodies and returned rows",
+                "prompts, email bodies, and raw debug payloads",
+                ".env contents and secret values",
+            ],
+        },
+    }
 
 
 __all__ = [
     "build_mongo_operation_comment",
+    "build_mongo_cost_guardrail_report",
     "aggregate_mongo_query_shape_rows",
     "build_mongo_command_shape",
     "build_mongo_query_targeting_report_from_rows",
+    "estimate_mongo_command_size_bytes",
     "extract_n_returned_from_reply",
+    "get_blob_hydration_snapshot",
+    "get_mongo_large_write_snapshot",
     "get_mongo_operation_audit_snapshot",
     "get_mongo_query_targeting_report",
     "mongo_operation_audit_enabled",
     "mongo_operation_slow_threshold_ms",
     "mongo_query_shape_telemetry_enabled",
+    "observe_mongo_write_command_size",
     "profiler_document_to_query_shape_row",
     "mongo_query_attribution_enabled",
+    "record_blob_hydration_observation",
+    "record_mongo_large_write_attempt",
     "observe_mongo_operation",
     "record_mongo_command_observation",
     "record_mongo_operation",
     "record_mongo_query_shape_observation",
+    "reset_blob_hydration_snapshot",
+    "reset_mongo_large_write_snapshot",
     "reset_mongo_operation_audit_snapshot",
     "reset_mongo_query_shape_telemetry",
 ]

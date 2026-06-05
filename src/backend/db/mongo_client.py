@@ -13,7 +13,9 @@ from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
 from ..services.mongo_observability_service import (
     build_mongo_command_shape,
     extract_n_returned_from_reply,
+    observe_mongo_write_command_size,
     record_mongo_command_observation,
+    record_mongo_operation,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,28 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
                 return
             shape = _command_shape_from_started_command(event)
             self._in_flight[event.request_id] = shape
+        warning = observe_mongo_write_command_size(
+            command_name=str(getattr(event, "command_name", "") or ""),
+            database=str(getattr(event, "database_name", "") or ""),
+            command=getattr(event, "command", None),
+            command_shape=shape,
+            request_id=getattr(event, "request_id", ""),
+            source="command_listener_started",
+        )
+        if warning is not None:
+            logger.warning(
+                "[mongo_large_write] class=%s cmd=%s db=%s coll=%s "
+                "estimated_size_bytes=%s warning_threshold_bytes=%s "
+                "critical_threshold_bytes=%s request_id=%s",
+                warning.get("warning_class"),
+                warning.get("command_name"),
+                warning.get("database"),
+                warning.get("collection"),
+                warning.get("estimated_size_bytes"),
+                warning.get("warning_threshold_bytes"),
+                warning.get("critical_threshold_bytes"),
+                warning.get("request_id"),
+            )
 
     def _pop_context(self, request_id: int) -> dict[str, object]:
         with self._lock:
@@ -127,14 +151,22 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
             duration_ms = float(event.duration_micros) / 1000.0
         except Exception:
             return
+        command_name = str(getattr(event, "command_name", "") or "")
+        record_mongo_operation(
+            service="mongo_command_listener",
+            collection=str(shape.get("collection") or ""),
+            operation=command_name,
+            elapsed_ms=duration_ms,
+            success=True,
+        )
         if duration_ms < self._SLOW_COMMAND_DURATION_MS:
             return
         n_returned = extract_n_returned_from_reply(
-            str(getattr(event, "command_name", "") or ""),
+            command_name,
             getattr(event, "reply", None),
         )
         record_mongo_command_observation(
-            command_name=str(getattr(event, "command_name", "") or ""),
+            command_name=command_name,
             database=str(getattr(event, "database_name", "") or ""),
             command_shape=shape,
             duration_ms=duration_ms,
@@ -162,8 +194,17 @@ class _VonMongoFailureLogger(monitoring.CommandListener):
             duration_ms = float(event.duration_micros) / 1000.0
         except Exception:
             duration_ms = -1.0
+        command_name = str(getattr(event, "command_name", "") or "")
+        record_mongo_operation(
+            service="mongo_command_listener",
+            collection=str(shape.get("collection") or ""),
+            operation=command_name,
+            elapsed_ms=duration_ms if duration_ms >= 0 else 0.0,
+            success=False,
+            error_type=type(getattr(event, "failure", None)).__name__,
+        )
         record_mongo_command_observation(
-            command_name=str(getattr(event, "command_name", "") or ""),
+            command_name=command_name,
             database=str(getattr(event, "database_name", "") or ""),
             command_shape=shape,
             duration_ms=duration_ms if duration_ms >= 0 else None,

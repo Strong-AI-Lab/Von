@@ -53,7 +53,6 @@ from ...services.settings_service import (
     set_rag_llm_setting,
     set_server_default_llm_setting,
     get_model_llm_timeout_overrides,
-    get_model_llm_timeout,
     set_model_llm_timeout,
     _make_model_timeout_key,
 )
@@ -80,6 +79,7 @@ from ...services.workflow_capability_service import (
 )
 from ...services.mongo_observability_service import (
     build_mongo_operation_comment,
+    build_mongo_cost_guardrail_report,
     observe_mongo_operation,
 )
 from ...services.rag_service import peek_rag_service
@@ -662,6 +662,42 @@ def get_db_location_info():
     except Exception as e:
         current_app.logger.error(f"Error retrieving DB info: {e}", exc_info=True)
         return jsonify({"error": "Failed to retrieve DB info."}), 500
+
+
+def _classify_mongo_sanitized_uri(sanitized_uri: str) -> str:
+    is_local = bool(
+        re.search(
+            r"mongodb://(localhost|127\.0\.0\.1|0\.0\.0\.0)",
+            sanitized_uri,
+            re.IGNORECASE,
+        )
+    )
+    is_srv = sanitized_uri.startswith("mongodb+srv://")
+    return "local" if is_local else ("atlas" if is_srv else "remote")
+
+
+@settings_bp.route("/db/guardrails", methods=["GET"])
+def get_db_guardrails():
+    """Return redacted MongoDB cost/latency guardrails for operators."""
+    try:
+        effective_uri = get_effective_mongo_uri()
+        sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
+        classification = _classify_mongo_sanitized_uri(sanitized_uri)
+        reset = request.args.get("reset") in {"1", "true", "yes", "on"}
+        report = build_mongo_cost_guardrail_report(
+            mongo_classification=classification,
+            sanitized_uri=sanitized_uri,
+            using_fallback=is_using_fallback_uri(),
+            reset=reset,
+        )
+        return jsonify({"success": True, "report": report}), 200
+    except Exception as e:
+        current_app.logger.error(
+            "Error retrieving DB guardrail report: %s",
+            e,
+            exc_info=True,
+        )
+        return jsonify({"success": False, "error": "Failed to retrieve DB guardrails."}), 500
 
 
 @settings_bp.route("/llm/info", methods=["GET"])

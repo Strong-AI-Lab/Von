@@ -11,12 +11,19 @@ from src.backend.services import chat_history_service
 from src.backend.services.mongo_observability_service import (
     build_mongo_operation_comment,
     build_mongo_command_shape,
+    build_mongo_cost_guardrail_report,
+    get_blob_hydration_snapshot,
     build_mongo_query_targeting_report_from_rows,
     get_mongo_operation_audit_snapshot,
+    get_mongo_large_write_snapshot,
     get_mongo_query_targeting_report,
     profiler_document_to_query_shape_row,
+    record_blob_hydration_observation,
+    record_mongo_large_write_attempt,
     record_mongo_query_shape_observation,
     record_mongo_operation,
+    reset_blob_hydration_snapshot,
+    reset_mongo_large_write_snapshot,
     reset_mongo_operation_audit_snapshot,
     reset_mongo_query_shape_telemetry,
 )
@@ -480,3 +487,184 @@ def test_internal_mcp_gateway_exposes_mongo_query_diagnostics_report(monkeypatch
     assert payload["success"] is True
     assert payload["summary"]["rows"][0]["collection"] == "concepts"
     assert payload["direct_index_mutation"] is False
+
+
+def test_mongo_cost_guardrail_report_warns_for_remote_local_operation_rate(
+    monkeypatch,
+):
+    monkeypatch.setenv("VON_MONGO_OPERATION_AUDIT_ENABLED", "1")
+    monkeypatch.setenv("VON_MONGO_GUARDRAIL_WINDOW_SECONDS", "60")
+    monkeypatch.setenv("VON_MONGO_GUARDRAIL_REMOTE_OPS_PER_MIN_WARN", "2")
+    reset_mongo_operation_audit_snapshot()
+    reset_mongo_large_write_snapshot()
+    reset_blob_hydration_snapshot()
+    reset_mongo_query_shape_telemetry()
+
+    for _ in range(3):
+        record_mongo_operation(
+            service="mongo_command_listener",
+            collection="$cmd",
+            operation="ping",
+            elapsed_ms=5,
+            success=True,
+        )
+
+    report = build_mongo_cost_guardrail_report(
+        mongo_classification="atlas",
+        sanitized_uri="mongodb+srv://cluster.example.invalid",
+        local_development=True,
+    )
+
+    codes = {warning["code"] for warning in report["warnings"]}
+    assert report["schema_version"] == "mongo_cost_guardrail_report.v1"
+    assert report["status"] == "warning"
+    assert "remote_local_high_operation_rate" in codes
+    assert report["recent_operations"]["operation_count"] == 3
+    rendered = str(report)
+    assert "cluster.example.invalid" in rendered
+    assert "mongodb+srv://user:secret" not in rendered
+    assert ".env contents" in rendered
+
+
+def test_mongo_cost_guardrail_report_includes_large_write_and_hydration_without_payloads(
+    monkeypatch,
+):
+    monkeypatch.setenv("VON_MONGO_LARGE_WRITE_WARN_BYTES", "100")
+    monkeypatch.setenv("VON_MONGO_LARGE_WRITE_CRITICAL_BYTES", "200")
+    reset_mongo_operation_audit_snapshot()
+    reset_mongo_large_write_snapshot()
+    reset_blob_hydration_snapshot()
+    reset_mongo_query_shape_telemetry()
+
+    record_mongo_large_write_attempt(
+        command_name="insert",
+        database="von_db",
+        collection="turn_execution_records",
+        estimated_size_bytes=250,
+        request_id="request-123",
+    )
+    record_blob_hydration_observation(
+        family="debug_payload",
+        status="local_miss_remote_hit",
+        hydrated_count=2,
+    )
+
+    report = build_mongo_cost_guardrail_report(
+        mongo_classification="remote",
+        sanitized_uri="mongodb://atlas-host.example.invalid",
+        local_development=True,
+    )
+
+    assert report["large_write_attempts"]["rows"][0]["max_estimated_bytes"] == 250
+    assert report["cache_and_hydration"]["rows"][0]["status"] == "local_miss_remote_hit"
+    assert report["cache_and_hydration"]["rows"][0]["hydrated_count"] == 2
+    codes = {warning["code"] for warning in report["warnings"]}
+    assert "large_mongo_write_attempt" in codes
+    rendered = str(report)
+    assert "secret-payload" not in rendered
+    assert "request-123" in rendered
+
+
+def test_large_write_snapshot_records_size_only(monkeypatch):
+    monkeypatch.setenv("VON_MONGO_LARGE_WRITE_WARN_BYTES", "10")
+    monkeypatch.setenv("VON_MONGO_LARGE_WRITE_CRITICAL_BYTES", "100")
+    reset_mongo_large_write_snapshot()
+
+    warning = record_mongo_large_write_attempt(
+        command_name="update",
+        database="von_db",
+        collection="chat_history",
+        estimated_size_bytes=64,
+        request_id="safe-request",
+    )
+    snapshot = get_mongo_large_write_snapshot(reset=True)
+
+    assert warning is not None
+    assert warning["warning_class"] == "warning"
+    assert snapshot["rows"][0]["collection"] == "chat_history"
+    assert snapshot["rows"][0]["max_estimated_bytes"] == 64
+    assert "safe-request" in str(snapshot)
+    assert "payload" not in str(snapshot).lower()
+
+
+def test_blob_hydration_snapshot_aggregates_without_blob_keys():
+    reset_blob_hydration_snapshot()
+    record_blob_hydration_observation(
+        family="workflow_payload",
+        status="backend_store_hit",
+        hydrated_count=1,
+    )
+    record_blob_hydration_observation(
+        family="workflow_payload",
+        status="missing",
+        error_count=1,
+    )
+
+    snapshot = get_blob_hydration_snapshot(reset=True)
+
+    statuses = {row["status"]: row for row in snapshot["rows"]}
+    assert statuses["backend_store_hit"]["hydrated_count"] == 1
+    assert statuses["missing"]["error_count"] == 1
+    assert "blob/key" not in str(snapshot)
+
+
+def test_internal_mcp_gateway_exposes_mongo_cost_guardrails_report(monkeypatch):
+    monkeypatch.setenv("VON_MONGO_OPERATION_AUDIT_ENABLED", "1")
+    monkeypatch.setenv("VON_MONGO_GUARDRAIL_REMOTE_OPS_PER_MIN_WARN", "1")
+    reset_mongo_operation_audit_snapshot()
+    record_mongo_operation(
+        service="mongo_command_listener",
+        collection="$cmd",
+        operation="ping",
+        elapsed_ms=2,
+        success=True,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.db.mongo_client.get_effective_mongo_uri",
+        lambda: "mongodb+srv://user:secret@example.invalid/von_db",
+    )
+    monkeypatch.setattr("src.backend.db.mongo_client.is_using_fallback_uri", lambda: False)
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "mongo_cost_guardrails_report",
+        {"local_development": True},
+    )
+
+    payload = result.payload
+    assert payload["schema_version"] == "mongo_cost_guardrail_report.v1"
+    assert payload["runtime_posture"]["remote_mongo"] is True
+    assert "user:secret" not in str(payload)
+    assert payload["runtime_posture"]["sanitized_uri"] == "mongodb+srv://example.invalid"
+
+
+def test_settings_db_guardrails_route_returns_redacted_report(monkeypatch):
+    from src.backend.server.routes import settings_routes
+
+    reset_mongo_operation_audit_snapshot()
+    monkeypatch.setattr(
+        settings_routes,
+        "get_effective_mongo_uri",
+        lambda: "mongodb+srv://user:secret@example.invalid/von_db?retryWrites=true",
+    )
+    monkeypatch.setattr(settings_routes, "is_using_fallback_uri", lambda: False)
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(settings_routes.settings_bp, url_prefix="/api/settings")
+
+    response = app.test_client().get("/api/settings/db/guardrails")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    report = payload["report"]
+    assert report["schema_version"] == "mongo_cost_guardrail_report.v1"
+    assert report["runtime_posture"]["mongo_classification"] == "atlas"
+    assert report["runtime_posture"]["sanitized_uri"] == "mongodb+srv://example.invalid"
+    assert "user:secret" not in str(payload)

@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from .blob_store import BlobRef
 from .blob_uploads import BlobUploadError, put_bytes_durable
+from .mongo_observability_service import record_blob_hydration_observation
 
 
 WORKFLOW_PAYLOAD_BLOB_REF_SCHEMA_VERSION = "workflow_payload_blob_ref.v1"
@@ -213,12 +214,14 @@ def load_workflow_payload_blob_ref(
     backend_text = backend.strip() if isinstance(backend, str) else ""
     compressed: bytes | None = None
     first_error: Exception | None = None
+    source_status = "unknown"
 
     if backend_text == "spillway":
         try:
             from .blob_spillway import get_blob_spillway_queue
 
             compressed = get_blob_spillway_queue().get_local_bytes(clean_key)
+            source_status = "local_hit"
         except Exception as exc:
             first_error = exc
 
@@ -226,6 +229,7 @@ def load_workflow_payload_blob_ref(
         try:
             store = get_blob_store_from_env()
             compressed = _get_bytes_with_retries(store, clean_key, attempts=2)
+            source_status = "default_store_hit"
         except Exception as exc:
             first_error = first_error or exc
 
@@ -236,10 +240,16 @@ def load_workflow_payload_blob_ref(
                 clean_key,
                 attempts=3,
             )
+            source_status = "backend_store_hit"
         except Exception as exc:
             first_error = first_error or exc
 
     if compressed is None:
+        record_blob_hydration_observation(
+            family="workflow_payload",
+            status="missing",
+            error_count=1,
+        )
         if first_error is not None:
             raise first_error
         raise RuntimeError("Workflow payload blob read failed")
@@ -276,7 +286,13 @@ def load_workflow_payload_blob_ref(
     ):
         raise ValueError("Workflow payload blob raw SHA-256 mismatch")
 
-    return json.loads(raw_bytes.decode("utf-8"))
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    record_blob_hydration_observation(
+        family="workflow_payload",
+        status=source_status,
+        hydrated_count=1,
+    )
+    return payload
 
 
 def hydrate_workflow_payload_blob_refs(
@@ -314,8 +330,16 @@ def hydrate_workflow_payload_blob_refs(
             return [_walk(item) for item in value]
         return value
 
+    hydrated_payload = _walk(payload)
+    if hydrated_count or error_count:
+        record_blob_hydration_observation(
+            family="workflow_payload_walk",
+            status="completed",
+            hydrated_count=hydrated_count,
+            error_count=error_count,
+        )
     return WorkflowPayloadHydrationResult(
-        payload=_walk(payload),
+        payload=hydrated_payload,
         hydrated_count=hydrated_count,
         error_count=error_count,
     )
