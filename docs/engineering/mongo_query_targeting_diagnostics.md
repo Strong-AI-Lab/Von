@@ -1,14 +1,15 @@
 # Mongo Query Targeting Diagnostics
 
 **Status:** Operational guide  
-**Related Jira:** `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
+**Related Jira:** `JVNAUTOSCI-2428`, `JVNAUTOSCI-2427`, `JVNAUTOSCI-2426`
 
-Von now has two complementary Mongo query-targeting diagnostics surfaces:
+Von now has three complementary Mongo query-targeting diagnostics surfaces:
 
 1. In-process slow command telemetry from the global PyMongo command listener.
 2. A bounded profiler report command over MongoDB `system.profile`.
+3. A read-only Atlas Admin API report for Query Shape Insights.
 
-Both surfaces are designed as support plumbing only. They record query shape,
+These surfaces are designed as support plumbing only. They record query shape,
 execution counters, and operational attribution; they must not become a hidden
 workflow, prompt, routing, or index-creation policy surface.
 
@@ -23,7 +24,7 @@ Slow command listener rows can retain:
 - returned count when available from the command reply
 - safe profiler comment attribution such as Von service, operation, and route
 
-Profiler and explain-backed rows can additionally include:
+Profiler, explain-backed, and Atlas rows can additionally include:
 
 - `docsExamined`
 - `keysExamined`
@@ -32,12 +33,13 @@ Profiler and explain-backed rows can additionally include:
 - plan summary or winning index
 - in-memory sort evidence
 - query hash or plan cache key, when present
+- Atlas total/average execution time, execution count, and P90/P99 latency
 
 The diagnostics intentionally do not retain query values, update values,
 returned documents, `.env` contents, Mongo URIs, credentials, prompts, email
 bodies, or private document bodies.
 
-## Running The Report
+## Running The Local Report
 
 Use the repository virtualenv if the shell does not expose `pdm`:
 
@@ -72,6 +74,62 @@ documents. Keep the sample count low on a busy database.
 If `system.profile` is unavailable, use Atlas Query Insights or Performance
 Advisor for the same time window.
 
+## Running The Atlas Report
+
+Use Atlas Admin API credentials with read-only project access. The command
+supports service-account bearer tokens or digest public/private API keys.
+Credential values may be supplied directly or through `_FILE` env vars:
+
+- `ATLAS_ACCESS_TOKEN` / `ATLAS_ACCESS_TOKEN_FILE`
+- `ATLAS_SERVICE_ACCOUNT_CLIENT_ID` /
+  `ATLAS_SERVICE_ACCOUNT_CLIENT_ID_FILE`
+- `ATLAS_SERVICE_ACCOUNT_CLIENT_SECRET` /
+  `ATLAS_SERVICE_ACCOUNT_CLIENT_SECRET_FILE`
+- `ATLAS_PUBLIC_KEY` / `ATLAS_PUBLIC_KEY_FILE`
+- `ATLAS_PRIVATE_KEY` / `ATLAS_PRIVATE_KEY_FILE`
+
+The command also accepts MongoDB-prefixed aliases such as
+`MONGODB_ATLAS_GROUP_ID`, `MONGODB_ATLAS_CLUSTER_NAME`,
+`MONGODB_ATLAS_PUBLIC_KEY`, and `MONGODB_ATLAS_PRIVATE_KEY`.
+
+Basic JSON report:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_report.py \
+  --group-id "$ATLAS_GROUP_ID" \
+  --cluster-name "$ATLAS_CLUSTER_NAME" \
+  --since 2026-06-05T00:00:00Z \
+  --until 2026-06-05T01:00:00Z \
+  --namespace von_db.workflow_use_episodes \
+  --json
+```
+
+Include authorised query-shape metadata with literal values redacted:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_report.py \
+  --namespace von_db.workflow_use_episodes \
+  --command aggregate \
+  --include-query-shapes \
+  --include-shape-text \
+  --json
+```
+
+Include Performance Advisor suggested-index summaries for known Atlas process
+ids:
+
+```sh
+.venv/bin/python scripts/atlas_query_insights_report.py \
+  --include-suggested-indexes \
+  --process-id "$ATLAS_PROCESS_ID" \
+  --json
+```
+
+The report emits typed blockers for missing project id, missing cluster name,
+missing credentials, insufficient Atlas role, unavailable Query Shape Insights,
+and parse/request failures. Missing credentials should produce a blocked report;
+the script must not silently fall back to local Mongo telemetry.
+
 ## Reading The Output
 
 The report ranks rows by:
@@ -92,6 +150,13 @@ above a high-duration but well-targeted lookup.
 Fields to inspect:
 
 - `namespace`: database and collection.
+- `command_name`: Atlas command or operation.
+- `query_shape_hash`: Atlas query shape hash for cross-reference.
+- `total_execution_time_ms`: Atlas total execution time for the window.
+- `average_execution_time_ms`: Atlas average execution time.
+- `execution_count`: executions observed by Atlas in the window.
+- `p90_execution_time_ms` and `p99_execution_time_ms`: latency percentiles when
+  Atlas returns them.
 - `filter_shape`, `sort_shape`, `projection_shape`: structural query shape.
 - `max_docs_examined_per_returned`: worst observed object scan ratio.
 - `max_keys_examined_per_returned`: worst observed key scan ratio.
@@ -99,6 +164,8 @@ Fields to inspect:
 - `sample_request_ids`: request ids, query hashes, or plan cache keys suitable
   for cross-reference.
 - `recommended_next_step`: operator guidance for the next diagnostic action.
+- `repo_index_comparison`: evidence-only signal that the collection appears in
+  repo-owned index setup. This is not proof of full index coverage.
 
 ## Reconciling With Atlas
 
@@ -134,6 +201,10 @@ Useful Atlas Admin API surfaces, when service-account credentials are available:
 
 Atlas Admin API credentials are separate from Mongo URI credentials. Do not
 print either credential class in reports, Jira comments, logs, or screenshots.
+
+`scripts/atlas_query_insights_report.py` uses these endpoints only as read-only
+diagnostics. It never creates or drops indexes, and it does not include slow-log
+bodies in the redacted report.
 
 ## Environment Controls
 
