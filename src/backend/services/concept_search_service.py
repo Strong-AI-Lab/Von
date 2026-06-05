@@ -234,6 +234,48 @@ def _build_preferred_description_lookup(
     return description_lookup
 
 
+def _legacy_name_scan_needed(results: List[Dict[str, Any]], limit: int) -> bool:
+    """Return whether legacy concept-document name fields still need scanning.
+
+    Modern text_relations are the canonical name surface. The legacy concept
+    document fields remain a compatibility fallback, but scanning them with
+    unanchored regexes is expensive on Atlas. Once modern results already fill
+    the over-fetch window that this service historically used, the fallback
+    scan cannot improve the returned page.
+    """
+
+    return len(results) < max(1, limit * 2)
+
+
+def _fetch_text_relation_concept_docs(
+    concept_ids: set[str],
+    *,
+    base_query: Dict[str, Any],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if not concept_ids:
+        return []
+
+    ordered_ids = sorted(
+        concept_id
+        for concept_id in concept_ids
+        if isinstance(concept_id, str) and concept_id.strip()
+    )
+    if not ordered_ids:
+        return []
+
+    query: Dict[str, Any] = {"concept_id": {"$in": ordered_ids}}
+    if base_query:
+        query = {**base_query, **query}
+
+    cursor = ConceptsRepository.find(
+        query,
+        projection=SEARCH_RESULT_PROJECTION,
+        limit=max(limit * 2, len(ordered_ids)),
+    )
+    return list(cursor)
+
+
 def _normalize_text_for_match(text: str) -> str:
     """Normalise text for case/whitespace-insensitive matching.
 
@@ -839,6 +881,20 @@ def search_concepts(
                         f"[concept_search] Found {len(text_relations_concept_ids)} concepts "
                         f"via text_relations (modern schema)"
                     )
+                    modern_concepts = _fetch_text_relation_concept_docs(
+                        text_relations_concept_ids,
+                        base_query=base_query,
+                        limit=limit,
+                    )
+                    for concept_doc in modern_concepts:
+                        concept_id = concept_doc.get("concept_id")
+                        if concept_id and concept_id not in seen_ids:
+                            results.append(concept_doc)
+                            seen_ids.add(concept_id)
+                        elif concept_id in seen_ids:
+                            duplicates_encountered += 1
+                    if modern_concepts:
+                        match_types_used.append("text_relations")
             except Exception as e:
                 logger.warning(
                     f"Text relations search failed (non-fatal): {e}", exc_info=True
@@ -879,22 +935,20 @@ def search_concepts(
             if similarity_results:
                 match_types_used.append("similarity")
 
-            # If match_type is "all", also do substring search and merge
-            if match_type == "all":
+            # If match_type is "all", also do substring search and merge.
+            if match_type == "all" and _legacy_name_scan_needed(results, limit):
                 substring_query = _build_name_query(
                     query, prefix=False, include_description=include_description
                 )
                 combined_query = (
                     {**base_query, **substring_query} if base_query else substring_query
                 )
-
-                if seen_ids:
-                    combined_query["concept_id"] = {"$nin": list(seen_ids)}
+                fetch_limit = limit + len(seen_ids)
 
                 substring_cursor = ConceptsRepository.find(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
-                    limit=limit,
+                    limit=fetch_limit,
                 )
 
                 substring_added = False
@@ -934,7 +988,7 @@ def search_concepts(
             # Check if query contains non-word chars (skip prefix if so)
             has_special_chars = bool(re.search(r"\W", query))
 
-            if not has_special_chars:
+            if not has_special_chars and _legacy_name_scan_needed(results, limit):
                 # Pass 1: Prefix match (fast, high-quality results)
                 prefix_query = _build_name_query(
                     query, prefix=True, include_description=include_description
@@ -960,7 +1014,7 @@ def search_concepts(
                 # Pass 2: Substring fallback if few results
                 fallback_threshold = max(3, limit // 2)
                 if len(results) < fallback_threshold:
-                    remaining = limit * 2 - len(results)
+                    remaining = max(limit * 2 - len(results), 0)
                     substring_query = _build_name_query(
                         query, prefix=False, include_description=include_description
                     )
@@ -969,15 +1023,12 @@ def search_concepts(
                         if base_query
                         else substring_query
                     )
-
-                    # Exclude already found IDs
-                    if seen_ids:
-                        combined_query["concept_id"] = {"$nin": list(seen_ids)}
+                    fetch_limit = remaining + len(seen_ids)
 
                     substring_cursor = ConceptsRepository.find(
                         combined_query,
                         projection=SEARCH_RESULT_PROJECTION,
-                        limit=remaining,
+                        limit=max(remaining, fetch_limit),
                     )
 
                     for concept_doc in substring_cursor:
@@ -987,7 +1038,8 @@ def search_concepts(
                             seen_ids.add(concept_id)
                         elif concept_id in seen_ids:
                             duplicates_encountered += 1
-            else:
+
+            elif _legacy_name_scan_needed(results, limit):
                 # Special chars detected, skip directly to substring
                 substring_query = _build_name_query(
                     query, prefix=False, include_description=include_description
@@ -1004,10 +1056,10 @@ def search_concepts(
 
                 for concept_doc in substring_cursor:
                     concept_id = concept_doc.get("concept_id")
-                    if concept_id not in seen_ids:
+                    if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
                         seen_ids.add(concept_id)
-                    else:
+                    elif concept_id in seen_ids:
                         duplicates_encountered += 1
 
         else:
@@ -1018,55 +1070,22 @@ def search_concepts(
             )
             combined_query = {**base_query, **name_query} if base_query else name_query
 
-            concepts_cursor = ConceptsRepository.find(
-                combined_query,
-                projection=SEARCH_RESULT_PROJECTION,
-                limit=limit * 2,
-            )
-
-            for concept_doc in concepts_cursor:
-                results.append(concept_doc)
-
-            match_types_used.append(match_type)
-
-        # MERGE TEXT_RELATIONS RESULTS (modern schema)
-        # Add any concepts found via text_relations that weren't found via legacy fields
-        if text_relations_concept_ids:
-            # Get concept IDs already found via legacy search
-            legacy_concept_ids = {doc.get("concept_id") for doc in results}
-
-            # Find concepts that are only in text_relations results
-            additional_concept_ids = text_relations_concept_ids - legacy_concept_ids
-
-            if additional_concept_ids:
-                # Fetch full concept documents for these IDs
-                additional_query = {"concept_id": {"$in": list(additional_concept_ids)}}
-
-                # Apply base_query filters if any
-                if base_query:
-                    additional_query = {**base_query, **additional_query}
-
-                additional_cursor = ConceptsRepository.find(
-                    additional_query,
+            if use_exact or _legacy_name_scan_needed(results, limit):
+                concepts_cursor = ConceptsRepository.find(
+                    combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
                 )
 
-                additional_found = 0
-                additional_concepts = []
-                for concept_doc in additional_cursor:
-                    additional_concepts.append(concept_doc)
-                    additional_found += 1
+                for concept_doc in concepts_cursor:
+                    concept_id = concept_doc.get("concept_id")
+                    if concept_id and concept_id not in seen_ids:
+                        results.append(concept_doc)
+                        seen_ids.add(concept_id)
+                    elif concept_id in seen_ids:
+                        duplicates_encountered += 1
 
-                if additional_found > 0:
-                    # IMPORTANT: Prepend text_relations results to the front of the list
-                    # These are high-quality matches (query matched in hasName predicate)
-                    # and should be prioritized over legacy field matches
-                    results = additional_concepts + results
-                    logger.info(
-                        f"[concept_search] Added {additional_found} concepts found only in "
-                        f"modern schema (text_relations) - prepended to prioritize them"
-                    )
+                match_types_used.append(match_type)
 
         logger.info(f"[concept_search] Total results before filtering: {len(results)}")
 
