@@ -769,6 +769,10 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
         state_id="summarise_representation_evidence",
     )
+    completed_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="completed",
+    )
     read_back_transitions = metadata_definition.states[read_back_state_id].transitions
     assert any(
         transition.to_state == read_back_text_relations_state_id
@@ -784,12 +788,25 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "#V#has_doi",
         "#V#has_source_uri",
     ]
-    assert any(
-        transition.to_state == summary_state_id
+    read_back_text_relations_transitions = {
+        transition.reason: transition
         for transition in metadata_definition.states[
             read_back_text_relations_state_id
         ].transitions
+    }
+    assert (
+        read_back_text_relations_transitions["next_step"].to_state
+        == completed_state_id
     )
+    summary_transition = read_back_text_relations_transitions[
+        "representation_evidence_summary_required"
+    ]
+    assert summary_transition.to_state == summary_state_id
+    assert summary_transition.condition_spec == {
+        "expected": True,
+        "key": "require_representation_evidence_summary",
+        "kind": "context_flag",
+    }
     summary_action = metadata_definition.states[summary_state_id].actions[0]
     assert summary_action.action_id == "llm.action"
     assert summary_action.execution_mode == "llm"
@@ -967,6 +984,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "author_names" in contract["provided_inputs"]
     assert "topic_labels" in contract["provided_inputs"]
     delegate_action = delegate_state.actions[0]
+    assert delegate_action.inputs.get("require_representation_evidence_summary") is False
     assert delegate_action.inputs.get("paper_concept_id") == {
         "$context_key": "paper_concept_id",
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_paper_concept_id_to_paper_concept_id_parameter",
@@ -1650,7 +1668,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "14" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "15" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID

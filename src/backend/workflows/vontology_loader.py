@@ -3482,9 +3482,15 @@ def load_workflow_definition_from_vontology(
                         for key, raw_value in input_map.items()
                         if isinstance(key, str)
                         and str(key).strip()
-                        and isinstance(raw_value, str)
-                        and str(raw_value).strip()
-                        and str(key).strip() not in {"workflow_id", "failure_mode"}
+                        and raw_value is not None
+                        and not isinstance(raw_value, Mapping)
+                        and str(key).strip()
+                        not in {
+                            "workflow_id",
+                            "failure_mode",
+                            "__failure_mode",
+                            "max_transitions",
+                        }
                         and not str(key).strip().startswith("__")
                         and not str(key).strip().startswith("workflow_step_")
                     )

@@ -2783,7 +2783,10 @@ class TestSubworkflowCompositionContracts:
             "#V#step": {
                 "concept_id": "#V#step",
                 "relationships": {
-                    "#V#hasInputMap": ["verification_profile=technical_scientific_talk"],
+                    "#V#hasInputMap": [
+                        "verification_profile=technical_scientific_talk",
+                        "require_representation_evidence_summary=json:false",
+                    ],
                 },
             },
             input_mapping_id: {
@@ -2822,13 +2825,16 @@ class TestSubworkflowCompositionContracts:
         assert state.actions[0].inputs["verification_profile"] == (
             "technical_scientific_talk"
         )
+        assert state.actions[0].inputs["require_representation_evidence_summary"] is False
         metadata = state.metadata
         assert metadata["subworkflow_contract"]["static_input_keys"] == [
-            "verification_profile"
+            "verification_profile",
+            "require_representation_evidence_summary",
         ]
         assert metadata["subworkflow_contract"]["provided_inputs"] == [
             "child_input",
             "verification_profile",
+            "require_representation_evidence_summary",
         ]
 
     def test_load_definition_supports_dynamic_subworkflow_workflow_id_mapping(self):

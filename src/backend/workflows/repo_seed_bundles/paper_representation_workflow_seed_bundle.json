@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "14",
-  "source_tag": "JVNAUTOSCI-2408",
+  "seed_version": "15",
+  "source_tag": "JVNAUTOSCI-2432",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -166,6 +166,13 @@
             "extractor": "identity",
             "required": false,
             "description": "Optional arXiv identifier supplied by the arXiv wrapper."
+          },
+          {
+            "target_context_key": "require_representation_evidence_summary",
+            "source_expression": "inputs.require_representation_evidence_summary",
+            "extractor": "identity",
+            "required": false,
+            "description": "Optional flag allowing callers to request or skip the final LLM evidence-summary enrichment step."
           }
         ]
       },
@@ -335,6 +342,11 @@
                       "file_copy_concept_id"
                     ],
                     "skip_if_unresolved": true
+                  },
+                  {
+                    "key": "require_representation_evidence_summary",
+                    "value": true,
+                    "preserve_existing": true
                   },
                   {
                     "key": "arxiv_id",
@@ -1052,7 +1064,18 @@
                 "tool_param": "concept_id"
               }
             ],
-            "next_state": "summarise_representation_evidence",
+            "next_state": "completed",
+            "conditional_transitions": [
+              {
+                "to_state": "summarise_representation_evidence",
+                "reason": "representation_evidence_summary_required",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "require_representation_evidence_summary",
+                  "expected": true
+                }
+              }
+            ],
             "on_failure_state": "failed",
             "tool_output_mapping_specs": [
               {
@@ -2344,6 +2367,12 @@
             "next_state": "verify_arxiv_path",
             "on_failure_state": "failed",
             "state_id": "delegate_to_general_paper_workflow",
+            "static_input_bindings": [
+              [
+                "require_representation_evidence_summary",
+                false
+              ]
+            ],
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_result_paper_concept_id_to_paper_concept_id",
