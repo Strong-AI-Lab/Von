@@ -159,6 +159,62 @@ def test_executor_can_route_from_structured_failed_action_outputs() -> None:
     assert result.final_state == "fallback"
 
 
+def test_executor_prefers_condition_spec_over_stale_compiled_condition() -> None:
+    on_failure_spec, _on_failure_fn = build_transition_condition(
+        {
+            "kind": "context_flag",
+            "key": "last_action_failed",
+            "expected": True,
+        }
+    )
+    always_spec, always_fn = build_transition_condition({"kind": "always"})
+
+    definition = WorkflowDefinition(
+        workflow_id="#V#condition_spec_recovery_next_step_workflow",
+        initial_state="recover",
+        states={
+            "recover": WorkflowStateSpec(
+                state_id="recover",
+                actions=(WorkflowActionInvocation(action_id="recover.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition=lambda _context: True,
+                        condition_spec=on_failure_spec,
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="delegate",
+                        reason="next_step",
+                        condition=always_fn,
+                        condition_spec=always_spec,
+                    ),
+                ),
+            ),
+            "delegate": WorkflowStateSpec(state_id="delegate", terminal=True),
+            "failed": WorkflowStateSpec(state_id="failed", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="recover.action",
+            handler=lambda _request: WorkflowActionResult(status="success"),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "delegate"
+    assert result.data["last_action_failed"] is False
+
+
 @pytest.mark.parametrize(
     ("transition_result", "expected_state"),
     [(True, "yes"), (False, "no")],

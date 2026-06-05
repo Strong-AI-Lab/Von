@@ -1078,6 +1078,17 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "$required": True,
     }
     assert import_pdf_action.inputs["type_concept_id"] == "#V#arxiv_pdf_file"
+    assert import_pdf_action.inputs["timeout_seconds"] == 30
+    import_pdf_transitions = {
+        transition.reason: transition
+        for transition in arxiv_definition.states[import_pdf_state_id].transitions
+    }
+    assert import_pdf_transitions["on_failure"].to_state == (
+        authority_service._step_concept_id(
+            workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+            state_id="record_pdf_import_skipped",
+        )
+    )
     import_pdf_mappings = arxiv_definition.states[import_pdf_state_id].metadata[
         "tool_output_context_mappings"
     ]
@@ -1086,6 +1097,22 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         and mapping["context_key"] == "file_copy_concept_id"
         for mapping in import_pdf_mappings
     )
+    record_pdf_import_skipped_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="record_pdf_import_skipped",
+    )
+    record_pdf_import_skipped_action = arxiv_definition.states[
+        record_pdf_import_skipped_state_id
+    ].actions[0]
+    assert record_pdf_import_skipped_action.action_id == "workflow_control.context_set"
+    assert record_pdf_import_skipped_action.inputs.get("assignments")[:3] == [
+        {"key": "pdf_acquisition_status", "value": "skipped"},
+        {"key": "pdf_acquisition_optional", "value": True},
+        {
+            "key": "pdf_acquisition_failure_stage",
+            "value": "import_arxiv_pdf_from_url",
+        },
+    ]
     decide_acquisition_mode_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="decide_acquisition_mode",
@@ -1102,6 +1129,13 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="delegate_to_general_paper_workflow",
     )
+    delegate_action = arxiv_definition.states[delegate_state_id].actions[0]
+    assert delegate_action.inputs.get("file_copy_concept_id") == {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_file_copy_concept_id_to_file_copy_concept_id_parameter",
+        "$required": False,
+    }
+    assert delegate_action.inputs.get("require_file_copy") is False
     decide_acquisition_mode_action = arxiv_definition.states[
         decide_acquisition_mode_state_id
     ].actions[0]
@@ -1152,6 +1186,17 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             "value_from_context": "cached_markdown_path",
         },
     ]
+    verify_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="verify_arxiv_path",
+    )
+    verify_action = arxiv_definition.states[verify_state_id].actions[0]
+    assert verify_action.inputs.get("file_copy_concept_id") == {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_verify_arxiv_path_file_copy_concept_id_to_file_copy_concept_id_parameter",
+        "$required": False,
+    }
+    assert verify_action.inputs.get("require_file_copy") is False
 
     scholarly_delegate_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
@@ -1668,7 +1713,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "15" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "16" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -1685,6 +1730,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert required_effect["required_tools"] == [
         "scholarly_paper.verify_representation"
     ]
+    assert required_effect["required_payload_fields"] == ["paper_concept_id"]
     assert required_effect["targets_extractor"] == "arxiv_id_list"
     assert "workflow_discovery_result.discovery_query_input" in (
         required_effect["targets_source_expressions"]
@@ -1763,8 +1809,10 @@ def test_arxiv_launch_contract_resolves_deictic_paper_ids_from_prior_context(
     )
 
 
+@pytest.mark.parametrize("import_succeeds", [True, False])
 def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
     _reset_mock_db: Any,
+    import_succeeds: bool,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
     registry_factory._resolve_subworkflow_definition.cache_clear()
@@ -1842,6 +1890,20 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
 
     def _import_url(request: WorkflowActionRequest) -> WorkflowActionResult:
         import_calls.append(dict(request.inputs))
+        if not import_succeeds:
+            return WorkflowActionResult(
+                status="failed",
+                error="remote_request_failed",
+                outputs={
+                    "result": {
+                        "success": False,
+                        "error": "remote_request_failed",
+                        "message": "Remote artefact request failed: timed out",
+                        "final_url": request.inputs.get("url"),
+                        "status_code": None,
+                    }
+                },
+            )
         return WorkflowActionResult(
             status="success",
             outputs={
@@ -1922,19 +1984,34 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
             "max_bytes": 104857600,
             "max_redirects": 5,
             "source_system": "arxiv_pdf_url_workflow_fallback",
+            "timeout_seconds": 30,
             "type_concept_id": "#V#arxiv_pdf_file",
             "url": "https://arxiv.org/pdf/2406.15341.pdf",
         }
     ]
     assert subworkflow_calls[0]["file_copy_concept_id"] == (
-        "#V#arxiv_pdf_file_from_workflow_url_import"
+        "#V#arxiv_pdf_file_from_workflow_url_import" if import_succeeds else None
     )
+    assert subworkflow_calls[0]["require_file_copy"] is False
     assert subworkflow_calls[0]["paper_metadata"]["title"] == "GenoTEX"
     assert verify_calls[0]["file_copy_concept_id"] == (
-        "#V#arxiv_pdf_file_from_workflow_url_import"
+        "#V#arxiv_pdf_file_from_workflow_url_import" if import_succeeds else None
     )
+    assert verify_calls[0]["require_file_copy"] is False
     assert result.data["arxiv_pdf_url"] == "https://arxiv.org/pdf/2406.15341.pdf"
     assert result.data["arxiv_pdf_import_reason"] == "provider_error"
+    if import_succeeds:
+        assert "pdf_acquisition_status" not in result.data
+    else:
+        assert result.data["pdf_acquisition_status"] == "skipped"
+        assert result.data["pdf_acquisition_optional"] is True
+        assert result.data["pdf_acquisition_failure_stage"] == (
+            "import_arxiv_pdf_from_url"
+        )
+        assert result.data["arxiv_pdf_import_error"] == "remote_request_failed"
+        assert result.data["arxiv_pdf_import_message"] == (
+            "Remote artefact request failed: timed out"
+        )
 
 
 def test_metadata_workflow_executes_direct_scholarly_article_representation(

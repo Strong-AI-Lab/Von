@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
 import json
 import mimetypes
 import os
 import socket
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
@@ -17,6 +19,7 @@ _DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 _DEFAULT_MAX_REDIRECTS = 5
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 _DEFAULT_READ_TIMEOUT_SECONDS = 30
+_DEFAULT_TOTAL_TIMEOUT_SECONDS = 40
 _DEFAULT_USER_AGENT = "VonRemoteFileCopyIngestion/1.0"
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _CAPTURED_RESPONSE_HEADERS: tuple[str, ...] = (
@@ -82,6 +85,19 @@ def _configured_timeouts() -> tuple[int, int]:
         maximum=300,
     )
     return connect_timeout, read_timeout
+
+
+def _configured_total_timeout_seconds(override: float | int | None = None) -> float:
+    if isinstance(override, (int, float)) and not isinstance(override, bool):
+        return max(1.0, min(float(override), 600.0))
+    return float(
+        _coerce_configured_int(
+            os.getenv("VON_REMOTE_FILE_COPY_TOTAL_TIMEOUT_SECONDS"),
+            default=_DEFAULT_TOTAL_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=600,
+        )
+    )
 
 
 def _safe_filename(value: str | None) -> str | None:
@@ -317,6 +333,7 @@ def download_remote_file_copy_bytes(
     filename: str | None = None,
     max_bytes: int | None = None,
     max_redirects: int | None = None,
+    timeout_seconds: float | int | None = None,
 ) -> dict[str, Any]:
     """Fetch a remote artefact with SSRF and size guardrails."""
 
@@ -331,19 +348,59 @@ def download_remote_file_copy_bytes(
     resolved_max_bytes = _configured_max_bytes(max_bytes)
     resolved_max_redirects = _configured_max_redirects(max_redirects)
     connect_timeout, read_timeout = _configured_timeouts()
+    resolved_timeout_seconds = _configured_total_timeout_seconds(timeout_seconds)
+    started_at = time.monotonic()
+    deadline = started_at + resolved_timeout_seconds
     current_url = requested_url
     redirects: list[dict[str, Any]] = []
     hops: list[dict[str, Any]] = []
 
+    def _elapsed_seconds() -> float:
+        return round(max(0.0, time.monotonic() - started_at), 3)
+
+    def _remaining_seconds() -> float:
+        return deadline - time.monotonic()
+
+    def _timeout_failure(
+        *,
+        final_url: str,
+        status_code: int | None = None,
+        size_bytes: int | None = None,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        failure: dict[str, Any] = {
+            "success": False,
+            "error": "remote_file_copy_timeout",
+            "message": message
+            or "Remote artefact ingestion exceeded the total timeout.",
+            "requested_url": requested_url,
+            "final_url": final_url,
+            "redirects": redirects,
+            "hops": hops,
+            "timeout_seconds": resolved_timeout_seconds,
+            "elapsed_seconds": _elapsed_seconds(),
+        }
+        if status_code is not None:
+            failure["status_code"] = status_code
+        if size_bytes is not None:
+            failure["size_bytes"] = size_bytes
+        return failure
+
     session = _create_requests_session()
     try:
         for _hop_index in range(resolved_max_redirects + 1):
+            remaining = _remaining_seconds()
+            if remaining <= 0:
+                return _timeout_failure(final_url=current_url)
+
             validation = _validate_remote_target(current_url)
             if not validation.get("success"):
                 failure = dict(validation)
                 failure["requested_url"] = requested_url
                 failure["redirects"] = redirects
                 failure["hops"] = hops
+                failure["timeout_seconds"] = resolved_timeout_seconds
+                failure["elapsed_seconds"] = _elapsed_seconds()
                 return failure
             hops.append(
                 {
@@ -354,17 +411,29 @@ def download_remote_file_copy_bytes(
             )
 
             try:
+                remaining = _remaining_seconds()
+                if remaining <= 0:
+                    return _timeout_failure(final_url=current_url)
+                request_timeout = (
+                    min(float(connect_timeout), remaining),
+                    min(float(read_timeout), remaining),
+                )
                 response = session.get(
                     current_url,
                     stream=True,
                     allow_redirects=False,
-                    timeout=(connect_timeout, read_timeout),
+                    timeout=request_timeout,
                     headers={
                         "User-Agent": os.getenv(
                             "VON_REMOTE_FILE_COPY_USER_AGENT", _DEFAULT_USER_AGENT
                         ),
                         "Accept": "*/*",
                     },
+                )
+            except requests.Timeout as exc:
+                return _timeout_failure(
+                    final_url=current_url,
+                    message=f"Remote artefact request timed out: {exc}",
                 )
             except requests.RequestException as exc:
                 return {
@@ -375,6 +444,8 @@ def download_remote_file_copy_bytes(
                     "final_url": current_url,
                     "redirects": redirects,
                     "hops": hops,
+                    "timeout_seconds": resolved_timeout_seconds,
+                    "elapsed_seconds": _elapsed_seconds(),
                 }
 
             try:
@@ -455,23 +526,57 @@ def download_remote_file_copy_bytes(
                 }
 
                 data = bytearray()
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    data.extend(chunk)
-                    if len(data) > resolved_max_bytes:
-                        return {
-                            "success": False,
-                            "error": "remote_file_too_large",
-                            "message": "Remote artefact exceeded the configured maximum size while downloading.",
-                            "requested_url": requested_url,
-                            "final_url": current_url,
-                            "status_code": status_code,
-                            "size_bytes": len(data),
-                            "max_bytes": resolved_max_bytes,
-                            "redirects": redirects,
-                            "hops": hops,
-                        }
+                try:
+                    for chunk in response.iter_content(chunk_size=64 * 1024):
+                        if _remaining_seconds() <= 0:
+                            return _timeout_failure(
+                                final_url=current_url,
+                                status_code=status_code,
+                                size_bytes=len(data),
+                            )
+                        if not chunk:
+                            continue
+                        data.extend(chunk)
+                        if len(data) > resolved_max_bytes:
+                            return {
+                                "success": False,
+                                "error": "remote_file_too_large",
+                                "message": "Remote artefact exceeded the configured maximum size while downloading.",
+                                "requested_url": requested_url,
+                                "final_url": current_url,
+                                "status_code": status_code,
+                                "size_bytes": len(data),
+                                "max_bytes": resolved_max_bytes,
+                                "redirects": redirects,
+                                "hops": hops,
+                            }
+                    if _remaining_seconds() <= 0:
+                        return _timeout_failure(
+                            final_url=current_url,
+                            status_code=status_code,
+                            size_bytes=len(data),
+                        )
+                except requests.Timeout as exc:
+                    return _timeout_failure(
+                        final_url=current_url,
+                        status_code=status_code,
+                        size_bytes=len(data),
+                        message=f"Remote artefact download timed out: {exc}",
+                    )
+                except requests.RequestException as exc:
+                    return {
+                        "success": False,
+                        "error": "remote_request_failed",
+                        "message": f"Remote artefact download failed: {exc}",
+                        "requested_url": requested_url,
+                        "final_url": current_url,
+                        "status_code": status_code,
+                        "size_bytes": len(data),
+                        "redirects": redirects,
+                        "hops": hops,
+                        "timeout_seconds": resolved_timeout_seconds,
+                        "elapsed_seconds": _elapsed_seconds(),
+                    }
 
                 if not data:
                     return {
@@ -509,6 +614,8 @@ def download_remote_file_copy_bytes(
                     "hops": hops,
                     "status_code": status_code,
                     "size_bytes": len(data),
+                    "timeout_seconds": resolved_timeout_seconds,
+                    "elapsed_seconds": _elapsed_seconds(),
                     "data": bytes(data),
                     "original_filename": original_filename,
                     "filename_source": filename_source,
@@ -528,6 +635,8 @@ def download_remote_file_copy_bytes(
             "final_url": current_url,
             "redirects": redirects,
             "hops": hops,
+            "timeout_seconds": resolved_timeout_seconds,
+            "elapsed_seconds": _elapsed_seconds(),
         }
     finally:
         session.close()
@@ -545,14 +654,25 @@ def import_remote_url_file_copy(
     source_system: str = "remote_url_import",
     max_bytes: int | None = None,
     max_redirects: int | None = None,
+    timeout_seconds: float | int | None = None,
 ) -> dict[str, Any]:
     """Download a remote artefact, persist it durably, and register a file copy."""
+
+    resolved_timeout_seconds = _configured_total_timeout_seconds(timeout_seconds)
+    started_at = time.monotonic()
+
+    def _elapsed_seconds() -> float:
+        return round(max(0.0, time.monotonic() - started_at), 3)
+
+    def _remaining_seconds() -> float:
+        return (started_at + resolved_timeout_seconds) - time.monotonic()
 
     download_result = download_remote_file_copy_bytes(
         url=url,
         filename=filename,
         max_bytes=max_bytes,
         max_redirects=max_redirects,
+        timeout_seconds=resolved_timeout_seconds,
     )
     if not download_result.get("success"):
         return download_result
@@ -567,19 +687,19 @@ def import_remote_url_file_copy(
         if isinstance(download_result.get("redirects"), list)
         else []
     )
-    import_result = import_bytes_file_copy(
-        data=bytes(download_result["data"]),
-        user_concept_id=user_concept_id,
-        organisation_concept_id=organisation_concept_id,
-        namespace=namespace,
-        namespace_source=namespace_source,
-        original_filename=str(download_result["original_filename"]),
-        content_type=download_result.get("content_type"),
-        type_concept_id=type_concept_id,
-        source_system=source_system,
-        source_identifier=str(download_result["requested_url"]),
-        source_uri=str(download_result["final_url"]),
-        metadata={
+    import_kwargs = {
+        "data": bytes(download_result["data"]),
+        "user_concept_id": user_concept_id,
+        "organisation_concept_id": organisation_concept_id,
+        "namespace": namespace,
+        "namespace_source": namespace_source,
+        "original_filename": str(download_result["original_filename"]),
+        "content_type": download_result.get("content_type"),
+        "type_concept_id": type_concept_id,
+        "source_system": source_system,
+        "source_identifier": str(download_result["requested_url"]),
+        "source_uri": str(download_result["final_url"]),
+        "metadata": {
             "requested_url": str(download_result["requested_url"]),
             "final_url": str(download_result["final_url"]),
             "filename_source": str(download_result.get("filename_source") or ""),
@@ -594,7 +714,76 @@ def import_remote_url_file_copy(
             "redirect_count": len(redirects),
             "redirect_chain_json": json.dumps(redirects, ensure_ascii=False),
         },
+    }
+    remaining = _remaining_seconds()
+    if remaining <= 0:
+        return {
+            "success": False,
+            "error": "remote_file_copy_timeout",
+            "message": "Remote artefact ingestion exceeded the total timeout before file-copy registration.",
+            "requested_url": download_result.get("requested_url"),
+            "final_url": download_result.get("final_url"),
+            "redirects": redirects,
+            "redirect_count": len(redirects),
+            "download_hops": download_result.get("hops"),
+            "timeout_seconds": resolved_timeout_seconds,
+            "elapsed_seconds": _elapsed_seconds(),
+            "response": {
+                "status_code": download_result.get("status_code"),
+                "size_bytes": download_result.get("size_bytes"),
+                "headers": response_headers,
+            },
+            "filename_resolution": {
+                "original_filename": download_result.get("original_filename"),
+                "source": download_result.get("filename_source"),
+            },
+            "content_type_resolution": {
+                "effective_content_type": download_result.get("content_type"),
+                "response_content_type": download_result.get("response_content_type"),
+                "source": download_result.get("content_type_source"),
+            },
+        }
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="remote-file-copy-register",
     )
+    future = executor.submit(import_bytes_file_copy, **import_kwargs)
+    try:
+        import_result = future.result(timeout=max(0.001, remaining))
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {
+            "success": False,
+            "error": "remote_file_copy_timeout",
+            "message": "Remote artefact file-copy registration exceeded the total timeout.",
+            "requested_url": download_result.get("requested_url"),
+            "final_url": download_result.get("final_url"),
+            "redirects": redirects,
+            "redirect_count": len(redirects),
+            "download_hops": download_result.get("hops"),
+            "timeout_seconds": resolved_timeout_seconds,
+            "elapsed_seconds": _elapsed_seconds(),
+            "response": {
+                "status_code": download_result.get("status_code"),
+                "size_bytes": download_result.get("size_bytes"),
+                "headers": response_headers,
+            },
+            "filename_resolution": {
+                "original_filename": download_result.get("original_filename"),
+                "source": download_result.get("filename_source"),
+            },
+            "content_type_resolution": {
+                "effective_content_type": download_result.get("content_type"),
+                "response_content_type": download_result.get("response_content_type"),
+                "source": download_result.get("content_type_source"),
+            },
+        }
+    finally:
+        if future.done():
+            executor.shutdown(wait=True)
+
     if not import_result.get("success"):
         merged_failure = dict(import_result)
         merged_failure.update(

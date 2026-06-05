@@ -292,3 +292,80 @@ def test_verify_representation_requires_publication_date_for_arxiv_profile(
     assert "publication_date_missing" in list(
         result.outputs["verification_failures"] or []
     )
+
+
+def test_verify_representation_allows_missing_file_copy_when_not_required(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    registry = ActionRegistry()
+    register_paper_representation_actions(registry)
+
+    monkeypatch.setattr(
+        mod,
+        "_get_concept",
+        lambda _concept_id: {
+            "relationships": {
+                "is_an_instance_of": ["#V#scholarly_article"],
+                "#V#authored_by": ["#V#author_1"],
+                "#V#about": ["#V#topic_1"],
+            },
+            "attributes": {"arxiv_id": "2505.17801"},
+            "name": "Integrating Counterfactual Simulations",
+        },
+    )
+
+    def _fake_get_texts_for_concept(*, predicate: str, **_kwargs):
+        if predicate == "hasName":
+            return [
+                {
+                    "text": (
+                        "Integrating Counterfactual Simulations with Language "
+                        "Models for Explaining Multi-Agent Behaviour"
+                    )
+                },
+                {"text": "2505.17801"},
+                {"text": "https://arxiv.org/abs/2505.17801"},
+            ]
+        if predicate == "hasDescription":
+            return [{"text": "Abstract text."}]
+        if predicate == "#V#has_publication_date":
+            return [{"text": "2025-05-23"}]
+        if predicate == "#V#has_topic_labels":
+            return [{"text": "cs.AI"}]
+        return []
+
+    monkeypatch.setattr(mod, "get_texts_for_concept", _fake_get_texts_for_concept)
+
+    strict_result = registry.execute(
+        SCHOLARLY_PAPER_VERIFY_ACTION_ID,
+        inputs={
+            "paper_concept_id": "#V#paper_on_arxiv_2505_17801",
+            "arxiv_id": "2505.17801",
+            "publication_date": "2025-05-23",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    optional_result = registry.execute(
+        SCHOLARLY_PAPER_VERIFY_ACTION_ID,
+        inputs={
+            "paper_concept_id": "#V#paper_on_arxiv_2505_17801",
+            "arxiv_id": "2505.17801",
+            "publication_date": "2025-05-23",
+            "require_file_copy": False,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert strict_result.status == "success"
+    assert strict_result.outputs["scholarly_representation_verified"] is False
+    assert "file_copy_concept_missing" in list(
+        strict_result.outputs["verification_failures"] or []
+    )
+    assert optional_result.status == "success"
+    assert optional_result.outputs["require_file_copy"] is False
+    assert optional_result.outputs["scholarly_representation_verified"] is True
+    assert optional_result.outputs["verification_failures"] == []

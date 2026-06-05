@@ -5503,6 +5503,25 @@ def _import_url_file_copy(**kwargs):
                 suggestions=["Provide max_redirects as zero or a positive integer"],
             )
 
+    timeout_seconds = kwargs.get("timeout_seconds")
+    if timeout_seconds is not None:
+        try:
+            timeout_seconds = float(timeout_seconds)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid timeout_seconds: must be a number",
+                details={"timeout_seconds": timeout_seconds},
+                suggestions=["Provide timeout_seconds as a positive number"],
+            )
+        if timeout_seconds <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "timeout_seconds must be positive",
+                details={"timeout_seconds": timeout_seconds},
+                suggestions=["Provide timeout_seconds as a positive number"],
+            )
+
     index_in_rag = _coerce_bool_input(kwargs.get("index_in_rag"), default=False)
 
     def _run_import():
@@ -5525,6 +5544,7 @@ def _import_url_file_copy(**kwargs):
             source_system=source_system,
             max_bytes=max_bytes,
             max_redirects=max_redirects,
+            timeout_seconds=timeout_seconds,
         )
         if not isinstance(result, dict):
             return result
@@ -8568,6 +8588,7 @@ def _import_url_file_copy_input_schema() -> Schema:
             "source_system": (str, type(None)),
             "max_bytes": (int, type(None)),
             "max_redirects": (int, type(None)),
+            "timeout_seconds": (int, float, type(None)),
             "index_in_rag": (bool, type(None)),
         },
         allow_unknown=True,
@@ -8594,6 +8615,8 @@ def _import_url_file_copy_output_schema() -> Schema:
             "redirect_count": (int, type(None)),
             "redirects": (list, type(None)),
             "download_hops": (list, type(None)),
+            "timeout_seconds": (int, float, type(None)),
+            "elapsed_seconds": (int, float, type(None)),
             "storage": (dict, type(None)),
             "artifact_record": (dict, type(None)),
             "response": (dict, type(None)),

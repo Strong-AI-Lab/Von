@@ -2,8 +2,8 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "15",
-  "source_tag": "JVNAUTOSCI-2432",
+  "seed_version": "16",
+  "source_tag": "JVNAUTOSCI-2434",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
@@ -1550,8 +1550,8 @@
     {
       "workflow_id": "#V#arxiv_paper_representation_workflow",
       "display_name": "Arxiv Paper Representation Workflow",
-      "description": "Canonical arXiv wrapper workflow that normalises an arXiv source, fetches authoritative arXiv metadata, acquires or finalises the paper artefact, delegates to the scholarly-paper workflow, and fails closed on incomplete representation.",
-      "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, then delegating to the general scholarly-paper workflow with arXiv verification.",
+      "description": "Canonical arXiv wrapper workflow that normalises an arXiv source, fetches authoritative arXiv metadata, acquires or finalises the paper artefact when available, delegates to the scholarly-paper workflow, and fails closed on incomplete metadata representation.",
+      "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, trying a direct PDF URL import as optional enrichment after provider failure, then delegating to the general scholarly-paper workflow with arXiv verification even when external PDF acquisition is skipped.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -1570,7 +1570,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\":\"arxiv_paper_representation_readback\",\"required_effects\":[{\"description\":\"Require verified paper concept and source/PDF artefact read-back for each arXiv target supplied to the workflow turn.\",\"effect_id\":\"arxiv_paper_representation\",\"effect_type\":\"scholarly_representation\",\"failed_failure_code\":\"arxiv_paper_representation_failed\",\"missing_failure_code\":\"arxiv_paper_representation_not_executed\",\"not_executed_reason\":\"No verified arXiv paper representation read-back was observed for this target.\",\"not_satisfied_reason\":\"ArXiv paper representation read-back did not verify for this target.\",\"required_payload_fields\":[\"paper_concept_id\",\"file_copy_concept_id\"],\"required_tools\":[\"scholarly_paper.verify_representation\"],\"targets_extractor\":\"arxiv_id_list\",\"targets_source_expressions\":[\"selected_workflow_trace.expected_outcome_contract_state.fields.summary\",\"completion_report.turn_expected_outcome_contract_state.fields.summary\",\"workflow_discovery_result.discovery_query_input\"],\"wrong_target_failure_code\":\"arxiv_paper_representation_wrong_target\"}],\"schema_version\":\"workflow_required_effects_contract.v1\"}",
+          "text": "{\"contract_id\":\"arxiv_paper_representation_readback\",\"required_effects\":[{\"description\":\"Require verified paper concept read-back for each arXiv target supplied to the workflow turn; source/PDF artefact acquisition is optional enrichment when external providers fail.\",\"effect_id\":\"arxiv_paper_representation\",\"effect_type\":\"scholarly_representation\",\"failed_failure_code\":\"arxiv_paper_representation_failed\",\"missing_failure_code\":\"arxiv_paper_representation_not_executed\",\"not_executed_reason\":\"No verified arXiv paper representation read-back was observed for this target.\",\"not_satisfied_reason\":\"ArXiv paper representation read-back did not verify for this target.\",\"required_payload_fields\":[\"paper_concept_id\"],\"required_tools\":[\"scholarly_paper.verify_representation\"],\"targets_extractor\":\"arxiv_id_list\",\"targets_source_expressions\":[\"selected_workflow_trace.expected_outcome_contract_state.fields.summary\",\"completion_report.turn_expected_outcome_contract_state.fields.summary\",\"workflow_discovery_result.discovery_query_input\"],\"wrong_target_failure_code\":\"arxiv_paper_representation_wrong_target\"}],\"schema_version\":\"workflow_required_effects_contract.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -2247,7 +2247,7 @@
             ],
             "execution_mode": "deterministic",
             "next_state": "delegate_to_general_paper_workflow",
-            "on_failure_state": "failed",
+            "on_failure_state": "record_pdf_import_skipped",
             "state_id": "import_arxiv_pdf_from_url",
             "static_input_bindings": [
               [
@@ -2265,6 +2265,10 @@
               [
                 "max_redirects",
                 5
+              ],
+              [
+                "timeout_seconds",
+                30
               ],
               [
                 "index_in_rag",
@@ -2293,6 +2297,61 @@
             ]
           },
           {
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "delegate_to_general_paper_workflow",
+            "on_failure_state": "failed",
+            "state_id": "record_pdf_import_skipped",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "pdf_acquisition_status",
+                    "value": "skipped"
+                  },
+                  {
+                    "key": "pdf_acquisition_optional",
+                    "value": true
+                  },
+                  {
+                    "key": "pdf_acquisition_failure_stage",
+                    "value": "import_arxiv_pdf_from_url"
+                  },
+                  {
+                    "key": "arxiv_pdf_import_error",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "last_action_outputs.result.error"
+                  },
+                  {
+                    "key": "arxiv_pdf_import_message",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "last_action_outputs.result.message"
+                  },
+                  {
+                    "key": "arxiv_pdf_import_status_code",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "last_action_outputs.result.status_code"
+                  },
+                  {
+                    "key": "arxiv_pdf_import_final_url",
+                    "skip_if_unresolved": true,
+                    "value_from_context": "last_action_outputs.result.final_url"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "pdf_acquisition_status",
+              "pdf_acquisition_optional",
+              "pdf_acquisition_failure_stage",
+              "arxiv_pdf_import_error",
+              "arxiv_pdf_import_message",
+              "arxiv_pdf_import_status_code",
+              "arxiv_pdf_import_final_url"
+            ]
+          },
+          {
             "action_id": "workflow_invoke_subworkflow",
             "context_input_mapping_specs": [
               {
@@ -2310,7 +2369,7 @@
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_file_copy_concept_id_to_file_copy_concept_id_parameter",
                 "context_key": "file_copy_concept_id",
-                "required": true,
+                "required": false,
                 "tool_param": "file_copy_concept_id"
               },
               {
@@ -2371,6 +2430,10 @@
               [
                 "require_representation_evidence_summary",
                 false
+              ],
+              [
+                "require_file_copy",
+                false
               ]
             ],
             "tool_output_mapping_specs": [
@@ -2414,7 +2477,7 @@
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_verify_arxiv_path_file_copy_concept_id_to_file_copy_concept_id_parameter",
                 "context_key": "file_copy_concept_id",
-                "required": true,
+                "required": false,
                 "tool_param": "file_copy_concept_id"
               },
               {
@@ -2442,6 +2505,10 @@
             "on_true_state": "completed",
             "state_id": "verify_arxiv_path",
             "static_input_bindings": [
+              [
+                "require_file_copy",
+                false
+              ],
               [
                 "verification_profile",
                 "arxiv"

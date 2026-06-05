@@ -216,9 +216,11 @@ def test_import_url_file_copy_gateway_invoke(monkeypatch):
         "src.backend.security.access_control.get_effective_user_concept_id",
         lambda: "#V#user",
     )
-    monkeypatch.setattr(
-        "src.backend.services.remote_file_copy_ingestion_service.import_remote_url_file_copy",
-        lambda **_kwargs: {
+    captured_import: dict[str, object] = {}
+
+    def _fake_import_remote_url_file_copy(**kwargs):
+        captured_import.update(kwargs)
+        return {
             "success": True,
             "concept_id": "#V#imported_url_file_gateway",
             "type_concept_id": "#V#computer_file_copy",
@@ -247,7 +249,11 @@ def test_import_url_file_copy_gateway_invoke(monkeypatch):
                 "effective_content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 "source": "filename.extension",
             },
-        },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.remote_file_copy_ingestion_service.import_remote_url_file_copy",
+        _fake_import_remote_url_file_copy,
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_event_integration_service.maybe_launch_file_copy_uploaded_workflow",
@@ -256,12 +262,17 @@ def test_import_url_file_copy_gateway_invoke(monkeypatch):
 
     payload = gateway.invoke(
         "import_url_file_copy",
-        {"url": "https://example.com/deck.pptx", "namespace": "#V#user@org"},
+        {
+            "url": "https://example.com/deck.pptx",
+            "namespace": "#V#user@org",
+            "timeout_seconds": 12,
+        },
     ).payload
 
     assert payload.get("success") is True
     assert payload.get("concept_id") == "#V#imported_url_file_gateway"
     assert payload.get("workflow_event_launch", {}).get("triggered") is True
+    assert captured_import["timeout_seconds"] == 12.0
 
 
 def test_materialise_scholarly_representation_for_file_copy_gateway_invoke(

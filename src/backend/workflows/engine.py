@@ -2233,14 +2233,13 @@ class WorkflowExecutor:
     ) -> _WorkflowTransitionDecision:
         for transition in state_spec.transitions:
             try:
-                condition_result = bool(transition.condition(context))
-                if not condition_result and isinstance(
-                    transition.condition_spec, Mapping
-                ):
+                if isinstance(transition.condition_spec, Mapping):
                     condition_result = evaluate_transition_condition_spec(
                         context=context,
                         condition_spec=transition.condition_spec,
                     )
+                else:
+                    condition_result = bool(transition.condition(context))
                 if condition_result:
                     return _WorkflowTransitionDecision(
                         next_state=transition.to_state,

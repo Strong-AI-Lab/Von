@@ -954,6 +954,10 @@ def _build_verify_representation_handler():
             request.inputs.get("file_copy_concept_id"),
             request.data.get("file_copy_concept_id"),
         )
+        require_file_copy = _coerce_bool(
+            request.inputs.get("require_file_copy"),
+            default=_coerce_bool(request.data.get("require_file_copy"), default=True),
+        )
         verification_profile = _resolve_verification_profile(request)
         arxiv_id = _extract_arxiv_id_from_request(request)
         expected_publication_date = _extract_publication_date_from_request(request)
@@ -963,7 +967,7 @@ def _build_verify_representation_handler():
         if not paper_doc:
             verification_failures.append("paper_concept_missing")
 
-        if not file_copy_concept_id:
+        if require_file_copy and not file_copy_concept_id:
             verification_failures.append("file_copy_concept_missing")
 
         name_rows = (
@@ -1009,7 +1013,7 @@ def _build_verify_representation_handler():
                 "#V#propositional_information_thing_has_computer_file",
                 file_copy_concept_id,
             )
-        if not file_link_verified:
+        if file_copy_concept_id and not file_link_verified:
             verification_failures.append("file_link_missing")
 
         has_name_signal = bool(name_rows) or bool(_clean_text((paper_doc or {}).get("name")))
@@ -1094,6 +1098,7 @@ def _build_verify_representation_handler():
                 "paper_concept_id": paper_concept_id,
                 "file_copy_concept_id": file_copy_concept_id,
                 "verification_profile": verification_profile,
+                "require_file_copy": require_file_copy,
                 "scholarly_representation_verified": verified,
                 "verification_failures": verification_failures,
                 "author_concept_ids": author_concept_ids,

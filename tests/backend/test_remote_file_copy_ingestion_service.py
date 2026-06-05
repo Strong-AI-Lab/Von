@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 
 class _StubResponse:
     def __init__(
@@ -161,13 +164,55 @@ def test_download_remote_file_copy_bytes_rejects_oversized_response(monkeypatch)
     assert session.closed is True
 
 
-def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
+def test_download_remote_file_copy_bytes_enforces_total_timeout(monkeypatch):
     from src.backend.services import remote_file_copy_ingestion_service as svc
 
     monkeypatch.setattr(
         svc,
-        "download_remote_file_copy_bytes",
-        lambda **_kwargs: {
+        "_validate_remote_target",
+        lambda url: {
+            "success": True,
+            "url": url,
+            "host": "example.com",
+            "resolved_addresses": ["198.51.100.20"],
+        },
+    )
+    response = _StubResponse(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        body_chunks=[b"late bytes"],
+        url="https://example.com/slow.pdf",
+    )
+    session = _StubSession([response])
+    monkeypatch.setattr(svc, "_create_requests_session", lambda: session)
+
+    ticks = iter([0.0, 0.0, 0.0, 2.0])
+    monkeypatch.setattr(svc.time, "monotonic", lambda: next(ticks, 2.0))
+
+    result = svc.download_remote_file_copy_bytes(
+        url="https://example.com/slow.pdf",
+        timeout_seconds=1,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "remote_file_copy_timeout"
+    assert result["timeout_seconds"] == 1.0
+    assert result["elapsed_seconds"] == 2.0
+    assert result["final_url"] == "https://example.com/slow.pdf"
+    assert result["status_code"] == 200
+    assert session.calls[0]["kwargs"]["timeout"] == (1.0, 1.0)
+    assert response.closed is True
+    assert session.closed is True
+
+
+def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
+    from src.backend.services import remote_file_copy_ingestion_service as svc
+
+    captured_download: dict[str, object] = {}
+
+    def _fake_download_remote_file_copy_bytes(**kwargs):
+        captured_download.update(kwargs)
+        return {
             "success": True,
             "requested_url": "https://example.com/paper",
             "final_url": "https://cdn.example.com/paper.pdf",
@@ -191,7 +236,12 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
                 "content_type": "application/pdf",
                 "content_disposition": 'attachment; filename="paper.pdf"',
             },
-        },
+        }
+
+    monkeypatch.setattr(
+        svc,
+        "download_remote_file_copy_bytes",
+        _fake_download_remote_file_copy_bytes,
     )
 
     captured: dict[str, object] = {}
@@ -224,9 +274,11 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
         organisation_concept_id="#V#org",
         namespace="#V#user@org",
         namespace_source="request.namespace",
+        timeout_seconds=12.5,
     )
 
     assert result["success"] is True
+    assert captured_download["timeout_seconds"] == 12.5
     assert captured["original_filename"] == "paper.pdf"
     assert captured["organisation_concept_id"] == "#V#org"
     assert captured["namespace"] == "#V#user@org"
@@ -243,3 +295,58 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     assert (
         result["content_type_resolution"]["effective_content_type"] == "application/pdf"
     )
+
+
+def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
+    from src.backend.services import remote_file_copy_ingestion_service as svc
+
+    monkeypatch.setattr(
+        svc,
+        "_configured_total_timeout_seconds",
+        lambda _override=None: 0.02,
+    )
+    monkeypatch.setattr(
+        svc,
+        "download_remote_file_copy_bytes",
+        lambda **_kwargs: {
+            "success": True,
+            "requested_url": "https://example.com/paper",
+            "final_url": "https://cdn.example.com/paper.pdf",
+            "redirects": [],
+            "hops": [{"url": "https://example.com/paper", "host": "example.com"}],
+            "status_code": 200,
+            "size_bytes": 7,
+            "data": b"pdfdata",
+            "original_filename": "paper.pdf",
+            "filename_source": "response.content_disposition",
+            "response_content_type": "application/pdf",
+            "content_type": "application/pdf",
+            "content_type_source": "response.content_type",
+            "response_headers": {"content_type": "application/pdf"},
+        },
+    )
+
+    worker_released = threading.Event()
+
+    def _slow_import_bytes_file_copy(**_kwargs):
+        time.sleep(0.1)
+        worker_released.set()
+        return {"success": True, "concept_id": "#V#late_file"}
+
+    monkeypatch.setattr(svc, "import_bytes_file_copy", _slow_import_bytes_file_copy)
+
+    result = svc.import_remote_url_file_copy(
+        url="https://example.com/paper",
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+        namespace_source="request.namespace",
+        timeout_seconds=0.02,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "remote_file_copy_timeout"
+    assert result["timeout_seconds"] == 0.02
+    assert result["requested_url"] == "https://example.com/paper"
+    assert result["response"]["status_code"] == 200
+    assert worker_released.wait(timeout=1.0)
