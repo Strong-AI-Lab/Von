@@ -796,6 +796,47 @@ def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
         concepts_coll.create_index([("relationships.has_instance", ASCENDING)])
     if "relationships.related_to_1" not in existing_indexes:
         concepts_coll.create_index([("relationships.related_to", ASCENDING)])
+    if "attributes_mcp_tool_name_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("attributes.mcp_tool_name", ASCENDING)],
+            name="attributes_mcp_tool_name_1",
+        )
+    if "relationships_v_has_initial_step_camel_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("relationships.#V#hasInitialStep", ASCENDING)],
+            name="relationships_v_has_initial_step_camel_1",
+        )
+    if "relationships_hasInitialStep_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("relationships.hasInitialStep", ASCENDING)],
+            name="relationships_hasInitialStep_1",
+        )
+    if "relationships_v_has_initial_step_snake_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("relationships.#V#has_initial_step", ASCENDING)],
+            name="relationships_v_has_initial_step_snake_1",
+        )
+    if "relationships_has_initial_step_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("relationships.has_initial_step", ASCENDING)],
+            name="relationships_has_initial_step_1",
+        )
+    if "relationships_v_evidence_view_applies_to_tool_1" not in existing_indexes:
+        concepts_coll.create_index(
+            [("relationships.#V#evidence_view_applies_to_tool", ASCENDING)],
+            name="relationships_v_evidence_view_applies_to_tool_1",
+        )
+    if "episode_critique_remediation_external_instance_lookup" not in existing_indexes:
+        concepts_coll.create_index(
+            [
+                (
+                    "metadata.external_references.episode_critique_remediation.external_id",
+                    ASCENDING,
+                ),
+                ("relationships.is_an_instance_of", ASCENDING),
+            ],
+            name="episode_critique_remediation_external_instance_lookup",
+        )
 
     if "metadata.concept_type_1" in existing_indexes:
         try:
@@ -834,10 +875,13 @@ def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
         concepts_coll.create_index([("timestamps.created_at", DESCENDING)])
     if "timestamps.updated_at_-1" not in existing_indexes:
         concepts_coll.create_index([("timestamps.updated_at", DESCENDING)])
+    if "updated_at_-1" not in existing_indexes:
+        concepts_coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
 def _ensure_text_values_indexes(coll: Collection) -> None:
     coll.create_index([("text", "text")], name="text_text_search")
+    coll.create_index([("text", ASCENDING)], name="text_1")
     coll.create_index([("lang", ASCENDING)], name="lang_1")
     coll.create_index(
         [("fingerprint", ASCENDING), ("lang", ASCENDING)],
@@ -873,6 +917,14 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
             "predicate": "#V#next_run_scheduled_for",
             "context.next_run_epoch_ms": {"$exists": True},
         },
+    )
+    coll.create_index(
+        [
+            ("context.name_type", ASCENDING),
+            ("predicate", ASCENDING),
+            ("text", ASCENDING),
+        ],
+        name="context_name_type_predicate_text",
     )
     coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
     coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")

@@ -123,8 +123,25 @@ def _ensure_indexes() -> None:
                 [("status", ASCENDING), ("lock_expires_at", ASCENDING)],
                 name="status_lock_expires",
             )
+        if "started_status_created_instance_lock" not in existing:
+            instances_coll.create_index(
+                [
+                    ("started_at", ASCENDING),
+                    ("status", ASCENDING),
+                    ("created_at", ASCENDING),
+                    ("instance_id", ASCENDING),
+                    ("lock_expires_at", ASCENDING),
+                ],
+                name="started_status_created_instance_lock",
+            )
 
         # User queries
+        if "created_at_desc" not in existing:
+            instances_coll.create_index(
+                [("created_at", DESCENDING)],
+                name="created_at_desc",
+            )
+
         if "user_created" not in existing:
             instances_coll.create_index(
                 [("user_id", ASCENDING), ("created_at", DESCENDING)],
@@ -145,6 +162,16 @@ def _ensure_indexes() -> None:
                     ("created_at", DESCENDING),
                 ],
                 name="namespace_status_created",
+            )
+        if "conversation_turn_namespace_created" not in existing:
+            instances_coll.create_index(
+                [
+                    ("inputs.conversation_session_id", ASCENDING),
+                    ("inputs.turn_id", ASCENDING),
+                    ("namespace", ASCENDING),
+                    ("created_at", DESCENDING),
+                ],
+                name="conversation_turn_namespace_created",
             )
 
         # Schedule association
