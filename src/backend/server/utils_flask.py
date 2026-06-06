@@ -2709,6 +2709,28 @@ def _build_health_check_response(app: Flask):
     )
 
 
+def _build_diagnostics_durable_workflow_status(app: Flask) -> dict[str, object]:
+    """Return durable workflow diagnostics without waking skipped runtimes."""
+
+    startup_status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS")
+    if _is_agent_test_instance():
+        return {
+            "available": False,
+            "state": "skipped_agent_test",
+            "source": "agent_test_startup_status",
+            "startup_status": (
+                startup_status if isinstance(startup_status, dict) else None
+            ),
+        }
+
+    try:
+        from ..workflows.durable.startup import get_system_status
+
+        return get_system_status()
+    except Exception as exc:
+        return {"error": str(exc), "available": False}
+
+
 def _describe_runtime_component(obj):
     if obj is None:
         return None
@@ -3587,12 +3609,7 @@ def _build_diagnostics_response(app: Flask):
             "error": type(exc).__name__,
         }
 
-    try:
-        from ..workflows.durable.startup import get_system_status
-
-        diag["durable_workflows"] = get_system_status()
-    except Exception as exc:
-        diag["durable_workflows"] = {"error": str(exc), "available": False}
+    diag["durable_workflows"] = _build_diagnostics_durable_workflow_status(app)
 
     gateway = app.config.get("INTERNAL_MCP_GATEWAY")
     if gateway is None:

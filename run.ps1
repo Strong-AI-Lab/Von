@@ -2514,18 +2514,54 @@ function Start-VonServer {
     if (Test-Path $NewLog) { Remove-Item $NewLog -Force -ErrorAction SilentlyContinue }
     if (Test-Path $serverErrLog) { Remove-Item $serverErrLog -Force -ErrorAction SilentlyContinue }
     try {
-        $startProcessArgs = @{
-            FilePath = $serverExe
-            ArgumentList = $serverArgs
-            WorkingDirectory = $Root
-            PassThru = $true
-            RedirectStandardOutput = $NewLog
-            RedirectStandardError = $serverErrLog
+        $usePythonDetachedLauncher = (-not $IsWindows) -and ($PSVersionTable.PSEdition -ne 'Desktop') -and $projectPython -and ($projectPython -ne 'python') -and (Test-Path $projectPython)
+        if ($usePythonDetachedLauncher) {
+            $launcherPayload = @{
+                executable = $serverExe
+                args = $serverArgs
+                cwd = $Root
+                stdout = $NewLog
+                stderr = $serverErrLog
+            } | ConvertTo-Json -Compress
+            $launcherScript = @'
+import json
+import subprocess
+import sys
+
+payload = json.loads(sys.stdin.read())
+stdout = open(payload["stdout"], "ab", buffering=0)
+stderr = open(payload["stderr"], "ab", buffering=0)
+process = subprocess.Popen(
+    [payload["executable"], *payload["args"]],
+    cwd=payload["cwd"],
+    stdin=subprocess.DEVNULL,
+    stdout=stdout,
+    stderr=stderr,
+    close_fds=True,
+    start_new_session=True,
+)
+print(process.pid)
+'@
+            $launchedPidText = ($launcherPayload | & $projectPython -c $launcherScript | Select-Object -Last 1)
+            if (-not $launchedPidText -or $launchedPidText -notmatch '^\d+$') {
+                throw "launcher did not return a child PID"
+            }
+            $proc = Get-Process -Id ([int]$launchedPidText) -ErrorAction Stop
         }
-        if ($IsWindows -or $PSVersionTable.PSEdition -eq 'Desktop') {
-            $startProcessArgs['WindowStyle'] = 'Hidden'
+        else {
+            $startProcessArgs = @{
+                FilePath = $serverExe
+                ArgumentList = $serverArgs
+                WorkingDirectory = $Root
+                PassThru = $true
+                RedirectStandardOutput = $NewLog
+                RedirectStandardError = $serverErrLog
+            }
+            if ($IsWindows -or $PSVersionTable.PSEdition -eq 'Desktop') {
+                $startProcessArgs['WindowStyle'] = 'Hidden'
+            }
+            $proc = Start-Process @startProcessArgs
         }
-        $proc = Start-Process @startProcessArgs
     }
     catch {
         Write-LauncherLog "ERROR: Failed to launch server process ($launchMode): $($_.Exception.Message)"
