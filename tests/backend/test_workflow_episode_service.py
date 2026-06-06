@@ -8,6 +8,7 @@ import pytest
 from src.backend.db.mongo_client import get_db
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.services import concept_service
+from src.backend.services import workflow_episode_service
 from src.backend.services.workflow_episode_service import (
     build_workflow_episode_stable_key,
     finalise_workflow_use_episode,
@@ -307,6 +308,105 @@ def test_namespace_equivalence_includes_user_only_and_default_legacy_forms():
         namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
     )
     assert counts[workflow_id] == 2
+
+
+def test_usage_aggregates_skip_episode_log_fallback_when_concept_aggregates_exist(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workflow_ids = ["#V#workflow_a", "#V#workflow_b"]
+
+    monkeypatch.setattr(
+        workflow_episode_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": workflow_ids[0],
+                "concept_data": {
+                    "workflow_use_aggregates": {
+                        "attempts": 3,
+                        "completions": 2,
+                        "completion_rate": 2 / 3,
+                        "last_episode_at": datetime(
+                            2026, 3, 5, 12, 0, tzinfo=timezone.utc
+                        ),
+                        "updated_at": datetime(
+                            2026, 3, 5, 12, 5, tzinfo=timezone.utc
+                        ),
+                    }
+                },
+            },
+            {
+                "concept_id": workflow_ids[1],
+                "concept_data": {
+                    "workflow_use_aggregates": {
+                        "attempts": 1,
+                        "completions": 1,
+                        "completion_rate": 1.0,
+                    }
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        workflow_episode_service,
+        "_get_collection",
+        lambda: pytest.fail("episode log aggregate fallback should not run"),
+    )
+
+    aggregates = get_workflow_usage_aggregates_for_workflows(workflow_ids)
+
+    assert aggregates[workflow_ids[0]]["attempts"] == 3
+    assert aggregates[workflow_ids[0]]["completions"] == 2
+    assert aggregates[workflow_ids[1]]["attempts"] == 1
+
+
+def test_usage_aggregates_fallback_queries_only_missing_concept_aggregates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    populated_id = "#V#workflow_populated"
+    missing_id = "#V#workflow_missing"
+    captured_pipeline = {}
+
+    class FakeCollection:
+        def aggregate(self, pipeline):
+            captured_pipeline["pipeline"] = pipeline
+            return [
+                {
+                    "_id": missing_id,
+                    "attempts": 4,
+                    "completions": 1,
+                    "last_episode_at": datetime(
+                        2026, 3, 5, 12, 10, tzinfo=timezone.utc
+                    ),
+                }
+            ]
+
+    monkeypatch.setattr(
+        workflow_episode_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": populated_id,
+                "concept_data": {
+                    "workflow_use_aggregates": {
+                        "attempts": 8,
+                        "completions": 8,
+                        "completion_rate": 1.0,
+                    }
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(workflow_episode_service, "_get_collection", lambda: FakeCollection())
+
+    aggregates = get_workflow_usage_aggregates_for_workflows([populated_id, missing_id])
+
+    assert captured_pipeline["pipeline"][0]["$match"] == {
+        "workflow_id": {"$in": [missing_id]}
+    }
+    assert aggregates[populated_id]["attempts"] == 8
+    assert aggregates[missing_id]["attempts"] == 4
+    assert aggregates[missing_id]["completion_rate"] == 0.25
 
 
 def test_get_latest_workflow_use_episode_returns_newest_session_episode():

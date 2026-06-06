@@ -12,6 +12,7 @@ import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,7 +30,7 @@ _JIRA_KEY = "JVNAUTOSCI-2428"
 _RELATED_JIRA_KEY = "JVNAUTOSCI-2427"
 _DEFAULT_BASE_URL = "https://cloud.mongodb.com"
 _DEFAULT_OAUTH_TOKEN_URL = "https://cloud.mongodb.com/api/oauth/token"
-_DEFAULT_ACCEPT_HEADER = "application/vnd.atlas.2024-08-05+json"
+_DEFAULT_ACCEPT_HEADER = "application/vnd.atlas.2025-03-12+json"
 
 _SUMMARY_ENDPOINT = (
     "/api/atlas/v2/groups/{group_id}/clusters/{cluster_name}"
@@ -442,16 +443,33 @@ def _multi_params(name: str, values: Iterable[str]) -> list[tuple[str, str]]:
     return params
 
 
+def _atlas_epoch_millis_param(value: str | None) -> str | None:
+    text = clean_env_value(value)
+    if not text:
+        return None
+    if re.fullmatch(r"\d+", text):
+        return text
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return str(int(dt.timestamp() * 1000))
+
+
 def build_query_insights_summary_params(
     filters: AtlasQueryInsightsFilters,
 ) -> list[tuple[str, str]]:
     params: list[tuple[str, str]] = [
         ("nSummaries", str(max(1, min(int(filters.max_results or 100), 100)))),
     ]
-    if filters.since:
-        params.append(("since", filters.since))
-    if filters.until:
-        params.append(("until", filters.until))
+    since = _atlas_epoch_millis_param(filters.since)
+    until = _atlas_epoch_millis_param(filters.until)
+    if since:
+        params.append(("since", since))
+    if until:
+        params.append(("until", until))
     params.extend(_multi_params("namespaces", filters.namespaces))
     params.extend(_multi_params("commands", filters.commands))
     params.extend(_multi_params("queryShapeHashes", filters.query_shape_hashes))
@@ -463,10 +481,12 @@ def build_query_shapes_params(
     filters: AtlasQueryInsightsFilters,
 ) -> list[tuple[str, str]]:
     params: list[tuple[str, str]] = []
-    if filters.since:
-        params.append(("since", filters.since))
-    if filters.until:
-        params.append(("until", filters.until))
+    since = _atlas_epoch_millis_param(filters.since)
+    until = _atlas_epoch_millis_param(filters.until)
+    if since:
+        params.append(("since", since))
+    if until:
+        params.append(("until", until))
     params.extend(_multi_params("namespaces", filters.namespaces))
     params.extend(_multi_params("commands", filters.commands))
     params.extend(_multi_params("queryShapeHashes", filters.query_shape_hashes))
@@ -657,6 +677,11 @@ def parse_query_insights_summaries(payload: Mapping[str, Any]) -> list[dict[str,
             "namespace": _namespace(raw),
             "command_name": _command_name(raw),
         }
+        shape_text = raw.get("queryShape")
+        if shape_text is not None:
+            row["shape_text_available"] = True
+            row["query_shape_text_redacted"] = redact_query_shape_text(shape_text)
+            row["shape_text_redaction"] = "literal_values_redacted"
         for canonical in _METRIC_ALIASES:
             value = _normalise_metric(raw, canonical)
             if canonical.endswith("_time_ms"):

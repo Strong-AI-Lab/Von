@@ -72,8 +72,8 @@ def test_summary_params_repeat_filters_and_cap_result_count() -> None:
     params = build_query_insights_summary_params(filters)
 
     assert params[0] == ("nSummaries", "100")
-    assert ("since", "2026-06-05T00:00:00Z") in params
-    assert ("until", "2026-06-05T01:00:00Z") in params
+    assert ("since", "1780617600000") in params
+    assert ("until", "1780621200000") in params
     assert params.count(("namespaces", "von_db.workflow_instances")) == 1
     assert params.count(("commands", "aggregate")) == 1
     assert params.count(("queryShapeHashes", "abc")) == 1
@@ -113,6 +113,7 @@ def test_client_builds_encoded_summary_url_and_redacted_bearer_request() -> None
     assert call["url"].endswith(
         "/api/atlas/v2/groups/group%201/clusters/Cluster%20A/queryShapeInsights/summaries"
     )
+    assert call["headers"]["Accept"] == "application/vnd.atlas.2025-03-12+json"
     assert call["headers"]["Authorization"] == "Bearer secret-token"
     assert ("nSummaries", "10") in call["params"]
     rendered = json.dumps(report, sort_keys=True)
@@ -182,6 +183,13 @@ def test_parser_accepts_direct_and_series_metrics_and_ranking_prefers_total_time
                     "queryShapeHash": "low-targeting",
                     "namespace": "von_db.workflow_selection_experiences",
                     "command": "find",
+                    "queryShape": {
+                        "find": "workflow_selection_experiences",
+                        "filter": {
+                            "session_id": "secret-session",
+                            "attempt": 42,
+                        },
+                    },
                     "totalExecutionTimeMs": 4442,
                     "executionCount": 1,
                     "docsExamined": 120,
@@ -215,6 +223,11 @@ def test_parser_accepts_direct_and_series_metrics_and_ranking_prefers_total_time
     assert ranked[0]["execution_count"] == 12000
     assert ranked[0]["docs_examined_per_returned"] == 200.0
     assert ranked[0]["p99_execution_time_ms"] == 80
+    assert rows[0]["shape_text_available"] is True
+    assert "secret-session" not in rows[0]["query_shape_text_redacted"]
+    assert "42" not in rows[0]["query_shape_text_redacted"]
+    assert "session_id" in rows[0]["query_shape_text_redacted"]
+    assert "<number>" in rows[0]["query_shape_text_redacted"]
 
 
 def test_query_shape_text_redacts_literal_values() -> None:

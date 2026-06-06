@@ -236,6 +236,33 @@ def _ensure_indexes() -> None:
                 [("session_id", ASCENDING), ("attempt_started_at", DESCENDING)],
                 name="session_attempted_at",
             )
+        if "workflow_namespace_attempted_at" not in existing:
+            coll.create_index(
+                [
+                    ("workflow_id", ASCENDING),
+                    ("namespace", ASCENDING),
+                    ("attempt_started_at", DESCENDING),
+                ],
+                name="workflow_namespace_attempted_at",
+            )
+        if "workflow_session_attempted_at" not in existing:
+            coll.create_index(
+                [
+                    ("workflow_id", ASCENDING),
+                    ("session_id", ASCENDING),
+                    ("attempt_started_at", DESCENDING),
+                ],
+                name="workflow_session_attempted_at",
+            )
+        if "workflow_turn_attempted_at" not in existing:
+            coll.create_index(
+                [
+                    ("workflow_id", ASCENDING),
+                    ("turn_id", ASCENDING),
+                    ("attempt_started_at", DESCENDING),
+                ],
+                name="workflow_turn_attempted_at",
+            )
     except OperationFailure as exc:
         logger.warning("[workflow_episode] Index creation partially failed: %s", exc)
     except Exception as exc:  # pragma: no cover - defensive
@@ -693,6 +720,7 @@ def get_workflow_usage_aggregates_for_workflows(
         "concept_id": 1,
         "concept_data.workflow_use_aggregates": 1,
     }
+    concept_aggregate_ids: set[str] = set()
     for doc in ConceptsRepository.find(
         {"concept_id": {"$in": unique_ids}},
         projection=projection,
@@ -714,6 +742,7 @@ def get_workflow_usage_aggregates_for_workflows(
         attempts = usage.get("attempts")
         completions = usage.get("completions")
         completion_rate = usage.get("completion_rate")
+        concept_aggregate_ids.add(concept_id)
         aggregate_map[concept_id] = {
             "attempts": int(attempts) if isinstance(attempts, (int, float)) else 0,
             "completions": (
@@ -729,10 +758,15 @@ def get_workflow_usage_aggregates_for_workflows(
         }
 
     # Fallback: derive from episode logs when concept aggregates are not populated.
-    coll = _get_collection()
+    fallback_ids = [
+        workflow_id
+        for workflow_id in unique_ids
+        if workflow_id not in concept_aggregate_ids
+    ]
+    coll = _get_collection() if fallback_ids else None
     if coll is not None:
         pipeline = [
-            {"$match": {"workflow_id": {"$in": unique_ids}}},
+            {"$match": {"workflow_id": {"$in": fallback_ids}}},
             {
                 "$group": {
                     "_id": "$workflow_id",
