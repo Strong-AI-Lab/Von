@@ -151,17 +151,14 @@ class AccessEvaluator:
                 {
                     **{f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
                     **{
-                        f"relationships.{p}": 1
-                        for p in SPECIFIC_TO_ORG_PREDICATES_READ
+                        f"relationships.{p}": 1 for p in SPECIFIC_TO_ORG_PREDICATES_READ
                     },
                 },
             )
             if doc:
                 rels = doc.get("relationships", {})
                 user_specific = _get_specific_to_user_values(rels) if rels else None
-                org_specific = (
-                    get_specific_to_org_values(rels) if rels else None
-                )
+                org_specific = get_specific_to_org_values(rels) if rels else None
                 if user_specific:
                     # Log user-specific concept access
                     _log.info(
@@ -179,6 +176,87 @@ class AccessEvaluator:
             else:
                 allowed = False
         self._cache[normalised] = allowed
+        return allowed
+
+    def accessible_concept_ids(self, concept_ids: Iterable[Any]) -> set[str]:
+        """Return accessible concept ids using the same semantics as can_access."""
+
+        normalised_ids = {
+            normalised
+            for concept_id in concept_ids
+            if (normalised := _normalise_concept_id(concept_id)) is not None
+        }
+        if not normalised_ids:
+            return set()
+        if not self.enforce:
+            for concept_id in normalised_ids:
+                self._cache[concept_id] = True
+            return set(normalised_ids)
+
+        allowed: set[str] = set()
+        uncached: set[str] = set()
+        for concept_id in normalised_ids:
+            cached = self._cache.get(concept_id)
+            if cached is True:
+                allowed.add(concept_id)
+                continue
+            if cached is False:
+                continue
+            if concept_id == self.user_id:
+                self._cache[concept_id] = True
+                allowed.add(concept_id)
+                continue
+            uncached.add(concept_id)
+
+        if uncached:
+            code_concepts: set[str] = set()
+            try:
+                from ..vontology.code_concepts_registry import is_code_concept_id
+
+                for concept_id in tuple(uncached):
+                    if is_code_concept_id(concept_id):
+                        code_concepts.add(concept_id)
+            except Exception:
+                code_concepts = set()
+            for concept_id in code_concepts:
+                self._cache[concept_id] = True
+                allowed.add(concept_id)
+                uncached.discard(concept_id)
+
+        if not uncached:
+            return allowed
+
+        coll = (
+            self._collection
+            if self._collection is not None
+            else get_concepts_collection()
+        )
+        self._collection = coll
+        if coll is None:
+            for concept_id in uncached:
+                self._cache[concept_id] = True
+            return allowed | uncached
+
+        projection = {
+            "concept_id": 1,
+            **{f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
+            **{f"relationships.{p}": 1 for p in SPECIFIC_TO_ORG_PREDICATES_READ},
+        }
+        seen: set[str] = set()
+        for doc in coll.find({"concept_id": {"$in": sorted(uncached)}}, projection):
+            if not isinstance(doc, dict):
+                continue
+            concept_id = _normalise_concept_id(doc.get("concept_id"))
+            if concept_id is None:
+                continue
+            seen.add(concept_id)
+            is_visible = _document_visible_to_actor(doc, self.user_id, self.org_id)
+            self._cache[concept_id] = is_visible
+            if is_visible:
+                allowed.add(concept_id)
+
+        for concept_id in uncached - seen:
+            self._cache[concept_id] = False
         return allowed
 
 
@@ -635,6 +713,11 @@ def sanitize_concept_document(
 def can_access_concept(concept_id: Any) -> bool:
     evaluator = _current_evaluator()
     return evaluator.can_access(concept_id)
+
+
+def filter_accessible_concept_ids(concept_ids: Iterable[Any]) -> set[str]:
+    evaluator = _current_evaluator()
+    return evaluator.accessible_concept_ids(concept_ids)
 
 
 def cache_scope_key() -> str:

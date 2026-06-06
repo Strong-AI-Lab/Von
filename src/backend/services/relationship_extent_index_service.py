@@ -9,6 +9,7 @@ unwinding every concept document.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -21,6 +22,7 @@ from ..db.mongo_client import (
 )
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import bypass_access_control, can_access_concept
+from ..security.access_control import filter_accessible_concept_ids
 from .concept_predicate_metadata_service import get_relationship_kinds_set
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,15 @@ RELATIONSHIP_EXTENT_INDEX_STATE_SETTING = "relationship_extent_index_state"
 RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION = 1
 _READINESS_CACHE: dict[str, Any] = {"ready": None, "checked_at": 0.0}
 _READINESS_CACHE_TTL_SECONDS = 10.0
+RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE = int(
+    os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE", "128")
+)
+RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN = int(
+    os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN", "128")
+)
+RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS = int(
+    os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS", "1200")
+)
 
 
 def _utc_now() -> datetime:
@@ -276,6 +287,40 @@ def rebuild_relationship_extent_index(
         return {"success": False, "status": "failed", "error_type": type(exc).__name__}
 
 
+def _build_relationship_extent_index_query(
+    *,
+    predicate_id: str | None = None,
+    target_value: str | None = None,
+    target_values: Iterable[str] | None = None,
+    source_concept_id: str | None = None,
+    exclude_structural_predicates: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    query: dict[str, Any] = {
+        "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+    }
+    if predicate_id:
+        query["predicate_id"] = predicate_id
+    if target_value:
+        query["target_value"] = target_value
+    elif target_values is not None:
+        values = [
+            item for item in target_values if isinstance(item, str) and item.strip()
+        ]
+        if not values:
+            return {}, False
+        query["target_value"] = {"$in": values}
+    if source_concept_id:
+        query["source_concept_id"] = source_concept_id
+    if exclude_structural_predicates:
+        if predicate_id and predicate_id in get_relationship_kinds_set():
+            return {}, False
+        predicate_filter: dict[str, Any] = {"$nin": list(get_relationship_kinds_set())}
+        if predicate_id:
+            predicate_filter["$eq"] = predicate_id
+        query["predicate_id"] = predicate_filter
+    return query, True
+
+
 def query_relationship_extent_index(
     *,
     predicate_id: str | None = None,
@@ -300,27 +345,15 @@ def query_relationship_extent_index(
     if coll is None:
         return [], -1
 
-    query: dict[str, Any] = {
-        "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
-    }
-    if predicate_id:
-        query["predicate_id"] = predicate_id
-    if target_value:
-        query["target_value"] = target_value
-    elif target_values is not None:
-        values = [item for item in target_values if isinstance(item, str) and item.strip()]
-        if not values:
-            return [], 0
-        query["target_value"] = {"$in": values}
-    if source_concept_id:
-        query["source_concept_id"] = source_concept_id
-    if exclude_structural_predicates:
-        if predicate_id and predicate_id in get_relationship_kinds_set():
-            return [], 0
-        predicate_filter: dict[str, Any] = {"$nin": list(get_relationship_kinds_set())}
-        if predicate_id:
-            predicate_filter["$eq"] = predicate_id
-        query["predicate_id"] = predicate_filter
+    query, should_query = _build_relationship_extent_index_query(
+        predicate_id=predicate_id,
+        target_value=target_value,
+        target_values=target_values,
+        source_concept_id=source_concept_id,
+        exclude_structural_predicates=exclude_structural_predicates,
+    )
+    if not should_query:
+        return [], 0
 
     cursor = coll.find(query)
     if sort:
@@ -332,6 +365,270 @@ def query_relationship_extent_index(
     docs = list(cursor)
     total = coll.count_documents(query) if count_total else len(docs)
     return docs, total
+
+
+def _incoming_row_from_index_doc(
+    item: Mapping[str, Any],
+    *,
+    target_concept_id: str,
+) -> dict[str, Any] | None:
+    source_concept_id = item.get("source_concept_id")
+    predicate_id = item.get("predicate_id")
+    target_value = item.get("target_value")
+    if not isinstance(source_concept_id, str) or not source_concept_id.strip():
+        return None
+    source_concept_id = source_concept_id.strip()
+    if not isinstance(predicate_id, str) or not predicate_id.strip():
+        return None
+    predicate_id = predicate_id.strip()
+    if target_value != target_concept_id:
+        return None
+    if source_concept_id == target_concept_id:
+        return None
+
+    updated_at = item.get("updated_at")
+    updated_at_value = (
+        updated_at.isoformat() if hasattr(updated_at, "isoformat") else None
+    )
+    target_index = int(item.get("target_index") or 0)
+    return {
+        "relation_id": (
+            f"struct::{source_concept_id}::{predicate_id}::incoming::{target_index}"
+        ),
+        "source": "structured",
+        "relation_kind": "binary",
+        "role": "arg2",
+        "predicate_id": predicate_id,
+        "arg1_value": source_concept_id,
+        "arg1_is_concept": source_concept_id.startswith("#V#"),
+        "arg2_value": target_value,
+        "arg2_is_concept": True,
+        "arg2_index": int(item.get("arg2_index") or target_index + 2),
+        "source_concept_id": source_concept_id,
+        "target_value": target_value,
+        "updated_at": updated_at_value,
+        "is_asserted": True,
+        "relation_state": "asserted",
+    }
+
+
+def _incoming_rows_from_index_docs(
+    docs: Sequence[Mapping[str, Any]],
+    *,
+    target_concept_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    source_ids: list[str] = []
+    row_candidates: list[tuple[Mapping[str, Any], str]] = []
+    for item in docs:
+        source_concept_id = item.get("source_concept_id")
+        target_value = item.get("target_value")
+        if (
+            isinstance(source_concept_id, str)
+            and source_concept_id.strip()
+            and target_value == target_concept_id
+            and source_concept_id.strip() != target_concept_id
+        ):
+            clean_source_id = source_concept_id.strip()
+            source_ids.append(clean_source_id)
+            row_candidates.append((item, clean_source_id))
+
+    accessible_source_ids = filter_accessible_concept_ids(source_ids)
+    rows: list[dict[str, Any]] = []
+    filtered_by_access = 0
+    for item, source_concept_id in row_candidates:
+        if source_concept_id not in accessible_source_ids:
+            filtered_by_access += 1
+            continue
+        row = _incoming_row_from_index_doc(
+            item,
+            target_concept_id=target_concept_id,
+        )
+        if row is not None:
+            rows.append(row)
+
+    return rows, {
+        "source_concepts_seen": len(set(source_ids)),
+        "rows_filtered_by_access": filtered_by_access,
+    }
+
+
+def incoming_dynamic_extent_rows_page_for_target(
+    target_concept_id: str,
+    *,
+    requested_predicate: str | None = None,
+    exclude_structural_predicates: bool = True,
+    visible_offset: int = 0,
+    visible_limit: int = 50,
+    batch_size: int | None = None,
+    max_index_rows_scanned: int | None = None,
+    time_budget_ms: int | None = None,
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    """Return a bounded visible incoming extent page from the derived index."""
+
+    clean_offset = max(0, int(visible_offset or 0))
+    clean_limit = max(1, int(visible_limit or 1))
+    clean_batch_size = max(
+        1,
+        int(batch_size or RELATIONSHIP_EXTENT_PAGE_BATCH_SIZE or 1),
+    )
+    clean_max_scan = max(
+        clean_batch_size,
+        int(max_index_rows_scanned or RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN or 1),
+    )
+    clean_time_budget_ms = max(
+        1,
+        int(time_budget_ms or RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS or 1),
+    )
+    wanted_visible = clean_offset + clean_limit + 1
+    rows: list[dict[str, Any]] = []
+    scanned = 0
+    access_checked: set[str] = set()
+    filtered_by_access = 0
+    batches = 0
+    source_exhausted = False
+    stop_reason: str | None = None
+    started_at = time.monotonic()
+
+    if not relationship_extent_index_ready():
+        return (
+            [],
+            False,
+            {
+                "used_extent_index": False,
+                "complete": False,
+                "bounded": False,
+                "reason": "extent_index_unavailable",
+            },
+        )
+    coll = get_relationship_extent_index_collection()
+    if coll is None:
+        return (
+            [],
+            False,
+            {
+                "used_extent_index": False,
+                "complete": False,
+                "bounded": False,
+                "reason": "extent_index_unavailable",
+            },
+        )
+    query, should_query = _build_relationship_extent_index_query(
+        predicate_id=requested_predicate,
+        target_value=target_concept_id,
+        exclude_structural_predicates=exclude_structural_predicates,
+    )
+    if not should_query:
+        return (
+            [],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": True,
+                "bounded": False,
+                "has_more": False,
+                "index_rows_scanned": 0,
+                "index_batches": 0,
+                "source_concepts_access_checked": 0,
+                "rows_filtered_by_access": 0,
+                "visible_rows_collected": 0,
+                "rows_returned": 0,
+                "visible_offset": clean_offset,
+                "visible_limit": clean_limit,
+                "batch_size": clean_batch_size,
+                "max_index_rows_scanned": clean_max_scan,
+                "time_budget_ms": clean_time_budget_ms,
+                "elapsed_ms": 0,
+            },
+        )
+
+    cursor = (
+        coll.find(query)
+        .sort([("predicate_id", 1), ("source_concept_id", 1), ("target_index", 1)])
+        .limit(clean_max_scan)
+        .batch_size(clean_batch_size)
+    )
+    pending_docs: list[Mapping[str, Any]] = []
+
+    def _process_pending_batch() -> None:
+        nonlocal batches, filtered_by_access
+        if not pending_docs:
+            return
+        batches += 1
+        batch_rows, batch_stats = _incoming_rows_from_index_docs(
+            pending_docs,
+            target_concept_id=target_concept_id,
+        )
+        rows.extend(batch_rows)
+        access_checked.update(
+            str(item.get("source_concept_id")).strip()
+            for item in pending_docs
+            if isinstance(item.get("source_concept_id"), str)
+            and str(item.get("source_concept_id")).strip()
+        )
+        filtered_by_access += int(batch_stats.get("rows_filtered_by_access") or 0)
+        pending_docs.clear()
+
+    try:
+        for item in cursor:
+            pending_docs.append(item)
+            scanned += 1
+            if len(pending_docs) < clean_batch_size and scanned < clean_max_scan:
+                continue
+            _process_pending_batch()
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            if len(rows) >= wanted_visible:
+                stop_reason = "visible_page_filled"
+                break
+            if scanned >= clean_max_scan:
+                stop_reason = "scan_cap_exhausted"
+                break
+            if elapsed_ms >= clean_time_budget_ms:
+                stop_reason = "time_budget_exhausted"
+                break
+        else:
+            source_exhausted = True
+        if pending_docs and len(rows) < wanted_visible:
+            _process_pending_batch()
+    except Exception:
+        logger.exception(
+            "Failed reading relationship extent index page for target=%s",
+            target_concept_id,
+        )
+        return (
+            [],
+            False,
+            {
+                "used_extent_index": False,
+                "complete": False,
+                "bounded": False,
+                "reason": "extent_index_query_failed",
+            },
+        )
+
+    has_more_visible = len(rows) > clean_offset + clean_limit
+    complete = source_exhausted
+    bounded = not complete
+    page_rows = rows[clean_offset : clean_offset + clean_limit]
+    diagnostics = {
+        "used_extent_index": True,
+        "complete": complete,
+        "bounded": bounded,
+        "has_more": has_more_visible or bounded,
+        "index_rows_scanned": scanned,
+        "index_batches": batches,
+        "source_concepts_access_checked": len(access_checked),
+        "rows_filtered_by_access": filtered_by_access,
+        "visible_rows_collected": len(rows),
+        "rows_returned": len(page_rows),
+        "visible_offset": clean_offset,
+        "visible_limit": clean_limit,
+        "batch_size": clean_batch_size,
+        "max_index_rows_scanned": clean_max_scan,
+        "time_budget_ms": clean_time_budget_ms,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "stop_reason": stop_reason or ("source_exhausted" if complete else None),
+    }
+    return page_rows, True, diagnostics
 
 
 def incoming_dynamic_extent_rows_for_target(
@@ -356,48 +653,26 @@ def incoming_dynamic_extent_rows_for_target(
     if total < 0:
         return [], False
 
-    rows: list[dict[str, Any]] = []
-    for item in docs:
-        source_concept_id = item.get("source_concept_id")
-        predicate_id = item.get("predicate_id")
-        target_value = item.get("target_value")
-        if not isinstance(source_concept_id, str) or not source_concept_id.strip():
-            continue
-        if not isinstance(predicate_id, str) or not predicate_id.strip():
-            continue
-        if target_value != target_concept_id:
-            continue
-        if source_concept_id == target_concept_id:
-            continue
-        try:
-            if not can_access_concept(source_concept_id):
+    try:
+        rows, _stats = _incoming_rows_from_index_docs(
+            docs,
+            target_concept_id=target_concept_id,
+        )
+    except Exception:
+        rows = []
+        for item in docs:
+            source_concept_id = item.get("source_concept_id")
+            if not isinstance(source_concept_id, str) or not source_concept_id.strip():
                 continue
-        except Exception:
-            continue
-        updated_at = item.get("updated_at")
-        updated_at_value = (
-            updated_at.isoformat() if hasattr(updated_at, "isoformat") else None
-        )
-        target_index = int(item.get("target_index") or 0)
-        rows.append(
-            {
-                "relation_id": (
-                    f"struct::{source_concept_id}::{predicate_id}::incoming::{target_index}"
-                ),
-                "source": "structured",
-                "relation_kind": "binary",
-                "role": "arg2",
-                "predicate_id": predicate_id,
-                "arg1_value": source_concept_id,
-                "arg1_is_concept": source_concept_id.startswith("#V#"),
-                "arg2_value": target_value,
-                "arg2_is_concept": True,
-                "arg2_index": int(item.get("arg2_index") or target_index + 2),
-                "source_concept_id": source_concept_id,
-                "target_value": target_value,
-                "updated_at": updated_at_value,
-                "is_asserted": True,
-                "relation_state": "asserted",
-            }
-        )
+            try:
+                if not can_access_concept(source_concept_id):
+                    continue
+            except Exception:
+                continue
+            row = _incoming_row_from_index_doc(
+                item,
+                target_concept_id=target_concept_id,
+            )
+            if row is not None:
+                rows.append(row)
     return rows, True

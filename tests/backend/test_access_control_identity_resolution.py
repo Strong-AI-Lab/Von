@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from flask import Flask
+import pytest
 
 
 class _FakeConceptCollection:
@@ -20,7 +21,9 @@ def test_validate_person_concept_uses_raw_exact_lookup(monkeypatch) -> None:
         concept_service,
         "get_concept_by_concept_id",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("identity validation should not use recursive concept resolution")
+            AssertionError(
+                "identity validation should not use recursive concept resolution"
+            )
         ),
         raising=False,
     )
@@ -28,7 +31,9 @@ def test_validate_person_concept_uses_raw_exact_lookup(monkeypatch) -> None:
         concept_service,
         "_find_concept_by_exact_concept_id",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("identity validation should not use finalised concept lookup")
+            AssertionError(
+                "identity validation should not use finalised concept lookup"
+            )
         ),
     )
     monkeypatch.setattr(
@@ -40,7 +45,10 @@ def test_validate_person_concept_uses_raw_exact_lookup(monkeypatch) -> None:
         },
     )
 
-    assert access_control._validate_person_concept("#V#michael_witbrock") == "#V#michael_witbrock"
+    assert (
+        access_control._validate_person_concept("#V#michael_witbrock")
+        == "#V#michael_witbrock"
+    )
 
 
 def test_get_effective_user_concept_id_caches_validated_header(monkeypatch) -> None:
@@ -64,12 +72,10 @@ def test_get_effective_user_concept_id_caches_validated_header(monkeypatch) -> N
         cache_token = access_control._HEADER_CACHE.set(None)
         try:
             assert (
-                access_control.get_effective_user_concept_id()
-                == "#V#michael_witbrock"
+                access_control.get_effective_user_concept_id() == "#V#michael_witbrock"
             )
             assert (
-                access_control.get_effective_user_concept_id()
-                == "#V#michael_witbrock"
+                access_control.get_effective_user_concept_id() == "#V#michael_witbrock"
             )
         finally:
             access_control._HEADER_CACHE.reset(cache_token)
@@ -88,13 +94,15 @@ def test_can_access_concept_respects_organisation_visibility(monkeypatch) -> Non
     )
     monkeypatch.setattr(access_control, "get_concepts_collection", lambda: collection)
 
-    with access_control.override_current_user("#V#member"), (
-        access_control.override_current_organisation("#V#sail")
+    with (
+        access_control.override_current_user("#V#member"),
+        access_control.override_current_organisation("#V#sail"),
     ):
         assert access_control.can_access_concept("#V#team_note") is True
 
-    with access_control.override_current_user("#V#member"), (
-        access_control.override_current_organisation("#V#other_org")
+    with (
+        access_control.override_current_user("#V#member"),
+        access_control.override_current_organisation("#V#other_org"),
     ):
         assert access_control.can_access_concept("#V#team_note") is False
 
@@ -113,13 +121,15 @@ def test_can_access_concept_uses_same_user_or_org_semantics(monkeypatch) -> None
     )
     monkeypatch.setattr(access_control, "get_concepts_collection", lambda: collection)
 
-    with access_control.override_current_user("#V#member"), (
-        access_control.override_current_organisation("#V#sail")
+    with (
+        access_control.override_current_user("#V#member"),
+        access_control.override_current_organisation("#V#sail"),
     ):
         assert access_control.can_access_concept("#V#mixed_scope_note") is True
 
-    with access_control.override_current_user("#V#member"), (
-        access_control.override_current_organisation("#V#other_org")
+    with (
+        access_control.override_current_user("#V#member"),
+        access_control.override_current_organisation("#V#other_org"),
     ):
         assert access_control.can_access_concept("#V#mixed_scope_note") is False
 
@@ -131,8 +141,9 @@ def test_visibility_filter_requires_no_user_or_org_restrictions_for_global() -> 
         SPECIFIC_TO_USER_PREDICATES,
     )
 
-    with access_control.override_current_user("#V#member"), (
-        access_control.override_current_organisation("#V#sail")
+    with (
+        access_control.override_current_user("#V#member"),
+        access_control.override_current_organisation("#V#sail"),
     ):
         visibility_filter = access_control.build_visibility_filter()
 
@@ -140,8 +151,7 @@ def test_visibility_filter_requires_no_user_or_org_restrictions_for_global() -> 
     clauses = visibility_filter["$or"]
     unrestricted_clause = clauses[0]
     unrestricted_fields = [
-        next(iter(part["$or"][0]))
-        for part in unrestricted_clause["$and"]
+        next(iter(part["$or"][0])) for part in unrestricted_clause["$and"]
     ]
     for predicate in (
         *SPECIFIC_TO_USER_PREDICATES,
@@ -150,3 +160,47 @@ def test_visibility_filter_requires_no_user_or_org_restrictions_for_global() -> 
         assert f"relationships.{predicate}" in unrestricted_fields
     assert {"relationships.specific_to_user": {"$in": ["#V#member"]}} in clauses
     assert {"relationships.specific_to_org": {"$in": ["#V#sail"]}} in clauses
+
+
+def test_filter_accessible_concept_ids_uses_batch_visibility_semantics(
+    monkeypatch,
+) -> None:
+    mongomock = pytest.importorskip("mongomock")
+    import src.backend.security.access_control as access_control
+
+    client = mongomock.MongoClient()
+    concepts = client.db.concepts
+    concepts.insert_many(
+        [
+            {"concept_id": "#V#global_note", "relationships": {}},
+            {
+                "concept_id": "#V#owner_note",
+                "relationships": {"specific_to_user": ["#V#owner"]},
+            },
+            {
+                "concept_id": "#V#team_note",
+                "relationships": {"specific_to_org": ["#V#sail"]},
+            },
+            {
+                "concept_id": "#V#other_note",
+                "relationships": {"specific_to_user": ["#V#other_user"]},
+            },
+        ]
+    )
+    monkeypatch.setattr(access_control, "get_concepts_collection", lambda: concepts)
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#sail",
+    ):
+        allowed = access_control.filter_accessible_concept_ids(
+            [
+                "#V#global_note",
+                "#V#owner_note",
+                "#V#team_note",
+                "#V#other_note",
+                "#V#missing_note",
+            ]
+        )
+
+    assert allowed == {"#V#global_note", "#V#owner_note", "#V#team_note"}

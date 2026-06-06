@@ -397,6 +397,83 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     assert rows[0]["arg2_value"] == "#V#focus"
 
 
+def test_relationship_extent_route_uses_bounded_incoming_index_page(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {"relations": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("unbounded incoming extent helper used")
+        ),
+    )
+
+    def _fake_page(*_args, **kwargs):
+        assert kwargs["visible_offset"] == 0
+        assert kwargs["visible_limit"] == 3
+        return (
+            [
+                {
+                    "relation_id": "struct::#V#other::#V#attended_event::incoming::0",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": "#V#attended_event",
+                    "arg1_value": "#V#other",
+                    "arg1_is_concept": True,
+                    "arg2_value": "#V#focus",
+                    "arg2_is_concept": True,
+                    "arg2_index": 2,
+                    "source_concept_id": "#V#other",
+                    "target_value": "#V#focus",
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+            ],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": False,
+                "bounded": True,
+                "has_more": True,
+                "index_rows_scanned": 128,
+                "source_concepts_access_checked": 100,
+                "rows_filtered_by_access": 99,
+                "rows_returned": 1,
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_page_for_target",
+        _fake_page,
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?"
+        "concept_id=%23V%23focus&role=arg2&source=structured&limit=2"
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["total_is_complete"] is False
+    assert payload["has_more"] is True
+    assert payload["extent_index"]["index_rows_scanned"] == 128
+    assert payload["rows"][0]["arg1_value"] == "#V#other"
+
+
 def test_relationship_extent_route_falls_back_before_extent_index_build(
     app_client, monkeypatch
 ):

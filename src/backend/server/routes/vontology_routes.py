@@ -52,6 +52,7 @@ from ...services.concept_service import (
 from ...services.text_value_service import get_texts_for_concept
 from ...services.concept_relation_service import build_concept_relations_payload
 from ...services.relationship_extent_index_service import (
+    incoming_dynamic_extent_rows_page_for_target,
     incoming_dynamic_extent_rows_for_target,
     relationship_extent_index_ready,
 )
@@ -3441,13 +3442,33 @@ def get_relationships_extent_route():
     )
     limit = _coerce_relationship_extent_limit(request.args.get("limit"))
     offset = _coerce_relationship_extent_offset(request.args.get("offset"))
+    wants_arg1 = role_filter in {"any", "arg1"}
+    wants_arg2 = role_filter in {"any", "arg2"}
+    wants_structured = source_filter in {"", "structured"}
+    wants_text_relations = source_filter in {"", "text_relations"}
+    wants_uncertain = source_filter in {"", "uncertain_assertions"}
+    incoming_index_ready = (
+        wants_arg2 and wants_structured and relationship_extent_index_ready()
+    )
+    wants_uncertain_payload = wants_uncertain and (
+        include_uncertain or bool(uncertainty_mode) or bool(uncertainty_statuses)
+    )
+    minimal_concept_lookup = (
+        incoming_index_ready
+        and wants_arg2
+        and not wants_arg1
+        and source_filter == "structured"
+        and not wants_text_relations
+        and not wants_uncertain_payload
+    )
 
     try:
         repo = ConceptsRepository
 
         def _find_by_identifier(ident: str):
+            projection = {"concept_id": 1} if minimal_concept_lookup else None
             if ident.startswith("#V#"):
-                doc = repo.find_one({"concept_id": ident})
+                doc = repo.find_one({"concept_id": ident}, projection)
                 if doc is not None:
                     return doc
                 # The stored concept_id is always lowercased canonical form.
@@ -3456,15 +3477,15 @@ def get_relationships_extent_route():
                 from ...utils.concept_id_utils import canonicalise_vontology_concept_id
                 canonical = canonicalise_vontology_concept_id(ident)
                 if canonical and canonical != ident:
-                    return repo.find_one({"concept_id": canonical})
+                    return repo.find_one({"concept_id": canonical}, projection)
                 return None
             if ObjectId:
                 try:
                     oid = ObjectId(ident)
-                    return repo.find_one({"_id": oid})
+                    return repo.find_one({"_id": oid}, projection)
                 except Exception:
                     pass
-            return repo.find_one({"concept_id": ident})
+            return repo.find_one({"concept_id": ident}, projection)
 
         concept_doc = _find_by_identifier(identifier)
         if not concept_doc:
@@ -3502,43 +3523,57 @@ def get_relationships_extent_route():
         concept_id = concept_id.strip()
 
         rows: list[dict[str, Any]] = []
-        wants_arg1 = role_filter in {"any", "arg1"}
-        wants_arg2 = role_filter in {"any", "arg2"}
-        wants_structured = source_filter in {"", "structured"}
-        wants_text_relations = source_filter in {"", "text_relations"}
-        wants_uncertain = source_filter in {"", "uncertain_assertions"}
-        incoming_index_ready = (
-            wants_arg2 and wants_structured and relationship_extent_index_ready()
-        )
-
-        base_payload = build_concept_relations_payload(
-            concept_doc,
-            include_relations_arg1=wants_arg1 and wants_structured,
-            include_relations_any_arg=(
-                wants_arg2 and wants_structured and not incoming_index_ready
-            ),
-            include_text_relations_arg1=wants_arg1 and wants_text_relations,
-            predicate_filter=[requested_predicate] if requested_predicate else None,
-            limit=_RELATIONSHIP_EXTENT_MAX_LIMIT,
-            offset=0,
-            include_concept_preview=False,
-            include_uncertain=include_uncertain and wants_uncertain,
-            uncertainty_mode=uncertainty_mode,
-            uncertainty_statuses=uncertainty_statuses or None,
-        )
-        for relation in base_payload.get("relations", []):
-            rows.extend(
-                _expand_relation_payload_entry_for_extent(relation, concept_id)
+        incoming_extent_index_diagnostics: dict[str, Any] | None = None
+        needs_base_payload = any(
+            (
+                wants_arg1 and wants_structured,
+                wants_arg2 and wants_structured and not incoming_index_ready,
+                wants_arg1 and wants_text_relations,
+                wants_uncertain_payload,
             )
+        )
+        if needs_base_payload:
+            base_payload = build_concept_relations_payload(
+                concept_doc,
+                include_relations_arg1=wants_arg1 and wants_structured,
+                include_relations_any_arg=(
+                    wants_arg2 and wants_structured and not incoming_index_ready
+                ),
+                include_text_relations_arg1=wants_arg1 and wants_text_relations,
+                predicate_filter=[requested_predicate] if requested_predicate else None,
+                limit=_RELATIONSHIP_EXTENT_MAX_LIMIT,
+                offset=0,
+                include_concept_preview=False,
+                include_uncertain=include_uncertain and wants_uncertain,
+                uncertainty_mode=uncertainty_mode,
+                uncertainty_statuses=uncertainty_statuses or None,
+            )
+            for relation in base_payload.get("relations", []):
+                rows.extend(
+                    _expand_relation_payload_entry_for_extent(relation, concept_id)
+                )
 
         # Supplement incoming dynamic predicates where this concept appears as arg2.
         # The derived index avoids unwinding every concept document on the hot path.
         if wants_arg2 and wants_structured:
-            indexed_rows, used_extent_index = incoming_dynamic_extent_rows_for_target(
-                concept_id,
-                requested_predicate=requested_predicate,
-                exclude_structural_predicates=False,
-            )
+            if incoming_index_ready:
+                indexed_rows, used_extent_index, incoming_extent_index_diagnostics = (
+                    incoming_dynamic_extent_rows_page_for_target(
+                        concept_id,
+                        requested_predicate=requested_predicate,
+                        exclude_structural_predicates=False,
+                        visible_offset=0,
+                        visible_limit=offset + limit + 1,
+                    )
+                )
+            else:
+                indexed_rows, used_extent_index = (
+                    incoming_dynamic_extent_rows_for_target(
+                        concept_id,
+                        requested_predicate=requested_predicate,
+                        exclude_structural_predicates=False,
+                    )
+                )
             rows.extend(indexed_rows)
             if not used_extent_index:
                 rows.extend(
@@ -3586,17 +3621,45 @@ def get_relationships_extent_route():
             )
         )
 
-        total = len(deduped_rows)
+        incoming_complete = not incoming_extent_index_diagnostics or bool(
+            incoming_extent_index_diagnostics.get("complete")
+        )
+        exact_total = len(deduped_rows)
         paged_rows = deduped_rows[offset : offset + limit]
+        has_more = exact_total > offset + limit
+        total_is_complete = incoming_complete
+        total = exact_total
+        if incoming_extent_index_diagnostics and not incoming_complete:
+            has_more = True
+            total = max(exact_total, offset + len(paged_rows) + 1)
+        if incoming_extent_index_diagnostics:
+            incoming_extent_index_diagnostics["rows_returned"] = len(paged_rows)
+            current_app.logger.info(
+                "[relationship_extent] concept=%s role=%s source=%s "
+                "index_rows_scanned=%s access_checked=%s access_filtered=%s "
+                "rows_returned=%s complete=%s bounded=%s",
+                concept_id,
+                role_filter,
+                source_filter or "any",
+                incoming_extent_index_diagnostics.get("index_rows_scanned"),
+                incoming_extent_index_diagnostics.get("source_concepts_access_checked"),
+                incoming_extent_index_diagnostics.get("rows_filtered_by_access"),
+                len(paged_rows),
+                incoming_extent_index_diagnostics.get("complete"),
+                incoming_extent_index_diagnostics.get("bounded"),
+            )
         return (
             jsonify(
                 {
                     "success": True,
                     "concept_id": concept_id,
                     "total": total,
+                    "total_is_complete": total_is_complete,
+                    "has_more": has_more,
                     "limit": limit,
                     "offset": offset,
                     "rows": paged_rows,
+                    "extent_index": incoming_extent_index_diagnostics,
                 }
             ),
             200,
