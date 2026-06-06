@@ -970,6 +970,37 @@ def test_blocking_build_runs_all_warm_queries(
     )
 
 
+def test_agent_test_build_loads_registry_entries_without_rag_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    registry = build_test_conversation_turn_registry()
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setattr(
+        capability_service,
+        "_warm_workflow_capability_query_surface",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("AgentTest startup must not warm the RAG query surface")
+        ),
+    )
+
+    index = capability_service._perform_workflow_capability_index_build(
+        mode="startup",
+        workflow_registry=registry,
+    )
+
+    assert index.size > 0
+    assert _fake_retrieval_backend.reset_calls == []
+    assert _fake_retrieval_backend.upsert_calls == []
+    assert _fake_retrieval_backend.queries == []
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state()
+    assert runtime_state["query_surface_ready"] is False
+    assert runtime_state["last_manifest_status"] == "agent_test_memory_only"
+
+
 def test_index_sync_trims_backend_document_metadata(
     _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
 ) -> None:

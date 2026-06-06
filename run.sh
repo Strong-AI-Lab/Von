@@ -516,6 +516,7 @@ fi
 
 export PYTHONPATH="${ROOT}"
 export PYTHONUNBUFFERED=1
+export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 export VON_SKIP_BROWSER_LAUNCH=1
@@ -702,7 +703,7 @@ should_run_interval() {
     return 0
 }
 
-health_ok() {
+get_health_payload() {
     local timeout=2
     if printf '%s' "${VON_HEALTH_HTTP_TIMEOUT:-}" | grep -qE '^[0-9]+$'; then
         if [ "$VON_HEALTH_HTTP_TIMEOUT" -gt 0 ] && [ "$VON_HEALTH_HTTP_TIMEOUT" -lt 61 ]; then
@@ -727,18 +728,22 @@ health_ok() {
         fi
         local url="http://${host}:${PORT}/health"
         if command -v curl >/dev/null 2>&1; then
-            local code
-            code="$(curl -sS --max-time "$timeout" -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"
-            if [ "$code" = "200" ]; then
+            local body
+            body="$(curl -fsS --max-time "$timeout" "$url" 2>/dev/null || true)"
+            if [ -n "$body" ]; then
+                printf '%s' "$body"
                 return 0
             fi
-            if [ "$HEALTH_DEBUG" -eq 1 ] && [ -n "$code" ]; then
-                log "Health attempt $url status=$code"
+            if [ "$HEALTH_DEBUG" -eq 1 ]; then
+                log "Health attempt failed $url"
             fi
             continue
         fi
         if command -v wget >/dev/null 2>&1; then
-            if wget -q -T "$timeout" -O /dev/null "$url" >/dev/null 2>&1; then
+            local body
+            body="$(wget -q -T "$timeout" -O - "$url" 2>/dev/null || true)"
+            if [ -n "$body" ]; then
+                printf '%s' "$body"
                 return 0
             fi
             if [ "$HEALTH_DEBUG" -eq 1 ]; then
@@ -748,6 +753,166 @@ health_ok() {
         fi
     done
     return 1
+}
+
+health_ok() {
+    get_health_payload >/dev/null
+}
+
+health_payload_field() {
+    local payload="$1"
+    local field="$2"
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    HEALTH_PAYLOAD="$payload" "$py" - "$field" <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+field = sys.argv[1]
+try:
+    payload = json.loads(os.environ.get("HEALTH_PAYLOAD", ""))
+except Exception:
+    raise SystemExit(1)
+
+value = payload.get(field)
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is not None:
+    print(value)
+else:
+    raise SystemExit(1)
+PY
+}
+
+agent_test_health_payload_valid() {
+    local payload="$1"
+    local log_failure="${2:-0}"
+    if [ -z "$payload" ]; then
+        if [ "$log_failure" = "1" ]; then
+            log "Agent test health read-back rejected: /health returned no JSON payload."
+        fi
+        return 1
+    fi
+
+    local marker
+    marker="$(health_payload_field "$payload" "agent_test_instance" || true)"
+    if [ "$marker" != "true" ]; then
+        if [ "$log_failure" = "1" ]; then
+            log "Agent test health read-back rejected: agent_test_instance marker was not true."
+        fi
+        return 1
+    fi
+
+    local listener
+    listener="$(get_listening_pid_by_port "$PORT" || true)"
+    if [ -z "$listener" ]; then
+        if [ "$log_failure" = "1" ]; then
+            log "Agent test health read-back rejected: no listener remained on port $PORT."
+        fi
+        return 1
+    fi
+
+    local payload_pid
+    payload_pid="$(health_payload_field "$payload" "pid" || true)"
+    if ! printf '%s' "$payload_pid" | grep -qE '^[0-9]+$'; then
+        if [ "$log_failure" = "1" ]; then
+            log "Agent test health read-back rejected: /health payload did not include a valid pid."
+        fi
+        return 1
+    fi
+    if [ "$payload_pid" != "$listener" ]; then
+        if [ "$log_failure" = "1" ]; then
+            log "Agent test health read-back rejected: /health pid $payload_pid did not match listener PID $listener."
+        fi
+        return 1
+    fi
+    return 0
+}
+
+launcher_health_ready() {
+    local log_failure="${1:-0}"
+    local payload
+    payload="$(get_health_payload || true)"
+    if [ -z "$payload" ]; then
+        if [ "$log_failure" = "1" ] && [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+            log "Agent test health read-back not ready: /health did not return a payload."
+        fi
+        return 1
+    fi
+    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+        agent_test_health_payload_valid "$payload" "$log_failure"
+        return $?
+    fi
+    return 0
+}
+
+confirm_health_stable() {
+    local attempts=4
+    local i=0
+    while [ "$i" -lt "$attempts" ]; do
+        sleep 0.5
+        if ! launcher_health_ready "$([ "$i" -eq $((attempts - 1)) ] && echo 1 || echo 0)"; then
+            return 1
+        fi
+        i=$((i + 1))
+    done
+    return 0
+}
+
+show_server_start_failure_tail() {
+    log "Showing last 40 log lines for startup diagnostics:"
+    if [ -f "$CURRENT_LOG" ]; then
+        local log_tail
+        log_tail="$(tail -n 40 "$CURRENT_LOG" 2>/dev/null || true)"
+        if [ -n "$log_tail" ]; then
+            printf '%s\n' "$log_tail"
+        fi
+    fi
+    if [ -f "$SERVER_ERR_LOG" ]; then
+        log "Last 40 stderr log lines:"
+        local err_tail
+        err_tail="$(tail -n 40 "$SERVER_ERR_LOG" 2>/dev/null || true)"
+        if [ -n "$err_tail" ]; then
+            printf '%s\n' "$err_tail"
+        fi
+    fi
+}
+
+launch_detached_process() {
+    local launcher_py="$1"
+    local stdout_log="$2"
+    local stderr_log="$3"
+    local working_dir="$4"
+    local executable="$5"
+    shift 5
+
+    "$launcher_py" - "$stdout_log" "$stderr_log" "$working_dir" "$executable" "$@" <<'PY'
+import subprocess
+import sys
+
+stdout_path = sys.argv[1]
+stderr_path = sys.argv[2]
+working_dir = sys.argv[3]
+executable = sys.argv[4]
+args = sys.argv[5:]
+
+stdout = open(stdout_path, "ab", buffering=0)
+stderr = open(stderr_path, "ab", buffering=0)
+process = subprocess.Popen(
+    [executable, *args],
+    cwd=working_dir,
+    stdin=subprocess.DEVNULL,
+    stdout=stdout,
+    stderr=stderr,
+    close_fds=True,
+    start_new_session=True,
+)
+print(process.pid)
+PY
 }
 
 open_browser() {
@@ -1343,12 +1508,39 @@ start_server() {
     rm -f "$NEW_LOG" "$SERVER_ERR_LOG" 2>/dev/null || true
     : > "$NEW_LOG" 2>/dev/null || true
     : > "$SERVER_ERR_LOG" 2>/dev/null || true
+
+    local server_exe="$py"
+    local server_args=()
     if [ "$launch_mode" = "pdm-fallback" ]; then
-        nohup "$py" run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>> "$SERVER_ERR_LOG" &
+        server_args=(run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT")
     else
-        nohup "$py" -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>> "$SERVER_ERR_LOG" &
+        server_args=(-u "${ROOT}/src/workflows/von/main.py" --port "$PORT")
     fi
-    local pid=$!
+
+    local detacher_py
+    detacher_py="$(python_cmd)"
+    local pid=""
+    if [ -n "$detacher_py" ]; then
+        pid="$(
+            launch_detached_process \
+                "$detacher_py" \
+                "$NEW_LOG" \
+                "$SERVER_ERR_LOG" \
+                "$ROOT" \
+                "$server_exe" \
+                "${server_args[@]}" \
+                2>>"$SERVER_ERR_LOG" \
+            || true
+        )"
+        if ! printf '%s' "$pid" | grep -qE '^[0-9]+$'; then
+            log "ERROR: Detached launcher did not return a child PID. Showing stderr:"
+            show_server_start_failure_tail
+            return 1
+        fi
+    else
+        nohup "$server_exe" "${server_args[@]}" >> "$NEW_LOG" 2>> "$SERVER_ERR_LOG" &
+        pid=$!
+    fi
     log "Launched PID=$pid. Logs: $NEW_LOG ; stderr: $SERVER_ERR_LOG"
     write_pidfile "$pid"
 
@@ -1413,7 +1605,7 @@ start_server() {
                 listening_logged=1
             fi
 
-            if health_ok; then
+            if launcher_health_ready 0; then
                 healthy=1
                 break
             fi
@@ -1421,9 +1613,15 @@ start_server() {
                 log "Health not ready yet (attempt ${attempt}/${max_attempts})"
             fi
             if log_ready "$CURRENT_LOG"; then
-                log "Detected readiness log pattern; marking healthy (log shortcut)."
-                healthy=1
-                break
+                if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+                    if [ "$HEALTH_DEBUG" -eq 1 ]; then
+                        log "Detected readiness log pattern; Agent test mode still requires /health marker read-back."
+                    fi
+                else
+                    log "Detected readiness log pattern; marking healthy (log shortcut)."
+                    healthy=1
+                    break
+                fi
             fi
             attempt=$((attempt + 1))
         done
@@ -1434,7 +1632,7 @@ start_server() {
             local g=0
             while [ "$g" -lt "$grace_attempts" ] && [ "$healthy" -ne 1 ]; do
                 sleep 0.5
-                if health_ok; then
+                if launcher_health_ready 0; then
                     healthy=1
                     break
                 fi
@@ -1442,9 +1640,15 @@ start_server() {
                     log "Grace wait health not ready ($((g / 2))s/${HEALTH_GRACE_SEC}s)"
                 fi
                 if log_ready "$CURRENT_LOG"; then
-                    log "Detected readiness log pattern during grace; marking healthy (log shortcut)."
-                    healthy=1
-                    break
+                    if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+                        if [ "$HEALTH_DEBUG" -eq 1 ]; then
+                            log "Detected readiness log pattern during grace; Agent test mode still requires /health marker read-back."
+                        fi
+                    else
+                        log "Detected readiness log pattern during grace; marking healthy (log shortcut)."
+                        healthy=1
+                        break
+                    fi
                 fi
                 if [ $((g % 10)) -eq 0 ]; then
                     log "Still waiting for /health... $((g / 2))s/${HEALTH_GRACE_SEC}s grace"
@@ -1453,12 +1657,29 @@ start_server() {
             done
         fi
 
+        if [ "$healthy" -eq 1 ] && ! confirm_health_stable; then
+            healthy=0
+            log "ERROR: /health read-back did not remain stable after initial readiness."
+            if ! process_exists "$pid"; then
+                remove_pidfile
+            fi
+            show_server_start_failure_tail
+            return 1
+        fi
+
         if [ "$healthy" -eq 1 ]; then
             log "Server healthy (http://localhost:$PORT)"
             open_browser_if_needed
         elif [ "$listening_logged" -eq 1 ]; then
-            log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
-            log_mongo_status
+            if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
+                launcher_health_ready 1 || true
+                log "ERROR: Agent test port is listening but /health marker read-back did not validate in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s."
+                show_server_start_failure_tail
+                return 1
+            else
+                log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
+                log_mongo_status
+            fi
         else
             log "WARNING: Server not healthy after initial ${HEALTH_TIMEOUT_SEC}s (port not listening); check logs: $CURRENT_LOG and $SERVER_ERR_LOG"
         fi

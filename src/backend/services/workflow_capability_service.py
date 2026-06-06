@@ -51,6 +51,14 @@ def _get_positive_float_env(name: str, default: float) -> float:
         return float(default)
     return parsed if parsed > 0.0 else float(default)
 
+
+def _truthy_env_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _is_agent_test_instance() -> bool:
+    return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
 # -------------------------------------------------------------------------
 # Retired Python capability overrides.
 #
@@ -861,6 +869,45 @@ class WorkflowCapabilityIndex:
             "(%d eager, %d lazy), skipped_non_authoritative=%d "
             "skipped_missing_authoritative_text=%d "
             "skipped_invalid_workflow_id=%d",
+            count,
+            int(diagnostics.get("eager_count") or 0),
+            int(diagnostics.get("lazy_count") or 0),
+            int(diagnostics.get("skipped_non_authoritative") or 0),
+            int(diagnostics.get("skipped_missing_authoritative_text") or 0),
+            int(diagnostics.get("skipped_invalid_workflow_id") or 0),
+        )
+        return count
+
+    def load_entries_from_registry_without_rag_sync(
+        self,
+        registry: Any,
+        *,
+        mode: str | None = None,
+    ) -> int:
+        """Load authoritative workflow entries into process memory only.
+
+        AgentTest uses repo-seed workflow definitions and deterministic replay
+        support. It needs the same represented capability entries, but should
+        not wake persisted vector-index loading during server startup.
+        """
+
+        pending_entries, diagnostics = self._entries_from_registry(registry)
+        with self._lock:
+            self._entries = dict(pending_entries)
+
+        count = len(pending_entries)
+        _set_workflow_capability_manifest_state(
+            status="agent_test_memory_only",
+            detail=(
+                "Loaded AgentTest workflow capability entries from the "
+                "authoritative repo-seed registry without RAG sync or persisted "
+                "namespace warm-up."
+            ),
+        )
+        logger.info(
+            "[workflow_capability_index] AgentTest loaded %d workflow entries "
+            "in memory only (%d eager, %d lazy), skipped_non_authoritative=%d "
+            "skipped_missing_authoritative_text=%d skipped_invalid_workflow_id=%d",
             count,
             int(diagnostics.get("eager_count") or 0),
             int(diagnostics.get("lazy_count") or 0),
@@ -2121,18 +2168,27 @@ def _perform_workflow_capability_index_build(
             "load_from_persisted_namespace_if_current",
             None,
         )
-        if not force_refresh and callable(load_from_persisted):
+        agent_test_memory_only = _is_agent_test_instance()
+        if agent_test_memory_only:
+            count = index.load_entries_from_registry_without_rag_sync(
+                registry,
+                mode=mode,
+            )
+        elif not force_refresh and callable(load_from_persisted):
             loaded_from_manifest = bool(load_from_persisted(registry))
 
-        if loaded_from_manifest:
-            count = index.size
-        else:
-            try:
-                count = index.index_from_registry(registry, mode=mode)
-            except TypeError:
-                count = index.index_from_registry(registry)
-        if count > 0:
+        if not agent_test_memory_only:
+            if loaded_from_manifest:
+                count = index.size
+            else:
+                try:
+                    count = index.index_from_registry(registry, mode=mode)
+                except TypeError:
+                    count = index.index_from_registry(registry)
+        if count > 0 and not agent_test_memory_only:
             _warm_workflow_capability_query_surface(index, mode=mode)
+        elif count > 0:
+            _set_workflow_capability_query_surface_state(ready=False, error=None)
         success_monotonic = time.monotonic()
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
@@ -2152,7 +2208,13 @@ def _perform_workflow_capability_index_build(
         logger.info(
             "[workflow_capability_index] %s %s completed with %d entries.",
             mode,
-            "manifest load" if loaded_from_manifest else "build",
+            (
+                "agent-test memory load"
+                if agent_test_memory_only
+                else "manifest load"
+                if loaded_from_manifest
+                else "build"
+            ),
             count,
         )
         return index
