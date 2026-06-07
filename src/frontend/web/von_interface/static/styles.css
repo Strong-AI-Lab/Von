@@ -2810,6 +2810,20 @@ body {
     background-color: var(--von-tab-bg-hover);
 }
 
+.tab-button.is-loading::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 0;
+    height: 2px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0), rgba(37, 99, 235, 0.72), rgba(20, 184, 166, 0.72), rgba(37, 99, 235, 0));
+    background-size: 180% 100%;
+    animation: concept-tab-loading-sweep 1.25s ease-in-out infinite;
+    pointer-events: none;
+}
+
 .tab-button:focus-visible {
     outline: 2px solid var(--von-tab-focus-colour);
     outline-offset: 2px;
@@ -6314,6 +6328,90 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     /* Force full width */
     min-height: 400px !important;
     /* Force minimum height */
+    position: relative;
+}
+
+.tab-content.concept-tab-loading {
+    overflow-x: hidden;
+    overflow-y: visible;
+}
+
+.tab-content.concept-tab-loading::before {
+    content: "";
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    left: 30px;
+    right: 30px;
+    height: 2px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.18);
+    pointer-events: none;
+}
+
+.tab-content.concept-tab-loading::after {
+    content: "";
+    position: absolute;
+    z-index: 4;
+    top: 0;
+    left: 30px;
+    right: 30px;
+    height: 2px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0), #2563eb 36%, #14b8a6 52%, rgba(20, 184, 166, 0) 72%);
+    background-repeat: no-repeat;
+    background-size: 42% 100%;
+    box-shadow: 0 0 8px rgba(37, 99, 235, 0.22);
+    animation: concept-tab-loading-track 1.18s ease-in-out infinite;
+    pointer-events: none;
+}
+
+.concept-tab-loading-shell {
+    min-height: 120px;
+}
+
+@keyframes concept-tab-loading-track {
+    0% {
+        background-position: -50% 0;
+        opacity: 0.58;
+    }
+
+    50% {
+        opacity: 1;
+    }
+
+    100% {
+        background-position: 150% 0;
+        opacity: 0.58;
+    }
+}
+
+@keyframes concept-tab-loading-sweep {
+    0% {
+        background-position: 120% 0;
+        opacity: 0.55;
+    }
+
+    50% {
+        opacity: 0.95;
+    }
+
+    100% {
+        background-position: -120% 0;
+        opacity: 0.55;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tab-content.concept-tab-loading::after,
+    .tab-button.is-loading::after {
+        animation: none;
+    }
+
+    .tab-content.concept-tab-loading::after {
+        background-size: 35% 100%;
+        opacity: 0.75;
+    }
 }
 
 /* ADDED: Ensure active tab is displayed */
