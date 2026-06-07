@@ -40,6 +40,8 @@ const OPEN_CONCEPT_TABS_STORAGE_VERSION = 2;
 const MAX_RESTORE_NOTICE_ITEMS = 3;
 const CONCEPT_TAB_BUCKET_ORDER = ['type', 'individual', 'predicate'];
 const CONCEPT_TAB_KIND_CLASS_NAMES = ['type-tab', 'individual-tab', 'predicate-tab'];
+const CONCEPT_TAB_LOADING_CLASS = 'concept-tab-loading';
+const CONCEPT_TAB_BUTTON_LOADING_CLASS = 'is-loading';
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
@@ -47,6 +49,7 @@ let lastContextMenuOpenAt = 0;
 let lastContextMenuTriggerEl = null;
 let suppressConceptTabPersistence = false;
 let dynamicConceptTabRecencyCounter = 0;
+let conceptTabLoadingSequence = 0;
 const expandedConceptTabBuckets = new Set();
 
 function getOpenConceptTabsStorageKey(namespace = null) {
@@ -216,6 +219,71 @@ function applyConceptTabKindPresentation(element, kind) {
     }
     element.dataset.tabKind = normalisedKind;
     element.dataset.tabBucketKind = getConceptTabBucketKind(normalisedKind);
+}
+
+function getConceptTabLoadingLabel(tabInfo, fallback = null) {
+    const conceptName = fallback || tabInfo?.conceptName || tabInfo?.conceptId || 'concept';
+    return `Loading concept tab for ${conceptName}`;
+}
+
+function applyConceptTabLoadingPresentation(tabInfo, loading, label = null) {
+    if (!tabInfo) return;
+
+    const content = tabInfo.content;
+    const button = tabInfo.button;
+    if (content) {
+        if (loading) {
+            if (!Object.prototype.hasOwnProperty.call(content.dataset, 'previousAriaLabel')) {
+                content.dataset.previousAriaLabel = content.getAttribute('aria-label') || '';
+            }
+            content.classList.add(CONCEPT_TAB_LOADING_CLASS);
+            content.dataset.loading = 'true';
+            content.setAttribute('aria-busy', 'true');
+            content.setAttribute('aria-label', label || getConceptTabLoadingLabel(tabInfo));
+        } else {
+            content.classList.remove(CONCEPT_TAB_LOADING_CLASS);
+            delete content.dataset.loading;
+            content.removeAttribute('aria-busy');
+            if (Object.prototype.hasOwnProperty.call(content.dataset, 'previousAriaLabel')) {
+                const previousLabel = content.dataset.previousAriaLabel;
+                if (previousLabel) {
+                    content.setAttribute('aria-label', previousLabel);
+                } else {
+                    content.removeAttribute('aria-label');
+                }
+                delete content.dataset.previousAriaLabel;
+            }
+        }
+    }
+
+    if (button) {
+        if (loading) {
+            button.classList.add(CONCEPT_TAB_BUTTON_LOADING_CLASS);
+            button.setAttribute('aria-busy', 'true');
+        } else {
+            button.classList.remove(CONCEPT_TAB_BUTTON_LOADING_CLASS);
+            button.removeAttribute('aria-busy');
+        }
+    }
+}
+
+export function beginConceptTabLoading(conceptId, options = {}) {
+    const tabInfo = dynamicConceptTabs.get(conceptId);
+    if (!tabInfo) return null;
+    const token = `concept-tab-loading-${++conceptTabLoadingSequence}`;
+    tabInfo.loadingToken = token;
+    applyConceptTabLoadingPresentation(tabInfo, true, options.label);
+    return token;
+}
+
+export function endConceptTabLoading(conceptId, token = null) {
+    const tabInfo = dynamicConceptTabs.get(conceptId);
+    if (!tabInfo) return;
+    if (token && tabInfo.loadingToken && tabInfo.loadingToken !== token) {
+        return;
+    }
+    delete tabInfo.loadingToken;
+    applyConceptTabLoadingPresentation(tabInfo, false);
 }
 
 function createConceptTabBucketToggle(kind, hiddenCount) {
@@ -1658,8 +1726,7 @@ function createTabContent(tabId, conceptId, kind) {
     tabContent.dataset.conceptId = conceptId;
     applyConceptTabKindPresentation(tabContent, kind);
 
-    // Add loading state initially
-    tabContent.innerHTML = '<div class="loading">Loading concept interface...</div>';
+    tabContent.innerHTML = '<div class="concept-tab-loading-shell" aria-hidden="true"></div>';
 
     return tabContent;
 }
@@ -1869,6 +1936,12 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
         return;
     }
 
+    if (tabInfo.loadingPromise) {
+        return tabInfo.loadingPromise;
+    }
+
+    const loadingToken = beginConceptTabLoading(conceptId);
+    tabInfo.loadingPromise = (async () => {
     try {
         const initialBucketKind = getConceptTabBucketKind(tabInfo.kind);
         // Fetch the concept tab template
@@ -2003,14 +2076,11 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
         // Initialize the concept tab functionality with unique element IDs.
         // Run on the next microtask so the cloned template is present without
         // adding a visible fixed delay to newly opened concept tabs.
-        Promise.resolve().then(() => {
-            console.log(`[dynamicTabs] Initializing concept tab functionality for ${conceptId}`);
-            initializeDynamicConceptTab(conceptId, uniqueIdSuffix);
-            // Attach MutationObserver fallback for name changes (only once content likely rendered)
-            try { attachNamesObserver(conceptId, uniqueIdSuffix); } catch (_) { }
-            // Backfill note glyphs after potential notes render
-            try { backfillNoteGlyphs(tabInfo.content); } catch (e) { console.warn('[dynamicTabs] backfillNoteGlyphs post-init failed', e); }
-        });
+        await Promise.resolve();
+        console.log(`[dynamicTabs] Initializing concept tab functionality for ${conceptId}`);
+        await initializeDynamicConceptTab(conceptId, uniqueIdSuffix);
+        try { attachNamesObserver(conceptId, uniqueIdSuffix); } catch (_) { }
+        try { backfillNoteGlyphs(tabInfo.content); } catch (e) { console.warn('[dynamicTabs] backfillNoteGlyphs post-init failed', e); }
 
         // Post-load safety: if legacy description button still present without upgraded actions, trigger ensure
         try {
@@ -2029,7 +2099,13 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
     } catch (error) {
         console.error(`[dynamicTabs] Error loading content for ${tabId}:`, error);
         tabInfo.content.innerHTML = `<div class="error">Error loading concept tab content. Please try again.</div>`;
+    } finally {
+        delete tabInfo.loadingPromise;
+        endConceptTabLoading(conceptId, loadingToken);
     }
+    })();
+
+    return tabInfo.loadingPromise;
 }
 /**
  * Generates a unique tab ID from a concept ID
@@ -2308,18 +2384,15 @@ async function copyConceptIdToClipboard(conceptId) {
  */
 async function reloadConceptTab(conceptId) {
     console.log(`[dynamicTabs] Reloading concept tab: ${conceptId}`);
+    const tabInfo = dynamicConceptTabs.get(conceptId);
+    const loadingToken = beginConceptTabLoading(conceptId, {
+        label: getConceptTabLoadingLabel(tabInfo, tabInfo?.conceptName || conceptId)
+    });
 
     try {
         // Calculate the suffix used for this tab's DOM elements
         const suffix = makeUniqueDomSuffix(conceptId);
-        const kind = (dynamicConceptTabs.get(conceptId) || {}).kind;
-
-        // Show loading state on both tab button and refresh icon
-        const tabButton = document.querySelector(`[data-tab-id="${conceptId}"] .tab-name`);
-        const originalText = tabButton?.textContent;
-        if (tabButton) {
-            tabButton.textContent = '🔄 Reloading...';
-        }
+        const kind = (tabInfo || {}).kind;
 
         // Add loading animation to refresh button icon
         const refreshButton = document.getElementById(`refreshConceptButton_${suffix}`);
@@ -2379,11 +2452,6 @@ async function reloadConceptTab(conceptId) {
 
         console.log(`[dynamicTabs] Concept tab reloaded successfully: ${conceptId}`);
 
-        // Restore button text
-        if (tabButton && originalText) {
-            tabButton.textContent = originalText;
-        }
-
         // Remove loading animation from refresh button
         if (refreshButton) {
             refreshButton.classList.remove('loading');
@@ -2392,16 +2460,6 @@ async function reloadConceptTab(conceptId) {
 
     } catch (error) {
         console.error(`[dynamicTabs] Failed to reload concept tab:`, error);
-
-        // Show error in UI
-        const tabButton = document.querySelector(`[data-tab-id="${conceptId}"] .tab-name`);
-        if (tabButton) {
-            const originalText = tabButton.textContent.replace('🔄 Reloading...', '').replace('❌ ', '');
-            tabButton.textContent = `❌ ${originalText}`;
-            setTimeout(() => {
-                if (tabButton) tabButton.textContent = originalText;
-            }, 2000);
-        }
 
         // Remove loading animation from refresh button on error
         const suffix = makeUniqueDomSuffix(conceptId);
@@ -2412,7 +2470,9 @@ async function reloadConceptTab(conceptId) {
         }
 
         // Show user-friendly error message
-        alert(`Failed to reload concept: ${error.message}`);
+        showToast(`Failed to reload concept: ${error.message}`, 'error');
+    } finally {
+        endConceptTabLoading(conceptId, loadingToken);
     }
 }
 

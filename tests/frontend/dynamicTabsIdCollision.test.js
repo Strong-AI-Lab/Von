@@ -97,6 +97,65 @@ describe('dynamic concept tab IDs', () => {
         const contentIds = contents.map((el) => el.id);
         expect(new Set(contentIds).size).toBe(2);
     });
+
+    test('marks and clears concept tab loading state accessibly', () => {
+        const {
+            beginConceptTabLoading,
+            createOrActivateConceptTab,
+            endConceptTabLoading
+        } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#slow_concept', 'Slow Concept', false, { kind: 'type' });
+
+        const tabButton = document.querySelector('.tab-button.closable[data-concept-id="#V#slow_concept"]');
+        const tabContent = document.querySelector('.tab-content[data-concept-id="#V#slow_concept"]');
+        expect(tabButton).not.toBeNull();
+        expect(tabContent).not.toBeNull();
+
+        tabContent.setAttribute('aria-label', 'Slow Concept details');
+        const token = beginConceptTabLoading('#V#slow_concept');
+
+        expect(token).toBeTruthy();
+        expect(tabContent.classList.contains('concept-tab-loading')).toBe(true);
+        expect(tabContent.dataset.loading).toBe('true');
+        expect(tabContent.getAttribute('aria-busy')).toBe('true');
+        expect(tabContent.getAttribute('aria-label')).toBe('Loading concept tab for Slow Concept');
+        expect(tabButton.classList.contains('is-loading')).toBe(true);
+        expect(tabButton.getAttribute('aria-busy')).toBe('true');
+
+        endConceptTabLoading('#V#slow_concept', token);
+
+        expect(tabContent.classList.contains('concept-tab-loading')).toBe(false);
+        expect(tabContent.dataset.loading).toBeUndefined();
+        expect(tabContent.getAttribute('aria-busy')).toBeNull();
+        expect(tabContent.getAttribute('aria-label')).toBe('Slow Concept details');
+        expect(tabButton.classList.contains('is-loading')).toBe(false);
+        expect(tabButton.getAttribute('aria-busy')).toBeNull();
+    });
+
+    test('keeps newer concept tab loading token active when an older load finishes', () => {
+        const {
+            beginConceptTabLoading,
+            createOrActivateConceptTab,
+            endConceptTabLoading
+        } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#overlap', 'Overlap', false, { kind: 'individual' });
+
+        const tabContent = document.querySelector('.tab-content[data-concept-id="#V#overlap"]');
+        expect(tabContent).not.toBeNull();
+
+        const firstToken = beginConceptTabLoading('#V#overlap');
+        const secondToken = beginConceptTabLoading('#V#overlap');
+
+        endConceptTabLoading('#V#overlap', firstToken);
+        expect(tabContent.classList.contains('concept-tab-loading')).toBe(true);
+        expect(tabContent.getAttribute('aria-busy')).toBe('true');
+
+        endConceptTabLoading('#V#overlap', secondToken);
+        expect(tabContent.classList.contains('concept-tab-loading')).toBe(false);
+        expect(tabContent.getAttribute('aria-busy')).toBeNull();
+    });
 });
 
 describe('relationship dropdown enter selection precedence', () => {
