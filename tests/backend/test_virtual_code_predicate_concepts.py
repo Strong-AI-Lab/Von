@@ -397,6 +397,136 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     assert rows[0]["arg2_value"] == "#V#focus"
 
 
+def test_relationship_extent_route_dedupes_visibility_alias_rows(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {
+            "relations": [
+                {
+                    "relation_id": "struct::#V#focus::specific_to_user",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "specific_to_user",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#michael_witbrock"],
+                    "matched_argument_indexes": [1],
+                },
+                {
+                    "relation_id": "struct::#V#focus::#V#specific_to_user",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "#V#specific_to_user",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#michael_witbrock"],
+                    "matched_argument_indexes": [1],
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",
+        lambda *a, **k: ([], False),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?concept_id=%23V%23focus"
+    )
+    assert resp.status_code == 200
+    rows = [
+        row
+        for row in resp.get_json().get("rows") or []
+        if row.get("predicate_id") == "#V#specific_to_user"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["arg1_value"] == "#V#focus"
+    assert rows[0]["arg2_value"] == "#V#michael_witbrock"
+
+
+def test_relationship_extent_route_dedupes_indexed_visibility_alias_rows(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#michael_witbrock", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {"relations": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_page_for_target",
+        lambda *a, **k: (
+            [
+                {
+                    "relation_id": "struct::#V#focus::specific_to_user::incoming::0",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": "specific_to_user",
+                    "arg1_value": "#V#focus",
+                    "arg1_is_concept": True,
+                    "arg2_value": "#V#michael_witbrock",
+                    "arg2_is_concept": True,
+                    "arg2_index": 2,
+                    "source_concept_id": "#V#focus",
+                    "target_value": "#V#michael_witbrock",
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                },
+                {
+                    "relation_id": "struct::#V#focus::#V#specific_to_user::incoming::0",
+                    "source": "structured",
+                    "relation_kind": "binary",
+                    "role": "arg2",
+                    "predicate_id": "#V#specific_to_user",
+                    "arg1_value": "#V#focus",
+                    "arg1_is_concept": True,
+                    "arg2_value": "#V#michael_witbrock",
+                    "arg2_is_concept": True,
+                    "arg2_index": 2,
+                    "source_concept_id": "#V#focus",
+                    "target_value": "#V#michael_witbrock",
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                },
+            ],
+            True,
+            {"used_extent_index": True, "complete": True, "bounded": False},
+        ),
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?"
+        "concept_id=%23V%23michael_witbrock&role=arg2&source=structured"
+    )
+    assert resp.status_code == 200
+    rows = resp.get_json().get("rows") or []
+    assert len(rows) == 1
+    assert rows[0]["predicate_id"] == "#V#specific_to_user"
+    assert rows[0]["arg1_value"] == "#V#focus"
+    assert rows[0]["arg2_value"] == "#V#michael_witbrock"
+
+
 def test_relationship_extent_route_uses_bounded_incoming_index_page(
     app_client, monkeypatch
 ):

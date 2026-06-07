@@ -624,6 +624,20 @@ function normaliseRelationshipTargets(raw) {
     return [];
 }
 
+const RELATIONSHIP_PREDICATE_ALIAS_TO_CANONICAL = Object.freeze({
+    specific_to_user: '#V#specific_to_user',
+    specific_to_org: '#V#specific_to_organisation',
+    specific_to_organisation: '#V#specific_to_organisation',
+    '#V#specific_to_org': '#V#specific_to_organisation'
+});
+
+function normaliseRelationshipPredicateForExtent(predicateId) {
+    if (typeof predicateId !== 'string') return '';
+    const trimmed = predicateId.trim();
+    if (!trimmed) return '';
+    return RELATIONSHIP_PREDICATE_ALIAS_TO_CANONICAL[trimmed] || trimmed;
+}
+
 function normaliseInstanceTypeConceptId(value) {
     if (typeof value !== 'string') return '';
     const trimmed = value.trim();
@@ -744,6 +758,7 @@ export function deriveRelationshipExtentFallbackRows(conceptId, conceptData) {
     if (!relationships || typeof relationships !== 'object') return [];
 
     const rows = [];
+    const seenRows = new Set();
     const updatedAt = conceptData.updated_at || conceptData.updated || null;
     const sourceConceptId = typeof conceptData.concept_id === 'string' && conceptData.concept_id.trim()
         ? conceptData.concept_id.trim()
@@ -751,15 +766,27 @@ export function deriveRelationshipExtentFallbackRows(conceptId, conceptData) {
 
     for (const [predicateId, rawTargets] of Object.entries(relationships)) {
         if (!predicateId || predicateId === 'most_salient_type') continue;
+        const canonicalPredicateId = normaliseRelationshipPredicateForExtent(predicateId);
+        if (!canonicalPredicateId) continue;
         const targets = normaliseRelationshipTargets(rawTargets);
         if (!targets.length) continue;
         targets.forEach((targetValue, idx) => {
+            const rowKey = [
+                'structured',
+                'binary',
+                'arg1',
+                canonicalPredicateId,
+                sourceConceptId,
+                targetValue
+            ].join('\u001f');
+            if (seenRows.has(rowKey)) return;
+            seenRows.add(rowKey);
             rows.push({
-                relation_id: `fallback::${sourceConceptId}::${predicateId}::${idx}`,
+                relation_id: `fallback::${sourceConceptId}::${canonicalPredicateId}::${idx}`,
                 source: 'structured',
                 relation_kind: 'binary',
                 role: 'arg1',
-                predicate_id: predicateId,
+                predicate_id: canonicalPredicateId,
                 arg1_value: sourceConceptId,
                 arg1_is_concept: !!normalisePotentialConceptId(sourceConceptId),
                 arg2_value: targetValue,
@@ -1332,6 +1359,7 @@ function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {})
         displayNames: displayNames,
         kind: normalisedKind,
         namespace: currentNamespace,
+        newlyCreated: !!opts.newlyCreated,
         button: tabButton,
         content: tabContent,
         lastTouchedAt: nextConceptTabRecency(opts.lastTouchedAt)
@@ -1972,15 +2000,17 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
             console.log(`[dynamicTabs] Skipping setCurrentConceptType for individual tab: ${conceptId}`);
         }
 
-        // Initialize the concept tab functionality with unique element IDs
-        setTimeout(() => {
+        // Initialize the concept tab functionality with unique element IDs.
+        // Run on the next microtask so the cloned template is present without
+        // adding a visible fixed delay to newly opened concept tabs.
+        Promise.resolve().then(() => {
             console.log(`[dynamicTabs] Initializing concept tab functionality for ${conceptId}`);
             initializeDynamicConceptTab(conceptId, uniqueIdSuffix);
             // Attach MutationObserver fallback for name changes (only once content likely rendered)
             try { attachNamesObserver(conceptId, uniqueIdSuffix); } catch (_) { }
             // Backfill note glyphs after potential notes render
             try { backfillNoteGlyphs(tabInfo.content); } catch (e) { console.warn('[dynamicTabs] backfillNoteGlyphs post-init failed', e); }
-        }, 100);
+        });
 
         // Post-load safety: if legacy description button still present without upgraded actions, trigger ensure
         try {
@@ -3036,20 +3066,34 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
         }
 
         // Ensure unified description UI (reuse type description section & logic for individuals)
-        await ensureUnifiedDescriptionSection(conceptId, suffix);
-        try {
+        const descriptionLoad = ensureUnifiedDescriptionSection(conceptId, suffix);
+        const recommendationProfileLoad = (async () => {
             const { ensureRecommendationProfilePanelForConceptTab } = await import('./components/paperRecommendationProfilePanel.js');
             await ensureRecommendationProfilePanelForConceptTab({
                 conceptId,
                 suffix,
             });
-        } catch (profileErr) {
-            console.warn('[dynamicTabs] Unable to initialise recommendation profile panel', profileErr);
+        })();
+        const textSectionsLoad = (async () => {
+            // Keep content below notes without making both wait for description/profile panels.
+            await populateNotesSection(conceptId, suffix);
+            await populateContentSection(conceptId, suffix);
+        })();
+        const secondaryLoads = await Promise.allSettled([
+            descriptionLoad,
+            recommendationProfileLoad,
+            textSectionsLoad
+        ]);
+        const [descriptionOutcome, profileOutcome, textSectionsOutcome] = secondaryLoads;
+        if (descriptionOutcome.status === 'rejected') {
+            console.warn('[dynamicTabs] Unable to initialise description section', descriptionOutcome.reason);
         }
-        // Multi-note section
-        await populateNotesSection(conceptId, suffix);
-        // Multi-content section
-        await populateContentSection(conceptId, suffix);
+        if (profileOutcome.status === 'rejected') {
+            console.warn('[dynamicTabs] Unable to initialise recommendation profile panel', profileOutcome.reason);
+        }
+        if (textSectionsOutcome.status === 'rejected') {
+            console.warn('[dynamicTabs] Unable to initialise note/content sections', textSectionsOutcome.reason);
+        }
 
         // If pure instance (no type-of parents), hide the concept list entirely
         const isPureInstance = !Array.isArray(parentsData.parents) || parentsData.parents.length === 0;
@@ -4107,6 +4151,7 @@ function normaliseDescriptionTimestamp(rawValue) {
 }
 
 export function buildDescriptionMetadataRows(record = {}) {
+    record = (record && typeof record === 'object') ? record : {};
     const context = (record && typeof record.context === 'object' && record.context)
         ? record.context
         : {};
@@ -4356,6 +4401,11 @@ async function populateTypeDescription(conceptId, suffix) {
                     textarea.value = desc.text || '';
                     renderDescriptionMetadata(desc);
                     console.debug('[dynamicTabs] Description loaded (primary API)', { conceptId, relationId });
+                    return;
+                }
+                if (res.ok && dynamicConceptTabs.get(conceptId)?.newlyCreated) {
+                    console.debug('[dynamicTabs] Newly-created concept has no hasDescription relation; skipping legacy description fallbacks', { conceptId });
+                    setEmpty();
                     return;
                 }
                 console.debug('[dynamicTabs] Primary description API returned no data – attempting legacy fallbacks', { status: res.status, bodyKeys: Object.keys(data || {}) });
@@ -7619,6 +7669,3 @@ async function getCurrentUserId() {
 
 // Explicit exports for tests / external modules that need to force relabeling
 export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName };
-
-
-

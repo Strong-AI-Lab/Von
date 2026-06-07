@@ -98,6 +98,10 @@ _RELATIONSHIP_ALIAS_TO_CANONICAL = {
     "is_an_instance_ofs": "is_an_instance_of",
     "has_instances": "has_instance",
     "related_tos": "related_to",
+    "specific_to_user": "#V#specific_to_user",
+    "specific_to_org": "#V#specific_to_organisation",
+    "specific_to_organisation": "#V#specific_to_organisation",
+    "#V#specific_to_org": "#V#specific_to_organisation",
 }
 _RELATIONSHIP_EXTENT_DEFAULT_LIMIT = 200
 _RELATIONSHIP_EXTENT_MAX_LIMIT = 500
@@ -3583,8 +3587,17 @@ def get_relationships_extent_route():
                     )
                 )
 
-        filtered_rows: list[dict[str, Any]] = []
+        canonicalised_rows: list[dict[str, Any]] = []
         for row in rows:
+            predicate_id = _canonicalise_relationship_predicate(row.get("predicate_id"))
+            if not predicate_id:
+                continue
+            if row.get("predicate_id") != predicate_id:
+                row = {**row, "predicate_id": predicate_id}
+            canonicalised_rows.append(row)
+
+        filtered_rows: list[dict[str, Any]] = []
+        for row in canonicalised_rows:
             if role_filter != "any" and row.get("role") != role_filter:
                 continue
             if source_filter and row.get("source") != source_filter:
@@ -5158,12 +5171,12 @@ def toggle_user_relation():
             return jsonify({"success": False, "error": "Concept not found"}), 404
 
         relationships = concept.get("relationships") or {}
-        # Read from both legacy and predicate-style fields for current state
-        from ...security.access_control import _get_specific_to_user_values
+        from ...security.visibility_predicates import (
+            get_specific_to_user_values,
+            set_specific_to_user_values,
+        )
 
-        user_relations = _get_specific_to_user_values(relationships)
-        if not isinstance(user_relations, list):
-            user_relations = list(user_relations) if user_relations else []
+        user_relations = get_specific_to_user_values(relationships)
 
         changed = False
         if action == "add":
@@ -5192,7 +5205,7 @@ def toggle_user_relation():
                     user_relations.remove(user_concept_id)
                     changed = True
 
-        relationships["specific_to_user"] = user_relations
+        relationships = set_specific_to_user_values(relationships, user_relations)
         ConceptsRepository.update_one(
             {"concept_id": concept_id}, {"$set": {"relationships": relationships}}
         )

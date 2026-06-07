@@ -476,6 +476,78 @@ describe('notes and content editor markup hygiene', () => {
     });
 });
 
+describe('newly-created concept description hydration', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="tabContainer" class="tab-container">
+                <div class="tab-button" data-tab="chatTab">Chat</div>
+                <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+                <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+            </div>
+            <div class="tab-content-area"></div>
+        `;
+        global.fetch = jest.fn(async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({ names: [] })
+        }));
+    });
+
+    afterEach(() => {
+        jest.resetModules();
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('skips legacy description fallbacks when a new concept has no description relation', async () => {
+        const { createOrActivateConceptTab, populateTypeDescription } = require(dynamicTabsModulePath);
+        const conceptId = '#V#new_empty_description_concept';
+        const tabId = createOrActivateConceptTab(conceptId, 'New Empty Description Concept', false, {
+            kind: 'individual',
+            newlyCreated: true
+        });
+        const suffix = tabId.replace(/^conceptTab_/, '');
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div id="conceptStep1_${suffix}">
+                <div id="typeDescriptionSection_${suffix}">
+                    <div class="type-description-wrapper">
+                        <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description"></div>
+                        <textarea id="typeDescriptionTextarea_${suffix}"></textarea>
+                        <button id="typeEditDescriptionButton_${suffix}"></button>
+                        <button id="typeEditDescriptionSave_${suffix}"></button>
+                        <button id="typeEditDescriptionCancel_${suffix}"></button>
+                        <button id="typeDeleteDescriptionButton_${suffix}"></button>
+                        <div id="typeDescriptionEditActions_${suffix}"></div>
+                        <span id="typeDescriptionStatus_${suffix}"></span>
+                    </div>
+                </div>
+            </div>
+        `);
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        global.fetch.mockClear();
+        global.fetch.mockImplementation(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.includes('/texts?predicate=hasDescription')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ texts: [], count: 0 })
+                };
+            }
+            throw new Error(`Unexpected fetch: ${requestUrl}`);
+        });
+
+        await populateTypeDescription(conceptId, suffix);
+
+        const urls = global.fetch.mock.calls.map(([url]) => String(url));
+        expect(urls).toHaveLength(1);
+        expect(urls[0]).toContain('/texts?predicate=hasDescription');
+        expect(document.getElementById(`typeDescriptionDisplay_${suffix}`).textContent).toContain('No description available.');
+    });
+});
+
 describe('persisted concept tab restore', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -740,6 +812,28 @@ describe('individual concept detail fallbacks', () => {
             predicate_id: '#V#maintained_by',
             arg1_value: '#V#atlascode_github_repository',
             arg2_value: '#V#atlassian'
+        });
+    });
+
+    test('deriveRelationshipExtentFallbackRows deduplicates visibility predicate aliases', () => {
+        const { deriveRelationshipExtentFallbackRows } = require(dynamicTabsModulePath);
+
+        const rows = deriveRelationshipExtentFallbackRows('#V#mjw_work_diarg_2026_06_06', {
+            concept_id: '#V#mjw_work_diarg_2026_06_06',
+            relationships: {
+                specific_to_user: ['#V#michael_witbrock'],
+                '#V#specific_to_user': ['#V#michael_witbrock']
+            }
+        });
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            source: 'structured',
+            relation_kind: 'binary',
+            role: 'arg1',
+            predicate_id: '#V#specific_to_user',
+            arg1_value: '#V#mjw_work_diarg_2026_06_06',
+            arg2_value: '#V#michael_witbrock'
         });
     });
 });
