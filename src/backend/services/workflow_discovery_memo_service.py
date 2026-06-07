@@ -146,6 +146,19 @@ def _candidate_count(payload: Mapping[str, Any]) -> int:
     return 0
 
 
+def _discovery_ranking_input(
+    *,
+    user_input: str,
+    requested_query: str | None,
+) -> str:
+    """Choose the text used for retrieval ranking."""
+
+    clean_requested_query = _safe_text(requested_query)
+    if clean_requested_query:
+        return clean_requested_query
+    return _safe_text(user_input)
+
+
 def _build_cache_key_payload(
     *,
     turn_scope: str | None,
@@ -295,9 +308,13 @@ def discover_workflows_for_turn_memoized(
 
         discovery_func = workflow_discovery_service.discover_workflows_for_turn
 
+    discovery_input = _discovery_ranking_input(
+        user_input=str(user_input),
+        requested_query=requested_query,
+    )
     uncached_started = time.perf_counter()
     raw_result = discovery_func(
-        user_input,
+        discovery_input,
         namespace=namespace,
         relevance_threshold=relevance_threshold,
         max_results=max_results,
@@ -310,6 +327,12 @@ def discover_workflows_for_turn_memoized(
         return raw_result
 
     payload = copy.deepcopy(dict(raw_result))
+    clean_user_input = _safe_text(user_input)
+    clean_discovery_input = _safe_text(discovery_input)
+    if clean_user_input and clean_discovery_input != clean_user_input:
+        payload["ranking_query_input"] = clean_discovery_input
+        payload["ranking_query_input_source"] = "requested_query"
+        payload["query"] = clean_user_input
     candidate_count = _candidate_count(payload)
     with _CACHE_LOCK:
         _CACHE[cache_key_digest] = _MemoEntry(

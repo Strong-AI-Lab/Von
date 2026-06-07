@@ -145,6 +145,52 @@ def test_turn_workflow_discovery_memo_invalidates_on_contract_change(
     assert calls == 2
 
 
+def test_turn_workflow_discovery_memo_ranks_with_requested_query(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda *, latency_sensitive=False: _runtime_state("v1"),
+    )
+    calls: list[str] = []
+    raw_query = "Represent this paper: https://arxiv.org/abs/2106.03245"
+    enriched_query = (
+        raw_query
+        + "\n\nTurn-intent routing guidance:\n"
+        "- Routing guidance: Prefer the most specific represented workflow.\n"
+        "- Required tools: get_paper_metadata"
+    )
+
+    def _discover(user_input: str, **_kwargs: Any) -> dict[str, Any]:
+        calls.append(user_input)
+        return {
+            "query": user_input,
+            "requested_query": raw_query,
+            "matches": [{"concept_id": "#V#arxiv_paper_representation_workflow"}],
+            "candidates": [{"concept_id": "#V#arxiv_paper_representation_workflow"}],
+            "candidate_count": 1,
+            "match_count": 1,
+        }
+
+    result = discover_workflows_for_turn_memoized(
+        enriched_query,
+        namespace="#V#user@org",
+        turn_scope="turn-1",
+        requested_query=raw_query,
+        expected_outcome_contract={"required_tools": ["get_paper_metadata"]},
+        discovery_func=_discover,
+    )
+
+    assert calls == [raw_query]
+    assert result is not None
+    assert result["query"] == enriched_query
+    assert result["ranking_query_input"] == raw_query
+    assert result["ranking_query_input_source"] == "requested_query"
+    assert result["matches"][0]["concept_id"] == (
+        "#V#arxiv_paper_representation_workflow"
+    )
+
+
 def test_turn_workflow_discovery_memo_invalidates_on_capability_index_version(
     monkeypatch,
 ) -> None:
