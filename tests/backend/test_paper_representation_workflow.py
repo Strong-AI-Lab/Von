@@ -30,6 +30,9 @@ def test_register_paper_representation_actions_registers_expected_ids() -> None:
         SCHOLARLY_PAPER_RESOLVE_AUTHORS_ACTION_ID,
         SCHOLARLY_PAPER_VERIFY_ACTION_ID,
     }.issubset(set(registry.all_action_ids()))
+    verify_spec = registry.get(SCHOLARLY_PAPER_VERIFY_ACTION_ID)
+    assert verify_spec is not None
+    assert verify_spec.required_tool_operation_class == "verification_read"
 
 
 def test_normalise_inputs_extracts_arxiv_id_from_prompt_context() -> None:

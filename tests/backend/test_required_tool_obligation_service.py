@@ -144,6 +144,56 @@ def test_prefix_like_required_tool_without_metadata_fails_closed(monkeypatch) ->
     assert BLOCKER_REQUIRED_TOOL_METADATA_MISSING in ledger["blocking_failure_codes"]
 
 
+def test_required_tool_ledger_closes_from_workflow_action_spec_metadata(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.workflows.action_registry import ActionSpec, WorkflowActionResult
+
+    def handler(_request):
+        return WorkflowActionResult(status="success", outputs={"success": True})
+
+    monkeypatch.setattr(metadata_service, "_load_from_vontology", lambda: {})
+    monkeypatch.setattr(
+        metadata_service,
+        "_resolve_workflow_action_spec",
+        lambda tool_name: ActionSpec(
+            action_id=tool_name,
+            handler=handler,
+            required_tool_operation_class="verification_read",
+        ),
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "represented_contract": ["generic.verify_representation"]
+            },
+            invocations=[
+                {
+                    "tool": "generic.verify_representation",
+                    "status": "ok",
+                    "payload": {"success": True},
+                }
+            ],
+            allowed_tools=["generic.verify_representation"],
+            method_catalogue=_catalogue(["generic.verify_representation"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(ledger, "generic.verify_representation")
+    assert obligation["successful_count"] == 1
+    assert obligation["operation_class"] == "verification_read"
+    assert obligation["operation_metadata_present"] is True
+    assert obligation["satisfied"] is True
+    assert obligation["blocking_reason"] == ""
+    assert (
+        BLOCKER_REQUIRED_TOOL_METADATA_MISSING
+        not in ledger["blocking_failure_codes"]
+    )
+
+
 def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> None:
     message = "create_concepts: Missing required field 'parent_id'."
 

@@ -1798,6 +1798,7 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
             action_id=SCHOLARLY_PAPER_VERIFY_ACTION_ID,
             handler=_build_verify_representation_handler(),
             description="Verify scholarly-paper representation postconditions.",
+            required_tool_operation_class="verification_read",
         )
     )
     registry.register_if_absent(

@@ -1878,6 +1878,15 @@ def get_tool_required_obligation_metadata(
     operation_class = _normalise_required_tool_operation_class(
         metadata.required_tool_operation_class
     )
+    action_spec = (
+        _resolve_workflow_action_spec(tool_name) if allow_registry_fallback else None
+    )
+    if operation_class is None and action_spec is not None:
+        operation_class = _normalise_required_tool_operation_class(
+            getattr(action_spec, "required_tool_operation_class", None)
+            or getattr(action_spec, "operation_class", None)
+            or getattr(action_spec, "obligation_operation_class", None)
+        )
     if operation_class is None:
         operation_category = get_tool_operation_category(
             tool_name,
@@ -1897,21 +1906,43 @@ def get_tool_required_obligation_metadata(
             operation_class = "workflow_execute"
 
     target_argument_names = list(metadata.required_tool_target_argument_names)
+    for argument_name in _coerce_string_tuple(
+        getattr(action_spec, "required_tool_target_argument_names", None)
+        if action_spec is not None
+        else None
+    ):
+        if argument_name.lower() not in {
+            item.lower() for item in target_argument_names
+        }:
+            target_argument_names.append(argument_name)
+    target_payload_field_names = list(metadata.required_tool_target_payload_field_names)
+    for field_name in _coerce_string_tuple(
+        getattr(action_spec, "required_tool_target_payload_field_names", None)
+        if action_spec is not None
+        else None
+    ):
+        if field_name.lower() not in {
+            item.lower() for item in target_payload_field_names
+        }:
+            target_payload_field_names.append(field_name)
     binding = get_tool_target_concept_binding_metadata(tool_name)
     if binding is not None:
         binding_name = binding.target_concept_argument_name
         if binding_name.lower() not in {item.lower() for item in target_argument_names}:
             target_argument_names.append(binding_name)
+    target_closure_required = _coerce_optional_bool(
+        metadata.required_tool_target_closure
+    )
+    if target_closure_required is None and action_spec is not None:
+        target_closure_required = _coerce_optional_bool(
+            getattr(action_spec, "required_tool_target_closure", None)
+        )
 
     return ToolRequiredObligationMetadata(
         operation_class=operation_class,
-        target_closure_required=_coerce_optional_bool(
-            metadata.required_tool_target_closure
-        ),
+        target_closure_required=target_closure_required,
         target_argument_names=tuple(target_argument_names),
-        target_payload_field_names=tuple(
-            metadata.required_tool_target_payload_field_names
-        ),
+        target_payload_field_names=tuple(target_payload_field_names),
     )
 
 
@@ -1932,6 +1963,15 @@ def get_tool_operation_category(
     if fallback is not None:
         return fallback
 
+    action_spec = (
+        _resolve_workflow_action_spec(tool_name) if allow_registry_fallback else None
+    )
+    action_category = _normalise_operation_category(
+        getattr(action_spec, "operation_category", None)
+    )
+    if action_category is not None:
+        return action_category
+
     contract = (
         _resolve_registry_contract(tool_name) if allow_registry_fallback else None
     )
@@ -1950,6 +1990,15 @@ def get_tool_evidence_role(
     explicit_role = _normalise_evidence_role(metadata.evidence_role)
     if explicit_role is not None:
         return explicit_role
+
+    action_spec = (
+        _resolve_workflow_action_spec(tool_name) if allow_registry_fallback else None
+    )
+    action_role = _normalise_evidence_role(
+        getattr(action_spec, "evidence_role", None)
+    )
+    if action_role is not None:
+        return action_role
 
     operation_category = get_tool_operation_category(
         tool_name,
@@ -2060,6 +2109,17 @@ def _resolve_registry_contract(tool_name: str) -> Any | None:
         )
 
         return get_canonical_tool_registry().get(tool_name)
+    except Exception:
+        return None
+
+
+def _resolve_workflow_action_spec(tool_name: str) -> Any | None:
+    try:
+        from src.backend.workflows.durable.registry_factory import (
+            get_shared_durable_action_registry,
+        )
+
+        return get_shared_durable_action_registry().resolve_action_spec(tool_name)
     except Exception:
         return None
 

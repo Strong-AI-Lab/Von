@@ -111,6 +111,13 @@ class ActionSpec:
     output_schema: Mapping[str, Any] | None = None
     side_effects: str | None = None
     postconditions: Sequence[str] = ()
+    # Generic execution metadata for shared telemetry/obligation services.
+    operation_category: str | None = None
+    evidence_role: str | None = None
+    required_tool_operation_class: str | None = None
+    required_tool_target_closure: bool | None = None
+    required_tool_target_argument_names: Sequence[str] = ()
+    required_tool_target_payload_field_names: Sequence[str] = ()
 
 
 def _apply_action_outcome_context(

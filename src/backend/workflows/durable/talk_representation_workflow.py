@@ -290,6 +290,7 @@ def register_talk_representation_actions(registry: ActionRegistry) -> None:
             action_id=TALK_VERIFY_ACTION_ID,
             handler=_build_verify_representation_handler(),
             description="Verify talk or presentation representation postconditions.",
+            required_tool_operation_class="verification_read",
         )
     )
 
