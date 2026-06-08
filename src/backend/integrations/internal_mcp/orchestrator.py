@@ -19263,7 +19263,7 @@ class InternalMCPChatOrchestrator:
             # Try to parse as JSON
             try:
                 parsed = json.loads(fenced_content)
-            except json.JSONDecodeError, ValueError:
+            except (json.JSONDecodeError, ValueError):
                 continue
 
             # Check if it looks like a tool call (single object or array)
@@ -19368,7 +19368,7 @@ class InternalMCPChatOrchestrator:
                 or missing_action_but_tool_shape
                 or has_tool_uses_shape
             )
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return False
 
     def _extract_tool_calls(self, text: str) -> list[_ToolCallRequest] | None:
