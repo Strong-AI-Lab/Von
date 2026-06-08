@@ -18,6 +18,7 @@ from src.backend.services.tool_evidence_contract_vontology_service import (
     bootstrap_tool_evidence_contract_vocabulary,
 )
 from src.backend.services.tool_evidence_projection_service import (
+    project_nested_workflow_progress_evidence,
     project_surfaceable_concept_evidence,
     project_tool_payload_for_llm,
     render_surfaceable_concept_lines,
@@ -324,6 +325,79 @@ def test_surfaceable_concept_projection_collects_nested_workflow_outputs() -> No
         "Paper concept: #V#paper_on_arxiv_2402_18144_c100899e.",
         "File copy concept: #V#file_copy_arxiv_2402_18144_c100899e.",
     ]
+
+
+def test_nested_workflow_progress_projection_uses_represented_facts_only() -> None:
+    evidence = project_nested_workflow_progress_evidence(
+        {
+            "iteration_results": [
+                {
+                    "last_action_outputs": {
+                        "paper_concept_id": "#V#should_not_be_inferred",
+                        "progress_facts": [
+                            {
+                                "schema_version": "workflow_progress_projection.v1",
+                                "fact_id": "represented_readback",
+                                "label": "Represented read-back",
+                                "status": "available",
+                                "present": True,
+                                "value": "#V#paper_nested",
+                                "value_kind": "concept_id",
+                                "workflow_id": "#V#represented_workflow",
+                                "state_id": "read_back",
+                                "action_id": "verify",
+                                "contract_id": "#V#represented_readback_fact",
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert evidence is not None
+    assert evidence["schema_version"] == "nested_workflow_progress_evidence.v1"
+    assert evidence["contract_ids"] == ["#V#represented_readback_fact"]
+    assert evidence["facts"] == [
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "represented_readback",
+            "label": "Represented read-back",
+            "status": "available",
+            "present": True,
+            "redacted": False,
+            "truncated": False,
+            "source_path": "iteration_results.0.last_action_outputs.progress_facts",
+            "payload_source_path": "iteration_results.0.last_action_outputs.progress_facts",
+            "value_kind": "concept_id",
+            "workflow_id": "#V#represented_workflow",
+            "state_id": "read_back",
+            "action_id": "verify",
+            "contract_id": "#V#represented_readback_fact",
+            "value": "#V#paper_nested",
+        }
+    ]
+    assert "#V#should_not_be_inferred" not in json.dumps(evidence, sort_keys=True)
+
+
+def test_nested_workflow_progress_projection_fails_closed_without_represented_facts() -> None:
+    evidence = project_nested_workflow_progress_evidence(
+        {
+            "iteration_results": [
+                {
+                    "last_action_outputs": {
+                        "paper_concept_id": "#V#should_not_be_inferred",
+                        "scholarly_representation_verified": True,
+                    }
+                }
+            ]
+        }
+    )
+
+    assert evidence is not None
+    assert evidence["facts"] == []
+    assert evidence["contract_ids"] == []
+    assert evidence["workflow_evidence_seen"] is True
 
 
 def test_surfaceable_concept_projection_does_not_treat_search_hits_as_created() -> None:

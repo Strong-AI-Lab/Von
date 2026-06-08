@@ -1403,7 +1403,7 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
     )
 
 
-def test_presenter_mode_reconciles_nested_workflow_evidence_and_tool_blocker(
+def test_presenter_mode_fails_closed_without_represented_nested_progress_facts(
     monkeypatch,
 ):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
@@ -1498,12 +1498,122 @@ def test_presenter_mode_reconciles_nested_workflow_evidence_and_tool_blocker(
     body = resp.get_json()
     screen_text = body["response_channels"]["screen"]
 
-    assert "Nested workflow evidence was detected" in screen_text
-    assert "Representation/read-back verified for `#V#paper_nested`" in screen_text
-    assert "`gmail_modify_labels` reported gmail_api_error" in screen_text
-    assert "Profile scopes do not include gmail.modify" in screen_text
-    assert "No write activity was detected" not in screen_text
+    assert "Nested workflow payloads included no represented progress facts" in screen_text
+    assert "Representation/read-back verified" not in screen_text
+    assert "#V#paper_nested" not in screen_text
+    assert "`gmail_modify_labels` reported gmail_api_error" not in screen_text
+    assert "Profile scopes do not include gmail.modify" not in screen_text
     assert "required workflow_execute-based" not in screen_text
+
+
+def test_presenter_mode_surfaces_represented_nested_progress_facts(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    progress_facts = [
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "represented_readback",
+            "label": "Represented read-back",
+            "status": "available",
+            "present": True,
+            "value": "#V#paper_nested",
+            "value_kind": "concept_id",
+            "workflow_id": "#V#paper_representation_workflow",
+            "state_id": "read_back",
+            "action_id": "verify_representation",
+            "contract_id": "#V#represented_readback_fact",
+        },
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "label_mutation_blocker",
+            "label": "Label mutation blocker",
+            "status": "available",
+            "present": True,
+            "value": "gmail_api_error: Profile scopes do not include gmail.modify",
+            "value_kind": "error",
+            "workflow_id": "#V#gmail_label_workflow",
+            "state_id": "modify_labels",
+            "action_id": "gmail_modify_labels",
+            "contract_id": "#V#label_mutation_blocker_fact",
+        },
+    ]
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "workflow_control.for_each",
+                    "status": "ok",
+                    "payload": {
+                        "iteration_results": [
+                            {
+                                "completed": True,
+                                "tool_invocations": [
+                                    {
+                                        "tool": "workflow_invoke_subworkflow",
+                                        "status": "ok",
+                                        "payload": {
+                                            "result": {
+                                                "last_action_outputs": {
+                                                    "progress_facts": progress_facts,
+                                                    "paper_concept_id": "#V#not_policy",
+                                                },
+                                            }
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ),
+        }
+    ]
+    orchestrator_result = OrchestratorResult(
+        response_text=(
+            "I ran tools for this request, but I do not have a reliable final answer yet."
+        ),
+        extra_messages=tool_messages,
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Represent recent arXiv email papers", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    screen_text = body["response_channels"]["screen"]
+
+    assert "Represented workflow progress facts:" in screen_text
+    assert "Represented read-back: `#V#paper_nested`" in screen_text
+    assert "#V#represented_readback_fact" in screen_text
+    assert "Label mutation blocker" in screen_text
+    assert "Profile scopes do not include gmail.modify" in screen_text
+    assert "#V#not_policy" not in screen_text
+    assert "Representation/read-back verified" not in screen_text
+    assert "`gmail_modify_labels` reported gmail_api_error" not in screen_text
+
+    backfill_event = _find_aux_event(
+        body["llm_debug"],
+        "presenter_screen_backfill",
+        reason_code="tool_activity_summary_fallback",
+    )
+    projection = backfill_event["represented_evidence_projection"]
+    assert projection["contract_ids"] == [
+        "#V#represented_readback_fact",
+        "#V#label_mutation_blocker_fact",
+    ]
+    assert projection["fact_count"] == 2
 
 
 def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypatch):

@@ -90,6 +90,9 @@ from ...services.turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
     update_tool_observation_summary,
 )
+from ...services.tool_evidence_projection_service import (
+    project_nested_workflow_progress_evidence,
+)
 from ...services.runtime_code_version_service import (
     get_runtime_code_version_info,
 )
@@ -7443,8 +7446,6 @@ def _extract_created_concept_labels_from_payload(
                     "materialised",
                     "materialized",
                 }
-            if not created_id_set and not item_created:
-                continue
             requested_name_raw = (
                 item.get("requested_name") or item.get("input_name") or item.get("name")
             )
@@ -7466,6 +7467,15 @@ def _extract_created_concept_labels_from_payload(
                     nested_id = nested_concept.get("concept_id")
                     if isinstance(nested_id, str) and nested_id.strip():
                         concept_id_value = nested_id.strip()
+            if (
+                not item_created
+                and not created_id_set
+                and requested_name
+                and concept_id_value
+            ):
+                item_created = True
+            if not created_id_set and not item_created:
+                continue
 
             if (
                 created_id_set
@@ -7546,123 +7556,87 @@ def _extract_nested_workflow_tool_evidence(
     *,
     max_lines: int = 8,
 ) -> dict[str, Any]:
-    """Summarise nested workflow evidence hidden inside aggregate tool payloads."""
+    """Project represented nested workflow progress facts for presenter fallback."""
 
-    tool_name_lower = (tool_name or "").lower()
-    workflow_evidence_seen = tool_name_lower.startswith("workflow_")
-    durable_evidence_lines: list[str] = []
-    blocker_lines: list[str] = []
-    durable_seen: set[str] = set()
-    blocker_seen: set[str] = set()
+    projected = project_nested_workflow_progress_evidence(
+        payload,
+        max_facts=max_lines,
+    )
+    if not isinstance(projected, Mapping):
+        return {
+            "workflow_evidence_seen": bool((tool_name or "").lower().startswith("workflow_")),
+            "progress_lines": [],
+            "contract_ids": [],
+            "telemetry": None,
+        }
 
-    for mapping in _iter_presenter_nested_mappings(payload):
-        if any(
-            key in mapping
-            for key in (
-                "iteration_results",
-                "subworkflow_invocation",
-                "subworkflow_result_envelope",
-                "workflow_terminal",
-                "workflow_terminal_state",
-                "last_action_id",
-                "last_action_outputs",
-            )
-        ):
-            workflow_evidence_seen = True
-
-        action_id = _progress_str(mapping.get("last_action_id")) or _progress_str(
-            mapping.get("last_action_target_id")
+    progress_lines: list[str] = []
+    progress_seen: set[str] = set()
+    for fact in projected.get("facts") or []:
+        if not isinstance(fact, Mapping):
+            continue
+        line = _format_represented_progress_fact_line(fact)
+        _append_unique_presenter_line(
+            progress_lines,
+            progress_seen,
+            line,
+            limit=max_lines,
         )
-        action_status = (
-            _progress_str(mapping.get("last_action_status"))
-            or _progress_str(mapping.get("last_action_outcome"))
-            or _progress_str(mapping.get("last_step_outcome"))
-        )
-        if action_id and action_status:
-            _append_unique_presenter_line(
-                durable_evidence_lines,
-                durable_seen,
-                f"- Nested workflow action `{action_id}` reported `{action_status}`.",
-                limit=max_lines,
-            )
-
-        terminal_state = _progress_str(mapping.get("workflow_terminal_state"))
-        final_state = _progress_str(mapping.get("final_state"))
-        if terminal_state or final_state:
-            workflow_evidence_seen = True
-            _append_unique_presenter_line(
-                durable_evidence_lines,
-                durable_seen,
-                f"- Nested workflow reached `{terminal_state or final_state}`.",
-                limit=max_lines,
-            )
-
-        paper_concept_id = _progress_str(mapping.get("paper_concept_id"))
-        file_copy_concept_id = _progress_str(mapping.get("file_copy_concept_id"))
-        representation_verified = mapping.get("scholarly_representation_verified")
-        if representation_verified is True or paper_concept_id or file_copy_concept_id:
-            workflow_evidence_seen = True
-            if representation_verified is True:
-                _append_unique_presenter_line(
-                    durable_evidence_lines,
-                    durable_seen,
-                    (
-                        "- Representation/read-back verified"
-                        + (f" for `{paper_concept_id}`" if paper_concept_id else "")
-                        + "."
-                    ),
-                    limit=max_lines,
-                )
-            elif paper_concept_id:
-                _append_unique_presenter_line(
-                    durable_evidence_lines,
-                    durable_seen,
-                    f"- Nested workflow produced paper concept `{paper_concept_id}`.",
-                    limit=max_lines,
-                )
-            if file_copy_concept_id:
-                _append_unique_presenter_line(
-                    durable_evidence_lines,
-                    durable_seen,
-                    f"- Nested workflow produced file-copy concept `{file_copy_concept_id}`.",
-                    limit=max_lines,
-                )
-
-        nested_tool = _progress_str(mapping.get("mcp_tool")) or _progress_str(
-            mapping.get("mcp_requested_tool")
-        )
-        error_code = _progress_str(mapping.get("error_code"))
-        error_text = _progress_str(mapping.get("error"))
-        mcp_result = mapping.get("mcp_result")
-        if isinstance(mcp_result, Mapping):
-            error_code = error_code or _progress_str(mcp_result.get("error_code"))
-            error_text = error_text or _progress_str(mcp_result.get("error"))
-        if error_code or error_text:
-            workflow_evidence_seen = True
-            label = (
-                nested_tool or _progress_str(mapping.get("tool")) or tool_name or "tool"
-            )
-            detail = ": ".join(
-                part
-                for part in (error_code, error_text)
-                if isinstance(part, str) and part
-            )
-            _append_unique_presenter_line(
-                blocker_lines,
-                blocker_seen,
-                f"- `{label}` reported {detail}.",
-                limit=max_lines,
-            )
 
     return {
-        "workflow_evidence_seen": workflow_evidence_seen,
-        "durable_evidence_lines": durable_evidence_lines,
-        "blocker_lines": blocker_lines,
+        "workflow_evidence_seen": bool(projected.get("workflow_evidence_seen")),
+        "progress_lines": progress_lines,
+        "contract_ids": list(projected.get("contract_ids") or []),
+        "telemetry": projected.get("telemetry"),
     }
+
+
+def _format_represented_progress_fact_line(fact: Mapping[str, Any]) -> str | None:
+    label = _progress_str(fact.get("label"))
+    if not label:
+        return None
+    redacted = bool(fact.get("redacted"))
+    status = _progress_str(fact.get("status")) or "missing"
+    value = fact.get("value")
+    if redacted:
+        value_text = "[redacted]"
+    elif isinstance(value, (str, int, float, bool)) and not isinstance(value, bool):
+        value_text = str(value)
+    elif isinstance(value, bool):
+        value_text = "true" if value else "false"
+    elif isinstance(value, list):
+        value_text = ", ".join(str(item) for item in value if item is not None)
+    else:
+        value_text = None
+
+    contract_id = _progress_str(fact.get("contract_id"))
+    provenance_bits = [
+        bit
+        for bit in (
+            _progress_str(fact.get("workflow_id")),
+            _progress_str(fact.get("state_id")),
+            _progress_str(fact.get("action_id")),
+        )
+        if bit
+    ]
+    suffix_parts: list[str] = []
+    if contract_id:
+        suffix_parts.append(f"contract `{contract_id}`")
+    if provenance_bits:
+        suffix_parts.append("source " + " / ".join(f"`{bit}`" for bit in provenance_bits))
+    suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+    if value_text:
+        return f"- {label}: `{value_text}`{suffix}."
+    reason_code = _progress_str(fact.get("reason_code"))
+    if reason_code:
+        return f"- {label}: `{status}` ({reason_code}){suffix}."
+    return f"- {label}: `{status}`{suffix}."
 
 
 def _build_presenter_screen_summary_from_tool_messages(
     tool_messages: list[dict],
+    *,
+    projection_telemetry: dict[str, Any] | None = None,
 ) -> str | None:
     """Deterministic, user-facing summary of tool activity.
 
@@ -7684,9 +7658,10 @@ def _build_presenter_screen_summary_from_tool_messages(
     concept_create_seen = False
     nested_workflow_evidence_seen = False
     nested_workflow_lines: list[str] = []
-    nested_workflow_blocker_lines: list[str] = []
     nested_line_seen: set[str] = set()
-    nested_blocker_seen: set[str] = set()
+    represented_contract_ids: list[str] = []
+    represented_contract_seen: set[str] = set()
+    represented_projection_events: list[dict[str, Any]] = []
 
     index = 0
     for msg in tool_messages:
@@ -7761,18 +7736,18 @@ def _build_presenter_screen_summary_from_tool_messages(
             nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
                 nested_evidence.get("workflow_evidence_seen")
             )
-            for nested_line in nested_evidence.get("durable_evidence_lines", []):
+            for contract_id in nested_evidence.get("contract_ids") or []:
+                if isinstance(contract_id, str) and contract_id not in represented_contract_seen:
+                    represented_contract_seen.add(contract_id)
+                    represented_contract_ids.append(contract_id)
+            telemetry = nested_evidence.get("telemetry")
+            if isinstance(telemetry, Mapping):
+                represented_projection_events.append(dict(telemetry))
+            for nested_line in nested_evidence.get("progress_lines", []):
                 _append_unique_presenter_line(
                     nested_workflow_lines,
                     nested_line_seen,
                     nested_line,
-                    limit=12,
-                )
-            for blocker_line in nested_evidence.get("blocker_lines", []):
-                _append_unique_presenter_line(
-                    nested_workflow_blocker_lines,
-                    nested_blocker_seen,
-                    blocker_line,
                     limit=12,
                 )
 
@@ -7800,22 +7775,34 @@ def _build_presenter_screen_summary_from_tool_messages(
             lines.append("- Name writes detected")
         if concept_create_seen:
             lines.append("- Concept creation detected")
-    elif nested_workflow_evidence_seen:
-        lines.append("Nested workflow evidence was detected.")
+    elif nested_workflow_evidence_seen and nested_workflow_lines:
+        lines.append("Top-level write-tool summary was unavailable.")
         lines.append(
-            "- No direct top-level write-tool summary was available; do not treat this as evidence that nothing was written or verified."
+            "- Use the represented workflow progress facts below for any durable-effect claims."
+        )
+    elif nested_workflow_evidence_seen:
+        lines.append("Nested workflow payloads included no represented progress facts.")
+        lines.append(
+            "- No direct top-level write-tool summary was available; do not infer completion or durable effects from this fallback."
         )
     else:
         lines.append("No write activity was detected in the tool results.")
 
     if nested_workflow_lines:
         lines.append("")
-        lines.append("Nested workflow/read-back evidence:")
+        lines.append("Represented workflow progress facts:")
         lines.extend(nested_workflow_lines)
-    if nested_workflow_blocker_lines:
-        lines.append("")
-        lines.append("Typed tool blockers:")
-        lines.extend(nested_workflow_blocker_lines)
+
+    if isinstance(projection_telemetry, dict):
+        projection_telemetry.update(
+            {
+                "schema_version": "presenter_nested_workflow_progress_projection.v1",
+                "contract_ids": represented_contract_ids,
+                "projection_events": represented_projection_events,
+                "fact_count": len(nested_workflow_lines),
+                "workflow_evidence_seen": bool(nested_workflow_evidence_seen),
+            }
+        )
 
     return "\n".join(lines).strip() or None
 
@@ -8135,10 +8122,10 @@ def _build_tool_messages_prompt_blob(
     writes_lines: list[str] = []
     relation_evidence_lines: list[str] = []
     nested_workflow_lines: list[str] = []
-    nested_workflow_blocker_lines: list[str] = []
     nested_workflow_evidence_seen = False
     nested_line_seen: set[str] = set()
-    nested_blocker_seen: set[str] = set()
+    nested_contract_ids: list[str] = []
+    nested_contract_seen: set[str] = set()
 
     # Track a small set of write categories we care about for UI truthfulness.
     description_write_seen = False
@@ -8362,18 +8349,15 @@ def _build_tool_messages_prompt_blob(
         nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
             nested_evidence.get("workflow_evidence_seen")
         )
-        for nested_line in nested_evidence.get("durable_evidence_lines", []):
+        for contract_id in nested_evidence.get("contract_ids") or []:
+            if isinstance(contract_id, str) and contract_id not in nested_contract_seen:
+                nested_contract_seen.add(contract_id)
+                nested_contract_ids.append(contract_id)
+        for nested_line in nested_evidence.get("progress_lines", []):
             _append_unique_presenter_line(
                 nested_workflow_lines,
                 nested_line_seen,
                 nested_line,
-                limit=16,
-            )
-        for blocker_line in nested_evidence.get("blocker_lines", []):
-            _append_unique_presenter_line(
-                nested_workflow_blocker_lines,
-                nested_blocker_seen,
-                blocker_line,
                 limit=16,
             )
 
@@ -8414,17 +8398,18 @@ def _build_tool_messages_prompt_blob(
     blob_lines.extend(writes_lines or ["- No writes detected"])
     if nested_workflow_evidence_seen:
         blob_lines.append("")
-        blob_lines.append("NESTED WORKFLOW EVIDENCE (authoritative):")
+        blob_lines.append("REPRESENTED WORKFLOW PROGRESS FACTS:")
+        if nested_contract_ids:
+            blob_lines.append(
+                "- projection_contract_ids="
+                + ", ".join(f"`{contract_id}`" for contract_id in nested_contract_ids)
+            )
         blob_lines.extend(
             nested_workflow_lines
             or [
-                "- Nested workflow/subworkflow evidence is present, but no compact durable-write details were extracted."
+                "- Nested workflow/subworkflow payloads were present, but no represented progress facts were supplied."
             ]
         )
-    if nested_workflow_blocker_lines:
-        blob_lines.append("")
-        blob_lines.append("TYPED TOOL BLOCKERS (authoritative):")
-        blob_lines.extend(nested_workflow_blocker_lines)
     if relation_evidence_lines:
         blob_lines.append("")
         blob_lines.append("TOOL RELATION EVIDENCE (authoritative):")
@@ -11937,6 +11922,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 screen_backfill_source = None
                 follow_up_screen_summary = None
                 supplementary_screen_summary = None
+                tool_summary_projection_telemetry: dict[str, Any] = {}
                 if has_tool_messages and isinstance(completion_gate_summary, Mapping):
                     requires_follow_up = bool(
                         completion_gate_summary.get("requires_follow_up", False)
@@ -12272,7 +12258,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if not screen_candidate:
                     fallback_summary = supplementary_screen_summary or (
                         _build_presenter_screen_summary_from_tool_messages(
-                            tool_messages
+                            tool_messages,
+                            projection_telemetry=tool_summary_projection_telemetry,
                         )
                     )
                     if fallback_summary:
@@ -12296,6 +12283,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     "type": "presenter_screen_backfill",
                                     "stage": "screen_backfill",
                                     "source": screen_backfill_source,
+                                    "represented_evidence_projection": (
+                                        dict(tool_summary_projection_telemetry)
+                                        if tool_summary_projection_telemetry
+                                        else None
+                                    ),
                                 },
                                 stage="screen_backfill",
                                 component="presenter_routes",

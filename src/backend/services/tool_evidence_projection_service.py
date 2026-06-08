@@ -27,6 +27,10 @@ VIEW_PURPOSE_PRIORITY: tuple[str, ...] = (
 
 PROJECTION_SCHEMA_VERSION = "tool_evidence_projection.v1"
 SURFACEABLE_CONCEPT_EVIDENCE_SCHEMA_VERSION = "surfaceable_concept_evidence.v1"
+NESTED_WORKFLOW_PROGRESS_EVIDENCE_SCHEMA_VERSION = (
+    "nested_workflow_progress_evidence.v1"
+)
+WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION = "workflow_progress_projection.v1"
 
 _CONCEPT_ID_RE = re.compile(r"#V#[A-Za-z0-9._-]+")
 _CONDITIONALLY_SURFACEABLE_SINGLE_KEYS = {
@@ -413,6 +417,228 @@ def surfaceable_concept_ids_from_evidence(
         seen.add(lowered)
         concept_ids.append(clean_id)
     return concept_ids
+
+
+def project_nested_workflow_progress_evidence(
+    payload: Any,
+    *,
+    max_facts: int = 16,
+    max_depth: int = 8,
+    max_nodes: int = 320,
+) -> dict[str, Any] | None:
+    """Project represented nested workflow progress facts from an aggregate payload.
+
+    The only user-facing labels this helper preserves are labels already carried
+    on ``workflow_progress_projection.v1`` facts. Source-specific evidence
+    policy belongs in the represented projection metadata that produced those
+    facts, not in this traversal primitive.
+    """
+
+    facts: list[dict[str, Any]] = []
+    fact_seen: set[tuple[str, str, str]] = set()
+    contract_ids: list[str] = []
+    contract_seen: set[str] = set()
+    source_paths: list[str] = []
+    source_seen: set[str] = set()
+    workflow_evidence_seen = False
+    visited = 0
+
+    def _clean_text(value: Any, *, limit: int = 240) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = " ".join(value.split()).strip()
+        if not cleaned:
+            return None
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: max(0, limit - 3)].rstrip()}..."
+
+    def _normalise_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    def _normalise_value(value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return _clean_text(value, limit=320)
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            items: list[Any] = []
+            for item in list(value)[:5]:
+                normalised = _normalise_value(item)
+                if normalised is not None:
+                    items.append(normalised)
+            return items or None
+        return None
+
+    def _append_source_path(path: str) -> None:
+        if not path or path in source_seen:
+            return
+        source_seen.add(path)
+        source_paths.append(path)
+
+    def _append_contract_id(contract_id: str | None) -> None:
+        if not contract_id or contract_id in contract_seen:
+            return
+        contract_seen.add(contract_id)
+        contract_ids.append(contract_id)
+
+    def _append_fact(raw_fact: Mapping[str, Any], source_path: str) -> None:
+        if len(facts) >= max_facts:
+            return
+        schema_version = _clean_text(raw_fact.get("schema_version"), limit=80)
+        if schema_version and schema_version != WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION:
+            return
+        fact_id = _clean_text(raw_fact.get("fact_id") or raw_fact.get("id"), limit=120)
+        label = _clean_text(raw_fact.get("label"), limit=120)
+        if not fact_id or not label:
+            return
+        status = _clean_text(raw_fact.get("status"), limit=80) or (
+            "available" if "value" in raw_fact else "missing"
+        )
+        contract_id = _clean_text(
+            raw_fact.get("contract_id")
+            or raw_fact.get("projection_contract_id")
+            or raw_fact.get("concept_id"),
+            limit=180,
+        )
+        source_key = _clean_text(raw_fact.get("source_path"), limit=240) or source_path
+        key = (fact_id, label, source_key)
+        if key in fact_seen:
+            return
+        fact_seen.add(key)
+        _append_source_path(source_path)
+        _append_contract_id(contract_id)
+
+        fact: dict[str, Any] = {
+            "schema_version": WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION,
+            "fact_id": fact_id,
+            "label": label,
+            "status": status,
+            "present": _normalise_bool(raw_fact.get("present")),
+            "redacted": _normalise_bool(raw_fact.get("redacted")),
+            "truncated": _normalise_bool(raw_fact.get("truncated")),
+            "source_path": source_key,
+            "payload_source_path": source_path,
+        }
+        for field in (
+            "value_kind",
+            "visibility",
+            "resolved_path",
+            "reason_code",
+            "workflow_id",
+            "state_id",
+            "action_id",
+        ):
+            text = _clean_text(raw_fact.get(field), limit=180)
+            if text:
+                fact[field] = text
+        if contract_id:
+            fact["contract_id"] = contract_id
+        if "value" in raw_fact and not fact["redacted"]:
+            normalised_value = _normalise_value(raw_fact.get("value"))
+            if normalised_value is not None:
+                fact["value"] = normalised_value
+        facts.append(fact)
+
+    def _append_raw_facts(raw_facts: Any, source_path: str) -> None:
+        if not isinstance(raw_facts, Sequence) or isinstance(
+            raw_facts, (str, bytes, bytearray)
+        ):
+            return
+        for raw_fact in raw_facts:
+            if isinstance(raw_fact, Mapping):
+                _append_fact(raw_fact, source_path)
+                if len(facts) >= max_facts:
+                    return
+
+    def _walk(value: Any, *, path: tuple[str, ...], depth: int) -> None:
+        nonlocal visited, workflow_evidence_seen
+        if len(facts) >= max_facts or depth > max_depth or visited >= max_nodes:
+            return
+        if isinstance(value, Mapping):
+            visited += 1
+            if any(
+                key in value
+                for key in (
+                    "iteration_results",
+                    "subworkflow_invocation",
+                    "subworkflow_result_envelope",
+                    "workflow_terminal",
+                    "workflow_terminal_state",
+                    "last_action_id",
+                    "last_action_outputs",
+                    "progress_facts",
+                    "workflow_progress_facts",
+                    "last_workflow_progress_facts",
+                )
+            ):
+                workflow_evidence_seen = True
+            for raw_key, nested in value.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                next_path = (*path, key)
+                source_path = ".".join(next_path)
+                lowered_key = key.lower()
+                if lowered_key in {
+                    "progress_facts",
+                    "workflow_progress_facts",
+                    "last_workflow_progress_facts",
+                }:
+                    _append_raw_facts(nested, source_path)
+                    continue
+                if lowered_key == "_preview" and isinstance(nested, str):
+                    stripped = nested.strip()
+                    if stripped.startswith(("{", "[")):
+                        try:
+                            _walk(
+                                json.loads(stripped),
+                                path=next_path,
+                                depth=depth + 1,
+                            )
+                        except Exception:
+                            pass
+                    continue
+                if isinstance(nested, (Mapping, list, tuple)):
+                    _walk(nested, path=next_path, depth=depth + 1)
+            return
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for index, item in enumerate(value):
+                if len(facts) >= max_facts or visited >= max_nodes:
+                    return
+                _walk(item, path=(*path, str(index)), depth=depth + 1)
+
+    _walk(payload, path=(), depth=0)
+    if not workflow_evidence_seen and not facts:
+        return None
+    return {
+        "schema_version": NESTED_WORKFLOW_PROGRESS_EVIDENCE_SCHEMA_VERSION,
+        "projection_source_schema_version": WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION,
+        "facts": facts,
+        "contract_ids": contract_ids,
+        "source_paths": source_paths,
+        "workflow_evidence_seen": workflow_evidence_seen,
+        "telemetry": {
+            "schema_version": NESTED_WORKFLOW_PROGRESS_EVIDENCE_SCHEMA_VERSION,
+            "projection_source_schema_version": WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION,
+            "fact_count": len(facts),
+            "contract_ids": contract_ids,
+            "source_paths": source_paths,
+            "scanned_node_count": visited,
+            "max_depth": max_depth,
+            "max_nodes": max_nodes,
+        },
+    }
 
 
 def render_surfaceable_concept_lines(
@@ -1010,9 +1236,12 @@ def _clean_str(value: Any) -> str | None:
 
 
 __all__ = [
+    "NESTED_WORKFLOW_PROGRESS_EVIDENCE_SCHEMA_VERSION",
     "PROJECTION_SCHEMA_VERSION",
+    "WORKFLOW_PROGRESS_PROJECTION_SCHEMA_VERSION",
     "ToolFieldContract",
     "ToolProjectionContract",
+    "project_nested_workflow_progress_evidence",
     "project_tool_payload_for_llm",
     "resolve_tool_projection_contract",
 ]

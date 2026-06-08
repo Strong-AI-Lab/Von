@@ -327,6 +327,36 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
             ),
         },
     },
+    {
+        "name": "presenter_nested_workflow_evidence_authority_surface",
+        "path": "src/backend/server/routes/von_routes.py",
+        "forbidden_patterns": {
+            "python_authored_presenter_nested_evidence_heading": re.compile(
+                r"NESTED WORKFLOW EVIDENCE",
+                re.IGNORECASE,
+            ),
+            "python_authored_presenter_nested_readback_heading": re.compile(
+                r"Nested workflow/read-back evidence",
+                re.IGNORECASE,
+            ),
+            "python_authored_presenter_readback_wording": re.compile(
+                r"Representation/read-back verified",
+                re.IGNORECASE,
+            ),
+            "python_authored_presenter_paper_concept_wording": re.compile(
+                r"Nested workflow produced paper concept",
+                re.IGNORECASE,
+            ),
+            "python_authored_presenter_file_copy_wording": re.compile(
+                r"Nested workflow produced file-copy concept",
+                re.IGNORECASE,
+            ),
+            "python_authored_presenter_typed_blocker_heading": re.compile(
+                r"TYPED TOOL BLOCKERS|Typed tool blockers",
+                re.IGNORECASE,
+            ),
+        },
+    },
 )
 
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
