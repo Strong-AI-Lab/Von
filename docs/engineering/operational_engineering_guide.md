@@ -313,17 +313,21 @@ abandoning cleanup. The common reasons are:
 - When code depends on a credential or service-critical environment variable,
   register the key in `_apply_dotenv_overrides()` in
   `src/workflows/von/main.py`.
-- For repo-local shell diagnostics of internal MCP tools, prefer a canonical
+- For repo-local shell diagnostics of internal Von MCP tools, prefer a canonical
   helper that runs through `InternalMCPGateway` from the repo root rather than
   assuming the parent shell inherited `.env`. Use
   `python utilities/invoke_internal_mcp_tool.py <tool_name>` or
   `pdm run python utilities/invoke_internal_mcp_tool.py <tool_name>`. The helper
   delegates through PDM when launched by a system Python, so it avoids missing
   repo dependencies and centralises the gateway initialisation boilerplate.
-- For multi-step Jira or MCP writes, use the same helper with a JSON payload
+- For multi-step internal Von MCP writes, use the same helper with a JSON payload
   file rather than hand-writing inline Python. This keeps `InternalMCPGateway`,
   `InternalMCPTransport`, catalogue construction, output-schema validation, and
   write guardrails on the canonical path.
+- For Codex-side Jira issue lifecycle actions, prefer the installed Atlassian
+  Rovo/Jira connector when available and healthy. Use Von's internal Jira MCP
+  helper when the connector is unavailable, auth is broken, or the task
+  specifically needs to validate Von's own Jira integration path.
 - Do not rely on inherited parent-shell values for well-known keys such as
   `GITHUB_TOKEN`; IDEs, CI, and host tooling often override them.
 - Assume `.env` edits do not affect already-running Von processes.
@@ -462,7 +466,13 @@ found the right reusable workflow boundary.
 
 ### 6.2 Jira
 
-- Prefer Von's internal Jira path when Atlassian MCP OAuth is unreliable.
+- For Codex-side Jira task lifecycle work, prefer the installed Atlassian
+  Rovo/Jira connector when available and healthy. Use it for issue reads and
+  searches, comments, transitions, assignee/status checks, linked issue
+  read-back, and final close-out verification.
+- Use Von's internal Jira MCP path when the task specifically validates Von's
+  Jira integration, when Jira access must flow through Von's own authority/tool
+  surfaces, or when the Atlassian connector is unavailable or unhealthy.
 - Use the Atlassian recovery runbook rather than handwritten REST workarounds.
 - If the Jira pathway is broken, improve the canonical path or document the gap
   instead of normalising ad-hoc bypasses.

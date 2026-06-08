@@ -71,7 +71,7 @@ For frontend/browser user-view validation practice, also see
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
 6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state. A Jira progress or closure comment is not completion: after commenting that implementation or validation is done, continue immediately through commit, merge/push, read-back verification, and Jira transition unless the user has explicitly asked to pause before those steps.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
-   - Ignore Codex app connectors, including the Codex Gmail/email connector, when deciding what Von code or Von workflows should expose or use. Those connectors are assistant-side conveniences, not Von authority surfaces, canonical implementation paths, or evidence that internal MCP/tooling is redundant.
+   - For Codex-side Jira task lifecycle work, prefer the installed Atlassian Rovo/Jira connector when it is available and healthy: read issues, add progress or closure comments, transition statuses, and read back results through that tool before falling back to Von's internal Jira MCP helpers. Still treat Codex app connectors as assistant-side conveniences, not Von authority surfaces, canonical Von implementation paths, or evidence that internal MCP/tooling is redundant for product behaviour.
 8. Workflow-first / KB-authoritative is the default doctrine: if a durable behaviour or policy change can live cleanly in workflow, prompt, KB, or Vontology artefacts, prefer changing it there rather than encoding the policy in Python.
 9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, planning, and stage-specific context construction count as authored behaviour.
 10. Python should usually provide reusable support surfaces: execution, validation, tool wrappers, rendering, telemetry, persistence, safety checks, integrations, and genuinely missing reusable primitives.
@@ -299,7 +299,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 
 ## 9. Tooling defaults
 
-- Prefer Von's internal Jira pathways when Atlassian MCP OAuth is unreliable.
+- Prefer the Atlassian Rovo/Jira connector for Codex-side Jira issue reads, comments, transitions, and status read-back when available and healthy; use Von's internal Jira pathways for Von product/tool validation or as fallback when connector auth/tooling is unavailable.
 - Use the Atlassian recovery runbook rather than inventing Jira REST workarounds.
 - When the user asks for "recently closed" `JVNAUTOSCI` issues, interpret that by default as `project = JVNAUTOSCI AND statusCategory = Done AND resolved >= -48h ORDER BY resolved DESC` unless they explicitly ask for a narrower terminal status such as `Closed`.
 - Use workflow MCP tools as the default control surface for workflow behaviour.
