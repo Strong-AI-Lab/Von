@@ -74,7 +74,7 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` surfaces now on `main`.
 - Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`; it
   still failed only on the known four repo-seed paths tracked by
-  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, and
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
   `JVNAUTOSCI-2341`.
 - Confirmed `turn_execution_actions.py` and `von_routes.py` still contain the
   prior `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` drift evidence; no duplicate tasks
