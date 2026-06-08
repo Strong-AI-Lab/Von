@@ -33286,6 +33286,137 @@ class InternalMCPChatOrchestrator:
             return concept_id
         return None
 
+    @staticmethod
+    def _display_name_for_workflow_id(workflow_id: str) -> str:
+        name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
+        return name.replace("_", " ").strip().title() or workflow_id
+
+    @staticmethod
+    def _collect_workflow_definition_action_ids(
+        workflow_definition: Any,
+    ) -> tuple[str, ...]:
+        states = getattr(workflow_definition, "states", None)
+        if not isinstance(states, Mapping):
+            return ()
+
+        action_ids: list[str] = []
+        seen_action_ids: set[str] = set()
+        for state_spec in states.values():
+            for action in getattr(state_spec, "actions", ()) or ():
+                action_id = str(
+                    getattr(action, "action_id", None)
+                    or getattr(action, "target_id", "")
+                    or ""
+                ).strip()
+                if not action_id:
+                    continue
+                lowered_action_id = action_id.lower()
+                if lowered_action_id in seen_action_ids:
+                    continue
+                seen_action_ids.add(lowered_action_id)
+                action_ids.append(action_id)
+        return tuple(action_ids)
+
+    def _build_agent_test_required_tool_workflow_candidates(
+        self,
+        *,
+        required_tools: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Expose represented workflows whose actions satisfy required tools.
+
+        This is an AgentTest-only support surface for the local replay case where
+        the normal workflow discovery query surface is unavailable or empty.  It
+        does not infer task semantics from the prompt; it projects already
+        represented workflow action contracts into a discovery-like candidate
+        payload so the existing selector policy can see them.
+        """
+
+        required_tool_names = tuple(
+            str(tool_name or "").strip()
+            for tool_name in required_tools
+            if isinstance(tool_name, str) and str(tool_name or "").strip()
+        )
+        if not required_tool_names:
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        for workflow_id in self._workflow_registry.all_workflow_ids():
+            workflow_id_text = str(workflow_id or "").strip()
+            if (
+                not workflow_id_text
+                or workflow_id_text in _SELECTOR_GENERIC_WORKFLOW_IDS
+            ):
+                continue
+            try:
+                registration = self._workflow_registry.get_registration(
+                    workflow_id_text
+                )
+            except Exception:
+                registration = None
+            workflow_definition = (
+                getattr(registration, "definition", None)
+                if registration is not None
+                else None
+            )
+            if workflow_definition is None:
+                continue
+            metadata = getattr(workflow_definition, "metadata", None)
+            routing_profile = (
+                metadata.get("routing_profile")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if not isinstance(routing_profile, Mapping):
+                continue
+            routing_role = str(routing_profile.get("role") or "").strip().lower()
+            if routing_role != "execution":
+                continue
+            action_ids = self._collect_workflow_definition_action_ids(
+                workflow_definition
+            )
+            if not action_ids:
+                continue
+            action_id_keys = {action_id.lower() for action_id in action_ids}
+            matched_required_tools = [
+                tool_name
+                for tool_name in required_tool_names
+                if tool_name.lower() in action_id_keys
+            ]
+            if not matched_required_tools:
+                continue
+            purpose = str(
+                getattr(registration, "purpose", None)
+                or getattr(workflow_definition, "purpose", None)
+                or ""
+            ).strip()
+            candidates.append(
+                {
+                    "concept_id": workflow_id_text,
+                    "name": self._display_name_for_workflow_id(workflow_id_text),
+                    "description": purpose,
+                    "workflow_purpose": purpose,
+                    "candidate_source": "agent_test_local_replay",
+                    "candidate_reason": "required_tool_workflow_action_overlap",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_exclusion_reason": None,
+                    "routing_profile": dict(routing_profile),
+                    "workflow_action_ids": list(action_ids),
+                    "matched_required_tools": matched_required_tools,
+                    "required_tool_overlap_count": len(matched_required_tools),
+                }
+            )
+
+        candidates.sort(
+            key=lambda item: (
+                -int(item.get("required_tool_overlap_count") or 0),
+                str(item.get("concept_id") or ""),
+            )
+        )
+        return candidates
+
     def _emit_selector_preparation_summary_progress(
         self,
         emit_progress: Callable[[Mapping[str, Any]], None] | None,
@@ -33400,10 +33531,16 @@ class InternalMCPChatOrchestrator:
                 progress_note(
                     "Use AgentTest selector defaults",
                     (
-                        "Using a deterministic local selector candidate because "
+                        "Projecting represented workflow actions into a "
+                        "deterministic local selector candidate set because "
                         "represented workflow discovery found no candidates."
                     ),
                 )
+            represented_candidates = (
+                self._build_agent_test_required_tool_workflow_candidates(
+                    required_tools=expected_required_tools
+                )
+            )
             tool_candidate = next(
                 (
                     dict(candidate)
@@ -33423,31 +33560,78 @@ class InternalMCPChatOrchestrator:
             tool_candidate.update(
                 {
                     "candidate_source": "agent_test_local_replay",
-                    "candidate_reason": "required_turn_tools",
+                    "candidate_reason": (
+                        "required_turn_tools_fallback"
+                        if represented_candidates
+                        else "required_turn_tools"
+                    ),
                     "routing_profile_role": "execution",
                     "routing_exclusion_reason": None,
                 }
             )
+            selector_candidate_entries = [*represented_candidates, tool_candidate]
+            selector_candidate_ids = [
+                str(candidate.get("concept_id")).strip()
+                for candidate in selector_candidate_entries
+                if isinstance(candidate.get("concept_id"), str)
+                and str(candidate.get("concept_id")).strip()
+            ]
+            selector_authoritative_candidate_entries = list(represented_candidates)
+            selector_authoritative_candidate_ids = [
+                str(candidate.get("concept_id")).strip()
+                for candidate in selector_authoritative_candidate_entries
+                if isinstance(candidate.get("concept_id"), str)
+                and str(candidate.get("concept_id")).strip()
+            ]
+            recommended_workflow_id = (
+                selector_authoritative_candidate_ids[0]
+                if selector_authoritative_candidate_ids
+                else TOOL_CALLING_WORKFLOW_ID
+            )
+            discovery_candidates = (
+                selector_candidate_entries
+                if represented_candidates
+                else [tool_candidate]
+            )
+            discovery_matches = (
+                represented_candidates if represented_candidates else [tool_candidate]
+            )
+            discovery_origin = (
+                "agent_test_local_replay_synthetic_action_overlap"
+                if represented_candidates
+                else "agent_test_local_replay_synthetic"
+            )
             workflow_discovery_result = {
                 "query": discovery_query_input,
                 "requested_query": prompt_text,
-                "search_sources": ["agent_test_local_replay"],
-                "candidate_count": 1,
-                "match_count": 1,
-                "matches": [dict(tool_candidate)],
-                "candidates": [dict(tool_candidate)],
+                "search_sources": (
+                    [
+                        "agent_test_local_replay",
+                        "workflow_registry_action_overlap",
+                    ]
+                    if represented_candidates
+                    else ["agent_test_local_replay"]
+                ),
+                "candidate_count": len(discovery_candidates),
+                "match_count": len(discovery_matches),
+                "matches": [dict(candidate) for candidate in discovery_matches],
+                "candidates": [dict(candidate) for candidate in discovery_candidates],
                 "agent_test_local_replay": True,
                 "required_tools": list(expected_required_tools),
-                "discovery_payload_origin": "agent_test_local_replay_synthetic",
+                "discovery_payload_origin": discovery_origin,
             }
             selector_prompt_text = (
-                "Select #V#tool_calling_workflow for this AgentTest local replay. "
-                "The expected outcome requires grounded tool evidence."
+                "For this AgentTest local replay, reuse the first authoritative "
+                "represented workflow candidate when one is present; otherwise "
+                "use #V#tool_calling_workflow for grounded tool evidence."
             )
             selector_context_lineage = {
                 "stage": "selector_decision",
                 "base_context_source": "agent_test_local_replay",
                 "agent_test_local_replay": True,
+                "agent_test_registry_action_overlap_candidate_count": len(
+                    represented_candidates
+                ),
             }
             # Persist the populated discovery payload onto request.data so it
             # survives downstream code paths that bypass the action-output
@@ -33464,9 +33648,13 @@ class InternalMCPChatOrchestrator:
                 "selector_prompt_text": selector_prompt_text,
                 "selector_call_prompt_text": json.dumps(
                     {
-                        "workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                        "workflow_id": recommended_workflow_id,
                         "confidence": 1.0,
-                        "reasoning": "AgentTest local replay requires grounded tool evidence.",
+                        "reasoning": (
+                            "AgentTest local replay projects represented "
+                            "workflow action overlap before falling back to "
+                            "the generic tool workflow."
+                        ),
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -33475,30 +33663,49 @@ class InternalMCPChatOrchestrator:
                 "selector_prompt_provenance": {
                     "source": "agent_test_local_replay",
                     "render_variables": {
-                        "candidate_list": (
-                            f"- {TOOL_CALLING_WORKFLOW_ID}: Tool Calling Workflow"
+                        "candidate_list": "\n".join(
+                            f"- {candidate_id}: "
+                            f"{str(candidate.get('name') or candidate_id).strip()}"
+                            for candidate, candidate_id in zip(
+                                selector_candidate_entries,
+                                selector_candidate_ids,
+                                strict=False,
+                            )
                         )
                     },
                 },
                 "selector_prompt_failure_reason": None,
                 "selector_prompt_failure_detail": None,
-                "selector_authoritative_candidate_entries": [],
-                "selector_authoritative_candidate_ids": [],
-                "selector_authoritative_candidate_source": "agent_test_local_replay_synthetic",
-                "selector_candidate_entries": [dict(tool_candidate)],
-                "selector_candidate_ids": [TOOL_CALLING_WORKFLOW_ID],
+                "selector_authoritative_candidate_entries": (
+                    selector_authoritative_candidate_entries
+                ),
+                "selector_authoritative_candidate_ids": (
+                    selector_authoritative_candidate_ids
+                ),
+                "selector_authoritative_candidate_source": discovery_origin,
+                "selector_candidate_entries": selector_candidate_entries,
+                "selector_candidate_ids": selector_candidate_ids,
                 "selector_excluded_candidate_entries": [],
                 "selector_excluded_candidate_ids": [],
-                "selector_discovered_workflow_ids": [TOOL_CALLING_WORKFLOW_ID],
+                "selector_discovered_workflow_ids": [
+                    str(candidate.get("concept_id")).strip()
+                    for candidate in discovery_matches
+                    if isinstance(candidate.get("concept_id"), str)
+                    and str(candidate.get("concept_id")).strip()
+                ],
                 "selector_context_messages": [
                     {"role": "system", "content": selector_prompt_text}
                 ],
                 "selector_context_lineage": selector_context_lineage,
-                "selector_candidate_count": 1,
+                "selector_candidate_count": len(selector_candidate_entries),
                 "selector_excluded_candidate_count": 0,
                 "selector_policy_recommendation": {
-                    "recommended_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                    "guidance_mode": "agent_test_local_replay",
+                    "recommended_workflow_id": recommended_workflow_id,
+                    "guidance_mode": (
+                        "agent_test_local_replay_action_overlap"
+                        if represented_candidates
+                        else "agent_test_local_replay"
+                    ),
                 },
                 "selector_continuation_routing_context_text": None,
             }

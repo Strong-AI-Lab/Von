@@ -9,8 +9,17 @@ from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
     WorkflowEnvironment,
 )
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
+)
+from src.backend.workflows.workflow_registry import (
+    WorkflowRegistration,
+    WorkflowRegistry,
 )
 from src.backend.workflows.definitions import (
     CHAT_NARRATION_WORKFLOW_ID,
@@ -37,6 +46,33 @@ class _DummyGateway:
 
     def describe_methods(self) -> dict[str, Any]:
         return {}
+
+
+def _workflow_definition(
+    workflow_id: str,
+    *,
+    action_id: str,
+    purpose: str = "Test workflow",
+    routing_profile: dict[str, Any] | None = None,
+) -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id=action_id),),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+        purpose=purpose,
+        metadata=(
+            {"routing_profile": routing_profile}
+            if isinstance(routing_profile, dict)
+            else {}
+        ),
+    )
 
 
 def _expected_outcome_validation_policy() -> dict[str, Any]:
@@ -421,6 +457,115 @@ def test_agent_test_selector_preparation_uses_local_tool_candidate(
     assert outputs["selector_prompt_available"] is True
     assert outputs["selector_candidate_ids"] == [TOOL_CALLING_WORKFLOW_ID]
     assert outputs["workflow_discovery_result"]["agent_test_local_replay"] is True
+
+
+def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    represented_workflow_id = "#V#represented_lookup_workflow"
+    required_action_id = "represented.lookup"
+    registry = WorkflowRegistry()
+    registry.register(
+        WorkflowRegistration(
+            workflow_id=represented_workflow_id,
+            definition=_workflow_definition(
+                represented_workflow_id,
+                action_id=required_action_id,
+                purpose="Represented lookup workflow",
+                routing_profile={
+                    "schema_version": "workflow_routing_profile.v1",
+                    "role": "execution",
+                },
+            ),
+            purpose="Represented lookup workflow",
+            source="test",
+        )
+    )
+    registry.register(
+        WorkflowRegistration(
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            definition=_workflow_definition(
+                TOOL_CALLING_WORKFLOW_ID,
+                action_id="tool_calling.execute",
+                purpose="Generic tool workflow",
+            ),
+            purpose="Generic tool workflow",
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry = registry
+
+    def _empty_discovery(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "represented lookup prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
+
+    def _unexpected_prompt_render(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("AgentTest synthetic fallback should not render prompts")
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _empty_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        _unexpected_prompt_render,
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": "Run the represented lookup with grounded evidence.",
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+                "turn_expected_required_tools": [required_action_id],
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace="#V#michael_witbrock",
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert outputs["selector_authoritative_candidate_ids"] == [
+        represented_workflow_id
+    ]
+    assert outputs["selector_candidate_ids"] == [
+        represented_workflow_id,
+        TOOL_CALLING_WORKFLOW_ID,
+    ]
+    assert outputs["selector_policy_recommendation"]["recommended_workflow_id"] == (
+        represented_workflow_id
+    )
+    selector_payload = json.loads(outputs["selector_call_prompt_text"])
+    assert selector_payload["workflow_id"] == represented_workflow_id
+    discovery = outputs["workflow_discovery_result"]
+    assert discovery["discovery_payload_origin"] == (
+        "agent_test_local_replay_synthetic_action_overlap"
+    )
+    assert discovery["search_sources"] == [
+        "agent_test_local_replay",
+        "workflow_registry_action_overlap",
+    ]
+    assert discovery["candidate_count"] == 2
+    assert discovery["match_count"] == 1
+    assert discovery["candidates"][0]["concept_id"] == represented_workflow_id
+    assert discovery["candidates"][0]["matched_required_tools"] == [
+        required_action_id
+    ]
+    assert discovery["candidates"][1]["concept_id"] == TOOL_CALLING_WORKFLOW_ID
 
 
 def test_agent_test_selector_preparation_prefers_represented_discovery_candidate(
