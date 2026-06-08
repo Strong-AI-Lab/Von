@@ -109,6 +109,28 @@ def _is_admin_or_owner_session() -> bool:
     return isinstance(role, str) and role.strip().lower() in {"admin", "owner"}
 
 
+def _can_rename_concept_id() -> bool:
+    """Return whether this request may perform concept-ID rename previews/execution."""
+
+    return _is_admin_or_owner_session()
+
+
+def _coerce_json_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return default
+
+
 def _can_edit_subject_recommendation_profile(subject_concept_id: str) -> bool:
     subject_id = _normalise_concept_id(subject_concept_id)
     if not subject_id:
@@ -924,7 +946,7 @@ def rename_concept_route(concept_id: str):
     Request body:
         {
             "new_id": "#V#new_concept_name",
-            "simulate": true/false (optional, default false),
+            "simulate": true/false (optional, default true),
             "preserve_alias": true/false (optional, default true)
         }
 
@@ -934,7 +956,19 @@ def rename_concept_route(concept_id: str):
     """
     from ...services.concept_rename_service import rename_concept
 
-    data = request.get_json() or {}
+    if not _can_rename_concept_id():
+        return (
+            jsonify(
+                error=(
+                    "Forbidden: concept ID rename requires an admin or owner session"
+                )
+            ),
+            403,
+        )
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify(error="JSON object body required"), 400
     new_id = data.get("new_id")
     if not new_id or not isinstance(new_id, str):
         return (
@@ -942,8 +976,9 @@ def rename_concept_route(concept_id: str):
             400,
         )
 
-    simulate = data.get("simulate", False)
-    preserve_alias = data.get("preserve_alias", True)
+    simulate = _coerce_json_bool(data.get("simulate"), default=True)
+    preserve_alias = _coerce_json_bool(data.get("preserve_alias"), default=True)
+    skip_inaccessible = _coerce_json_bool(data.get("skip_inaccessible"), default=False)
 
     try:
         result = rename_concept(
@@ -951,6 +986,7 @@ def rename_concept_route(concept_id: str):
             new_id=new_id,
             simulate=simulate,
             preserve_alias=preserve_alias,
+            skip_inaccessible=skip_inaccessible,
         )
 
         if not result.get("success"):

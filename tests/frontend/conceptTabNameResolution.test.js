@@ -1,6 +1,11 @@
 /** @jest-environment jsdom */
 
-import { addNewName, loadConceptNames } from "../../src/frontend/web/von_interface/static/js/conceptTab.js";
+import {
+    addNewName,
+    executeConceptIdRename,
+    loadConceptNames,
+    previewConceptIdRename,
+} from "../../src/frontend/web/von_interface/static/js/conceptTab.js";
 import { postJson } from "../../src/frontend/web/von_interface/static/js/apiService.js";
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
@@ -136,5 +141,109 @@ describe('conceptTab name resolution', () => {
 
         const namesList = document.getElementById('namesList_alpha');
         expect(namesList.textContent).toContain('Person Name Two');
+    });
+
+    test('previews concept ID rename and enables execution only after a successful preview', async () => {
+        document.body.innerHTML = `
+            <div class="tab-content" id="conceptTab" data-concept-id="#V#old_diarg">
+              <input id="conceptIdRenameInput" value="#V#old_diary" />
+              <button id="conceptIdRenameExecuteButton" disabled>Rename</button>
+              <span id="conceptIdRenameStatus"></span>
+              <div id="conceptIdRenamePreview" class="hidden"></div>
+            </div>
+        `;
+        selectedConceptState.selected = '#V#old_diarg';
+
+        global.fetch = jest.fn(async (url, options = {}) => {
+            expect(String(url)).toBe('/api/concepts/%23V%23old_diarg/rename');
+            expect(JSON.parse(options.body)).toMatchObject({
+                new_id: '#V#old_diary',
+                simulate: true,
+                preserve_alias: true,
+            });
+            return okJson({
+                success: true,
+                simulate: true,
+                old_id: '#V#old_diarg',
+                new_id: '#V#old_diary',
+                operations: [
+                    { type: 'rewrite_relationship_references', count: 2 },
+                    { type: 'update_concept_id' },
+                ],
+                reference_surfaces: {
+                    covered: [{ collection: 'concepts', path: 'relationships.*', handling: 'rewritten' }],
+                    excluded: [{ surface: 'chat/RAG/session namespaces', handling: 'blocked when detected' }],
+                },
+            });
+        });
+
+        const result = await previewConceptIdRename();
+
+        expect(result.success).toBe(true);
+        expect(document.getElementById('conceptIdRenameExecuteButton').disabled).toBe(false);
+        expect(document.getElementById('conceptIdRenameStatus').textContent).toBe('Preview ready');
+        expect(document.getElementById('conceptIdRenamePreview').textContent).toContain('#V#old_diarg -> #V#old_diary');
+        expect(document.getElementById('conceptIdRenamePreview').textContent).toContain('Relationship');
+    });
+
+    test('executes previewed concept ID rename and refreshes selected concept state', async () => {
+        document.body.innerHTML = `
+            <div class="tab-content" id="conceptTab" data-concept-id="#V#old_diarg">
+              <input id="conceptIdRenameInput" value="#V#old_diary" />
+              <button id="conceptIdRenameExecuteButton">Rename</button>
+              <span id="conceptIdRenameStatus"></span>
+              <div id="conceptIdRenamePreview" class="hidden"></div>
+              <div id="namesList"></div>
+              <select id="newNameLanguage"><option value="en-NZ">English (New Zealand)</option></select>
+              <select id="newNameType"><option value="NL">Natural Language</option></select>
+              <span id="namesStatus"></span>
+              <div id="attributesList"></div>
+            </div>
+        `;
+        selectedConceptState.selected = '#V#old_diarg';
+        window.confirm = jest.fn(() => true);
+        const events = [];
+        document.addEventListener('concept-id-renamed', (event) => events.push(event.detail));
+
+        global.fetch = jest.fn(async (url, options = {}) => {
+            const requestUrl = String(url);
+            if (requestUrl === '/api/concepts/%23V%23old_diarg/rename') {
+                const body = JSON.parse(options.body);
+                return okJson({
+                    success: true,
+                    simulate: body.simulate,
+                    executed: body.simulate === false,
+                    old_id: '#V#old_diarg',
+                    new_id: '#V#old_diary',
+                    operations: [{ type: 'update_concept_id' }],
+                    reference_surfaces: { covered: [], excluded: [] },
+                });
+            }
+            if (requestUrl === '/api/concepts/%23V%23old_diary') {
+                return okJson({
+                    concept_id: '#V#old_diary',
+                    name: 'Old Diary',
+                    display_name: 'Old Diary',
+                    names: [{ name: 'Old Diary', language: 'en-NZ', type: 'NL' }],
+                    relationships: {},
+                });
+            }
+            if (requestUrl.startsWith('/vontology/api/vontology/text_relations')) {
+                return okJson({ text_relations: [] });
+            }
+            return okJson({});
+        });
+
+        await previewConceptIdRename();
+        const result = await executeConceptIdRename();
+
+        expect(result.executed).toBe(true);
+        expect(window.confirm).toHaveBeenCalledWith('Rename #V#old_diarg to #V#old_diary?');
+        expect(selectedConceptState.selected).toBe('#V#old_diary');
+        expect(document.getElementById('conceptTab').dataset.conceptId).toBe('#V#old_diary');
+        expect(events[0]).toMatchObject({ oldId: '#V#old_diarg', newId: '#V#old_diary' });
+        const renameCalls = global.fetch.mock.calls.filter((call) => String(call[0]) === '/api/concepts/%23V%23old_diarg/rename');
+        expect(JSON.parse(renameCalls[0][1].body).simulate).toBe(true);
+        expect(JSON.parse(renameCalls[1][1].body).simulate).toBe(false);
     });
 });

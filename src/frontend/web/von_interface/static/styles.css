@@ -11309,6 +11309,69 @@ button.prompt-vontology-cartouche {
     padding: 6px 8px;
 }
 
+.concept-id-rename-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.concept-id-rename-form input {
+    flex: 1 1 260px;
+    min-width: 180px;
+    max-width: 520px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.concept-id-rename-preview {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #fbfcfd;
+    color: #1f2937;
+    font-size: 13px;
+}
+
+.concept-id-rename-summary {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.concept-id-rename-summary.ok {
+    color: #166534;
+}
+
+.concept-id-rename-summary.blocked {
+    color: #b91c1c;
+}
+
+.concept-id-rename-operations,
+.concept-id-rename-errors,
+.concept-id-rename-surfaces ul {
+    margin: 8px 0 0 18px;
+    padding: 0;
+}
+
+.concept-id-rename-errors {
+    color: #b91c1c;
+}
+
+.concept-id-rename-surfaces {
+    margin-top: 10px;
+}
+
+.concept-id-rename-surfaces summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.concept-id-rename-surface-heading {
+    margin-top: 8px;
+    font-weight: 600;
+    color: #374151;
+}
+
 .names-technical-toggle {
     display: flex;
     align-items: center;

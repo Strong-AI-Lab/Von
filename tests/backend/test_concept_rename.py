@@ -7,6 +7,7 @@ Tests cover:
 4. Protected concept checks
 """
 
+import re
 from unittest.mock import MagicMock, patch
 
 from src.backend.utils.concept_id_utils import (
@@ -113,6 +114,15 @@ class TestRenameConceptSimulation:
         assert result["simulate"] is True
         assert "operations" in result
         assert any(op["type"] == "update_concept_id" for op in result["operations"])
+        assert result["reference_surfaces"]["covered"]
+        assert any(
+            item["collection"] == "concepts" and item["path"] == "relationships.*"
+            for item in result["reference_surfaces"]["covered"]
+        )
+        assert any(
+            item["surface"] == "chat/RAG/session namespaces"
+            for item in result["reference_surfaces"]["excluded"]
+        )
 
     @patch("src.backend.services.concept_rename_service.ConceptsRepository")
     @patch("src.backend.services.concept_rename_service.TextRelationsRepository")
@@ -299,6 +309,46 @@ class TestCheckConceptUsedInNamespaces:
 
         assert is_used is True
         assert usage["as_user_id"] == 10
+
+    @patch("src.backend.services.concept_rename_service.get_db")
+    def test_namespace_checks_use_canonical_fields_and_slugged_namespace_components(
+        self, mock_get_db
+    ):
+        """Namespace checks full ID fields and slug components consistently."""
+        mock_db = MagicMock()
+        mock_chat_coll = MagicMock()
+        mock_chat_coll.count_documents.return_value = 0
+        mock_interactions_coll = MagicMock()
+        mock_interactions_coll.count_documents.return_value = 0
+        mock_db.get_collection.side_effect = lambda name: (
+            mock_chat_coll if name == "chat_history" else mock_interactions_coll
+        )
+        mock_get_db.return_value = mock_db
+
+        is_used, _usage = check_concept_used_in_namespaces("#V#user.with.dot")
+
+        assert is_used is False
+        assert mock_chat_coll.count_documents.call_args_list[0].args[0] == {
+            "user_id": "#V#user.with.dot"
+        }
+        assert mock_chat_coll.count_documents.call_args_list[1].args[0] == {
+            "organisation_concept_id": "#V#user.with.dot"
+        }
+        namespace_queries = [
+            call.args[0]
+            for call in mock_chat_coll.count_documents.call_args_list
+            if "namespace" in call.args[0]
+        ]
+        assert namespace_queries
+        pattern = namespace_queries[0]["namespace"]["$regex"]
+        assert "user\\.with\\.dot" in pattern
+        assert "(^#V#user\\.with\\.dot($|@)|@user\\.with\\.dot$)" == pattern
+        compiled = re.compile(pattern)
+        assert compiled.search("#V#user.with.dot")
+        assert compiled.search("#V#user.with.dot@example_org")
+        assert compiled.search("#V#other_user@user.with.dot")
+        assert not compiled.search("#V#other_user@not_user.with.dot")
+        assert not compiled.search("#V#userXwithXdot@example_org")
 
     @patch("src.backend.services.concept_rename_service.get_db")
     def test_db_unavailable_returns_false(self, mock_get_db):

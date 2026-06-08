@@ -3011,6 +3011,40 @@ export function initializeDynamicTabs() {
         });
     } catch (_) { }
 
+    try {
+        document.addEventListener('concept-id-renamed', (e) => {
+            const oldId = typeof e?.detail?.oldId === 'string' ? e.detail.oldId.trim() : '';
+            const newId = typeof e?.detail?.newId === 'string' ? e.detail.newId.trim() : '';
+            if (!oldId || !newId || oldId === newId) return;
+            const info = dynamicConceptTabs.get(oldId);
+            if (!info) return;
+
+            dynamicConceptTabs.delete(oldId);
+            info.conceptId = newId;
+            info.conceptName = newId;
+            if (info.content?.dataset) {
+                info.content.dataset.conceptId = newId;
+                delete info.content.dataset.conceptMissing;
+            }
+            if (info.button?.dataset) {
+                info.button.dataset.conceptId = newId;
+                info.button.dataset.conceptName = newId;
+            }
+            const closeButton = info.button?.querySelector?.('.close-tab');
+            if (closeButton) {
+                const replacement = createCloseTabButton(`Close ${newId} tab`, () => closeDynamicConceptTab(newId));
+                closeButton.replaceWith(replacement);
+            }
+            dynamicConceptTabs.set(newId, info);
+            try { namesCache.delete(oldId); } catch (_) { }
+            try { namesCache.delete(newId); } catch (_) { }
+            try { inFlightFetches.delete(oldId); } catch (_) { }
+            try { inFlightFetches.delete(newId); } catch (_) { }
+            try { updateTabLabelWithShortestName(newId, info.button, true); } catch (_) { }
+            persistOpenConceptTabs({ activeTabId: info.tabId, removeWhenEmpty: true });
+        });
+    } catch (_) { }
+
     console.log('[dynamicTabs] Dynamic tabs initialization complete');
 }
 

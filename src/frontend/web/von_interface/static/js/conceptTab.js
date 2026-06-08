@@ -212,7 +212,7 @@ async function handleSuggestMissingInfo() {
     if (submitResponse.value) {
       alert(`Hypothesis created: ${predicate} = ${submitResponse.value} (confidence: ${submitResponse.confidence_score})`);
       // Refresh the concept view to show the new hypothesis
-      loadconceptForCurrentSelection();
+      reloadSelectedConceptFromApi();
     } else {
       alert('Failed to create hypothesis from your answer.');
     }
@@ -262,6 +262,10 @@ function getSuffixElement(baseId, suffix = '') {
     if (el) return el;
   }
   return null;
+}
+
+function getConceptTabElements() {
+  return elements;
 }
 
 function normaliseNameRecord(raw) {
@@ -317,6 +321,298 @@ function setNamesStatusMessage(suffix, message, colour, autoClear = false) {
         latestStatus.textContent = '';
       }
     }, 3000);
+  }
+}
+
+function toggleDescriptionRenderedState(suffix, buttonEl) {
+  const descId = suffix ? `conceptDescription_${suffix}` : 'conceptDescription';
+  const descriptionEl = document.getElementById(descId);
+  if (!descriptionEl) return;
+  let renderedContainer = document.getElementById(`conceptDescriptionRendered_${suffix}`);
+  if (!renderedContainer) {
+    renderedContainer = document.createElement('div');
+    renderedContainer.id = `conceptDescriptionRendered_${suffix}`;
+    renderedContainer.className = 'concept-notes-rendered hidden';
+    descriptionEl.insertAdjacentElement('afterend', renderedContainer);
+  }
+  const isHidden = renderedContainer.classList.contains('hidden');
+  if (isHidden) {
+    const raw = descriptionEl.textContent || '';
+    void renderConceptMarkdownInto(renderedContainer, raw).catch(() => {
+      renderedContainer.textContent = raw;
+    });
+    renderedContainer.classList.remove('hidden');
+    if (buttonEl) buttonEl.textContent = 'Show Raw Markdown';
+    descriptionEl.style.display = 'none';
+  } else {
+    renderedContainer.classList.add('hidden');
+    if (buttonEl) buttonEl.textContent = 'Show Rendered Markdown';
+    descriptionEl.style.removeProperty('display');
+  }
+}
+
+const conceptIdRenamePreviewBySuffix = new Map();
+
+function getConceptIdRenameKey(suffix = '') {
+  return suffix || '__default__';
+}
+
+function setConceptIdRenameStatus(suffix, message, colour = '') {
+  const status = getSuffixElement('conceptIdRenameStatus', suffix);
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = colour || '';
+}
+
+function resetConceptIdRenamePreview(suffix = '') {
+  conceptIdRenamePreviewBySuffix.delete(getConceptIdRenameKey(suffix));
+  const preview = getSuffixElement('conceptIdRenamePreview', suffix);
+  if (preview) {
+    preview.innerHTML = '';
+    preview.classList.add('hidden');
+  }
+  const executeButton = getSuffixElement('conceptIdRenameExecuteButton', suffix);
+  if (executeButton) {
+    executeButton.disabled = true;
+  }
+}
+
+function formatConceptRenameOperationType(type) {
+  return String(type || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function renderConceptIdRenamePreview(result, suffix = '') {
+  const preview = getSuffixElement('conceptIdRenamePreview', suffix);
+  if (!preview) return;
+
+  preview.innerHTML = '';
+  preview.classList.remove('hidden');
+
+  const summary = document.createElement('div');
+  summary.className = result?.success ? 'concept-id-rename-summary ok' : 'concept-id-rename-summary blocked';
+  summary.textContent = result?.success
+    ? `${result.old_id} -> ${result.new_id}`
+    : (Array.isArray(result?.errors) && result.errors[0]) || 'Rename blocked';
+  preview.appendChild(summary);
+
+  if (Array.isArray(result?.operations) && result.operations.length > 0) {
+    const list = document.createElement('ul');
+    list.className = 'concept-id-rename-operations';
+    result.operations.forEach((op) => {
+      const item = document.createElement('li');
+      const label = formatConceptRenameOperationType(op?.type);
+      const count = Number.isInteger(op?.count) ? ` (${op.count})` : '';
+      item.textContent = `${label}${count}`;
+      if (op?.detail) item.title = String(op.detail);
+      list.appendChild(item);
+    });
+    preview.appendChild(list);
+  }
+
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  if (errors.length > 0) {
+    const list = document.createElement('ul');
+    list.className = 'concept-id-rename-errors';
+    errors.forEach((error) => {
+      const item = document.createElement('li');
+      item.textContent = String(error);
+      list.appendChild(item);
+    });
+    preview.appendChild(list);
+  }
+
+  const surfaces = result?.reference_surfaces || {};
+  const covered = Array.isArray(surfaces.covered) ? surfaces.covered : [];
+  const excluded = Array.isArray(surfaces.excluded) ? surfaces.excluded : [];
+  if (covered.length || excluded.length) {
+    const details = document.createElement('details');
+    details.className = 'concept-id-rename-surfaces';
+    const summaryEl = document.createElement('summary');
+    summaryEl.textContent = 'Reference surfaces';
+    details.appendChild(summaryEl);
+
+    const addSurfaceList = (title, rows) => {
+      if (!rows.length) return;
+      const heading = document.createElement('div');
+      heading.className = 'concept-id-rename-surface-heading';
+      heading.textContent = title;
+      details.appendChild(heading);
+      const list = document.createElement('ul');
+      rows.forEach((row) => {
+        const item = document.createElement('li');
+        const name = row.collection ? `${row.collection}.${row.path || '*'}` : row.surface;
+        const handling = row.handling ? `: ${row.handling}` : '';
+        item.textContent = `${name}${handling}`;
+        if (row.reason) item.title = String(row.reason);
+        list.appendChild(item);
+      });
+      details.appendChild(list);
+    };
+
+    addSurfaceList('Covered', covered);
+    addSurfaceList('Excluded', excluded);
+    preview.appendChild(details);
+  }
+}
+
+function getCurrentConceptIdForRename(suffix = '') {
+  return getSelectedConceptIdForSuffix(suffix) || getCurrentlySelectedConceptId();
+}
+
+function updateConceptIdRenamePanel(concept, suffix = '') {
+  const section = getSuffixElement('conceptIdRenameSection', suffix);
+  const input = getSuffixElement('conceptIdRenameInput', suffix);
+  if (!section && !input) return;
+  const conceptId = concept?.concept_id || concept?.id || concept?._id || getCurrentConceptIdForRename(suffix) || '';
+  if (section) {
+    section.dataset.conceptId = conceptId || '';
+  }
+  if (input) {
+    input.value = conceptId || '';
+    input.placeholder = conceptId || '#V#concept_id';
+  }
+  resetConceptIdRenamePreview(suffix);
+  setConceptIdRenameStatus(suffix, '', '');
+}
+
+async function postConceptIdRename(conceptId, newId, options = {}) {
+  const response = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      new_id: newId,
+      simulate: options.simulate !== false,
+      preserve_alias: true,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload?.error || `HTTP ${response.status}`;
+    const error = new Error(message);
+    error.payload = payload?.details || payload;
+    throw error;
+  }
+  return payload;
+}
+
+async function refreshConceptAfterIdRename(oldId, newId, suffix = '') {
+  const container = getSuffixElement('conceptTab', suffix);
+  if (container?.dataset) {
+    container.dataset.conceptId = newId;
+    delete container.dataset.conceptMissing;
+  }
+  try {
+    document.querySelectorAll('.tab-content').forEach((el) => {
+      if (el?.dataset?.conceptId === oldId) {
+        el.dataset.conceptId = newId;
+      }
+    });
+  } catch (_) {
+    // ignore
+  }
+
+  setCurrentlySelectedConceptId(newId);
+  const response = await fetch(`/api/concepts/${encodeURIComponent(newId)}`);
+  if (response.ok) {
+    const conceptData = await response.json();
+    selectConceptWithSuffix(conceptData, suffix);
+  }
+  await loadConceptNames(newId, suffix);
+  await loadConceptAttributes(newId, suffix);
+  try {
+    document.dispatchEvent(new CustomEvent('concept-id-renamed', {
+      detail: { oldId, newId, suffix, source: 'concept_tab' },
+    }));
+    document.dispatchEvent(new CustomEvent('concept-updated', {
+      detail: { conceptId: newId, oldConceptId: oldId, reason: 'concept_id_renamed', source: 'concept_tab' },
+    }));
+    document.dispatchEvent(new CustomEvent('concept-names-changed', {
+      detail: { conceptId: newId, oldConceptId: oldId },
+    }));
+  } catch (_) {
+    // ignore
+  }
+}
+
+export async function previewConceptIdRename(suffix = '') {
+  const conceptId = getCurrentConceptIdForRename(suffix);
+  const input = getSuffixElement('conceptIdRenameInput', suffix);
+  const newId = String(input?.value || '').trim();
+  if (!conceptId || !newId) {
+    setConceptIdRenameStatus(suffix, 'Select a concept and enter a new ID', 'red');
+    resetConceptIdRenamePreview(suffix);
+    return null;
+  }
+
+  setConceptIdRenameStatus(suffix, 'Previewing...', 'blue');
+  resetConceptIdRenamePreview(suffix);
+
+  try {
+    const result = await postConceptIdRename(conceptId, newId, { simulate: true });
+    result.requested_new_id = newId;
+    conceptIdRenamePreviewBySuffix.set(getConceptIdRenameKey(suffix), result);
+    renderConceptIdRenamePreview(result, suffix);
+    const executeButton = getSuffixElement('conceptIdRenameExecuteButton', suffix);
+    if (executeButton) {
+      executeButton.disabled = !result?.success;
+    }
+    setConceptIdRenameStatus(suffix, result?.success ? 'Preview ready' : 'Rename blocked', result?.success ? 'green' : 'red');
+    return result;
+  } catch (error) {
+    const payload = error?.payload || {};
+    renderConceptIdRenamePreview(
+      Object.keys(payload).length ? payload : { success: false, errors: [error.message] },
+      suffix
+    );
+    setConceptIdRenameStatus(suffix, error.message, 'red');
+    return null;
+  }
+}
+
+export async function executeConceptIdRename(suffix = '') {
+  const conceptId = getCurrentConceptIdForRename(suffix);
+  const input = getSuffixElement('conceptIdRenameInput', suffix);
+  const newId = String(input?.value || '').trim();
+  const preview = conceptIdRenamePreviewBySuffix.get(getConceptIdRenameKey(suffix));
+  if (
+    !conceptId ||
+    !newId ||
+    !preview?.success ||
+    preview.old_id !== conceptId ||
+    (preview.requested_new_id || preview.new_id) !== newId
+  ) {
+    setConceptIdRenameStatus(suffix, 'Preview this rename first', 'red');
+    return null;
+  }
+
+  const confirmed = window.confirm(`Rename ${preview.old_id} to ${preview.new_id}?`);
+  if (!confirmed) return null;
+
+  const executeButton = getSuffixElement('conceptIdRenameExecuteButton', suffix);
+  if (executeButton) executeButton.disabled = true;
+  setConceptIdRenameStatus(suffix, 'Renaming...', 'blue');
+
+  try {
+    const result = await postConceptIdRename(conceptId, newId, { simulate: false });
+    renderConceptIdRenamePreview(result, suffix);
+    if (!result?.success) {
+      setConceptIdRenameStatus(suffix, 'Rename blocked', 'red');
+      return result;
+    }
+    await refreshConceptAfterIdRename(result.old_id || conceptId, result.new_id || newId, suffix);
+    setConceptIdRenameStatus(suffix, 'Concept ID renamed', 'green');
+    return result;
+  } catch (error) {
+    const payload = error?.payload || {};
+    renderConceptIdRenamePreview(
+      Object.keys(payload).length ? payload : { success: false, errors: [error.message] },
+      suffix
+    );
+    setConceptIdRenameStatus(suffix, error.message, 'red');
+    if (executeButton) executeButton.disabled = false;
+    return null;
   }
 }
 
@@ -773,6 +1069,7 @@ export function selectConceptWithSuffix(concept, suffix = '', radioId = null) {
   if (conceptId) {
     loadConceptNames(conceptId, suffix);
   }
+  updateConceptIdRenamePanel(concept, suffix);
 }
 
 /**
@@ -1236,8 +1533,6 @@ export async function handleDeleteConcept() {
   try {
     if (Array.isArray(currentConceptNames) && currentConceptNames.length > 0) {
       conceptName = currentConceptNames[0].text || conceptName;
-    } else if (currentDisplayName) {
-      conceptName = currentDisplayName;
     }
   } catch (_) { }
 
@@ -1905,12 +2200,13 @@ async function reloadSelectedConceptFromApi(suffix = '') {
     }
 
     const conceptData = await response.json();
+    const refreshedConceptId = conceptData?.concept_id || conceptId;
     selectConceptWithSuffix(conceptData, suffix);
-    await loadConceptNames(conceptId, suffix);
-    await loadConceptAttributes(conceptId, suffix);
+    await loadConceptNames(refreshedConceptId, suffix);
+    await loadConceptAttributes(refreshedConceptId, suffix);
 
     try {
-      document.dispatchEvent(new CustomEvent('concept-updated', { detail: { conceptId, reason: 'manual_refresh', source: 'concept_tab' } }));
+      document.dispatchEvent(new CustomEvent('concept-updated', { detail: { conceptId: refreshedConceptId, requestedConceptId: conceptId, reason: 'manual_refresh', source: 'concept_tab' } }));
     } catch (_) { /* ignore */ }
   } catch (e) {
     console.warn('[conceptTab] Failed to reload selected concept', e);
@@ -2084,6 +2380,27 @@ export function setupConceptTabEventListeners() {
     });
   }
 
+  const renamePreviewButton = document.getElementById('conceptIdRenamePreviewButton');
+  if (renamePreviewButton) {
+    renamePreviewButton.addEventListener('click', () => previewConceptIdRename());
+  }
+
+  const renameExecuteButton = document.getElementById('conceptIdRenameExecuteButton');
+  if (renameExecuteButton) {
+    renameExecuteButton.addEventListener('click', () => executeConceptIdRename());
+  }
+
+  const renameInput = document.getElementById('conceptIdRenameInput');
+  if (renameInput) {
+    renameInput.addEventListener('input', () => resetConceptIdRenamePreview());
+    renameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        previewConceptIdRename();
+      }
+    });
+  }
+
   // Mark that event listeners have been added
   eventListenersAdded = true;
 }
@@ -2235,6 +2552,27 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
     });
   }
 
+  const renamePreviewButton = getSuffixElement('conceptIdRenamePreviewButton');
+  if (renamePreviewButton) {
+    renamePreviewButton.addEventListener('click', () => previewConceptIdRename(suffix));
+  }
+
+  const renameExecuteButton = getSuffixElement('conceptIdRenameExecuteButton');
+  if (renameExecuteButton) {
+    renameExecuteButton.addEventListener('click', () => executeConceptIdRename(suffix));
+  }
+
+  const renameInput = getSuffixElement('conceptIdRenameInput');
+  if (renameInput) {
+    renameInput.addEventListener('input', () => resetConceptIdRenamePreview(suffix));
+    renameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        previewConceptIdRename(suffix);
+      }
+    });
+  }
+
   // Create subtype/instance event listeners
   const createSubtypeButton = getSuffixElement('createSubtypeButton');
   if (createSubtypeButton) {
@@ -2291,35 +2629,6 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
         toggleNotesRenderButton.textContent = 'Show Rendered Markdown';
       }
     });
-  }
-
-
-  // Shared: toggle description rendered state for a given suffix
-  function toggleDescriptionRenderedState(suffix, buttonEl) {
-    const descId = suffix ? `conceptDescription_${suffix}` : 'conceptDescription';
-    const descriptionEl = document.getElementById(descId);
-    if (!descriptionEl) return;
-    let renderedContainer = document.getElementById(`conceptDescriptionRendered_${suffix}`);
-    if (!renderedContainer) {
-      renderedContainer = document.createElement('div');
-      renderedContainer.id = `conceptDescriptionRendered_${suffix}`;
-      renderedContainer.className = 'concept-notes-rendered hidden';
-      descriptionEl.insertAdjacentElement('afterend', renderedContainer);
-    }
-    const isHidden = renderedContainer.classList.contains('hidden');
-    if (isHidden) {
-      const raw = descriptionEl.textContent || '';
-      void renderConceptMarkdownInto(renderedContainer, raw).catch(() => {
-        renderedContainer.textContent = raw;
-      });
-      renderedContainer.classList.remove('hidden');
-      if (buttonEl) buttonEl.textContent = 'Show Raw Markdown';
-      descriptionEl.style.display = 'none';
-    } else {
-      renderedContainer.classList.add('hidden');
-      if (buttonEl) buttonEl.textContent = 'Show Rendered Markdown';
-      descriptionEl.style.removeProperty('display');
-    }
   }
 
   // Note: ensureDescriptionRendered moved to top-level (attached to window) for dynamic tab access
@@ -3590,4 +3899,3 @@ function refreshRenderedConceptNotes() {
     elements.conceptNotesRendered.textContent = raw.trim();
   });
 }
-

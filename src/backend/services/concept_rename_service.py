@@ -15,6 +15,7 @@ The GUID remains unchanged, ensuring stable references via UUID.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ from ..utils.concept_id_utils import (
     canonicalise_vontology_concept_id,
     validate_concept_id_for_rename,
 )
+from .namespace_service import concept_id_to_namespace_slug
 from ..security.access_control import bypass_access_control
 from .text_value_service import audit_concept_text_relations, upsert_text_for_concept
 
@@ -44,9 +46,73 @@ PROTECTED_CONCEPTS: frozenset[str] = frozenset(
 # Concept ID for the "mentioned in Von code" marker type
 MENTIONED_IN_VON_CODE_ID = "#V#mentioned_in_von_code"
 
+RENAME_COVERED_REFERENCE_SURFACES: tuple[Dict[str, str], ...] = (
+    {
+        "collection": "concepts",
+        "path": "concept_id",
+        "handling": "updated",
+        "reason": "canonical concept identifier for the renamed document",
+    },
+    {
+        "collection": "concepts",
+        "path": "relationships.*",
+        "handling": "rewritten",
+        "reason": "structural and dynamic relationship target values are concept IDs",
+    },
+    {
+        "collection": "text_relations",
+        "path": "subject_concept_id",
+        "handling": "rewritten",
+        "reason": "text relations are keyed by subject concept ID",
+    },
+    {
+        "collection": "text_relations",
+        "path": "hasName CODE alias",
+        "handling": "preserved",
+        "reason": "old #V# ID remains a CODE alias for backwards-compatible lookup",
+    },
+)
+
+RENAME_EXCLUDED_REFERENCE_SURFACES: tuple[Dict[str, str], ...] = (
+    {
+        "surface": "chat/RAG/session namespaces",
+        "handling": "blocked when detected",
+        "reason": "namespace storage still depends on user/org concept IDs",
+    },
+    {
+        "surface": "workflow IDs and code-mentioned concepts",
+        "handling": "blocked when code-mentioned",
+        "reason": "code and workflow metadata can treat these IDs as stable authority handles",
+    },
+    {
+        "surface": "derived caches, indexes, and telemetry",
+        "handling": "not migrated by this operation",
+        "reason": "these are regenerated or require a separate GUID-backed migration path",
+    },
+)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _rename_reference_surface_report(
+    *,
+    namespace_usage: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Return the explicit support-surface contract for concept ID rename."""
+
+    usage = dict(namespace_usage or {})
+    return {
+        "covered": [dict(item) for item in RENAME_COVERED_REFERENCE_SURFACES],
+        "excluded": [dict(item) for item in RENAME_EXCLUDED_REFERENCE_SURFACES],
+        "namespace_usage": usage,
+        "namespace_blocking": any(int(v or 0) > 0 for v in usage.values()),
+        "notes": [
+            "This operation preserves GUID identity and rewrites the canonical Vontology surfaces it owns.",
+            "It does not silently migrate namespace-bearing user/org data, RAG records, workflow IDs, caches, or telemetry.",
+        ],
+    }
 
 
 def _replace_id_in_value(value: Any, old_id: str, new_id: str) -> Tuple[Any, bool]:
@@ -117,8 +183,11 @@ def check_concept_used_in_namespaces(concept_id: str) -> Tuple[bool, Dict[str, i
         "in_namespace_string": 0,
     }
 
-    # Extract the slug (without #V# prefix) for namespace string matching
-    slug = concept_id[3:] if concept_id.startswith("#V#") else concept_id
+    # Composite namespace strings use "#V#<user_slug>@<org_slug>", while
+    # user/org component fields carry the full canonical concept IDs.
+    slug = concept_id_to_namespace_slug(concept_id) or concept_id
+    escaped_slug = re.escape(slug)
+    namespace_component_pattern = f"(^#V#{escaped_slug}($|@)|@{escaped_slug}$)"
 
     # Check chat_history collection
     chat_history = db.get_collection("chat_history")
@@ -135,7 +204,7 @@ def check_concept_used_in_namespaces(concept_id: str) -> Tuple[bool, Dict[str, i
 
         # Check within namespace string (e.g., #V#user@org contains the slug)
         namespace_count = chat_history.count_documents(
-            {"namespace": {"$regex": f"(^#V#{slug}@|@{slug}$)"}}
+            {"namespace": {"$regex": namespace_component_pattern}}
         )
         usage["in_namespace_string"] += namespace_count
 
@@ -151,7 +220,7 @@ def check_concept_used_in_namespaces(concept_id: str) -> Tuple[bool, Dict[str, i
         usage["as_organisation_id"] += org_count
 
         namespace_count = interactions.count_documents(
-            {"namespace": {"$regex": f"(^#V#{slug}@|@{slug}$)"}}
+            {"namespace": {"$regex": namespace_component_pattern}}
         )
         usage["in_namespace_string"] += namespace_count
 
@@ -234,6 +303,7 @@ def rename_concept(
         "warnings": [],
         "errors": [],
         "skipped_relations": [],
+        "reference_surfaces": _rename_reference_surface_report(),
     }
 
     # Validate and canonicalise IDs
@@ -288,6 +358,9 @@ def rename_concept(
     # Check for concepts used in namespaces (user/org in chat sessions)
     is_used_in_namespaces, namespace_usage = check_concept_used_in_namespaces(
         canonical_old
+    )
+    report["reference_surfaces"] = _rename_reference_surface_report(
+        namespace_usage=namespace_usage
     )
     if is_used_in_namespaces:
         usage_details = ", ".join(
