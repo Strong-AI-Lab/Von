@@ -26,6 +26,7 @@ from .context_bundle_contracts import (
 from .context_bundle_service import ensure_canonical_context_bundle_ontology
 from .relationship_removal_service import remove_relationship
 from .relationship_write_service import add_relationship
+from ..security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 
 logger = logging.getLogger(__name__)
 
@@ -1358,7 +1359,11 @@ class AIChatSessionIngestionService:
         )
         concept_service.update_concept(
             concept_id,
-            {"relationships.specific_to_user": [self.user_concept_id]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    self.user_concept_id
+                ]
+            },
         )
 
     def _ensure_document_type(

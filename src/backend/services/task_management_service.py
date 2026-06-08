@@ -24,7 +24,7 @@ from ..utils.concept_id_utils import (
 )
 from ..security.visibility_predicates import (
     SPECIFIC_TO_ORG_PREDICATES_WRITE,
-    SPECIFIC_TO_USER_PREDICATES,
+    SPECIFIC_TO_USER_PREDICATES_WRITE,
     set_specific_to_org_values,
     set_specific_to_user_values,
 )
@@ -1986,8 +1986,8 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
         action="add",
     )
 
-    # Also add new assignee to all specific_to_user predicate variants for visibility.
-    for predicate in SPECIFIC_TO_USER_PREDICATES:
+    # Also add new assignee to the canonical user visibility predicate.
+    for predicate in SPECIFIC_TO_USER_PREDICATES_WRITE:
         ConceptsRepository.mutate_relationship_edge(
             source_id=task_concept_id,
             kind=predicate,
@@ -3950,7 +3950,7 @@ def update_task_fields(
             new_target_id=report_to_concept_id,
         )
         if report_to_concept_id:
-            for predicate in SPECIFIC_TO_USER_PREDICATES:
+            for predicate in SPECIFIC_TO_USER_PREDICATES_WRITE:
                 ConceptsRepository.mutate_relationship_edge(
                     source_id=task_concept_id,
                     kind=predicate,

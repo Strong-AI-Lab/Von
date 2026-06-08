@@ -1,41 +1,43 @@
 """Visibility predicate helpers.
 
-This module centralises legacy/canonical visibility predicate aliases so write
-paths can mirror values consistently and read paths can tolerate historical
-storage variants.
-
-Why this exists:
-- Legacy records use ``specific_to_user`` / ``specific_to_org`` fields.
-- Newer ontology usage expects predicate-concept IDs (for example
-  ``#V#specific_to_user`` and ``#V#specific_to_organisation``).
-- Without a shared helper, call paths drift and debugging predicate state
-  becomes brittle (for example fetches for one variant while data is stored in
-  another).
+Visibility predicates are represented Vontology relationships.  The canonical
+storage predicates are ``#V#specific_to_user`` and
+``#V#specific_to_organisation``.  Read helpers deliberately keep legacy aliases
+for the migration window, but write helpers emit canonical predicates only.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Sequence
 
-# Keep read aliases broad for backwards compatibility.
-SPECIFIC_TO_USER_PREDICATES: tuple[str, ...] = (
-    "specific_to_user",
-    "#V#specific_to_user",
-)
+CANONICAL_SPECIFIC_TO_USER_PREDICATE = "#V#specific_to_user"
+CANONICAL_SPECIFIC_TO_ORG_PREDICATE = "#V#specific_to_organisation"
 
-SPECIFIC_TO_ORG_PREDICATES_READ: tuple[str, ...] = (
+LEGACY_SPECIFIC_TO_USER_PREDICATES: tuple[str, ...] = ("specific_to_user",)
+
+LEGACY_SPECIFIC_TO_ORG_PREDICATES: tuple[str, ...] = (
     "specific_to_org",
     "specific_to_organisation",
     "#V#specific_to_org",
-    "#V#specific_to_organisation",
 )
 
-# Writes should favour currently supported canonical/legacy keys and avoid
-# introducing new non-canonical variants unless explicitly required.
+# Keep read aliases broad for backwards compatibility.
+SPECIFIC_TO_USER_PREDICATES: tuple[str, ...] = (
+    *LEGACY_SPECIFIC_TO_USER_PREDICATES,
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
+
+SPECIFIC_TO_ORG_PREDICATES_READ: tuple[str, ...] = (
+    *LEGACY_SPECIFIC_TO_ORG_PREDICATES,
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+)
+
+SPECIFIC_TO_USER_PREDICATES_WRITE: tuple[str, ...] = (
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
+
 SPECIFIC_TO_ORG_PREDICATES_WRITE: tuple[str, ...] = (
-    "specific_to_org",
-    "specific_to_organisation",
-    "#V#specific_to_organisation",
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
 )
 
 
@@ -109,16 +111,25 @@ def set_specific_to_user_values(
     relationships: Dict[str, Any] | None,
     values: Iterable[str],
 ) -> Dict[str, Any]:
-    return _set_visibility_values(relationships, SPECIFIC_TO_USER_PREDICATES, values)
+    updated = _set_visibility_values(
+        relationships,
+        SPECIFIC_TO_USER_PREDICATES_WRITE,
+        values,
+    )
+    for predicate in LEGACY_SPECIFIC_TO_USER_PREDICATES:
+        updated.pop(predicate, None)
+    return updated
 
 
 def set_specific_to_org_values(
     relationships: Dict[str, Any] | None,
     values: Iterable[str],
 ) -> Dict[str, Any]:
-    return _set_visibility_values(
+    updated = _set_visibility_values(
         relationships,
         SPECIFIC_TO_ORG_PREDICATES_WRITE,
         values,
     )
-
+    for predicate in LEGACY_SPECIFIC_TO_ORG_PREDICATES:
+        updated.pop(predicate, None)
+    return updated

@@ -21,6 +21,7 @@ from ...services.arxiv_paper_link_service import (
 )
 from ...services.relationship_write_service import add_relationship
 from ...services.text_value_service import get_texts_for_concept, upsert_text_for_concept
+from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -1173,7 +1174,11 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
                 )
                 concept_service.update_concept(
                     paper_concept_id,
-                    {"relationships.specific_to_user": [user_concept_id.strip()]},
+                    {
+                        f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                            user_concept_id.strip()
+                        ]
+                    },
                 )
                 created = True
         else:

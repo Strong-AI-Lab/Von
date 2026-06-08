@@ -137,6 +137,8 @@ def test_can_access_concept_uses_same_user_or_org_semantics(monkeypatch) -> None
 def test_visibility_filter_requires_no_user_or_org_restrictions_for_global() -> None:
     import src.backend.security.access_control as access_control
     from src.backend.security.visibility_predicates import (
+        CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+        CANONICAL_SPECIFIC_TO_USER_PREDICATE,
         SPECIFIC_TO_ORG_PREDICATES_READ,
         SPECIFIC_TO_USER_PREDICATES,
     )
@@ -158,8 +160,12 @@ def test_visibility_filter_requires_no_user_or_org_restrictions_for_global() -> 
         *SPECIFIC_TO_ORG_PREDICATES_READ,
     ):
         assert f"relationships.{predicate}" in unrestricted_fields
-    assert {"relationships.specific_to_user": {"$in": ["#V#member"]}} in clauses
-    assert {"relationships.specific_to_org": {"$in": ["#V#sail"]}} in clauses
+    assert {
+        f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": {"$in": ["#V#member"]}
+    } in clauses
+    assert {
+        f"relationships.{CANONICAL_SPECIFIC_TO_ORG_PREDICATE}": {"$in": ["#V#sail"]}
+    } in clauses
 
 
 def test_filter_accessible_concept_ids_uses_batch_visibility_semantics(

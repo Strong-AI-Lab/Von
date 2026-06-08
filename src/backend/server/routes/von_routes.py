@@ -21,6 +21,7 @@ from urllib.parse import unquote
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Mapping, Sequence, cast
+from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.models import WorkflowInstanceStatus
@@ -4102,7 +4103,13 @@ def upload_file_to_blob_store_and_vontology():
         # Scope visibility to the current user.
         ConceptsRepository.update_one(
             {"concept_id": instance_concept_id},
-            {"$set": {"relationships.specific_to_user": [user_concept_id.strip()]}},
+            {
+                "$set": {
+                    f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                        user_concept_id.strip()
+                    ]
+                }
+            },
         )
 
         # Attach blob + metadata as text relations (authoritative)
@@ -4376,7 +4383,7 @@ def download_file_copy(file_copy_concept_id: str):
     """Download an uploaded file-copy by its Vontology concept id.
 
     Security: user identity is derived server-side via get_effective_user_concept_id().
-    Access is restricted using relationships.specific_to_user on the file-copy concept.
+    Access is restricted using canonical user visibility predicates on the file-copy concept.
 
     Path params:
       - file_copy_concept_id: URL-encoded concept id (e.g. %23V%23uploaded_file_copy_...)

@@ -112,6 +112,9 @@ def test_get_user_specific_prompt_fragments_falls_back_to_text_relations(monkeyp
 def test_get_user_specific_prompt_fragments_queries_multiple_scoping_predicates(
     monkeypatch,
 ):
+    from src.backend.security.visibility_predicates import (
+        CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+    )
     from src.backend.services import chat_auxiliary_prompt_service as service
 
     captured = {}
@@ -142,7 +145,7 @@ def test_get_user_specific_prompt_fragments_queries_multiple_scoping_predicates(
     expected_fields = {
         "relationships.#V#specific_to_von_user",
         "relationships.specific_to_von_user",
-        "relationships.specific_to_user",
+        f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}",
     }
     seen_fields = set()
     for clause in ors:

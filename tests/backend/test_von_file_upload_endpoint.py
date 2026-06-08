@@ -6,6 +6,10 @@ from typing import Any
 import pytest
 from flask import Flask
 
+from src.backend.security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
+
 
 class _FakeStore:
     def __init__(self, blob_ref_cls):
@@ -85,7 +89,7 @@ def app(monkeypatch):
             if isinstance(raw_set, dict):
                 set_doc = dict(raw_set)
             for key, value in set_doc.items():
-                if key == "relationships.specific_to_user":
+                if key == f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}":
                     doc: dict[str, Any] = concept_docs.get(concept_id) or {
                         "concept_id": concept_id
                     }
@@ -93,7 +97,7 @@ def app(monkeypatch):
                     raw_rel = doc.get("relationships")
                     if isinstance(raw_rel, dict):
                         rel = dict(raw_rel)
-                    rel["specific_to_user"] = value
+                    rel[CANONICAL_SPECIFIC_TO_USER_PREDICATE] = value
                     doc["relationships"] = rel
                     concept_docs[concept_id] = doc
                 else:

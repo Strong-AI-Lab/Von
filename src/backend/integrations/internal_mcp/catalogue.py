@@ -18154,16 +18154,19 @@ def _build_rag_file_copy_visibility_query(
     visibility_filters: list[dict[str, Any]] = []
 
     if user_concept_id:
-        visibility_filters.append(
-            {"relationships.specific_to_user": {"$in": [user_concept_id]}}
-        )
-        visibility_filters.append(
-            {"relationships.#V#specific_to_user": {"$in": [user_concept_id]}}
-        )
+        from ...security.visibility_predicates import SPECIFIC_TO_USER_PREDICATES
+
+        for predicate in SPECIFIC_TO_USER_PREDICATES:
+            visibility_filters.append(
+                {f"relationships.{predicate}": {"$in": [user_concept_id]}}
+            )
     if organisation_concept_id:
-        visibility_filters.append(
-            {"relationships.specific_to_org": {"$in": [organisation_concept_id]}}
-        )
+        from ...security.visibility_predicates import SPECIFIC_TO_ORG_PREDICATES_READ
+
+        for predicate in SPECIFIC_TO_ORG_PREDICATES_READ:
+            visibility_filters.append(
+                {f"relationships.{predicate}": {"$in": [organisation_concept_id]}}
+            )
 
     if not visibility_filters:
         return None, "namespace_user_required"

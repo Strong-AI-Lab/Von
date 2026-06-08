@@ -23,7 +23,8 @@ Authoritative namespace contract:
 
 ## Executive summary (as implemented)
 
-- Vontology concept visibility is filtered by `relationships.specific_to_user` and `relationships.specific_to_org`.
+- Vontology concept visibility is filtered by canonical Vontology predicates under `relationships.#V#specific_to_user` and `relationships.#V#specific_to_organisation`.
+- Legacy storage keys such as `relationships.specific_to_user` and `relationships.specific_to_org` remain readable only for migration compatibility; new writes should use the canonical predicates.
 - User identity comes from the **server session** (fallback: validated `X-User-Concept-ID` header), not from client JSON.
 - RAG tools are **fail-closed** without a namespace.
 - RAG query backends (e.g., LlamaIndex) can additionally filter by metadata keys like `user_id` and `organisation_concept_id`, but only if those keys are provided via `permissions_context`.

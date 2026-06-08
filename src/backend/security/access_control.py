@@ -670,10 +670,12 @@ def sanitize_concept_document(
         pass
 
     concept_id = doc.get("concept_id", "unknown_concept")
-    user_specific = doc.get("relationships", {}).get("specific_to_user")
+    relationships = doc.get("relationships")
+    relationships = relationships if isinstance(relationships, dict) else {}
+    user_specific = _get_specific_to_user_values(relationships)
 
     org_id = get_effective_organisation_concept_id()
-    org_specific = get_specific_to_org_values(doc.get("relationships", {}))
+    org_specific = get_specific_to_org_values(relationships)
 
     if not _document_visible_to_actor(doc, user_id, org_id):
         _log.info(
@@ -690,7 +692,6 @@ def sanitize_concept_document(
         _log.info(
             f"[access_filter] ALLOWED concept_id={concept_id} specific_to_org={org_specific} authenticated_org={org_id} email={user_email}"
         )
-    relationships = doc.get("relationships")
     if not isinstance(relationships, dict):
         return doc
     evaluator = _current_evaluator()

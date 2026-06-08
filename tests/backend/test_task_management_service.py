@@ -11,6 +11,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.backend.security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+)
 from src.backend.services.task_management_service import (
     TASK_SPECIFICATION_TYPE_ID,
     TASK_STATUS_PENDING,
@@ -1108,7 +1111,8 @@ class TestTaskParityDatesAndEpic:
             "metadata.organisation_concept_id" in payload for payload in set_payloads
         )
         assert any(
-            payload.get("relationships.specific_to_org") == ["#V#sail_org"]
+            payload.get(f"relationships.{CANONICAL_SPECIFIC_TO_ORG_PREDICATE}")
+            == ["#V#sail_org"]
             for payload in set_payloads
         )
 

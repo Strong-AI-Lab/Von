@@ -3510,12 +3510,31 @@ def _build_diagnostics_response(app: Flask):
 
             coll = get_concepts_collection()
             if coll is not None:
+                from ..security.visibility_predicates import (
+                    SPECIFIC_TO_USER_PREDICATES,
+                )
+
                 total_user_specific = coll.count_documents(
-                    {"relationships.specific_to_user": {"$exists": True, "$ne": []}}
+                    {
+                        "$or": [
+                            {
+                                f"relationships.{predicate}": {
+                                    "$exists": True,
+                                    "$ne": [],
+                                }
+                            }
+                            for predicate in SPECIFIC_TO_USER_PREDICATES
+                        ]
+                    }
                 )
                 if effective_user:
                     visible_user_specific = coll.count_documents(
-                        {"relationships.specific_to_user": effective_user}
+                        {
+                            "$or": [
+                                {f"relationships.{predicate}": effective_user}
+                                for predicate in SPECIFIC_TO_USER_PREDICATES
+                            ]
+                        }
                     )
                 else:
                     visible_user_specific = 0

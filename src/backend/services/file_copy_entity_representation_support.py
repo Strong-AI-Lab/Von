@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from ..security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from . import concept_search_service
 from .text_value_service import upsert_text_for_concept
 from .workflow_vontology_materialisation_helpers import stable_named_instance_concept_id
@@ -92,7 +93,11 @@ def resolve_or_create_named_instance_concept_id(
         )
         concept_service.update_concept(
             concept_id,
-            {"relationships.specific_to_user": [user_concept_id.strip()]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    user_concept_id.strip()
+                ]
+            },
         )
     except Exception as exc:
         if logger is not None:

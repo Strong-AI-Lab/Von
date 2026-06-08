@@ -8,6 +8,10 @@ when callers included additional top-level context.
 import pytest
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.integrations.internal_mcp.catalogue import _create_concepts
+from src.backend.security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -188,8 +192,10 @@ def test_create_concepts_defaults_to_user_org_scope_from_namespace():
     relationships = concept.get("relationships") or {}
 
     assert first_result.get("success") is True
-    assert relationships.get("specific_to_user") == ["#V#scope_user"]
-    assert relationships.get("specific_to_org") == ["#V#scope_org"]
+    assert relationships.get(CANONICAL_SPECIFIC_TO_USER_PREDICATE) == [
+        "#V#scope_user"
+    ]
+    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
     scope_selection = result.get("scope_selection") or {}
     assert scope_selection.get("requested_scope_mode") == "user_org_default"
 
@@ -213,7 +219,7 @@ def test_create_concepts_scope_mode_organisation_general():
 
     assert first_result.get("success") is True
     assert "specific_to_user" not in relationships
-    assert relationships.get("specific_to_org") == ["#V#scope_org"]
+    assert relationships.get(CANONICAL_SPECIFIC_TO_ORG_PREDICATE) == ["#V#scope_org"]
     scope_selection = result.get("scope_selection") or {}
     assert scope_selection.get("requested_scope_mode") == "organisation_general"
     assert "organisation_general" in (scope_selection.get("effective_scope_modes") or [])

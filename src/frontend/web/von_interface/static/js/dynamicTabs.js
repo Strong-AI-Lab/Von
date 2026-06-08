@@ -706,6 +706,27 @@ function normaliseRelationshipPredicateForExtent(predicateId) {
     return RELATIONSHIP_PREDICATE_ALIAS_TO_CANONICAL[trimmed] || trimmed;
 }
 
+function getCanonicalRelationshipTargets(relationships, canonicalPredicateId) {
+    if (!relationships || typeof relationships !== 'object') {
+        return [];
+    }
+    const targets = [];
+    const seen = new Set();
+    Object.entries(relationships).forEach(([predicate, rawTargets]) => {
+        if (normaliseRelationshipPredicateForExtent(predicate) !== canonicalPredicateId) {
+            return;
+        }
+        normaliseRelationshipTargets(rawTargets).forEach((target) => {
+            if (seen.has(target)) {
+                return;
+            }
+            seen.add(target);
+            targets.push(target);
+        });
+    });
+    return targets;
+}
+
 function normaliseInstanceTypeConceptId(value) {
     if (typeof value !== 'string') return '';
     const trimmed = value.trim();
@@ -7558,15 +7579,21 @@ async function loadButtonStates(conceptId, flagBtn, orgBtn, userBtn) {
 
         // Update organization button state
         if (orgBtn) {
-            const orgRelations = concept.relationships?.specific_to_organisation || [];
-            const hasOrgRelation = Array.isArray(orgRelations) ? orgRelations.length > 0 : !!orgRelations;
+            const orgRelations = getCanonicalRelationshipTargets(
+                concept.relationships,
+                '#V#specific_to_organisation'
+            );
+            const hasOrgRelation = orgRelations.length > 0;
             updateOrgButtonState(orgBtn, hasOrgRelation);
         }
 
         // Update user button state
         if (userBtn) {
-            const userRelations = concept.relationships?.specific_to_user || [];
-            const hasUserRelation = Array.isArray(userRelations) ? userRelations.length > 0 : !!userRelations;
+            const userRelations = getCanonicalRelationshipTargets(
+                concept.relationships,
+                '#V#specific_to_user'
+            );
+            const hasUserRelation = userRelations.length > 0;
             updateUserButtonState(userBtn, hasUserRelation);
         }
 

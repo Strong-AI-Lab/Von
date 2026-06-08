@@ -578,8 +578,13 @@ def find_existing_computer_file_copy_instance(
 
     from ..db.repositories.concepts_repository import ConceptsRepository
 
+    from ..security.visibility_predicates import SPECIFIC_TO_USER_PREDICATES
+
     query: dict[str, Any] = {
-        "relationships.specific_to_user": clean_user,
+        "$or": [
+            {f"relationships.{predicate}": clean_user}
+            for predicate in SPECIFIC_TO_USER_PREDICATES
+        ],
         "attributes.blob_key": clean_blob_key,
     }
     if clean_type:

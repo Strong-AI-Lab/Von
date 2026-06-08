@@ -4,6 +4,7 @@ import hashlib
 import re
 from typing import Any, Iterable, Mapping, TypedDict
 
+from ..security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
 from . import concept_search_service
 from .identity_resolution_workflow_request_service import (
     request_identity_resolution_for_materialised_scholarly_authors,
@@ -285,7 +286,11 @@ def _resolve_or_create_person_concept_id(
         )
         concept_service.update_concept(
             concept_id,
-            {"relationships.specific_to_user": [user_concept_id.strip()]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    user_concept_id.strip()
+                ]
+            },
         )
     except Exception as exc:
         if logger is not None:
@@ -334,7 +339,11 @@ def _resolve_or_create_topic_concept_id(
         )
         concept_service.update_concept(
             concept_id,
-            {"relationships.specific_to_user": [user_concept_id.strip()]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    user_concept_id.strip()
+                ]
+            },
         )
     except Exception as exc:
         if logger is not None:
@@ -598,7 +607,11 @@ def ensure_arxiv_paper_instance(
         )
         concept_service.update_concept(
             instance_concept_id,
-            {"relationships.specific_to_user": [user_concept_id.strip()]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    user_concept_id.strip()
+                ]
+            },
         )
 
         # Make the arXiv identifier directly searchable without introducing a new predicate.
@@ -727,7 +740,11 @@ def materialise_scholarly_representation_for_file_copy(
         )
         concept_service.update_concept(
             paper_concept_id,
-            {"relationships.specific_to_user": [user_concept_id.strip()]},
+            {
+                f"relationships.{CANONICAL_SPECIFIC_TO_USER_PREDICATE}": [
+                    user_concept_id.strip()
+                ]
+            },
         )
 
     add_relationship(

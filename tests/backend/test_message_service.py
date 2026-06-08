@@ -22,6 +22,10 @@ from src.backend.services.message_service import (
     mark_message_read,
     delete_message,
 )
+from src.backend.security.visibility_predicates import (
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+)
 
 
 class TestMessageConstants:
@@ -67,8 +71,14 @@ class TestCreateMessage:
         )
 
         assert result["concept_id"].startswith("#V#message_")
-        assert "#V#user_alice" in result["relationships"]["specific_to_user"]
-        assert "#V#user_bob" in result["relationships"]["specific_to_user"]
+        assert (
+            "#V#user_alice"
+            in result["relationships"][CANONICAL_SPECIFIC_TO_USER_PREDICATE]
+        )
+        assert (
+            "#V#user_bob"
+            in result["relationships"][CANONICAL_SPECIFIC_TO_USER_PREDICATE]
+        )
         assert result["relationships"][PREDICATE_SENDER] == ["#V#user_alice"]
         assert result["relationships"][PREDICATE_RECIPIENT] == ["#V#user_bob"]
         assert result["concept_data"]["content_fallback"] == "Hello Bob!"
@@ -99,7 +109,7 @@ class TestCreateMessage:
             content="Hello everyone!",
         )
 
-        visibility = result["relationships"]["specific_to_user"]
+        visibility = result["relationships"][CANONICAL_SPECIFIC_TO_USER_PREDICATE]
         assert "#V#user_alice" in visibility
         assert "#V#user_bob" in visibility
         assert "#V#user_charlie" in visibility
@@ -127,7 +137,9 @@ class TestCreateMessage:
             org_id="#V#nao_institute",
         )
 
-        assert result["relationships"]["specific_to_org"] == ["#V#nao_institute"]
+        assert result["relationships"][CANONICAL_SPECIFIC_TO_ORG_PREDICATE] == [
+            "#V#nao_institute"
+        ]
         mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
