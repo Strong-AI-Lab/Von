@@ -2931,7 +2931,8 @@ describe('thinking activity history normalisation', () => {
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
         expect(html).toContain('View full LLM call log');
-        expect(html).toContain('No live LLM events have arrived yet.');
+        expect(html).toContain('No live LLM events are currently loaded.');
+        expect(html).toContain('View the archived call log for completed exchanges');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
     });
 
@@ -2948,8 +2949,36 @@ describe('thinking activity history normalisation', () => {
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
-        expect(html).toContain('No live LLM events have arrived yet.');
+        expect(html).toContain('No live LLM events are currently loaded.');
+        expect(html).not.toContain('No live LLM events have arrived yet.');
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
+    test('completed turns clarify that archived LLM exchange details are not loaded yet', () => {
+        const request = {
+            clientRequestId: 'req-llm-log-completed-not-loaded',
+            thinkingCardMode: 'debug',
+            latestProgress: {
+                request_id: 'req-llm-log-completed-not-loaded',
+                status: 'completed',
+                stage: 'completed'
+            },
+            thinkingCardProgressViewModel: {
+                llm_input_lifecycle: {
+                    state: 'completed',
+                    model: 'gpt-oss:20b',
+                    provider: 'ollama',
+                    duration_ms: 55373
+                }
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Every LLM interaction (timestamped)');
+        expect(html).toContain('No live LLM events are currently loaded.');
+        expect(html).toContain('View the archived call log for completed exchanges');
+        expect(html).toContain('timing and auxiliary summaries shown above may come from other telemetry');
+        expect(html).not.toContain('No live LLM events have arrived yet.');
     });
 
     test('shows live LLM send events immediately in the interaction log', () => {
@@ -2985,7 +3014,8 @@ describe('thinking activity history normalisation', () => {
 
         const html = __testOnly_renderThinkingCardBodyHTML(request);
         expect(html).toContain('Every LLM interaction (timestamped)');
-        expect(html).toContain('Showing live LLM events as they arrive.');
+        expect(html).toContain('Showing live LLM events currently loaded.');
+        expect(html).toContain('View the archived call log for completed exchanges');
         expect(html).toContain('LIVE-PROMPT-SENT-IMMEDIATELY');
         expect(html).toContain('Sent');
         expect(html).toContain('response pending');
@@ -3093,6 +3123,39 @@ describe('thinking activity history normalisation', () => {
 
         expect(entriesHtml).toContain('Prompt (truncated)');
         expect(entriesHtml).toContain('Response (truncated)');
+    });
+
+    test('labels auxiliary quick-reply UI LLM exchanges distinctly from workflow calls', () => {
+        const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
+            {
+                sequence_no: 3,
+                source: 'mongo.turn_execution_records.execution.aux_llm_calls',
+                stage: 'buttonify',
+                workflow_stage_id: 'buttonify',
+                call_type: 'workflow_llm_call',
+                model: 'gpt-oss:20b',
+                provider: 'ollama',
+                at_utc: '2026-06-07T20:03:11.000000+00:00',
+                prompt: { text: 'Build quick replies.', is_truncated: false },
+                response: { text: '["Proceed"]', is_truncated: false }
+            },
+            {
+                sequence_no: 4,
+                source: 'mongo.turn_execution_records.execution.llm_calls',
+                stage: 'workflow_dispatch',
+                call_type: 'llm.generate',
+                model: 'gpt-5-mini',
+                provider: 'openai',
+                at_utc: '2026-06-07T20:03:12.000000+00:00',
+                prompt: { text: 'Select a workflow.', is_truncated: false },
+                response: { text: '#V#arxiv_paper_representation_workflow', is_truncated: false }
+            }
+        ]);
+
+        expect(entriesHtml).toContain('Auxiliary UI quick replies');
+        expect(entriesHtml).toContain('Workflow LLM');
+        expect(entriesHtml).toContain('Buttonify');
+        expect(entriesHtml).toContain('Workflow dispatch');
     });
 
     test('renders loaded full LLM call log entries and load-more control', () => {

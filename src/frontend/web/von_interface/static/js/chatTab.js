@@ -9268,6 +9268,31 @@ function combineThinkingLlmCallLogEntries(liveEntries, archivedEntries, archiveL
     return [...archived, ...pendingLive];
 }
 
+function classifyThinkingLlmCallLogEntry(entry) {
+    const source = normaliseThinkingActivityString(entry?.source).toLowerCase();
+    const stage = normaliseThinkingActivityString(entry?.stage).toLowerCase();
+    const workflowStageId = normaliseThinkingActivityString(entry?.workflow_stage_id).toLowerCase();
+    const callType = normaliseThinkingActivityString(entry?.call_type).toLowerCase();
+    const fields = [source, stage, workflowStageId, callType].filter(Boolean);
+
+    if (fields.some((field) => field.includes('buttonify') || field.includes('quick_reply') || field.includes('quick-reply'))) {
+        return 'Auxiliary UI quick replies';
+    }
+    if (source.includes('aux_llm_calls') || fields.some((field) => field.includes('auxiliary'))) {
+        return 'Auxiliary LLM';
+    }
+    if (fields.some((field) => field.includes('selector'))) {
+        return 'Selector LLM';
+    }
+    if (fields.some((field) => field.includes('final_answer') || field.includes('answer_synthesis') || field.includes('response_final'))) {
+        return 'Answer LLM';
+    }
+    if (fields.some((field) => field.includes('workflow'))) {
+        return 'Workflow LLM';
+    }
+    return '';
+}
+
 function renderThinkingLlmCallLogEntriesHTML(entries) {
     if (!Array.isArray(entries) || entries.length === 0) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
@@ -9278,6 +9303,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
         const seq = Number.isFinite(entry?.sequence_no) ? Number(entry.sequence_no) : null;
         const stage = normaliseThinkingActivityString(entry?.stage) || 'unscoped';
         const callType = normaliseThinkingActivityString(entry?.call_type) || 'llm_call';
+        const roleLabel = classifyThinkingLlmCallLogEntry(entry);
         const model = normaliseThinkingActivityString(entry?.model) || 'unknown model';
         const provider = normaliseThinkingActivityString(entry?.provider);
         const liveState = formatThinkingLlmRequestState(entry?.live_state);
@@ -9295,6 +9321,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
         const headerBits = [
             seq !== null ? `#${seq}` : '',
             timestampLabel,
+            roleLabel,
             formatThinkingActivityFallbackLabel(stage),
             formatThinkingActivityFallbackLabel(callType),
             liveState,
@@ -9359,11 +9386,11 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         : '';
 
     const liveLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && liveEntries.length > 0)
-        ? '<div class="thinking-card-diagnostic-text">Showing live LLM events as they arrive. Load the full archived log for exact completed exchanges.</div>'
+        ? '<div class="thinking-card-diagnostic-text">Showing live LLM events currently loaded. View the archived call log for completed exchanges; timing summaries above may include exchanges not shown here yet.</div>'
         : '';
 
     const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && !hasVisibleEntries)
-        ? '<div class="thinking-card-diagnostic-text">No live LLM events have arrived yet. Load the full archived log for completed exchanges.</div>'
+        ? '<div class="thinking-card-diagnostic-text">No live LLM events are currently loaded. View the archived call log for completed exchanges; timing and auxiliary summaries shown above may come from other telemetry.</div>'
         : '';
 
     const countLine = Number.isFinite(state.totalCount)
