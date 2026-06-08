@@ -13,6 +13,10 @@ import re
 from typing import Any, Mapping, Sequence
 
 from ...languagemodels.llm_interface import get_llm_client
+from ...security.visibility_predicates import (
+    CANONICAL_VISIBILITY_PREDICATES,
+    LEGACY_VISIBILITY_PREDICATES,
+)
 from ...services.concept_service import (
     ConceptNotFoundError,
     get_concept_by_concept_id,
@@ -718,8 +722,8 @@ def _build_authenticated_concept_grounding_text(payload: Mapping[str, Any]) -> s
         if not target_names or len(target_names) > 4:
             continue
         if predicate_id in {
-            "specific_to_user",
-            "#V#specific_to_user",
+            *CANONICAL_VISIBILITY_PREDICATES,
+            *LEGACY_VISIBILITY_PREDICATES,
             "#V#has_paper_recommendation_assertion",
             "#V#preferred_language",
             "#V#has_email",

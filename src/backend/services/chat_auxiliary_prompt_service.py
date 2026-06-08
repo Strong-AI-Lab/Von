@@ -16,6 +16,7 @@ import logging
 import os
 
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
+from src.backend.security.visibility_predicates import SPECIFIC_TO_USER_PREDICATES
 from src.backend.services.concept_service import get_concept_by_concept_id
 from src.backend.services.text_value_service import get_texts_for_concept
 
@@ -27,8 +28,7 @@ _LEGACY_VON_LLM_PROMPT_TYPE = "#V#von_llm_prompt"
 _SPECIFIC_TO_USER_PREDICATE_CANDIDATES = (
     "#V#specific_to_von_user",
     "specific_to_von_user",
-    "#V#specific_to_user",
-    "specific_to_user",
+    *SPECIFIC_TO_USER_PREDICATES,
 )
 
 

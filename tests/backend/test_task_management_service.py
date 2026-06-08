@@ -91,12 +91,16 @@ class TestCreateTask:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service.ensure_task_ontology")
+    @patch("src.backend.services.task_management_service.ensure_effort_unit_ontology")
     @patch(
         "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
     )
     def test_create_task_with_minimal_params(
         self,
         mock_launch_workflow: MagicMock,
+        mock_ensure_effort_unit_ontology: MagicMock,
+        mock_ensure_task_ontology: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
     ) -> None:
@@ -119,6 +123,8 @@ class TestCreateTask:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service.ensure_task_ontology")
+    @patch("src.backend.services.task_management_service.ensure_effort_unit_ontology")
     @patch(
         "src.backend.services.conversation_concept_service.get_or_create_conversation_concept"
     )
@@ -129,6 +135,8 @@ class TestCreateTask:
         self,
         mock_launch_workflow: MagicMock,
         mock_conv_service: MagicMock,
+        mock_ensure_effort_unit_ontology: MagicMock,
+        mock_ensure_task_ontology: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
     ) -> None:
@@ -767,12 +775,16 @@ class TestTaskParityDatesAndEpic:
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
     @patch("src.backend.services.task_management_service._get_task_doc")
+    @patch("src.backend.services.task_management_service.ensure_task_ontology")
+    @patch("src.backend.services.task_management_service.ensure_effort_unit_ontology")
     @patch(
         "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
     )
     def test_create_task_stores_start_date_and_epic(
         self,
         mock_launch_workflow: MagicMock,
+        mock_ensure_effort_unit_ontology: MagicMock,
+        mock_ensure_task_ontology: MagicMock,
         mock_get_task_doc: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,

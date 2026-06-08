@@ -895,4 +895,17 @@ describe('individual concept detail fallbacks', () => {
             arg2_value: '#V#michael_witbrock'
         });
     });
+
+    test('getCanonicalRelationshipTargets prefers canonical visibility shape and tolerates legacy aliases', () => {
+        const { getCanonicalRelationshipTargets } = require(dynamicTabsModulePath);
+
+        expect(getCanonicalRelationshipTargets({
+            '#V#specific_to_user': ['#V#michael_witbrock']
+        }, '#V#specific_to_user')).toEqual(['#V#michael_witbrock']);
+
+        expect(getCanonicalRelationshipTargets({
+            specific_to_user: ['#V#michael_witbrock'],
+            '#V#specific_to_user': ['#V#michael_witbrock', '#V#other_user']
+        }, '#V#specific_to_user')).toEqual(['#V#michael_witbrock', '#V#other_user']);
+    });
 });

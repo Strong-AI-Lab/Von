@@ -3511,6 +3511,7 @@ def _build_diagnostics_response(app: Flask):
 
         try:
             from ..db.mongo_client import get_concepts_collection  # type: ignore
+            from ..security.visibility_predicates import SPECIFIC_TO_USER_PREDICATES
 
             coll = get_concepts_collection()
             if coll is not None:

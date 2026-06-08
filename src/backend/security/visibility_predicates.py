@@ -1,9 +1,10 @@
 """Visibility predicate helpers.
 
-Visibility predicates are represented Vontology relationships.  The canonical
+Visibility predicates are represented Vontology relationships. The canonical
 storage predicates are ``#V#specific_to_user`` and
-``#V#specific_to_organisation``.  Read helpers deliberately keep legacy aliases
-for the migration window, but write helpers emit canonical predicates only.
+``#V#specific_to_organisation``. Read helpers deliberately keep legacy aliases
+for the migration window, but write helpers emit canonical predicates only and
+clear legacy variants from the relationship dict they update.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ LEGACY_SPECIFIC_TO_ORG_PREDICATES: tuple[str, ...] = (
     "#V#specific_to_org",
 )
 
-# Keep read aliases broad for backwards compatibility.
 SPECIFIC_TO_USER_PREDICATES: tuple[str, ...] = (
     *LEGACY_SPECIFIC_TO_USER_PREDICATES,
     CANONICAL_SPECIFIC_TO_USER_PREDICATE,
@@ -39,6 +39,27 @@ SPECIFIC_TO_USER_PREDICATES_WRITE: tuple[str, ...] = (
 SPECIFIC_TO_ORG_PREDICATES_WRITE: tuple[str, ...] = (
     CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
 )
+
+LEGACY_VISIBILITY_PREDICATES: tuple[str, ...] = (
+    *LEGACY_SPECIFIC_TO_USER_PREDICATES,
+    *LEGACY_SPECIFIC_TO_ORG_PREDICATES,
+)
+
+CANONICAL_VISIBILITY_PREDICATES: tuple[str, ...] = (
+    CANONICAL_SPECIFIC_TO_USER_PREDICATE,
+    CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
+)
+
+VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL: Dict[str, str] = {
+    **{
+        predicate: CANONICAL_SPECIFIC_TO_USER_PREDICATE
+        for predicate in SPECIFIC_TO_USER_PREDICATES
+    },
+    **{
+        predicate: CANONICAL_SPECIFIC_TO_ORG_PREDICATE
+        for predicate in SPECIFIC_TO_ORG_PREDICATES_READ
+    },
+}
 
 
 def _normalise_concept_ids(values: Any) -> List[str]:
@@ -87,9 +108,15 @@ def _set_visibility_values(
     relationships: Dict[str, Any] | None,
     predicates: Sequence[str],
     values: Iterable[str],
+    *,
+    clear_predicates: Sequence[str] = (),
 ) -> Dict[str, Any]:
     updated = dict(relationships) if isinstance(relationships, dict) else {}
     normalised = _normalise_concept_ids(list(values))
+
+    for predicate in clear_predicates:
+        if predicate not in predicates:
+            updated.pop(predicate, None)
 
     for predicate in predicates:
         if normalised:
@@ -111,25 +138,27 @@ def set_specific_to_user_values(
     relationships: Dict[str, Any] | None,
     values: Iterable[str],
 ) -> Dict[str, Any]:
-    updated = _set_visibility_values(
+    return _set_visibility_values(
         relationships,
         SPECIFIC_TO_USER_PREDICATES_WRITE,
         values,
+        clear_predicates=SPECIFIC_TO_USER_PREDICATES,
     )
-    for predicate in LEGACY_SPECIFIC_TO_USER_PREDICATES:
-        updated.pop(predicate, None)
-    return updated
 
 
 def set_specific_to_org_values(
     relationships: Dict[str, Any] | None,
     values: Iterable[str],
 ) -> Dict[str, Any]:
-    updated = _set_visibility_values(
+    return _set_visibility_values(
         relationships,
         SPECIFIC_TO_ORG_PREDICATES_WRITE,
         values,
+        clear_predicates=SPECIFIC_TO_ORG_PREDICATES_READ,
     )
-    for predicate in LEGACY_SPECIFIC_TO_ORG_PREDICATES:
-        updated.pop(predicate, None)
-    return updated
+
+
+def visibility_relationship_field(predicate: str) -> str:
+    """Return the Mongo relationship field path for a visibility predicate."""
+
+    return f"relationships.{predicate}"

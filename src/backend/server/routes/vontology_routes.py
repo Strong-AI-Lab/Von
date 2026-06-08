@@ -60,6 +60,7 @@ from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
 from ...security.access_control import cache_scope_key, bypass_access_control
+from ...security.visibility_predicates import VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL
 from ...services.window_session_context_service import get_effective_context
 from ...utilities.salient_recompute import recompute_salient_predicates
 
@@ -98,10 +99,7 @@ _RELATIONSHIP_ALIAS_TO_CANONICAL = {
     "is_an_instance_ofs": "is_an_instance_of",
     "has_instances": "has_instance",
     "related_tos": "related_to",
-    "specific_to_user": "#V#specific_to_user",
-    "specific_to_org": "#V#specific_to_organisation",
-    "specific_to_organisation": "#V#specific_to_organisation",
-    "#V#specific_to_org": "#V#specific_to_organisation",
+    **VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL,
 }
 _RELATIONSHIP_EXTENT_DEFAULT_LIMIT = 200
 _RELATIONSHIP_EXTENT_MAX_LIMIT = 500

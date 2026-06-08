@@ -359,6 +359,10 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy scan used")),
     )
     monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",
         lambda *a, **k: (
             [
@@ -616,6 +620,10 @@ def test_relationship_extent_route_falls_back_before_extent_index_build(
     monkeypatch.setattr(
         "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
         lambda *a, **k: {"relations": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.relationship_extent_index_ready",
+        lambda: False,
     )
     monkeypatch.setattr(
         "src.backend.server.routes.vontology_routes.incoming_dynamic_extent_rows_for_target",

@@ -7789,4 +7789,4 @@ async function getCurrentUserId() {
 
 
 // Explicit exports for tests / external modules that need to force relabeling
-export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName };
+export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName, getCanonicalRelationshipTargets };

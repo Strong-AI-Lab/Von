@@ -36,6 +36,7 @@ from ..vontology.code_concepts_registry import (
     build_virtual_concept_doc,
     is_code_concept_id,
 )
+from ..security.visibility_predicates import VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL
 
 _logger = logging.getLogger(__name__)
 
@@ -47,14 +48,7 @@ PREDICATE_NAME_ALIASES: Dict[str, str] = {
     "typeOf": "is_a_type_of",
     "subtype": "has_subtype",
     "instance": "has_instance",
-    # Visibility predicate aliases:
-    # Route legacy field-style predicates to canonical predicate concept IDs so
-    # agents can write relationships using historic terms without creating
-    # orphan predicate references.
-    "specific_to_user": "#V#specific_to_user",
-    "specific_to_org": "#V#specific_to_organisation",
-    "specific_to_organisation": "#V#specific_to_organisation",
-    "#V#specific_to_org": "#V#specific_to_organisation",
+    **VISIBILITY_PREDICATE_ALIAS_TO_CANONICAL,
 }
 
 # Blocked parent types that defeat the purpose of the ontology (JVNAUTOSCI-1072).
