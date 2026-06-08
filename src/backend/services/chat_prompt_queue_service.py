@@ -16,6 +16,7 @@ from pymongo.collection import Collection
 from ..db.mongo_client import get_chat_prompt_queue_collection
 from .namespace_service import (
     concept_id_to_namespace_slug,
+    derive_actor_context_from_namespace,
     resolve_canonical_namespace,
 )
 
@@ -131,6 +132,21 @@ def _queue_scope_values(scope: Mapping[str, Any]) -> dict[str, str | None]:
         user_concept_id=user_id,
         organisation_concept_id=org_id,
     )
+    namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(namespace)
+    if namespace_user_id and namespace_user_id != user_id:
+        namespace = _normalise_namespace_component(
+            None,
+            user_concept_id=user_id,
+            organisation_concept_id=org_id,
+        )
+    elif org_id is None and namespace_org_id:
+        org_id = namespace_org_id
+    elif org_id is not None and namespace_org_id and namespace_org_id != org_id:
+        namespace = _normalise_namespace_component(
+            None,
+            user_concept_id=user_id,
+            organisation_concept_id=org_id,
+        )
     return {
         "user_concept_id": user_id,
         "organisation_concept_id": org_id,
@@ -169,7 +185,13 @@ def _compatible_scope_query(scope: Mapping[str, Any]) -> dict[str, Any]:
 
 def _scope_matches(record: Mapping[str, Any], scope: Mapping[str, Any]) -> bool:
     try:
-        return _scope_query(record) == _scope_query(scope)
+        canonical = _scope_query(scope)
+        record_scope = _scope_query(record)
+        return all(
+            record_scope_value in _value_variants(canonical_value, field=field)
+            for field, canonical_value in canonical.items()
+            for record_scope_value in [record_scope.get(field)]
+        )
     except InvalidChatPromptQueueInput:
         return False
 

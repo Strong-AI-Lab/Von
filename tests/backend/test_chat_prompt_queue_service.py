@@ -92,6 +92,34 @@ def test_queue_scope_canonicalises_org_and_namespace_components() -> None:
     }
 
 
+def test_queue_scope_recovers_components_from_namespace() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id=None,
+        namespace="#V#user@org",
+    )
+
+    assert scope == {
+        "user_concept_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+        "namespace": "#V#user@org",
+    }
+
+
+def test_queue_scope_rebuilds_namespace_when_components_disagree() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org_b",
+        namespace="#V#user@org_a",
+    )
+
+    assert scope == {
+        "user_concept_id": "#V#user",
+        "organisation_concept_id": "#V#org_b",
+        "namespace": "#V#user@org_b",
+    }
+
+
 def test_queue_transitions_tolerate_legacy_scope_variants() -> None:
     coll = mongo_client.get_chat_prompt_queue_collection()
     assert coll is not None
@@ -129,6 +157,44 @@ def test_queue_transitions_tolerate_legacy_scope_variants() -> None:
     assert persisted is not None
     assert persisted["organisation_concept_id"] == "#V#org"
     assert persisted["namespace"] == "#V#user@org"
+
+
+def test_legacy_scope_terminal_record_reports_wrong_state() -> None:
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    now = datetime.now(timezone.utc)
+    coll.insert_one(
+        {
+            "queue_id": "legacy-terminal-queue-1",
+            "user_concept_id": "user",
+            "organisation_concept_id": "org",
+            "namespace": None,
+            "prompt_raw": "Legacy completed task",
+            "status": queue_service.STATUS_COMPLETED,
+            "session_id": "session-1",
+            "session_name": "Legacy",
+            "source": "queued",
+            "attempt_count": 1,
+            "created_at": now,
+            "updated_at": now,
+            "queued_at": now,
+            "claimed_at": now,
+            "completed_at": now,
+            "last_error": None,
+        }
+    )
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound) as exc_info:
+        queue_service.claim_queue_record(scope=scope, queue_id="legacy-terminal-queue-1")
+
+    assert exc_info.value.error_code == "wrong_state"
+    assert exc_info.value.details["scope_match"] is True
+    assert exc_info.value.details["current_status"] == queue_service.STATUS_COMPLETED
 
 
 def test_queue_transition_miss_reports_wrong_state_details() -> None:
