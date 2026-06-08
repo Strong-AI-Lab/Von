@@ -239,6 +239,18 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   prompt and selector policy remains in the Vontology-rendered system/context
   prompt. File only if Python adds selector instructions, examples, fallback
   wording, or routing semantics there.
+- 2026-06-09: `scripts/author_jvnautosci_2421_gmail_arxiv_progress_projection.py`
+  looked like a one-shot Vontology-authoring helper for represented
+  progress-projection metadata, not request-path authority. File only if these
+  Gmail/arXiv progress facts become startup/runtime repopulation authority or
+  if request-path Python starts deciding progress labels/visibility from the
+  script's domain tables.
+- 2026-06-09: final-answer projected-evidence plumbing in
+  `turn_execution_record_service.py` and `turn_execution_runtime_support.py`
+  looked support-only: it bounds/redacts projected payloads and carries
+  represented tool-evidence projection into critic/completion evidence. File
+  only if Python starts deciding field/view semantics or user-facing answer
+  wording rather than preserving represented projection metadata.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
