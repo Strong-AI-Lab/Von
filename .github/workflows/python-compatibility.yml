@@ -1,0 +1,26 @@
+name: Python Compatibility
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  min-syntax:
+    name: Minimum Python syntax
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check minimum grammar compatibility
+        run: python scripts/check_python_min_syntax.py

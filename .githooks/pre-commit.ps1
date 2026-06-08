@@ -13,6 +13,23 @@ if (-not $staged) {
     exit 0
 }
 
+$repoRoot = (git rev-parse --show-toplevel).Trim()
+
+function Resolve-RepoPython {
+    param([string]$RepoRoot)
+
+    $candidates = @(
+        (Join-Path $RepoRoot '.venv\Scripts\python.exe'),
+        (Join-Path $RepoRoot '.venv/bin/python')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    return 'python'
+}
+
 $hits = @()
 foreach ($file in $staged) {
     foreach ($pattern in $blockedPatterns) {
@@ -75,6 +92,33 @@ if ($legacyHits.Count -gt 0) {
     exit 1
 }
 
+$pythonSyntaxPaths = @(
+    $staged | Where-Object { $_ -match '\.py$' }
+)
+
+if ($pythonSyntaxPaths.Count -gt 0) {
+    $compatScript = Join-Path $repoRoot 'scripts/check_python_min_syntax.py'
+    if (-not (Test-Path $compatScript)) {
+        Write-Host "Python syntax compatibility script is missing: $compatScript" -ForegroundColor Red
+        exit 1
+    }
+
+    $python = Resolve-RepoPython -RepoRoot $repoRoot
+    Write-Host "Running Python minimum syntax compatibility gate..." -ForegroundColor Cyan
+    Push-Location $repoRoot
+    try {
+        & $python $compatScript --paths @pythonSyntaxPaths
+        $commandSucceeded = $?
+        if (-not $commandSucceeded -or $LASTEXITCODE -ne 0) {
+            Write-Host "Python syntax compatibility gate failed. Keep repo Python parseable by the minimum supported Python version." -ForegroundColor Red
+            exit 1
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 $workflowPurityTriggerPatterns = @(
     '^src/backend/integrations/internal_mcp/orchestrator\.py$',
     '^src/backend/server/routes/von_routes\.py$',
@@ -85,6 +129,7 @@ $workflowPurityTriggerPatterns = @(
     '^scripts/workflow_purity_report\.py$',
     '^tests/backend/test_workflow_purity.*\.py$',
     '^tests/backend/fixtures/workflow_purity_baseline\.json$',
+    '^\.githooks/pre-commit$',
     '^\.githooks/pre-commit\.ps1$'
 )
 
@@ -102,14 +147,7 @@ foreach ($file in $staged) {
 }
 
 if ($runWorkflowPurityGate) {
-    $repoRoot = (git rev-parse --show-toplevel).Trim()
     $purityScript = Join-Path $repoRoot 'scripts/check_workflow_purity.py'
-    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
-    $pdm = if (Test-Path (Join-Path $repoRoot '.venv\Scripts\pdm.exe')) {
-        Join-Path $repoRoot '.venv\Scripts\pdm.exe'
-    } else {
-        'pdm'
-    }
 
     if (-not (Test-Path $purityScript)) {
         Write-Host "Workflow purity gate script is missing: $purityScript" -ForegroundColor Red
@@ -117,14 +155,12 @@ if ($runWorkflowPurityGate) {
     }
 
     Write-Host "Running workflow purity gate..." -ForegroundColor Cyan
+    $python = Resolve-RepoPython -RepoRoot $repoRoot
     Push-Location $repoRoot
     try {
-        if (Test-Path $venvPython) {
-            & $venvPython $purityScript
-        } else {
-            & $pdm run python $purityScript
-        }
-        if ($LASTEXITCODE -ne 0) {
+        & $python $purityScript
+        $commandSucceeded = $?
+        if (-not $commandSucceeded -or $LASTEXITCODE -ne 0) {
             Write-Host "Workflow purity gate failed. Fix the reported violations or refresh the baseline deliberately." -ForegroundColor Red
             exit 1
         }

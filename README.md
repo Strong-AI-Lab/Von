@@ -31,6 +31,16 @@ Von (or vonNeumarkt) provides researchers with AI-enriched tools that enhance ac
 - Node.js 16+ (for frontend)
 - PowerShell 7.x (for Windows)
 
+Von currently declares a Python 3.11 minimum in `pyproject.toml`. Newer
+interpreters are fine, but before committing Python changes run:
+
+```bash
+python scripts/check_python_min_syntax.py
+```
+
+This catches syntax that a newer local Python accepts but the minimum supported
+runtime would reject.
+
 ### 2. **Installation:**
 
 ```powershell

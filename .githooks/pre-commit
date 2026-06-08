@@ -1,0 +1,107 @@
+#!/usr/bin/env sh
+# Cross-platform pre-commit guardrails for POSIX Git clients.
+set -eu
+
+staged="$(git diff --cached --name-only)"
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+resolve_repo_python() {
+    if [ -x "$repo_root/.venv/bin/python" ]; then
+        printf '%s\n' "$repo_root/.venv/bin/python"
+        return 0
+    fi
+    if [ -x "$repo_root/.venv/Scripts/python.exe" ]; then
+        printf '%s\n' "$repo_root/.venv/Scripts/python.exe"
+        return 0
+    fi
+    printf '%s\n' python
+}
+
+blocked_hits="$(
+    printf '%s\n' "$staged" | grep -E '^(data/rag_storage/|data/raw/|data/.+\.json$|backups/|logs/)' || true
+)"
+if [ -n "$blocked_hits" ]; then
+    printf '%s\n' "Blocked committing runtime data files:" >&2
+    printf ' - %s\n' $blocked_hits >&2
+    printf '%s\n' "Remove from index or move out of blocked paths, then commit again." >&2
+    exit 1
+fi
+
+legacy_hits=""
+for file in $staged; do
+    case "$file" in
+        *.py|*.md|*.txt|*.json|*.yaml|*.yml|*.js|*.ts) ;;
+        *) continue ;;
+    esac
+    case "$file" in
+        src/backend/services/preserved_fields_decommission_service.py|\
+        src/backend/utilities/migrate_preserved_fields_to_text_relations.py|\
+        src/backend/services/concept_service.py|\
+        src/backend/server/routes/settings_routes.py|\
+        tests/*)
+            continue
+            ;;
+    esac
+    if git diff --cached --unified=0 -- "$file" \
+        | grep -E '^\+[^+].*concept_data\.preserved_fields' >/dev/null; then
+        legacy_hits="${legacy_hits}
+${file}"
+    fi
+done
+
+if [ -n "$(printf '%s' "$legacy_hits" | sed '/^$/d')" ]; then
+    printf '%s\n' "Blocked committing new deprecated field references:" >&2
+    printf '%s\n' "$legacy_hits" | sed '/^$/d;s/^/ - /' >&2
+    printf '%s\n' "Use canonical text relations (hasDescription/hasNote/hasContent) or approved migration helpers." >&2
+    exit 1
+fi
+
+python_syntax_paths="$(printf '%s\n' "$staged" | grep -E '\.py$' || true)"
+if [ -n "$python_syntax_paths" ]; then
+    compat_script="$repo_root/scripts/check_python_min_syntax.py"
+    if [ ! -f "$compat_script" ]; then
+        printf '%s\n' "Python syntax compatibility script is missing: $compat_script" >&2
+        exit 1
+    fi
+    python_cmd="$(resolve_repo_python)"
+    printf '%s\n' "Running Python minimum syntax compatibility gate..."
+    # shellcheck disable=SC2086
+    "$python_cmd" "$compat_script" --paths $python_syntax_paths
+fi
+
+run_workflow_purity_gate=0
+for file in $staged; do
+    case "$file" in
+        src/backend/integrations/internal_mcp/orchestrator.py|\
+        src/backend/server/routes/von_routes.py|\
+        src/backend/workflows/*|\
+        src/backend/services/*workflow*.py|\
+        src/backend/services/conversation_turn_workflow_vontology_service.py|\
+        scripts/check_workflow_purity.py|\
+        scripts/workflow_purity_report.py|\
+        tests/backend/test_workflow_purity*.py|\
+        tests/backend/fixtures/workflow_purity_baseline.json|\
+        .githooks/pre-commit|\
+        .githooks/pre-commit.ps1)
+            run_workflow_purity_gate=1
+            break
+            ;;
+    esac
+done
+
+if [ "$run_workflow_purity_gate" = "1" ]; then
+    purity_script="$repo_root/scripts/check_workflow_purity.py"
+    if [ ! -f "$purity_script" ]; then
+        printf '%s\n' "Workflow purity gate script is missing: $purity_script" >&2
+        exit 1
+    fi
+    python_cmd="$(resolve_repo_python)"
+    printf '%s\n' "Running workflow purity gate..."
+    "$python_cmd" "$purity_script"
+fi
+
+exit 0
