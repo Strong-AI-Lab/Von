@@ -81,6 +81,10 @@ from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
     build_turn_display_elements,
 )
+from ...services.turn_output_health_service import (
+    build_turn_output_health,
+    turn_output_health_issue_messages,
+)
 from ...services.response_transformation_telemetry import (
     build_response_transformation_event,
     build_response_transformation_telemetry_payload,
@@ -6046,65 +6050,9 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
                 f"Configured tool-invocation cap ({max_invocations}) was reached; later tool-shaped output was not executed."
             )
 
-    # Check presenter channel health (screen/spoken routes)
-    presenter_channels = debug_info.get("presenter_channels")
-    if isinstance(presenter_channels, dict):
-        screen_value = presenter_channels.get("screen")
-        spoken_value = presenter_channels.get("spoken")
-        screen_ok = isinstance(screen_value, str) and bool(screen_value.strip())
-        spoken_ok = isinstance(spoken_value, str) and bool(spoken_value.strip())
-
-        # If one channel is missing, flag it so the other route output acts as a
-        # diagnostic cue (without mutating the actual output text).
-        if screen_ok and not spoken_ok:
-            warnings.append(
-                "Presenter output missing spoken channel; text-to-speech will fall back to screen text."
-            )
-        elif spoken_ok and not screen_ok:
-            warnings.append(
-                "Presenter output missing screen channel; display will fall back to spoken text."
-            )
-        elif not screen_ok and not spoken_ok:
-            warnings.append(
-                "Presenter output present but both screen and spoken channels are empty."
-            )
-
-    spoken_backfill_attempted = bool(
-        debug_info.get("spoken_backfill_second_pass_attempted")
-    )
-    spoken_backfill_reason = debug_info.get("spoken_backfill_second_pass_reason")
-    if spoken_backfill_attempted:
-        # Flag only if spoken is still missing after backfill attempt.
-        spoken_still_missing = True
-        if isinstance(presenter_channels, dict):
-            spoken_value = presenter_channels.get("spoken")
-            spoken_still_missing = not (
-                isinstance(spoken_value, str) and bool(spoken_value.strip())
-            )
-
-        if spoken_still_missing:
-            reason_text = (
-                str(spoken_backfill_reason).strip()
-                if isinstance(spoken_backfill_reason, str)
-                and spoken_backfill_reason.strip()
-                else "unknown_reason"
-            )
-            warnings.append(
-                f"Spoken backfill attempted but spoken channel is still missing ({reason_text})."
-            )
-
-    display_elements = debug_info.get("display_elements")
-    if isinstance(display_elements, dict):
-        validation = display_elements.get("validation")
-        if isinstance(validation, dict) and validation.get("valid") is False:
-            warnings.append("Display element contract validation failed.")
-            errors = validation.get("errors")
-            if isinstance(errors, list):
-                for error in errors:
-                    if isinstance(error, str) and error.strip():
-                        warnings.append(
-                            f"Display element validation error: {error.strip()}"
-                        )
+    # Output/presenter/display health is typed separately so consumers can route
+    # it to output surfaces instead of treating it as LLM execution failure.
+    warnings.extend(turn_output_health_issue_messages(debug_info))
 
     # Remove duplicates while preserving order
     seen = set()
@@ -6539,6 +6487,7 @@ def _finalise_llm_debug_info(
         except Exception:
             pass
 
+    llm_debug_info["turn_output_health"] = build_turn_output_health(llm_debug_info)
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
     return llm_debug_info
 
@@ -13560,6 +13509,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else None
             ),
         }
+        llm_debug_info["turn_output_health"] = build_turn_output_health(
+            llm_debug_info
+        )
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
 
@@ -14479,11 +14431,22 @@ def history_backfill_spoken():
                         response_text=screen_text,
                         presenter_channels=existing_channels,
                     )
+                existing_health = None
+                if isinstance(existing_debug, dict):
+                    existing_health = existing_debug.get("turn_output_health")
+                if not isinstance(existing_health, dict):
+                    existing_health = build_turn_output_health(
+                        {
+                            "presenter_channels": existing_channels,
+                            "display_elements": existing_display_elements,
+                        }
+                    )
                 return jsonify(
                     {
                         "status": "already_present",
                         "presenter_channels": existing_channels,
                         "display_elements": existing_display_elements,
+                        "turn_output_health": existing_health,
                         "updated": False,
                     }
                 )
@@ -14642,6 +14605,14 @@ def history_backfill_spoken():
             spoken_backfill_second_pass_attempted=True,
             spoken_backfill_second_pass_reason=spoken_backfill_reason,
         )
+        turn_output_health = build_turn_output_health(
+            {
+                "presenter_channels": presenter_channels,
+                "display_elements": display_elements_contract,
+                "spoken_backfill_second_pass_attempted": True,
+                "spoken_backfill_second_pass_reason": spoken_backfill_reason,
+            }
+        )
 
         update_result = (
             chat_history_service.upsert_presenter_channels_for_history_message(
@@ -14650,6 +14621,7 @@ def history_backfill_spoken():
                 history_index=history_index,
                 presenter_channels=presenter_channels,
                 display_elements=display_elements_contract,
+                turn_output_health=turn_output_health,
                 generated_at=datetime.now(timezone.utc),
                 force=force,
             )
@@ -14660,6 +14632,7 @@ def history_backfill_spoken():
                 "status": "ok",
                 "presenter_channels": presenter_channels,
                 "display_elements": display_elements_contract,
+                "turn_output_health": turn_output_health,
                 "updated": bool(update_result.get("updated")),
                 "matched": bool(update_result.get("matched")),
             }

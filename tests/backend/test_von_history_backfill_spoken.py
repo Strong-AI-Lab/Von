@@ -183,6 +183,11 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
     assert body["presenter_channels"]["format"] == "narration_fallback_v1"
     assert body["display_elements"]["schema_version"] == "turn_display_elements_v1"
     assert body["display_elements"]["validation"]["valid"] is True
+    assert body["turn_output_health"] == {
+        "schema_version": "turn_output_health_v1",
+        "status": "ok",
+        "issues": [],
+    }
     spoken_element = next(
         element
         for element in body["display_elements"]["elements"]
@@ -212,6 +217,11 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
         stored_history[1]["llm_debug_data"]["display_elements"]["schema_version"]
         == "turn_display_elements_v1"
     )
+    assert stored_history[1]["llm_debug_data"]["turn_output_health"] == {
+        "schema_version": "turn_output_health_v1",
+        "status": "ok",
+        "issues": [],
+    }
 
     # Verify the spoken narration was also indexed into RAG.
     assert len(mock_rag.calls) == 1

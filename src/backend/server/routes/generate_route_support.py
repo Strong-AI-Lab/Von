@@ -567,6 +567,12 @@ def _build_generate_success_body(
             else None
         ),
         "llm_debug": llm_debug_info,
+        "turn_output_health": (
+            llm_debug_info.get("turn_output_health")
+            if isinstance(llm_debug_info, Mapping)
+            and isinstance(llm_debug_info.get("turn_output_health"), Mapping)
+            else None
+        ),
         "display_elements": display_elements_contract,
         "rag_trace": rag_trace,
     }

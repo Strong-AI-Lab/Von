@@ -185,6 +185,36 @@ describe('footer latest LLM execution status', () => {
         expect(modelSegment.classList.contains('ready')).toBe(true);
     });
 
+    test('does not turn footer red for presenter output warnings alone', async () => {
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+
+        window.__vonLatestLlmExecutionTelemetry = {
+            requested_model: 'gpt-5.4-mini',
+            actual_model: 'gpt-5.4-mini',
+            actual_provider: 'openai',
+            call_models: ['gpt-5.4-mini'],
+            fallback_used: false,
+            primary_failure_reason: null,
+            warnings: [
+                'Presenter output missing spoken channel; text-to-speech will fall back to screen text.'
+            ]
+        };
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: window.__vonLatestLlmExecutionTelemetry
+        }));
+        await flushUiTicks();
+
+        const modelSegment = await waitForModelSegment((seg) =>
+            seg.querySelector('.concept-footer-button')?.textContent?.trim() === 'gpt-5.4-mini'
+        );
+        expect(modelSegment).toBeTruthy();
+        expect(modelSegment.classList.contains('fatal')).toBe(false);
+        expect(modelSegment.classList.contains('warning')).toBe(false);
+        expect(modelSegment.classList.contains('ready')).toBe(true);
+    });
+
     test('shows warning (not fatal) when fallback was used but final model succeeded', async () => {
         const { setModelInfoFooterText } = require(domUtilsPath);
 

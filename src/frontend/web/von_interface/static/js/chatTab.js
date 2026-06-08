@@ -418,6 +418,64 @@ function extractLatestStageModelSelection(auxCalls = []) {
     };
 }
 
+function normaliseTurnOutputHealth(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    if (value.schema_version !== 'turn_output_health_v1') {
+        return null;
+    }
+    const rawIssues = Array.isArray(value.issues) ? value.issues : [];
+    const issues = rawIssues
+        .filter((issue) => issue && typeof issue === 'object')
+        .map((issue) => ({
+            category: (typeof issue.category === 'string' && issue.category.trim()) ? issue.category.trim() : null,
+            code: (typeof issue.code === 'string' && issue.code.trim()) ? issue.code.trim() : null,
+            severity: (typeof issue.severity === 'string' && issue.severity.trim()) ? issue.severity.trim() : null,
+            message: (typeof issue.message === 'string' && issue.message.trim()) ? issue.message.trim() : null,
+            fallbackUsed: (typeof issue.fallback_used === 'string' && issue.fallback_used.trim()) ? issue.fallback_used.trim() : null,
+        }))
+        .filter((issue) => issue.message);
+    return {
+        schemaVersion: value.schema_version,
+        status: (typeof value.status === 'string' && value.status.trim()) ? value.status.trim() : 'ok',
+        issues,
+    };
+}
+
+function getTurnOutputHealth(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+    return normaliseTurnOutputHealth(debugData.turn_output_health)
+        || normaliseTurnOutputHealth(debugData.metadata?.turn_output_health)
+        || null;
+}
+
+function getTurnOutputHealthMessages(turnOutputHealth) {
+    if (!turnOutputHealth || !Array.isArray(turnOutputHealth.issues)) {
+        return [];
+    }
+    return Array.from(new Set(
+        turnOutputHealth.issues
+            .map((issue) => issue.message)
+            .filter((message) => typeof message === 'string' && message.trim())
+    ));
+}
+
+function getTurnOutputHealthLlmExecutionFailure(turnOutputHealth) {
+    if (!turnOutputHealth || !Array.isArray(turnOutputHealth.issues)) {
+        return null;
+    }
+    const issue = turnOutputHealth.issues.find((candidate) => (
+        candidate?.category === 'llm_execution'
+        && ['error', 'fatal'].includes(candidate?.severity)
+        && typeof candidate?.message === 'string'
+        && candidate.message.trim()
+    ));
+    return issue ? issue.message.trim() : null;
+}
+
 function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
@@ -472,6 +530,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
     const topLevelError = (typeof debugData.error === 'string' && debugData.error.trim())
         ? debugData.error.trim()
         : null;
+    const turnOutputHealth = getTurnOutputHealth(debugData);
     const warnings = deriveLlmDebugWarnings(debugData);
     const failure = extractLatestLlmExecutionFailure(debugData.aux_llm_calls);
     const stageSelection = extractLatestStageModelSelection(debugData.aux_llm_calls);
@@ -480,7 +539,8 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         && call.note.toLowerCase().includes('trying fallback')
     ));
     const fallbackUsed = !!failure.fallbackUsed || callNoteIndicatesFallback;
-    const primaryFailureReason = failure.failureReason || topLevelError || (warnings[0] || null);
+    const outputHealthLlmFailure = getTurnOutputHealthLlmExecutionFailure(turnOutputHealth);
+    const primaryFailureReason = failure.failureReason || topLevelError || outputHealthLlmFailure || null;
 
     const effectiveRequestedModel = requestedModel || stageSelection.requestedModel || null;
     const effectiveActualModel = actualModel || stageSelection.actualModel || null;
@@ -18342,6 +18402,7 @@ function deriveLlmDebugWarnings(debugData) {
         return warnings;
     }
 
+    const turnOutputHealth = getTurnOutputHealth(debugData);
     const responseText = (typeof debugData.response === 'string') ? debugData.response : '';
     const toolInvocations = Array.isArray(debugData.tool_invocations) ? debugData.tool_invocations : [];
     const toolStatsCount = (debugData.tool_stats && Number.isFinite(debugData.tool_stats.tool_count))
@@ -18455,33 +18516,37 @@ function deriveLlmDebugWarnings(debugData) {
         }
     }
 
-    // Presenter channel health (screen/spoken routes)
-    const displayElementsRaw = debugData.display_elements;
-    const displayElements = normaliseDisplayElementsContract(displayElementsRaw);
-    if (displayElementsRaw && !displayElements) {
-        warnings.push('Display element contract is present but invalid or unsupported.');
-    } else if (displayElements && displayElements.validation?.valid === false) {
-        warnings.push('Display element contract validation failed.');
-    }
-    const presenterChannels = resolvePresenterChannels(
-        debugData.presenter_channels,
-        displayElements
-    );
-    if (presenterChannels) {
-        const hasScreen = typeof presenterChannels.screen === 'string' && presenterChannels.screen.trim();
-        const hasSpoken = typeof presenterChannels.spoken === 'string' && presenterChannels.spoken.trim();
+    let presenterChannels = null;
+    if (turnOutputHealth) {
+        warnings.push(...getTurnOutputHealthMessages(turnOutputHealth));
+    } else {
+        const displayElementsRaw = debugData.display_elements;
+        const displayElements = normaliseDisplayElementsContract(displayElementsRaw);
+        if (displayElementsRaw && !displayElements) {
+            warnings.push('Display element contract is present but invalid or unsupported.');
+        } else if (displayElements && displayElements.validation?.valid === false) {
+            warnings.push('Display element contract validation failed.');
+        }
+        presenterChannels = resolvePresenterChannels(
+            debugData.presenter_channels,
+            displayElements
+        );
+        if (presenterChannels) {
+            const hasScreen = typeof presenterChannels.screen === 'string' && presenterChannels.screen.trim();
+            const hasSpoken = typeof presenterChannels.spoken === 'string' && presenterChannels.spoken.trim();
 
-        if (hasScreen && !hasSpoken) {
-            warnings.push('Presenter output missing spoken channel; text-to-speech will fall back to screen text.');
-        } else if (hasSpoken && !hasScreen) {
-            warnings.push('Presenter output missing screen channel; display will fall back to spoken text.');
-        } else if (!hasScreen && !hasSpoken) {
-            warnings.push('Presenter output present but both screen and spoken channels are empty.');
+            if (hasScreen && !hasSpoken) {
+                warnings.push('Presenter output missing spoken channel; text-to-speech will fall back to screen text.');
+            } else if (hasSpoken && !hasScreen) {
+                warnings.push('Presenter output missing screen channel; display will fall back to spoken text.');
+            } else if (!hasScreen && !hasSpoken) {
+                warnings.push('Presenter output present but both screen and spoken channels are empty.');
+            }
         }
     }
 
     const spokenBackfillAttempted = !!debugData.spoken_backfill_second_pass_attempted;
-    if (spokenBackfillAttempted) {
+    if (spokenBackfillAttempted && !turnOutputHealth) {
         const spokenStillMissing = !(presenterChannels?.spoken && presenterChannels.spoken.trim());
         if (spokenStillMissing) {
             const reason = (typeof debugData.spoken_backfill_second_pass_reason === 'string' && debugData.spoken_backfill_second_pass_reason.trim())

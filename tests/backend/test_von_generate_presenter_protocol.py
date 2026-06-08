@@ -529,6 +529,10 @@ def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(
         "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.create_chat_session",
+        lambda **_kwargs: {"session_name": None},
+    )
 
     client = app.test_client()
     resp = client.post(
@@ -1078,8 +1082,14 @@ def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
         "spoken": "Short summary for TTS.",
         "format": "narration_fallback_v1",
     }
+    assert body["turn_output_health"] == {
+        "schema_version": "turn_output_health_v1",
+        "status": "ok",
+        "issues": [],
+    }
 
     llm_debug = body["llm_debug"]
+    assert llm_debug["turn_output_health"] == body["turn_output_health"]
     assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
     assert (
         llm_debug.get("spoken_backfill_second_pass_reason")
@@ -1094,6 +1104,31 @@ def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
 
     assert len(llm.calls) == 2
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_turn_output_health_flags_missing_spoken_channel():
+    from src.backend.services.turn_output_health_service import build_turn_output_health
+
+    health = build_turn_output_health(
+        {
+            "presenter_channels": {
+                "screen": "This is the on-screen answer with enough detail.",
+                "spoken": "",
+                "format": "tagged_blocks_v1",
+            },
+            "spoken_backfill_second_pass_attempted": False,
+        }
+    )
+
+    assert health["schema_version"] == "turn_output_health_v1"
+    assert health["status"] == "degraded"
+    assert {
+        "category": "presenter_output",
+        "code": "missing_spoken_channel",
+        "severity": "warning",
+        "message": "Presenter output missing spoken channel; text-to-speech will fall back to screen text.",
+        "fallback_used": "screen_text_for_tts",
+    } in health["issues"]
 
 
 def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkeypatch):

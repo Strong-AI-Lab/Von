@@ -164,4 +164,53 @@ describe('chatTab latest execution telemetry publication', () => {
             explicit_stage_model_override_origin: 'policy_primary'
         }));
     });
+
+    test('does not promote presenter output health warnings to LLM execution failure', () => {
+        const chatTab = require(chatTabModulePath);
+
+        chatTab.__testOnly_clearLlmDebugData();
+        chatTab.setLlmDebugDataForTurn('a-202', {
+            timestamp: '2026-06-08T15:01:00.000Z',
+            model: 'gpt-oss:20b',
+            llm_interaction: {
+                requested_model: 'ollama/gpt-oss:20b',
+                calls: [
+                    {
+                        type: 'llm.generate',
+                        model: 'gpt-oss:20b',
+                        provider: 'ollama'
+                    }
+                ]
+            },
+            presenter_channels: {
+                screen: 'On-screen answer',
+                spoken: '',
+                format: 'tagged_blocks_v1'
+            },
+            turn_output_health: {
+                schema_version: 'turn_output_health_v1',
+                status: 'degraded',
+                issues: [
+                    {
+                        category: 'presenter_output',
+                        code: 'missing_spoken_channel',
+                        severity: 'warning',
+                        message: 'Presenter output missing spoken channel; text-to-speech will fall back to screen text.',
+                        fallback_used: 'screen_text_for_tts'
+                    }
+                ]
+            }
+        });
+
+        const published = chatTab.__testOnly_getLatestLlmExecutionTelemetry();
+        expect(published).toEqual(expect.objectContaining({
+            requested_model: 'ollama/gpt-oss:20b',
+            actual_model: 'gpt-oss:20b',
+            actual_provider: 'ollama',
+            primary_failure_reason: null,
+            warnings: [
+                'Presenter output missing spoken channel; text-to-speech will fall back to screen text.'
+            ]
+        }));
+    });
 });

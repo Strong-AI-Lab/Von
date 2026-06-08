@@ -1608,6 +1608,7 @@ def upsert_presenter_channels_for_history_message(
     history_index: int,
     presenter_channels: Dict[str, Any],
     display_elements: Optional[Dict[str, Any]] = None,
+    turn_output_health: Optional[Dict[str, Any]] = None,
     generated_at: Optional[datetime] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
@@ -1630,6 +1631,10 @@ def upsert_presenter_channels_for_history_message(
         raise ChatHistoryServiceError("presenter_channels must be a non-empty dict")
     if display_elements is not None and not isinstance(display_elements, dict):
         raise ChatHistoryServiceError("display_elements must be a dict when provided")
+    if turn_output_health is not None and not isinstance(turn_output_health, dict):
+        raise ChatHistoryServiceError(
+            "turn_output_health must be a dict when provided"
+        )
 
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
@@ -1672,6 +1677,13 @@ def upsert_presenter_channels_for_history_message(
             )
             set_fields[
                 f"history.{history_index}.llm_debug_data.display_elements_generated_at"
+            ] = generated_at
+        if isinstance(turn_output_health, dict) and turn_output_health:
+            set_fields[f"history.{history_index}.llm_debug_data.turn_output_health"] = (
+                turn_output_health
+            )
+            set_fields[
+                f"history.{history_index}.llm_debug_data.turn_output_health_generated_at"
             ] = generated_at
 
         result = chat_history_coll.update_one(
