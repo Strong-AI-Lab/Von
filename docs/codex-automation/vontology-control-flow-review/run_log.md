@@ -74,7 +74,7 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` surfaces now on `main`.
 - Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`; it
   still failed only on the known four repo-seed paths tracked by
-  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, `JVNAUTOSCI-2340`, and
+  `JVNAUTOSCI-2315`, `JVNAUTOSCI-2271`, and
   `JVNAUTOSCI-2341`.
 - Confirmed `turn_execution_actions.py` and `von_routes.py` still contain the
   prior `JVNAUTOSCI-2352`/`JVNAUTOSCI-2353` drift evidence; no duplicate tasks
@@ -124,7 +124,7 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   `6aa91175` (`JVNAUTOSCI-2350`), and `fc9bbaff`. `JVNAUTOSCI-2350` moved
   synthesiser context framing from Python literals into a Vontology-resolved
   prompt/template service; the remaining repo-seed prompt JSON caveat is a
-  repo-seed authority concern, not a new Python control-flow issue. Surfaceable
+  repo-seed authority concern, not a new Python drift issue. Surfaceable
   concept evidence policy remains the open `JVNAUTOSCI-2357` surface, so no
   duplicate was filed.
 - Treated `tool_invocation_evidence.py` and the dirty live-progress fields in
@@ -182,4 +182,33 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   not edit or stage existing production/test changes. Treated the self-relative
   relation prompt edits and response-output propagation as support/authority
   repair work rather than a duplicate drift task.
+- No production code was changed by this review run.
+
+## 2026-06-09T06:22:42.9567772+12:00
+
+- Read required repo guidance, security guidance, workflow/memory/operational
+  and authority-alignment docs, current automation memory path, and repo-local
+  review memory.
+- Local `main` was one commit behind `origin/main`; `git merge --ff-only
+  origin/main` failed because Git could not create `.git/ORIG_HEAD.lock`
+  (`Permission denied`). Reviewed the local tree plus the `origin/main`
+  diff/commit directly.
+- `scripts/check_workflow_purity.py --verbose` was blocked before producing a
+  purity report by Python syntax errors such as
+  `src/backend/workflows/workflow_selector.py:151` `except TypeError,
+  ValueError:`. The same pattern also appears in `orchestrator.py` and later
+  `workflow_selector.py` locations; do not treat this run as a clean purity
+  pass.
+- Created `JVNAUTOSCI-2472` for the new Mongo query-diagnostics maintenance
+  workflow drift: `mongo_query_diagnostics_maintenance_workflow.py` builds a
+  `WorkflowDefinition(...)`, registers it with `source="built_in"`, and
+  `mongo_query_diagnostics_maintenance_workflow_vontology_service.py` publishes
+  that Python graph at startup.
+- Added fresh evidence to existing `JVNAUTOSCI-2406` instead of filing a
+  duplicate selector task: `workflow_selector.py` now recovers default/prompt
+  unavailable selector results to a single specialised candidate and authors
+  fallback reasoning in Python; tests pin those behaviours.
+- Treated the Gmail/arXiv progress-projection authoring script as a watch item,
+  not drift, because current runtime evidence reads represented
+  `#V#hasWorkflowProgressProjectionJson` metadata rather than the script.
 - No production code was changed by this review run.
