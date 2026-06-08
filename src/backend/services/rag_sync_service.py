@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 
 from bson import ObjectId
 
-from src.backend.db.connection_manager import get_db
+from src.backend.db.mongo_client import get_interaction_sessions_collection
 from src.backend.services.rag_service import RAGBackendUnavailable, get_rag_service
 
 logger = logging.getLogger(__name__)
@@ -134,10 +134,9 @@ def _record_namespace_sync_observation(
 
 
 def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
-    db = get_db()
-    if db is None:
+    coll = get_interaction_sessions_collection()
+    if coll is None:
         return []
-    coll = db["interaction_sessions"]
     cursor = coll.find(
         {"indexing_status": "indexed"},
         {
@@ -262,7 +261,9 @@ def sync_to_chat_store(
         failed += failure_count
 
     resolved_namespace = _normalise_namespace(namespace)
-    namespace_source = "request.namespace" if resolved_namespace else "mixed.item.namespace"
+    namespace_source = (
+        "request.namespace" if resolved_namespace else "mixed.item.namespace"
+    )
     if resolved_namespace is None:
         if len(target_namespaces) == 1:
             resolved_namespace = next(iter(target_namespaces))
@@ -326,11 +327,9 @@ def sync_one_session(
     organisation_concept_id: Optional[str] = None,
 ) -> dict:
     """Synchronise one already-indexed interaction_session into the chat RAG store."""
-    db = get_db()
-    if db is None:
+    coll = get_interaction_sessions_collection()
+    if coll is None:
         return {"success": False, "error": "DB unavailable"}
-
-    coll = db["interaction_sessions"]
     try:
         query_id: ObjectId | str = ObjectId(session_id)
     except Exception:
@@ -417,7 +416,9 @@ def sync_one_session(
         upsert_doc["embedding"] = embedding
 
     try:
-        success_count, failure_count = service.upsert_documents([upsert_doc], namespace=ns)
+        success_count, failure_count = service.upsert_documents(
+            [upsert_doc], namespace=ns
+        )
     except Exception as e:
         if "embedding" in upsert_doc:
             upsert_doc.pop("embedding", None)

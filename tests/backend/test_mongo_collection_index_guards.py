@@ -57,8 +57,7 @@ def test_text_value_indexes_are_ensured_once_per_database(monkeypatch):
     assert coll_first.list_indexes_calls == 0
     assert len(coll_first.create_index_calls) == 6
     assert {
-        str(call["kwargs"].get("name"))
-        for call in coll_first.create_index_calls
+        str(call["kwargs"].get("name")) for call in coll_first.create_index_calls
     } == {
         "text_text_search",
         "text_1",
@@ -67,6 +66,30 @@ def test_text_value_indexes_are_ensured_once_per_database(monkeypatch):
         "created_at_-1",
         "updated_at_-1",
     }
+
+
+def test_interaction_session_indexes_are_ensured_once_per_database(monkeypatch):
+    _reset_collection_index_state(monkeypatch)
+    db = _FakeDb("test_von_db", client=object())
+    monkeypatch.setattr(mc, "get_db", lambda: db)
+
+    coll_first = cast(_FakeCollection, mc.get_interaction_sessions_collection())
+    coll_second = cast(_FakeCollection, mc.get_interaction_sessions_collection())
+
+    assert coll_first is coll_second
+    assert coll_first is not None
+    assert len(coll_first.create_index_calls) == 2
+    calls_by_name = {
+        str(call["kwargs"].get("name") or ""): call
+        for call in coll_first.create_index_calls
+    }
+    assert calls_by_name["indexing_status_1"]["keys"] == [
+        ("indexing_status", mc.ASCENDING)
+    ]
+    assert calls_by_name["indexing_status_indexed_at_desc"]["keys"] == [
+        ("indexing_status", mc.ASCENDING),
+        ("indexed_at", mc.DESCENDING),
+    ]
 
 
 def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
@@ -137,8 +160,7 @@ def test_text_relation_indexes_include_atlas_name_lookup(monkeypatch):
 
     assert coll is not None
     assert {
-        str(call["kwargs"].get("name") or "")
-        for call in coll.create_index_calls
+        str(call["kwargs"].get("name") or "") for call in coll.create_index_calls
     } >= {"context_name_type_predicate_text"}
 
 
@@ -153,8 +175,7 @@ def test_workflow_instance_indexes_include_atlas_claim_and_lookup_indexes(monkey
 
     coll = db[instance_manager.WORKFLOW_INSTANCES_COLLECTION]
     calls_by_name = {
-        str(call["kwargs"].get("name") or ""): call
-        for call in coll.create_index_calls
+        str(call["kwargs"].get("name") or ""): call for call in coll.create_index_calls
     }
     assert calls_by_name["started_status_created_instance_lock"]["keys"] == [
         ("started_at", mc.ASCENDING),
@@ -163,9 +184,7 @@ def test_workflow_instance_indexes_include_atlas_claim_and_lookup_indexes(monkey
         ("instance_id", mc.ASCENDING),
         ("lock_expires_at", mc.ASCENDING),
     ]
-    assert calls_by_name["created_at_desc"]["keys"] == [
-        ("created_at", mc.DESCENDING)
-    ]
+    assert calls_by_name["created_at_desc"]["keys"] == [("created_at", mc.DESCENDING)]
     assert calls_by_name["conversation_turn_namespace_created"]["keys"] == [
         ("inputs.conversation_session_id", mc.ASCENDING),
         ("inputs.turn_id", mc.ASCENDING),
@@ -183,6 +202,5 @@ def test_chat_history_indexes_include_session_created_lookup(monkeypatch):
     chat_history_service._ensure_chat_history_indexes(coll)
 
     assert {
-        str(call["kwargs"].get("name") or "")
-        for call in coll.create_index_calls
+        str(call["kwargs"].get("name") or "") for call in coll.create_index_calls
     } >= {"session_id_1_created_at_1"}

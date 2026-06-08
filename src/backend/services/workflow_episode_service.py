@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure
 
 from ..db.mongo_client import get_db
@@ -72,7 +72,11 @@ def _namespace_equivalents(namespace: str | None) -> list[str]:
         org_part = _safe_str(org_raw)
         if user_part and org_part:
             _add(f"{user_part}/{org_part}")
-            if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
+            if (
+                user_part.startswith("#V#")
+                and org_part
+                and not org_part.startswith("#V#")
+            ):
                 _add(f"{user_part}/#V#{org_part}")
 
     if "/" in clean_namespace:
@@ -83,7 +87,11 @@ def _namespace_equivalents(namespace: str | None) -> list[str]:
             _add(f"{user_part}@{org_part}")
             if user_part.startswith("#V#") and org_part.startswith("#V#"):
                 _add(f"{user_part}@{org_part[3:]}")
-            if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
+            if (
+                user_part.startswith("#V#")
+                and org_part
+                and not org_part.startswith("#V#")
+            ):
                 _add(f"{user_part}@{org_part}")
 
     # Cross-era compatibility: some historical writes used user-only namespace
@@ -361,6 +369,101 @@ def _compute_episode_aggregate(workflow_id: str) -> dict[str, Any]:
     }
 
 
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
+
+
+def _max_iso_datetime(left: Any, right: Any) -> str | None:
+    left_iso = _iso_or_none(left)
+    right_iso = _iso_or_none(right)
+    if left_iso is None:
+        return right_iso
+    if right_iso is None:
+        return left_iso
+    return max(left_iso, right_iso)
+
+
+def _existing_workflow_use_aggregate(workflow_id: str) -> dict[str, Any]:
+    return {
+        "workflow_id": workflow_id,
+        "attempts": 0,
+        "completions": 0,
+        "completion_rate": None,
+        "last_episode_at": None,
+        "updated_at": _utcnow().isoformat(),
+        "concept_found": False,
+    }
+
+
+def _apply_workflow_concept_aggregate_delta(
+    workflow_id: str,
+    *,
+    attempts_delta: int = 0,
+    completions_delta: int = 0,
+    last_episode_at: Any = None,
+) -> dict[str, Any]:
+    """Persist an idempotent aggregate delta without scanning the episode log."""
+
+    aggregate = _existing_workflow_use_aggregate(workflow_id)
+    concept_doc = ConceptsRepository.find_one(
+        {"concept_id": workflow_id},
+        projection={"concept_id": 1, "concept_data.workflow_use_aggregates": 1},
+    )
+    if not concept_doc:
+        return aggregate
+
+    aggregate["concept_found"] = True
+    usage = (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
+    attempts = max(0, _coerce_int(usage.get("attempts")) + int(attempts_delta or 0))
+    completions = max(
+        0, _coerce_int(usage.get("completions")) + int(completions_delta or 0)
+    )
+    attempts = max(attempts, completions)
+    completion_rate = (completions / attempts) if attempts > 0 else None
+    last_episode_iso = _max_iso_datetime(usage.get("last_episode_at"), last_episode_at)
+    updated_at = _utcnow().isoformat()
+
+    aggregate.update(
+        {
+            "attempts": attempts,
+            "completions": completions,
+            "completion_rate": completion_rate,
+            "last_episode_at": last_episode_iso,
+            "updated_at": updated_at,
+        }
+    )
+
+    if not attempts_delta and not completions_delta and last_episode_at is None:
+        return aggregate
+
+    try:
+        ConceptsRepository.update_one(
+            {"concept_id": workflow_id},
+            {
+                "$set": {
+                    "concept_data.workflow_use_aggregates.attempts": attempts,
+                    "concept_data.workflow_use_aggregates.completions": completions,
+                    "concept_data.workflow_use_aggregates.completion_rate": completion_rate,
+                    "concept_data.workflow_use_aggregates.last_episode_at": last_episode_iso,
+                    "concept_data.workflow_use_aggregates.updated_at": updated_at,
+                }
+            },
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "[workflow_episode] Failed to apply concept aggregate delta for %s: %s",
+            workflow_id,
+            exc,
+        )
+    return aggregate
+
+
 def sync_workflow_concept_aggregates(workflow_id: str) -> dict[str, Any]:
     """Recompute and persist usage aggregates for a workflow concept."""
 
@@ -483,11 +586,14 @@ def start_workflow_use_episode(
         upsert=True,
     )
 
-    aggregate = (
-        sync_workflow_concept_aggregates(cleaned_workflow_id)
-        if sync_aggregates
-        else None
-    )
+    attempts_delta = 1 if result.upserted_id else 0
+    aggregate = None
+    if sync_aggregates:
+        aggregate = _apply_workflow_concept_aggregate_delta(
+            cleaned_workflow_id,
+            attempts_delta=attempts_delta,
+            last_episode_at=now if attempts_delta else None,
+        )
     return {
         "episode_id": episode_id,
         "workflow_id": cleaned_workflow_id,
@@ -549,7 +655,7 @@ def finalise_workflow_use_episode(
     if safe_metadata:
         set_fields["metadata"] = safe_metadata
 
-    coll.update_one(
+    previous_doc = coll.find_one_and_update(
         {"episode_id": resolved_episode_id},
         {
             "$setOnInsert": {
@@ -561,13 +667,29 @@ def finalise_workflow_use_episode(
             "$set": set_fields,
         },
         upsert=True,
+        return_document=ReturnDocument.BEFORE,
     )
 
-    aggregate = (
-        sync_workflow_concept_aggregates(cleaned_workflow_id)
-        if sync_aggregates
-        else None
+    attempts_delta = 1 if previous_doc is None else 0
+    previous_completed = (
+        bool(previous_doc.get("completed"))
+        if isinstance(previous_doc, Mapping)
+        else False
     )
+    completions_delta = int(bool(completed)) - int(previous_completed)
+    last_episode_at = (
+        previous_doc.get("attempt_started_at")
+        if isinstance(previous_doc, Mapping)
+        else now
+    )
+    aggregate = None
+    if sync_aggregates:
+        aggregate = _apply_workflow_concept_aggregate_delta(
+            cleaned_workflow_id,
+            attempts_delta=attempts_delta,
+            completions_delta=completions_delta,
+            last_episode_at=last_episode_at,
+        )
     return {
         "episode_id": resolved_episode_id,
         "workflow_id": cleaned_workflow_id,
@@ -659,9 +781,7 @@ def get_workflow_episode_counts_for_workflows(
     """Return episode counts keyed by workflow ID for monitor summaries."""
 
     ids = [
-        item.strip()
-        for item in workflow_ids
-        if isinstance(item, str) and item.strip()
+        item.strip() for item in workflow_ids if isinstance(item, str) and item.strip()
     ]
     if not ids:
         return {}
@@ -697,9 +817,7 @@ def get_workflow_usage_aggregates_for_workflows(
     """Return attempts/completions aggregates keyed by workflow_id."""
 
     ids = [
-        item.strip()
-        for item in workflow_ids
-        if isinstance(item, str) and item.strip()
+        item.strip() for item in workflow_ids if isinstance(item, str) and item.strip()
     ]
     if not ids:
         return {}

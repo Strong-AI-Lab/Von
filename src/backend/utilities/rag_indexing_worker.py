@@ -25,7 +25,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 _connection_manager = importlib.import_module("src.backend.db.connection_manager")
-get_db = _connection_manager.get_db
+_mongo_client = importlib.import_module("src.backend.db.mongo_client")
+get_interaction_sessions_collection = _mongo_client.get_interaction_sessions_collection
 health_summary = _connection_manager.health_summary
 IndexingStatus = importlib.import_module(
     "src.backend.models.concept_models"
@@ -74,9 +75,8 @@ def startup_diagnostics():
             f"Mongo connected={hs.get('connected')} using_fallback={hs.get('using_fallback')} uri={hs.get('effective_uri')}"
         )
         # Collection-level counts
-        db = get_db()
-        if db is not None:
-            coll = db["interaction_sessions"]
+        coll = get_interaction_sessions_collection()
+        if coll is not None:
             indexed = coll.count_documents(
                 {"indexing_status": IndexingStatus.INDEXED.value}
             )
@@ -107,12 +107,12 @@ def _get_llm_client():
 
 def process_pending_interactions(loop_iteration: int) -> int:
     loop_start = time.time()
-    db = get_db()
-    if db is None:
+    interactions_coll = get_interaction_sessions_collection()
+    if interactions_coll is None:
         logger.error("Could not connect to database")
         return 0
 
-    interactions_coll = db["interaction_sessions"]
+    db_name = getattr(getattr(interactions_coll, "database", None), "name", "unknown")
     pending_items = list(
         interactions_coll.find({"indexing_status": IndexingStatus.PENDING.value}).limit(
             BATCH_SIZE
@@ -128,7 +128,7 @@ def process_pending_interactions(loop_iteration: int) -> int:
                 logger.info(
                     "Idle heartbeat iteration=%s db=%s pending=%s",
                     loop_iteration,
-                    db.name,
+                    db_name,
                     pending_count,
                 )
             except Exception:
@@ -215,7 +215,9 @@ def process_pending_interactions(loop_iteration: int) -> int:
             try:
                 from src.backend.services.rag_sync_service import sync_one_session
 
-                sess_doc = interactions_coll.find_one({"_id": interaction_id}, {"namespace": 1})
+                sess_doc = interactions_coll.find_one(
+                    {"_id": interaction_id}, {"namespace": 1}
+                )
                 namespace = sess_doc.get("namespace") if sess_doc else None
                 if not namespace:
                     namespace = os.getenv("VON_DEFAULT_NAMESPACE")

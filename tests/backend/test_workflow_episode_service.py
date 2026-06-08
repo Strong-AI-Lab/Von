@@ -151,12 +151,90 @@ def test_workflow_episode_aggregates_sync_to_workflow_concept():
         projection={"concept_data.workflow_use_aggregates": 1},
     )
     assert concept_doc is not None
-    usage = (
-        (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
-    )
+    usage = (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
     assert usage.get("attempts") == 2
     assert usage.get("completions") == 1
     assert usage.get("completion_rate") == pytest.approx(0.5)
+
+
+def test_workflow_episode_hot_path_updates_aggregates_without_log_scan(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workflow_id = "#V#workflow_episode_delta_sync"
+    _ensure_workflow_concept(workflow_id)
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-delta",
+        session_id="session-delta",
+        stage="tool_calling",
+    )
+
+    monkeypatch.setattr(
+        workflow_episode_service,
+        "_compute_episode_aggregate",
+        lambda *_args, **_kwargs: pytest.fail("hot path should not scan episode log"),
+    )
+
+    started = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+        turn_id="turn-delta",
+        session_id="session-delta",
+    )
+    finished = finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=True,
+        terminal_stage="completed",
+    )
+
+    assert started is not None
+    assert finished is not None
+    aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
+    assert aggregate["attempts"] == 1
+    assert aggregate["completions"] == 1
+    assert aggregate["completion_rate"] == pytest.approx(1.0)
+
+
+def test_workflow_episode_duplicate_finalise_does_not_double_count_completion():
+    workflow_id = "#V#workflow_episode_duplicate_finalise"
+    _ensure_workflow_concept(workflow_id)
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-duplicate-finalise",
+        session_id="session-duplicate-finalise",
+        stage="tool_calling",
+    )
+
+    started = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+        turn_id="turn-duplicate-finalise",
+        session_id="session-duplicate-finalise",
+    )
+    first_finish = finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=True,
+        terminal_stage="completed",
+    )
+    second_finish = finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=True,
+        terminal_stage="completed",
+    )
+
+    assert started is not None
+    assert first_finish is not None
+    assert second_finish is not None
+    aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
+    assert aggregate["attempts"] == 1
+    assert aggregate["completions"] == 1
 
 
 def test_workflow_episode_can_skip_concept_aggregate_sync():
@@ -198,9 +276,7 @@ def test_workflow_episode_can_skip_concept_aggregate_sync():
         projection={"concept_data.workflow_use_aggregates": 1},
     )
     assert concept_doc is not None
-    usage = (
-        (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
-    )
+    usage = (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
     assert usage == {}
 
 
@@ -329,9 +405,7 @@ def test_usage_aggregates_skip_episode_log_fallback_when_concept_aggregates_exis
                         "last_episode_at": datetime(
                             2026, 3, 5, 12, 0, tzinfo=timezone.utc
                         ),
-                        "updated_at": datetime(
-                            2026, 3, 5, 12, 5, tzinfo=timezone.utc
-                        ),
+                        "updated_at": datetime(2026, 3, 5, 12, 5, tzinfo=timezone.utc),
                     }
                 },
             },
@@ -397,7 +471,9 @@ def test_usage_aggregates_fallback_queries_only_missing_concept_aggregates(
             }
         ],
     )
-    monkeypatch.setattr(workflow_episode_service, "_get_collection", lambda: FakeCollection())
+    monkeypatch.setattr(
+        workflow_episode_service, "_get_collection", lambda: FakeCollection()
+    )
 
     aggregates = get_workflow_usage_aggregates_for_workflows([populated_id, missing_id])
 

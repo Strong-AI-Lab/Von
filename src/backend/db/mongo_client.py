@@ -496,6 +496,7 @@ CONCEPTS_COLLECTION_NAME = "concepts"
 USER_ENTITY_TRACKING_COLLECTION_NAME = "user_entity_tracking"
 INTERACTIONS_COLLECTION_NAME = "interactions"  # Existing, but schema will be updated.
 INTERACTION_LOG_COLLECTION_NAME = "interaction_log"  # Existing, for auditing.
+INTERACTION_SESSIONS_COLLECTION_NAME = "interaction_sessions"
 MIGRATIONS_LOG_COLLECTION_NAME = (
     "migrations_log"  # New collection for tracking migrations
 )
@@ -1007,6 +1008,14 @@ def _ensure_text_values_indexes(coll: Collection) -> None:
     coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
+def _ensure_interaction_sessions_indexes(coll: Collection) -> None:
+    coll.create_index([("indexing_status", ASCENDING)], name="indexing_status_1")
+    coll.create_index(
+        [("indexing_status", ASCENDING), ("indexed_at", DESCENDING)],
+        name="indexing_status_indexed_at_desc",
+    )
+
+
 def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("subject_concept_id", ASCENDING)], name="subject_concept_id_1")
     coll.create_index([("predicate", ASCENDING)], name="predicate_1")
@@ -1095,7 +1104,9 @@ def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
             name="predicate_source_target_lookup",
         )
     if "source_concept_id_1" not in existing_indexes:
-        coll.create_index([("source_concept_id", ASCENDING)], name="source_concept_id_1")
+        coll.create_index(
+            [("source_concept_id", ASCENDING)], name="source_concept_id_1"
+        )
     if "updated_at_-1" not in existing_indexes:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
@@ -1158,6 +1169,18 @@ def get_interaction_log_collection() -> Collection | None:
     db = get_db()
     if db is not None:
         return db[INTERACTION_LOG_COLLECTION_NAME]
+    return None
+
+
+def get_interaction_sessions_collection() -> Collection | None:
+    """Returns the 'interaction_sessions' collection and ensures polling indexes."""
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            INTERACTION_SESSIONS_COLLECTION_NAME,
+            _ensure_interaction_sessions_indexes,
+        )
     return None
 
 
