@@ -211,6 +211,15 @@ prefer the repo's isolated AgentTest backend:
 - validate against `http://127.0.0.1:5010`;
 - stop it afterwards with `./run.sh stop -AgentTest -NoBrowser`.
 
+In VS Code / VS Code Insiders, do not assume the Codex Browser or Chrome plugin
+surfaces are usable just because the plugin bundles are installed. If
+`agent.browsers.list()` is empty, or `agent.browsers.get("iab")` /
+`agent.browsers.get("extension")` reports that the browser is unavailable after
+one lightweight retry, stop trying to recover the Codex plugin bridge inside the
+coding session. Treat that as a host-surface limitation and use the
+AgentTest-plus-Playwright path for local browser evidence. The Codex App may
+expose an in-app browser pane and plugin UI that VS Code Insiders does not.
+
 If the workspace has `playwright` / `@playwright/test` installed but Chromium
 still fails to launch from Codex, check whether the failure is sandbox-related
 before treating it as a missing dependency. A typical sandbox failure includes:

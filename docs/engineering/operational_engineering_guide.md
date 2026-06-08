@@ -210,6 +210,13 @@ Isolated coding-agent replay backend:
 - Do not treat `-Port` alone as isolation. The isolated mode changes launcher
   ownership semantics so an automated run does not globally clean up or adopt
   unrelated local Von processes.
+- In VS Code / VS Code Insiders, the Codex Browser and Chrome plugin bundles
+  can be present while the live browser backends are not exposed to the coding
+  session. If the Browser/Chrome client lists no browsers or reports
+  `Browser is not available: iab` / `Browser is not available: extension`
+  after one retry, do not keep pursuing plugin recovery as the acceptance path.
+  Use AgentTest plus Playwright for Von browser evidence, and reserve Codex App
+  plugin recovery for sessions actually running in the Codex App UI.
 - For Codex-driven Playwright checks on macOS, the normal sandbox may block
   Chromium launch or localhost browser access even when Playwright is installed.
   A characteristic launch failure is
