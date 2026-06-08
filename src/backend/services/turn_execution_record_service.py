@@ -77,6 +77,21 @@ _TURN_EXECUTION_INDEXES_LOCK = threading.Lock()
 _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS = 50_000
 _SEARCH_EVIDENCE_MAX_RESULT_CHARS = 500_000
 _SEARCH_EVIDENCE_PREVIEW_CHARS = 8_000
+_FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_DEPTH = 4
+_FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_ITEMS = 8
+_FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS = 700
+_FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
+    "access_token",
+    "api_key",
+    "authorization",
+    "bearer",
+    "credential",
+    "oauth",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+)
 
 _TOOL_CALLING_SELECTOR_VERDICTS = {"tool_seeking", "tool_calling"}
 _PLAIN_RESPONSE_WORKFLOW_IDS = {
@@ -2566,6 +2581,100 @@ def _projection_field_ids(entries: Sequence[Mapping[str, Any]]) -> list[str]:
     return _dedupe_string_sequence(field_concept_ids)
 
 
+def _projection_payload_key_is_sensitive(key: str | None) -> bool:
+    lowered = str(key or "").strip().lower()
+    return bool(lowered) and any(
+        marker in lowered for marker in _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS
+    )
+
+
+def _compact_final_answer_projection_payload(
+    value: Any,
+    *,
+    max_depth: int = _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_DEPTH,
+    max_items: int = _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_ITEMS,
+    max_string_chars: int = _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS,
+    _depth: int = 0,
+) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        return (
+            text[:max_string_chars] + "..."
+            if len(text) > max_string_chars
+            else text
+        )
+    if _depth >= max_depth:
+        if isinstance(value, Mapping):
+            compact: dict[str, Any] = {}
+            for key, item in list(value.items())[:max_items]:
+                if not isinstance(key, str):
+                    continue
+                if _projection_payload_key_is_sensitive(key):
+                    compact[key] = "[redacted]"
+                    continue
+                if isinstance(item, (str, bool, int, float)) or item is None:
+                    compact[key] = _compact_final_answer_projection_payload(
+                        item,
+                        max_depth=max_depth,
+                        max_items=max_items,
+                        max_string_chars=max_string_chars,
+                        _depth=_depth + 1,
+                    )
+            omitted = max(0, len(value) - len(compact))
+            if omitted:
+                compact["_omitted_items"] = omitted
+            return compact or {"_truncated": "mapping"}
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return ["_truncated"]
+        return repr(value)[:max_string_chars]
+    if isinstance(value, Mapping):
+        compact: dict[str, Any] = {}
+        visible_items = [
+            (key, item)
+            for key, item in value.items()
+            if isinstance(key, str) and key != "_tool_evidence_projection"
+        ]
+        for key, item in visible_items[:max_items]:
+            if not isinstance(key, str):
+                continue
+            if _projection_payload_key_is_sensitive(key):
+                compact[key] = "[redacted]"
+                continue
+            compact_value = _compact_final_answer_projection_payload(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_chars=max_string_chars,
+                _depth=_depth + 1,
+            )
+            if compact_value is not None:
+                compact[key] = compact_value
+        omitted = max(0, len(visible_items) - len(compact))
+        if omitted:
+            compact["_omitted_items"] = omitted
+        return compact
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        compact_items = [
+            _compact_final_answer_projection_payload(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_chars=max_string_chars,
+                _depth=_depth + 1,
+            )
+            for item in list(value)[:max_items]
+        ]
+        omitted = max(0, len(value) - len(compact_items))
+        if omitted:
+            compact_items.append({"_omitted_items": omitted})
+        return compact_items
+    return repr(value)[:max_string_chars]
+
+
 def _extract_projection_from_context_text(
     text: str,
     *,
@@ -2611,6 +2720,9 @@ def _extract_projection_from_context_text(
         "omitted_fields": omitted_fields,
         "redacted_fields": redacted_fields,
     }
+    projected_payload = _compact_final_answer_projection_payload(payload)
+    if isinstance(projected_payload, Mapping) and projected_payload:
+        entry["projected_payload"] = dict(projected_payload)
     return {key: item for key, item in entry.items() if item not in (None, [], {})}
 
 

@@ -136,6 +136,12 @@ def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry()
     assert projection["projection_count"] == 1
     assert projection["tools"] == ["gmail_list_messages"]
     assert projection["source_tool_invocation_ids"] == ["tool-call-1"]
+    assert projection["entries"][0]["projected_payload"] == {
+        "messages": [
+            {"id": "msg-1", "subject": "Lab scheduling"},
+            {"id": "msg-2", "subject": "Ontology review"},
+        ]
+    }
     assert projection["preserved_field_concept_ids"] == [
         "#V#gmail_message_subject_field"
     ]

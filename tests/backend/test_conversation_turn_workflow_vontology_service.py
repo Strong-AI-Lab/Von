@@ -277,6 +277,9 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "required_evidence_answer_consistency_blocker" in critic_text
     assert "effect_prompt_required_evidence_answer_consistency" in critic_text
     assert "Focus on grounded answer consistency" in critic_text
+    assert "final-answer synthesis telemetry" in critic_text
+    assert "final_answer_synthesis.tool_evidence_projection" in critic_text
+    assert "operational status/ledger summary" in critic_text
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(

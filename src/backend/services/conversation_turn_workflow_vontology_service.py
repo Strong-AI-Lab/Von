@@ -376,8 +376,17 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "final-answer synthesis telemetry",
+                "final_answer_synthesis.tool_evidence_projection",
+                "operational status/ledger summary",
+            ),
+        )
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,

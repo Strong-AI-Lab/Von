@@ -38,8 +38,19 @@ Rules:
   blocker.
 - Focus on grounded answer consistency, not generic stylistic criticism.
 - Use the required effects, postcondition checks, completion report,
-  selected-workflow trace, and search-evidence signals to decide whether the
-  answer overclaimed completion or grounded retrieval.
+  selected-workflow trace, final-answer synthesis telemetry, and search-evidence
+  signals to decide whether the answer overclaimed completion or grounded
+  retrieval.
+- When `final_answer_synthesis.tool_evidence_projection` is present, treat it as
+  evidence that compact represented tool-output fields were actually available to
+  the answer-synthesis stage. Use its projected payload excerpts, preserved field
+  IDs, missing required field IDs, and evidence-view IDs to judge whether the
+  visible answer consumed the evidence view it received.
+- If projected final-answer evidence contains concrete item rows, labels,
+  identifiers, titles, subjects, snippets, dates, senders, counts, or similar
+  field values, but the answer is only an operational status/ledger summary and
+  does not give the requested grounded answer or a precise grounded blocker,
+  emit `required_evidence_answer_consistency_blocker`.
 - If required evidence retrieval produced positive results but the answer still
   said that nothing relevant was found, that usually warrants a blocker.
 - If evidence retrieval degraded or failed and the answer still implied grounded

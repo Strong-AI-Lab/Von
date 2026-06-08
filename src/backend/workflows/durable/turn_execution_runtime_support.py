@@ -2696,6 +2696,12 @@ def run_turn_execution_critic(
         "prompt_text": prompt_text,
         "response_text": response_text,
         "completion_report": data.get("completion_report"),
+        "final_answer_synthesis": _bounded_snapshot(
+            turn_execution_record.get("final_answer_synthesis"),
+            max_depth=8,
+            max_items=10,
+            max_string_length=800,
+        ),
         "turn_expected_outcome_contract_state": turn_execution_record.get(
             "turn_expected_outcome_contract_state"
         ),

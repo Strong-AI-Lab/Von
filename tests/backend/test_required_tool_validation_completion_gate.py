@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,6 +13,7 @@ from src.backend.services.required_tool_obligation_service import (
 )
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
+    run_turn_execution_critic,
 )
 
 _CREATE_CONCEPTS_PARENT_ERROR = (
@@ -463,6 +465,196 @@ def test_completion_gate_promotes_selected_workflow_response_to_response_text() 
     assert result.outputs["final_response"] == "Grounded selected workflow answer."
     assert result.outputs["response_text"] == "Grounded selected workflow answer."
     assert result.outputs["current_response"] == "Grounded selected workflow answer."
+
+
+def test_postcondition_critic_bundle_carries_final_answer_projection_for_visible_answer_check() -> (
+    None
+):
+    projected_tool_payload = {
+        "tool": "gmail_list_messages",
+        "status": "ok",
+        "call_id": "gmail-list-1",
+        "payload": {
+            "messages": [
+                {
+                    "message_id": "msg-1",
+                    "sender": "sender@example.test",
+                    "subject": "Lab scheduling",
+                    "date": "2026-06-06",
+                    "snippet": "Labels: Work, Lab",
+                }
+            ],
+            "_tool_evidence_projection": {
+                "tool_concept_id": "#V#gmail_list_messages_tool",
+                "evidence_view_concept_ids": [
+                    "#V#gmail_message_final_answer_evidence_view"
+                ],
+                "preserved_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_sender_field",
+                        "output_key": "sender",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_subject_field",
+                        "output_key": "subject",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_date_field",
+                        "output_key": "date",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_snippet_field",
+                        "output_key": "snippet",
+                    },
+                ],
+                "missing_required_fields": [],
+                "omitted_fields": [],
+                "redacted_fields": [],
+            },
+        },
+    }
+    data = {
+        "turn_id": "req-gmail-projection-summary-only",
+        "conversation_session_id": "session-gmail-projection-summary-only",
+        "prompt": "List the Gmail messages and their labels.",
+        "final_response": "Execution status: processed the Gmail request successfully.",
+        "current_response": "Execution status: processed the Gmail request successfully.",
+        "response_text": "Execution status: processed the Gmail request successfully.",
+        "workflow_routing": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_calling",
+            "source": "selector",
+        },
+        "invocations": [
+            {
+                "tool": "gmail_list_messages",
+                "status": "ok",
+                "effective_payload": projected_tool_payload["payload"],
+            }
+        ],
+        "aux_llm_calls": [
+            {
+                "type": "workflow_model_policy_stage",
+                "stage": "summariser",
+                "workflow_stage_id": "final_answer",
+                "request": {
+                    "prompt": "Compose the final answer.",
+                    "context_messages": [
+                        {"role": "tool", "content": json.dumps(projected_tool_payload)}
+                    ],
+                },
+            }
+        ],
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={"emit_default_critic_verdict": False},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function="test_critic",
+    )
+
+    bundle = result.outputs["turn_execution_critic_evidence_bundle"]
+    synthesis = bundle["final_answer_synthesis"]
+    projection = synthesis["tool_evidence_projection"]
+    assert projection["projection_count"] == 1
+    assert projection["entries"][0]["projected_payload"]["messages"][0][
+        "subject"
+    ] == "Lab scheduling"
+    assert "#V#gmail_subject_field" in projection["preserved_field_concept_ids"]
+
+
+def test_completion_gate_blocks_operational_summary_when_authoritative_critic_flags_projected_evidence_mismatch() -> (
+    None
+):
+    summary_only_answer = "Execution status: processed the Gmail request successfully."
+    data = {
+        "turn_id": "req-gmail-summary-only-blocked",
+        "conversation_session_id": "session-gmail-summary-only-blocked",
+        "prompt": "List the Gmail messages and their labels.",
+        "final_response": summary_only_answer,
+        "current_response": summary_only_answer,
+        "response_text": summary_only_answer,
+        "workflow_routing": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_calling",
+            "source": "selector",
+        },
+        "invocations": [
+            {
+                "tool": "gmail_list_messages",
+                "status": "ok",
+                "effective_payload": {
+                    "messages": [
+                        {
+                            "message_id": "msg-1",
+                            "sender": "sender@example.test",
+                            "subject": "Lab scheduling",
+                            "date": "2026-06-06",
+                            "snippet": "Labels: Work, Lab",
+                        }
+                    ]
+                },
+            }
+        ],
+        "critic_verdict": {
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+            "verdict": "follow_up_required",
+            "confidence": 0.92,
+            "assessment_summary": (
+                "Projected final-answer evidence contained concrete message "
+                "fields, but the visible answer only reported operational status."
+            ),
+            "required_evidence_answer_consistency_blocker": {
+                "effect_type": "required_evidence_answer_consistency",
+                "status": "not_satisfied",
+                "decision": "partial",
+                "decision_reason": (
+                    "Projected final-answer evidence was available, but the "
+                    "visible answer did not consume it."
+                ),
+                "status_reason": (
+                    "The answer is an operational summary rather than a grounded "
+                    "message-list answer."
+                ),
+                "failure_code": "projected_final_answer_evidence_not_consumed",
+                "failure_codes": [
+                    "projected_final_answer_evidence_not_consumed"
+                ],
+                "repeat_eligible": True,
+                "blocker_source": "critic_verdict",
+            },
+            "recommendations": [],
+        },
+        "aux_llm_calls": [],
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert result.outputs["completion_gate_decision"] == "partial"
+    assert "projected_final_answer_evidence_not_consumed" in (
+        result.outputs["completion_gate_blocking_failure_codes"]
+    )
+    assert result.outputs["final_response"] == summary_only_answer
+    evidence_payload = result.outputs["completion_gate_evidence_payload"]
+    blocker = evidence_payload["required_evidence_answer_consistency_blocker"]
+    assert blocker["blocker_source"] == "critic_verdict"
 
 
 def test_kr_required_tools_block_completion_when_write_and_readback_are_absent() -> (
