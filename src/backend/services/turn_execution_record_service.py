@@ -1515,6 +1515,42 @@ def _normalise_workflow_execution_side_effects(
     return normalised
 
 
+def _normalise_workflow_execution_action_ids(raw_action_ids: Any) -> list[str]:
+    return _dedupe_string_sequence(
+        raw_action_ids if isinstance(raw_action_ids, list) else []
+    )
+
+
+def _normalise_workflow_execution_action_observations(
+    raw_observations: Any,
+    *,
+    workflow_id: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_observations, list):
+        return []
+    normalised: list[dict[str, Any]] = []
+    for raw in raw_observations:
+        if not isinstance(raw, Mapping):
+            continue
+        action_id = _safe_str(raw.get("action_id"))
+        if not action_id:
+            continue
+        normalised.append(
+            {
+                "source": "workflow_action_execution",
+                "tool": action_id,
+                "action_id": action_id,
+                "workflow_id": _safe_str(raw.get("workflow_id")) or workflow_id,
+                "state_id": _safe_str(raw.get("state_id")),
+                "status": _safe_str(raw.get("action_status"))
+                or _safe_str(raw.get("outcome")),
+                "outcome": _safe_str(raw.get("outcome"))
+                or _safe_str(raw.get("action_status")),
+            }
+        )
+    return normalised
+
+
 def _build_custom_workflow_execution_summary(
     *,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
@@ -1685,6 +1721,16 @@ def _build_custom_workflow_execution_summary(
         workflow_id = _safe_str(trace_payload.get("selected_workflow_id"))
     if not workflow_id:
         workflow_id = _safe_str(dispatch_workflow_id) or _safe_str(selected_workflow_id)
+    successful_action_ids = _normalise_workflow_execution_action_ids(
+        summary_source.get("successful_action_ids")
+    )
+    failed_action_ids = _normalise_workflow_execution_action_ids(
+        summary_source.get("failed_action_ids")
+    )
+    action_observations = _normalise_workflow_execution_action_observations(
+        summary_source.get("action_observations"),
+        workflow_id=workflow_id,
+    )
 
     workflow_instance_evidence = _extract_workflow_instance_evidence(trace_payload)
     if trace_result_snapshot:
@@ -1773,6 +1819,9 @@ def _build_custom_workflow_execution_summary(
         "action_success_count": action_success_count,
         "action_failure_count": action_failure_count,
         "action_unknown_count": action_unknown_count,
+        "successful_action_ids": successful_action_ids,
+        "failed_action_ids": failed_action_ids,
+        "action_observations": action_observations,
         "first_failing_state_id": first_failing_state_id,
         "first_failing_action_id": first_failing_action_id,
         "runtime_event_count": runtime_event_count,
@@ -2068,15 +2117,61 @@ def _append_tool_name_once(values: list[str], tool_name: str) -> None:
         values.append(tool_name)
 
 
+def _append_execution_surface_observation_once(
+    values: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    status: str,
+    source: str,
+    workflow_id: str = "",
+    state_id: str = "",
+    action_id: str = "",
+) -> None:
+    cleaned_tool_name = _safe_str(tool_name)
+    if not cleaned_tool_name:
+        return
+    cleaned_status = _safe_str(status) or "unknown"
+    fingerprint = (
+        cleaned_tool_name.lower(),
+        cleaned_status.lower(),
+        (_safe_str(source) or "execution_surface").lower(),
+        (_safe_str(workflow_id) or "").lower(),
+        (_safe_str(state_id) or "").lower(),
+        (_safe_str(action_id) or cleaned_tool_name).lower(),
+    )
+    for existing in values:
+        existing_fingerprint = (
+            (_safe_str(existing.get("tool")) or "").lower(),
+            (_safe_str(existing.get("status")) or "").lower(),
+            (_safe_str(existing.get("source")) or "").lower(),
+            (_safe_str(existing.get("workflow_id")) or "").lower(),
+            (_safe_str(existing.get("state_id")) or "").lower(),
+            (_safe_str(existing.get("action_id")) or "").lower(),
+        )
+        if existing_fingerprint == fingerprint:
+            return
+    values.append(
+        {
+            "tool": cleaned_tool_name,
+            "status": cleaned_status,
+            "source": _safe_str(source) or "execution_surface",
+            "workflow_id": _safe_str(workflow_id),
+            "state_id": _safe_str(state_id),
+            "action_id": _safe_str(action_id) or cleaned_tool_name,
+        }
+    )
+
+
 def _augment_tool_outcomes_with_execution_surfaces(
     *,
     successful_tools: Sequence[str],
     failed_tools: Sequence[str],
     execution_summary: Mapping[str, Any] | None,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
     augmented_successful_tools = _dedupe_string_sequence(list(successful_tools))
     augmented_failed_tools = _dedupe_string_sequence(list(failed_tools))
     observed_equivalent_tools: list[str] = []
+    observed_execution_surfaces: list[dict[str, Any]] = []
 
     workflow_execute_status = _custom_workflow_workflow_execute_equivalent_status(
         execution_summary
@@ -2084,9 +2179,21 @@ def _augment_tool_outcomes_with_execution_surfaces(
     if workflow_execute_status == "satisfied":
         _append_tool_name_once(augmented_successful_tools, "workflow_execute")
         _append_tool_name_once(observed_equivalent_tools, "workflow_execute")
+        _append_execution_surface_observation_once(
+            observed_execution_surfaces,
+            tool_name="workflow_execute",
+            status="success",
+            source="custom_workflow_execution",
+        )
     elif workflow_execute_status == "failed":
         _append_tool_name_once(augmented_failed_tools, "workflow_execute")
         _append_tool_name_once(observed_equivalent_tools, "workflow_execute")
+        _append_execution_surface_observation_once(
+            observed_execution_surfaces,
+            tool_name="workflow_execute",
+            status="failed",
+            source="custom_workflow_execution",
+        )
 
     workflow_get_instance_status = (
         _custom_workflow_workflow_get_instance_equivalent_status(execution_summary)
@@ -2094,8 +2201,73 @@ def _augment_tool_outcomes_with_execution_surfaces(
     if workflow_get_instance_status == "satisfied":
         _append_tool_name_once(augmented_successful_tools, "workflow_get_instance")
         _append_tool_name_once(observed_equivalent_tools, "workflow_get_instance")
+        _append_execution_surface_observation_once(
+            observed_execution_surfaces,
+            tool_name="workflow_get_instance",
+            status="success",
+            source="custom_workflow_execution",
+        )
 
-    return augmented_successful_tools, augmented_failed_tools, observed_equivalent_tools
+    if isinstance(execution_summary, Mapping):
+        custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+        if isinstance(custom_workflow_execution, Mapping):
+            workflow_id = _safe_str(custom_workflow_execution.get("workflow_id"))
+            successful_action_lookup = {
+                action_id.lower()
+                for action_id in _dedupe_string_sequence(
+                    custom_workflow_execution.get("successful_action_ids") or []
+                )
+            }
+            failed_action_lookup = {
+                action_id.lower()
+                for action_id in _dedupe_string_sequence(
+                    custom_workflow_execution.get("failed_action_ids") or []
+                )
+            }
+            raw_observations = custom_workflow_execution.get("action_observations")
+            if isinstance(raw_observations, list):
+                for raw_observation in raw_observations:
+                    if not isinstance(raw_observation, Mapping):
+                        continue
+                    action_id = _safe_str(raw_observation.get("action_id"))
+                    if not action_id:
+                        continue
+                    raw_status = (
+                        _safe_str(raw_observation.get("status"))
+                        or _safe_str(raw_observation.get("outcome"))
+                    ).lower()
+                    successful = (
+                        raw_status == "success"
+                        or action_id.lower() in successful_action_lookup
+                    )
+                    failed = raw_status in {"failed", "failure", "error"} or (
+                        action_id.lower() in failed_action_lookup
+                    )
+                    if not successful and not failed:
+                        continue
+                    if successful:
+                        _append_tool_name_once(augmented_successful_tools, action_id)
+                    elif failed:
+                        _append_tool_name_once(augmented_failed_tools, action_id)
+                    _append_tool_name_once(observed_equivalent_tools, action_id)
+                    _append_execution_surface_observation_once(
+                        observed_execution_surfaces,
+                        tool_name=action_id,
+                        status="success" if successful else "failed",
+                        source="workflow_action_execution",
+                        workflow_id=(
+                            _safe_str(raw_observation.get("workflow_id")) or workflow_id
+                        ),
+                        state_id=_safe_str(raw_observation.get("state_id")),
+                        action_id=action_id,
+                    )
+
+    return (
+        augmented_successful_tools,
+        augmented_failed_tools,
+        observed_equivalent_tools,
+        observed_execution_surfaces,
+    )
 
 
 def _observed_invocation_tool_names(
@@ -2916,9 +3088,7 @@ def _normalise_discovery_stage_timings(
                         scalar_map[str(map_key)[:120]] = map_value
                 if scalar_map:
                     normalised[key_text] = scalar_map
-            elif isinstance(value, Sequence) and not isinstance(
-                value, (str, bytes)
-            ):
+            elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
                 normalised[key_text] = [str(item)[:240] for item in list(value)[:20]]
         if normalised:
             cleaned.append(normalised)
@@ -3373,9 +3543,7 @@ def build_workflow_routing_diagnostics(
                 workflow_discovery_payload.get("requested_query")
             ),
             "discovery_payload_origin": (
-                _safe_str(
-                    workflow_discovery_payload.get("discovery_payload_origin")
-                )
+                _safe_str(workflow_discovery_payload.get("discovery_payload_origin"))
                 or (
                     "missing_discovery_payload"
                     if not workflow_discovery_payload
@@ -3509,7 +3677,9 @@ def build_workflow_routing_diagnostics(
                 "candidate_list_present": selector_candidate_list_present,
                 "response_present": selector_response_present,
                 "candidate_entries_present": bool(selector_candidates),
-                "context_lineage_present": isinstance(selector_context_lineage, Mapping),
+                "context_lineage_present": isinstance(
+                    selector_context_lineage, Mapping
+                ),
                 "selector_prompt_entry_count": len(selector_prompt_entries),
                 "selector_response_entry_count": len(selector_entries),
                 "missing_fields": selector_missing_telemetry_fields,
@@ -7938,6 +8108,7 @@ def build_turn_execution_record(
         execution_surface_successful_tools,
         execution_surface_failed_tools,
         execution_surface_observed_tools,
+        execution_surface_observations,
     ) = _augment_tool_outcomes_with_execution_surfaces(
         successful_tools=successful_tools,
         failed_tools=failed_tools,
@@ -7963,36 +8134,77 @@ def build_turn_execution_record(
         for tool_name in execution_surface_failed_tools
         if _tool_requirement_key(tool_name) not in actual_failed_tool_lookup
     ]
+    successful_equivalent_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in execution_surface_successful_equivalent_tools
+    }
+    failed_equivalent_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in execution_surface_failed_equivalent_tools
+    }
+    execution_surface_successful_equivalent_observations = [
+        observation
+        for observation in execution_surface_observations
+        if _tool_requirement_key(observation.get("tool"))
+        in successful_equivalent_lookup
+        and (_safe_str(observation.get("status")) or "").lower() == "success"
+    ]
+    execution_surface_failed_equivalent_observations = [
+        observation
+        for observation in execution_surface_observations
+        if _tool_requirement_key(observation.get("tool")) in failed_equivalent_lookup
+        and (_safe_str(observation.get("status")) or "").lower()
+        in {"failed", "failure", "error"}
+    ]
+    successful_observation_lookup = {
+        _tool_requirement_key(observation.get("tool"))
+        for observation in execution_surface_successful_equivalent_observations
+    }
+    failed_observation_lookup = {
+        _tool_requirement_key(observation.get("tool"))
+        for observation in execution_surface_failed_equivalent_observations
+    }
+    execution_surface_successful_equivalent_tool_names = [
+        tool_name
+        for tool_name in execution_surface_successful_equivalent_tools
+        if _tool_requirement_key(tool_name) not in successful_observation_lookup
+    ]
+    execution_surface_failed_equivalent_tool_names = [
+        tool_name
+        for tool_name in execution_surface_failed_equivalent_tools
+        if _tool_requirement_key(tool_name) not in failed_observation_lookup
+    ]
     if execution_surface_observed_tools:
         execution_summary = dict(execution_summary)
-        successful_surface_lookup = {
-            _tool_requirement_key(tool_name)
-            for tool_name in execution_surface_successful_equivalent_tools
-        }
-        failed_surface_lookup = {
-            _tool_requirement_key(tool_name)
-            for tool_name in execution_surface_failed_equivalent_tools
-        }
         execution_summary["execution_surface_observed_tool_names"] = list(
             execution_surface_observed_tools
         )
         execution_summary["execution_surface_successful_tool_names"] = [
             tool_name
             for tool_name in execution_surface_observed_tools
-            if _tool_requirement_key(tool_name) in successful_surface_lookup
+            if _tool_requirement_key(tool_name) in successful_equivalent_lookup
         ]
         execution_summary["execution_surface_failed_tool_names"] = [
             tool_name
             for tool_name in execution_surface_observed_tools
-            if _tool_requirement_key(tool_name) in failed_surface_lookup
+            if _tool_requirement_key(tool_name) in failed_equivalent_lookup
+        ]
+        execution_summary["execution_surface_observations"] = [
+            dict(observation) for observation in execution_surface_observations
         ]
     required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
         invocations=serialised_invocations,
         observed_equivalent_successful_tools=(
-            execution_surface_successful_equivalent_tools
+            execution_surface_successful_equivalent_tool_names
         ),
-        observed_equivalent_failed_tools=execution_surface_failed_equivalent_tools,
+        observed_equivalent_failed_tools=execution_surface_failed_equivalent_tool_names,
+        observed_equivalent_successful_executions=(
+            execution_surface_successful_equivalent_observations
+        ),
+        observed_equivalent_failed_executions=(
+            execution_surface_failed_equivalent_observations
+        ),
         tool_call_validation_failure_context=tool_call_validation_failure_context,
         existing_ledger=existing_required_tool_obligation_ledger,
         method_catalogue=method_catalogue,

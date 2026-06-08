@@ -1139,7 +1139,11 @@ def test_build_workflow_routing_diagnostics_surfaces_discovery_stage_timings() -
             "match_count": 0,
             "candidates": [],
             "stage_timings": [
-                {"stage": "capability_index_search", "status": "ok", "elapsed_ms": 12000.5},
+                {
+                    "stage": "capability_index_search",
+                    "status": "ok",
+                    "elapsed_ms": 12000.5,
+                },
                 {"stage": "semantic_search", "status": "ok", "elapsed_ms": 45123.7},
                 {"stage": "vontology_search", "status": "ok", "elapsed_ms": 800.2},
                 {"stage": "enrich_matches", "status": "ok", "elapsed_ms": 50.0},
@@ -1180,10 +1184,7 @@ def test_build_workflow_routing_diagnostics_surfaces_discovery_payload_origin() 
         aux_llm_calls=[],
     )
     discovery_block = diagnostics["discovery"]
-    assert (
-        discovery_block["discovery_payload_origin"]
-        == "discover_workflows_for_turn"
-    )
+    assert discovery_block["discovery_payload_origin"] == "discover_workflows_for_turn"
 
 
 def test_build_workflow_routing_diagnostics_marks_missing_discovery_payload() -> None:
@@ -2135,3 +2136,95 @@ def test_turn_execution_record_projects_required_write_payload_validation_blocke
             "required_tool_obligation_blocking_failure_codes"
         ]
     )
+
+
+def test_turn_execution_record_counts_selected_workflow_action_for_required_tool(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "get_paper_metadata": ToolMetadata(
+                tool_name="get_paper_metadata",
+                operation_category="read",
+                evidence_role="verification",
+            )
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        record = build_turn_execution_record(
+            request_id="req-workflow-action-required-tool",
+            session_id="session-1",
+            namespace="#V#user@test",
+            user_id="#V#user",
+            org_id="#V#org",
+            prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+            response_text="Paper concept: #V#paper.",
+            interaction_timestamp_utc="2026-06-07T00:00:00Z",
+            workflow_routing={
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+                "source": "selector",
+            },
+            tool_invocations=[],
+            selected_workflow_trace={
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "child_workflow_completed": True,
+                "child_workflow_final_state": "completed",
+                "workflow_execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "completed": True,
+                    "terminal_status": "completed",
+                    "final_state": "completed",
+                    "step_result_envelope_count": 1,
+                    "action_started_count": 1,
+                    "action_completed_count": 1,
+                    "action_success_count": 1,
+                    "action_failure_count": 0,
+                    "action_unknown_count": 0,
+                    "successful_action_ids": ["get_paper_metadata"],
+                    "failed_action_ids": [],
+                    "action_observations": [
+                        {
+                            "action_id": "get_paper_metadata",
+                            "state_id": "fetch_arxiv_metadata",
+                            "action_status": "success",
+                            "outcome": "success",
+                        }
+                    ],
+                    "runtime_event_count": 0,
+                    "terminal_effect_count": 0,
+                    "terminal_effects": [],
+                    "durable_side_effect_count": 0,
+                    "durable_side_effects": [],
+                },
+            },
+            turn_expected_outcome_contract={
+                "required_tools": ["get_paper_metadata"],
+            },
+            method_catalogue={"get_paper_metadata": {}},
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    summary = record["execution"]["summary"]
+    ledger = summary["required_tool_obligations"]
+    obligation = ledger["obligations"][0]
+    assert ledger["satisfied_count"] == 1
+    assert ledger["unsatisfied_count"] == 0
+    assert ledger["unsatisfied_required_tools"] == []
+    assert obligation["tool_name"] == "get_paper_metadata"
+    assert obligation["successful_count"] == 1
+    assert obligation["blocking_reason"] == ""
+    assert obligation["execution_surfaces"][0]["source"] == (
+        "workflow_action_execution"
+    )
+    assert obligation["execution_surfaces"][0]["state_id"] == "fetch_arxiv_metadata"
+    assert summary["required_tool_obligation_blocking_failure_codes"] == []

@@ -11,7 +11,6 @@ from src.backend.services.required_tool_obligation_service import (
     required_tool_obligation_effect,
 )
 
-
 _KR_REQUIRED_TOOLS = [
     "search_concepts",
     "create_concepts",
@@ -189,9 +188,68 @@ def test_required_tool_ledger_closes_from_workflow_action_spec_metadata(
     assert obligation["satisfied"] is True
     assert obligation["blocking_reason"] == ""
     assert (
-        BLOCKER_REQUIRED_TOOL_METADATA_MISSING
-        not in ledger["blocking_failure_codes"]
+        BLOCKER_REQUIRED_TOOL_METADATA_MISSING not in ledger["blocking_failure_codes"]
     )
+
+
+def test_workflow_action_execution_satisfies_matching_required_tool(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "get_paper_metadata": ToolMetadata(
+                tool_name="get_paper_metadata",
+                operation_category="read",
+                evidence_role="verification",
+            )
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "turn_expected_outcome_contract": ["get_paper_metadata"]
+            },
+            invocations=[],
+            observed_equivalent_successful_executions=[
+                {
+                    "tool": "get_paper_metadata",
+                    "action_id": "get_paper_metadata",
+                    "source": "workflow_action_execution",
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "fetch_arxiv_metadata",
+                    "status": "success",
+                }
+            ],
+            allowed_tools=["get_paper_metadata"],
+            method_catalogue=_catalogue(["get_paper_metadata"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(ledger, "get_paper_metadata")
+    assert obligation["planned_count"] == 1
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 1
+    assert obligation["operation_class"] == "verification_read"
+    assert obligation["satisfied"] is True
+    assert obligation["blocking_reason"] == ""
+    assert obligation["execution_surfaces"] == [
+        {
+            "source": "workflow_action_execution",
+            "status": "success",
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "state_id": "fetch_arxiv_metadata",
+            "action_id": "get_paper_metadata",
+        }
+    ]
+    assert ledger["observed_invocation_count"] == 1
+    assert ledger["unsatisfied_required_tools"] == []
 
 
 def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> None:
@@ -396,3 +454,43 @@ def test_verification_read_success_on_other_target_does_not_close_failed_target(
     assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
         ledger["blocking_failure_codes"]
     )
+
+
+def test_url_target_alias_closes_when_canonical_identifier_later_succeeds() -> None:
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={
+            "turn_expected_outcome_contract": ["get_paper_metadata"]
+        },
+        invocations=[
+            {
+                "tool": "get_paper_metadata",
+                "status": "error",
+                "target_ids": [
+                    "https://arxiv.org/abs/2106.03245",
+                    "2106.03245",
+                ],
+                "error": "Missing required field 'arxiv_id'.",
+            },
+            {
+                "tool": "get_paper_metadata",
+                "status": "ok",
+                "target_ids": ["2106.03245"],
+                "payload": {"success": True, "arxiv_id": "2106.03245"},
+            },
+        ],
+        allowed_tools=["get_paper_metadata"],
+        method_catalogue=_catalogue(["get_paper_metadata"]),
+    )
+
+    obligation = _obligation_for_tool(ledger, "get_paper_metadata")
+    assert obligation["attempted_count"] == 2
+    assert obligation["successful_count"] == 1
+    assert obligation["satisfied"] is True
+    assert obligation["blocking_reason"] == ""
+    assert obligation["target_closure"] == {
+        "attempted_target_count": 1,
+        "successful_target_count": 1,
+        "failed_target_count": 1,
+        "unresolved_failed_target_count": 0,
+        "unresolved_failed_targets": [],
+    }

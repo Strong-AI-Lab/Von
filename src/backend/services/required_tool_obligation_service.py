@@ -186,6 +186,34 @@ def _tool_from_planned_call(call: Mapping[str, Any]) -> str:
     )
 
 
+def _tool_from_equivalent_execution(execution: Mapping[str, Any]) -> str:
+    return (
+        _safe_str(execution.get("tool"))
+        or _safe_str(execution.get("method"))
+        or _safe_str(execution.get("action_id"))
+        or _safe_str(execution.get("name"))
+    )
+
+
+def _normalise_equivalent_execution_record(
+    execution: Mapping[str, Any],
+    *,
+    fallback_status: str,
+) -> dict[str, Any] | None:
+    tool_name = _tool_from_equivalent_execution(execution)
+    if not tool_name:
+        return None
+    status = _safe_str(execution.get("status")) or _safe_str(execution.get("outcome"))
+    return {
+        "tool": tool_name,
+        "status": status or fallback_status,
+        "source": _safe_str(execution.get("source")) or "equivalent_execution_surface",
+        "workflow_id": _safe_str(execution.get("workflow_id")),
+        "state_id": _safe_str(execution.get("state_id")),
+        "action_id": _safe_str(execution.get("action_id")) or tool_name,
+    }
+
+
 def _payload_from_invocation(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
     payload = invocation.get("effective_payload")
     if isinstance(payload, Mapping):
@@ -251,6 +279,16 @@ def _normalise_target_tokens(values: Sequence[Any]) -> list[str]:
             seen.add(lowered)
             tokens.append(token)
     return tokens
+
+
+def _target_closure_key(target: str) -> str:
+    cleaned = _safe_str(target)
+    lowered = cleaned.lower()
+    if "://" not in lowered:
+        return lowered
+    without_fragment = lowered.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    tail = without_fragment.rsplit("/", 1)[-1].strip()
+    return tail or lowered
 
 
 def _value_at_path(source: Mapping[str, Any], path: str) -> Any:
@@ -559,6 +597,10 @@ def build_required_tool_obligation_ledger(
     invocations: Sequence[Mapping[str, Any]] | None = None,
     observed_equivalent_successful_tools: Sequence[Any] | None = None,
     observed_equivalent_failed_tools: Sequence[Any] | None = None,
+    observed_equivalent_successful_executions: (
+        Sequence[Mapping[str, Any]] | None
+    ) = None,
+    observed_equivalent_failed_executions: Sequence[Mapping[str, Any]] | None = None,
     planned_tool_calls: Sequence[Mapping[str, Any]] | None = None,
     tool_call_validation_failure_context: Mapping[str, Any] | None = None,
     tool_call_validation_errors: Sequence[Mapping[str, Any]] | None = None,
@@ -628,6 +670,30 @@ def build_required_tool_obligation_ledger(
     last_invocation_by_tool: dict[str, Mapping[str, Any]] = {}
     attempted_operation_classes: list[str] = []
     target_status_by_tool: dict[str, dict[str, dict[str, Any]]] = {}
+    execution_surfaces_by_tool: dict[str, list[dict[str, Any]]] = {}
+
+    def add_execution_surface(tool_name: str, surface: Mapping[str, Any]) -> None:
+        cleaned_tool_name = _safe_str(tool_name)
+        if not cleaned_tool_name:
+            return
+        normalised = {
+            "source": _safe_str(surface.get("source"))
+            or "equivalent_execution_surface",
+            "status": _safe_str(surface.get("status")),
+            "workflow_id": _safe_str(surface.get("workflow_id")),
+            "state_id": _safe_str(surface.get("state_id")),
+            "action_id": _safe_str(surface.get("action_id")) or cleaned_tool_name,
+        }
+        existing = execution_surfaces_by_tool.setdefault(
+            cleaned_tool_name.lower(),
+            [],
+        )
+        fingerprint = tuple(sorted(normalised.items()))
+        for item in existing:
+            if tuple(sorted(item.items())) == fingerprint:
+                return
+        existing.append(normalised)
+
     for lowered, failure in validation_failures_by_tool.items():
         tool_name = _safe_str(failure.get("tool"))
         if not tool_name:
@@ -669,7 +735,7 @@ def build_required_tool_obligation_ledger(
             successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
         if _operation_supports_target_closure(tool_name, operation_class):
             for target in _target_tokens_from_invocation(tool_name, invocation):
-                target_key = target.lower()
+                target_key = _target_closure_key(target)
                 target_entry = target_status_by_tool.setdefault(lowered, {}).setdefault(
                     target_key,
                     {
@@ -703,6 +769,14 @@ def build_required_tool_obligation_ledger(
         )
         successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
         last_status_by_tool[lowered] = "ok"
+        add_execution_surface(
+            tool_name,
+            {
+                "source": "equivalent_execution_surface",
+                "status": "success",
+                "action_id": tool_name,
+            },
+        )
         attempted_operation_classes.append(classify_required_tool_operation(tool_name))
 
     for tool_name in normalise_required_tool_names(observed_equivalent_failed_tools):
@@ -718,6 +792,60 @@ def build_required_tool_obligation_ledger(
             "status": "error",
             "error": "Equivalent execution surface reported failure.",
         }
+        add_execution_surface(
+            tool_name,
+            {
+                "source": "equivalent_execution_surface",
+                "status": "failed",
+                "action_id": tool_name,
+            },
+        )
+        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+
+    for execution in observed_equivalent_successful_executions or ():
+        if not isinstance(execution, Mapping):
+            continue
+        record = _normalise_equivalent_execution_record(
+            execution,
+            fallback_status="success",
+        )
+        if record is None:
+            continue
+        tool_name = _safe_str(record.get("tool"))
+        lowered = tool_name.lower()
+        observed_equivalent_invocation_count += 1
+        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
+        planned_counts[lowered] = max(
+            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        )
+        successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
+        last_status_by_tool[lowered] = "ok"
+        add_execution_surface(tool_name, record)
+        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+
+    for execution in observed_equivalent_failed_executions or ():
+        if not isinstance(execution, Mapping):
+            continue
+        record = _normalise_equivalent_execution_record(
+            execution,
+            fallback_status="failed",
+        )
+        if record is None:
+            continue
+        tool_name = _safe_str(record.get("tool"))
+        lowered = tool_name.lower()
+        observed_equivalent_invocation_count += 1
+        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
+        planned_counts[lowered] = max(
+            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        )
+        last_status_by_tool[lowered] = "error"
+        last_invocation_by_tool[lowered] = {
+            "tool": tool_name,
+            "status": "error",
+            "error": "Equivalent execution surface reported failure.",
+        }
+        add_execution_surface(tool_name, record)
         attempted_operation_classes.append(classify_required_tool_operation(tool_name))
 
     obligations: list[dict[str, Any]] = []
@@ -835,6 +963,11 @@ def build_required_tool_obligation_ledger(
         }
         if isinstance(target_closure, Mapping):
             obligation["target_closure"] = dict(target_closure)
+        execution_surfaces = execution_surfaces_by_tool.get(lowered)
+        if execution_surfaces:
+            obligation["execution_surfaces"] = [
+                dict(surface) for surface in execution_surfaces
+            ]
         if validation_failure is not None:
             errors = validation_failure.get("errors")
             if isinstance(errors, Sequence) and not isinstance(

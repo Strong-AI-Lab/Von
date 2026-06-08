@@ -1628,6 +1628,7 @@ _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION = "workflow_execution_summary.v1"
 _WORKFLOW_EXECUTION_SUMMARY_MAX_TERMINAL_EFFECTS = 20
 _WORKFLOW_EXECUTION_SUMMARY_MAX_SIDE_EFFECTS = 24
 _WORKFLOW_EXECUTION_SUMMARY_MAX_IDS_PER_EFFECT = 50
+_WORKFLOW_EXECUTION_SUMMARY_MAX_ACTION_OBSERVATIONS = 80
 _WORKFLOW_EXECUTION_SUMMARY_MAX_SCAN_DEPTH = 3
 _WORKFLOW_EXECUTION_SUMMARY_IGNORED_KEYS: frozenset[str] = frozenset(
     {
@@ -2383,13 +2384,43 @@ def _build_workflow_execution_summary(
     unknown_count = 0
     first_failing_state_id: str | None = None
     first_failing_action_id: str | None = None
+    successful_action_ids: list[str] = []
+    failed_action_ids: list[str] = []
+    action_observations: list[dict[str, Any]] = []
+    seen_successful_action_ids: set[str] = set()
+    seen_failed_action_ids: set[str] = set()
+
+    def _append_action_id_once(
+        values: list[str],
+        seen: set[str],
+        action_id: Any,
+    ) -> None:
+        cleaned_action_id = _workflow_execution_summary_text(action_id)
+        if (
+            not cleaned_action_id
+            or len(values) >= _WORKFLOW_EXECUTION_SUMMARY_MAX_ACTION_OBSERVATIONS
+        ):
+            return
+        lowered = cleaned_action_id.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        values.append(cleaned_action_id)
+
     for envelope in step_envelopes:
         action_outcome = _workflow_execution_summary_text(
             envelope.get("action_outcome")
         ) or _workflow_execution_summary_text(envelope.get("action_status"))
+        action_id = _workflow_execution_summary_text(envelope.get("action_id"))
+        state_id = _workflow_execution_summary_text(envelope.get("state_id"))
         lowered_outcome = (action_outcome or "").lower()
         if lowered_outcome == "success":
             success_count += 1
+            _append_action_id_once(
+                successful_action_ids,
+                seen_successful_action_ids,
+                action_id,
+            )
         elif lowered_outcome in {"failed", "failure"}:
             failure_count += 1
             if first_failing_state_id is None:
@@ -2400,8 +2431,31 @@ def _build_workflow_execution_summary(
                 first_failing_action_id = _workflow_execution_summary_text(
                     envelope.get("action_id")
                 )
+            _append_action_id_once(
+                failed_action_ids,
+                seen_failed_action_ids,
+                action_id,
+            )
         else:
             unknown_count += 1
+        if (
+            action_id
+            and lowered_outcome in {"success", "failed", "failure"}
+            and len(action_observations)
+            < _WORKFLOW_EXECUTION_SUMMARY_MAX_ACTION_OBSERVATIONS
+        ):
+            action_observations.append(
+                {
+                    "action_id": action_id,
+                    "state_id": state_id,
+                    "action_status": (
+                        "success" if lowered_outcome == "success" else "failed"
+                    ),
+                    "outcome": (
+                        "success" if lowered_outcome == "success" else "failure"
+                    ),
+                }
+            )
 
     launch_resolution = workflow_data.get("workflow_launch_input_resolution")
     if isinstance(launch_resolution, Mapping):
@@ -2480,6 +2534,9 @@ def _build_workflow_execution_summary(
         "action_success_count": success_count,
         "action_failure_count": failure_count,
         "action_unknown_count": unknown_count,
+        "successful_action_ids": successful_action_ids,
+        "failed_action_ids": failed_action_ids,
+        "action_observations": action_observations,
         "first_failing_state_id": first_failing_state_id,
         "first_failing_action_id": first_failing_action_id,
         "runtime_event_count": runtime_event_count,
