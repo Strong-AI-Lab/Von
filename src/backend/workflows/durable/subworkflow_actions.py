@@ -90,6 +90,10 @@ _MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
 _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
+_AGENT_TEST_LOCAL_PROVIDER_NAME = "ollama"
+_AGENT_TEST_EXTERNAL_PROVIDER_NAMES: frozenset[str] = frozenset(
+    {"openai", "anthropic", "gemini", "azure_openai"}
+)
 _INTERNAL_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
     {
         "__parent_state_id",
@@ -283,10 +287,22 @@ def _model_identifier_looks_local_ollama(model: Any) -> bool:
 
 
 def _agent_test_request_uses_local_model(request: WorkflowActionRequest) -> bool:
-    return _model_identifier_looks_local_ollama(
+    model_looks_local = _model_identifier_looks_local_ollama(
         _normalise_text(getattr(request.environment, "model", None))
         or _normalise_text(request.data.get("requested_model"))
     )
+    provider = _normalise_text(
+        request.data.get("requested_client_type")
+        or request.data.get("selected_model_provider")
+        or request.data.get("model_provider")
+    ).lower()
+    if provider == _AGENT_TEST_LOCAL_PROVIDER_NAME:
+        return True
+    if model_looks_local:
+        return True
+    if provider in _AGENT_TEST_EXTERNAL_PROVIDER_NAMES:
+        return False
+    return False
 
 
 def _agent_test_relation_prompt_context(parent_context: Mapping[str, Any]) -> bool:
@@ -318,6 +334,69 @@ def _agent_test_relation_prompt_context(parent_context: Mapping[str, Any]) -> bo
     return "get_text_relations_summary" in {
         _normalise_text(tool_name) for tool_name in required_tools
     }
+
+
+def _completion_report_indicates_success(report: Mapping[str, Any]) -> bool:
+    terminal_status = _normalise_text(report.get("terminal_status")).lower()
+    if terminal_status in {"failed", "failure", "cancelled", "terminated"}:
+        return False
+
+    terminal_success = report.get("terminal_success_evaluation")
+    if isinstance(terminal_success, Mapping) and terminal_success.get("success") is True:
+        return True
+
+    if report.get("effective_completed") is True:
+        return True
+    if report.get("completed") is True:
+        return True
+    return report.get("reported_completed") is True
+
+
+def _agent_test_completed_selected_workflow_context(
+    parent_context: Mapping[str, Any],
+) -> bool:
+    completion_report = parent_context.get("completion_report")
+    selected_workflow_trace = parent_context.get("selected_workflow_trace")
+    workflow_routing = parent_context.get("workflow_routing")
+
+    has_selected_workflow_signal = bool(
+        _normalise_text(parent_context.get("selected_workflow_id"))
+        or (
+            isinstance(completion_report, Mapping)
+            and _normalise_text(completion_report.get("workflow_id"))
+        )
+        or (
+            isinstance(selected_workflow_trace, Mapping)
+            and (
+                _normalise_text(selected_workflow_trace.get("selected_workflow_id"))
+                or _normalise_text(selected_workflow_trace.get("workflow_id"))
+            )
+        )
+        or (
+            isinstance(workflow_routing, Mapping)
+            and (
+                _normalise_text(workflow_routing.get("workflow_id"))
+                or _normalise_text(workflow_routing.get("selected_workflow_id"))
+            )
+        )
+    )
+    if not has_selected_workflow_signal:
+        return False
+
+    if isinstance(completion_report, Mapping) and _completion_report_indicates_success(
+        completion_report
+    ):
+        return True
+
+    if not isinstance(selected_workflow_trace, Mapping):
+        return False
+    if selected_workflow_trace.get("child_workflow_completed") is True:
+        return True
+    execution_summary = selected_workflow_trace.get("workflow_execution_summary")
+    return isinstance(
+        execution_summary,
+        Mapping,
+    ) and _completion_report_indicates_success(execution_summary)
 
 
 def _build_agent_test_postcondition_critic_result(
@@ -627,8 +706,13 @@ def _build_subworkflow_handler(
         if (
             child_workflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
             and _is_agent_test_instance()
-            and _agent_test_request_uses_local_model(request)
-            and _agent_test_relation_prompt_context(request.data)
+            and (
+                _agent_test_completed_selected_workflow_context(request.data)
+                or (
+                    _agent_test_request_uses_local_model(request)
+                    and _agent_test_relation_prompt_context(request.data)
+                )
+            )
         ):
             return _build_agent_test_postcondition_critic_result(
                 request=request,

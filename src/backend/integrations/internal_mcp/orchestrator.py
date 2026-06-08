@@ -166,6 +166,7 @@ from ...workflows.durable.turn_execution_runtime_support import (
     render_selected_workflow_user_response,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
+    strip_completion_ledger_suffix,
 )
 from ...workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -36756,15 +36757,41 @@ class InternalMCPChatOrchestrator:
             "completion_gate_decision" in workflow_data
             or "completion_gate_evidence_payload" in workflow_data
         )
+        turn_record_payload = (
+            workflow_data.get("turn_execution_record")
+            if isinstance(workflow_data.get("turn_execution_record"), Mapping)
+            else {}
+        )
+        turn_record_completion_gate = (
+            turn_record_payload.get("completion_gate")
+            if isinstance(turn_record_payload, Mapping)
+            and isinstance(turn_record_payload.get("completion_gate"), Mapping)
+            else {}
+        )
+        if turn_record_completion_gate:
+            gate_reported_outcome = True
         gate_requires_follow_up = bool(
-            workflow_data.get("completion_gate_requires_follow_up", False)
+            workflow_data.get(
+                "completion_gate_requires_follow_up",
+                turn_record_completion_gate.get("requires_follow_up", False)
+                if isinstance(turn_record_completion_gate, Mapping)
+                else False,
+            )
         )
         gate_safe_to_claim_completion = bool(
             workflow_data.get(
                 "completion_gate_safe_to_claim_completion",
-                not gate_requires_follow_up,
+                (
+                    turn_record_completion_gate.get("safe_to_claim_completion")
+                    if isinstance(turn_record_completion_gate, Mapping)
+                    and "safe_to_claim_completion" in turn_record_completion_gate
+                    else not gate_requires_follow_up
+                ),
             )
         )
+        if gate_reported_outcome and gate_safe_to_claim_completion:
+            response_text = strip_completion_ledger_suffix(response_text)
+            final_response = strip_completion_ledger_suffix(final_response)
         if isinstance(final_response, str) and final_response.strip():
             if gate_reported_outcome and (
                 gate_requires_follow_up

@@ -190,6 +190,82 @@ def test_agent_test_postcondition_critic_subworkflow_uses_deterministic_record(
     ]
 
 
+def test_agent_test_postcondition_critic_bounds_completed_selected_workflow(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    registry = ActionRegistry()
+
+    def _unexpected_definition_loader(_workflow_id: str) -> None:
+        raise AssertionError("Completed AgentTest critic should not load definitions")
+
+    register_subworkflow_actions(
+        registry,
+        definition_loader=_unexpected_definition_loader,
+    )
+    completion_report = {
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": "#V#example_represent_artefact_workflow",
+        "completed": True,
+        "effective_completed": True,
+        "reported_completed": True,
+        "terminal_status": "completed",
+        "final_state": "#V#workflow_step_example_represent_artefact_completed",
+        "response_text": "The artefact has been represented.",
+    }
+    context: dict[str, Any] = {
+        "prompt": "Represent this paper: https://arxiv.org/abs/2106.03245",
+        "user_prompt": "Represent this paper: https://arxiv.org/abs/2106.03245",
+        "response_text": "The artefact has been represented.",
+        "final_response": "The artefact has been represented.",
+        "requested_model": "gpt-oss:20b",
+        "selected_model_provider": "openai",
+        "workflow_routing": {
+            "workflow_id": "#V#example_represent_artefact_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        "selected_workflow_trace": {
+            "selected_workflow_id": "#V#example_represent_artefact_workflow",
+            "child_workflow_completed": True,
+            "child_workflow_final_state": (
+                "#V#workflow_step_example_represent_artefact_completed"
+            ),
+            "completion_report_source": "child_completion_report",
+            "workflow_execution_summary": completion_report,
+        },
+        "completion_report": completion_report,
+        "invocations": [
+            {
+                "tool": "example.represent_artefact",
+                "status": "ok",
+                "payload": {"concept_id": "#V#represented_artefact"},
+            }
+        ],
+        "aux_llm_calls": [],
+    }
+
+    result = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+            "failure_mode": "capture",
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gpt-oss:20b"),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["subworkflow_invocation"]["child_final_state"] == (
+        "agent_test_deterministic_critic"
+    )
+    assert result.outputs["subworkflow_result_envelope"]["agent_test_bypass"] is True
+    payload = result.outputs["result"]
+    assert payload["agent_test_critic_skip_reason"] == "agent_test_instance"
+    assert payload["completion_gate_requires_follow_up"] is False
+    assert payload["turn_execution_record"]["completion_report"] == completion_report
+
+
 def test_agent_test_expected_outcome_fast_path_marks_relation_tools(
     monkeypatch,
 ) -> None:
@@ -922,6 +998,58 @@ def test_agent_test_completion_gate_skips_episode_autotrigger(monkeypatch) -> No
     assert result.status == "success"
     assert result.outputs["workflow_introspection_autotrigger"]["reason"] == (
         "agent_test_instance"
+    )
+
+
+def test_completion_gate_removes_stale_ledger_suffix_when_completion_is_safe(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    stale_response = (
+        "The artefact has been represented.\n\n"
+        "Execution status: required tool execution was not completed. "
+        "Required tool execution was not observed. "
+        "Blocking effect IDs: effect_required_tool_obligations_1. "
+        "Unresolved preconditions: Required tool obligations were not satisfied: "
+        "scholarly_paper.verify_representation. "
+        "Failure codes: required_tool_not_available_on_gateway."
+    )
+    request = WorkflowActionRequest(
+        action_id="turn_execution.completion_gate",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "prompt": "Represent this paper: https://arxiv.org/abs/2106.03245",
+            "selected_workflow_user_response": stale_response,
+            "final_response": stale_response,
+            "response_text": stale_response,
+            "current_response": stale_response,
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "completed",
+                    "safe_to_claim_completion": True,
+                    "requires_follow_up": False,
+                },
+                "required_effects": [],
+                "critic": {"summary": {}},
+            },
+            "aux_llm_calls": [],
+        },
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate_removes_stale_ledger_suffix",
+        introspection_auto_apply_env="VON_TEST_AUTO_APPLY",
+    )
+
+    assert result.status == "success"
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is True
+    assert result.outputs["final_response"] == "The artefact has been represented."
+    assert result.outputs["response_text"] == "The artefact has been represented."
+    assert result.outputs["selected_workflow_user_response"] == (
+        "The artefact has been represented."
     )
 
 

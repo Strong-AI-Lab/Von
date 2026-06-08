@@ -866,6 +866,33 @@ def _sanitise_user_response_candidate(text: Any) -> str | None:
     return candidate
 
 
+_COMPLETION_LEDGER_STATUS_PREFIXES: tuple[str, ...] = (
+    "Execution status: planned tool execution did not complete successfully.",
+    "Execution status: required tool execution was not completed.",
+    "Execution status: selected workflow execution did not complete successfully.",
+    "Execution status: required grounded evidence was not retrieved.",
+    "Execution status: requested mutation failed or was blocked.",
+    "Execution status: requested mutation was not executed.",
+    "Execution status: mutation may have run but verification is inconclusive.",
+    "Execution status: follow-up verification is required.",
+)
+
+
+def strip_completion_ledger_suffix(text: Any) -> str:
+    candidate = _safe_str(text)
+    if not candidate:
+        return ""
+    marker_match = None
+    for match in re.finditer(r"(?m)^\s*Execution status:", candidate):
+        marker_match = match
+    if marker_match is None:
+        return candidate
+    suffix = candidate[marker_match.start() :].strip()
+    if not suffix.startswith(_COMPLETION_LEDGER_STATUS_PREFIXES):
+        return candidate
+    return candidate[: marker_match.start()].rstrip()
+
+
 def _render_structured_observation_lines(observations: Any) -> list[str]:
     if not isinstance(observations, Sequence) or isinstance(
         observations, (str, bytes, bytearray)
@@ -3018,6 +3045,14 @@ def run_turn_execution_completion_gate(
         final_response = selected_workflow_user_response
         response_text = selected_workflow_user_response
         current_response = selected_workflow_user_response
+
+    if safe_to_claim_completion:
+        selected_workflow_user_response = strip_completion_ledger_suffix(
+            selected_workflow_user_response
+        )
+        final_response = strip_completion_ledger_suffix(final_response)
+        response_text = strip_completion_ledger_suffix(response_text)
+        current_response = strip_completion_ledger_suffix(current_response)
 
     if not safe_to_claim_completion:
         unresolved_effect_types = {

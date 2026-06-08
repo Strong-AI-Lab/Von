@@ -26,6 +26,9 @@ from ...workflows.durable.models import WorkflowInstanceStatus
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
+from ...workflows.durable.turn_execution_runtime_support import (
+    strip_completion_ledger_suffix,
+)
 from ...languagemodels.llm_interface import (
     _extract_ollama_model_id,
     _extract_openai_model_id,
@@ -13423,6 +13426,32 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             mcp_access=turn_execution_mcp_access,
         )
+        diagnostics_routing = turn_execution_diagnostics.get(
+            "workflow_routing_diagnostics"
+        )
+        diagnostics_dispatch = (
+            diagnostics_routing.get("dispatch")
+            if isinstance(diagnostics_routing, Mapping)
+            and isinstance(diagnostics_routing.get("dispatch"), Mapping)
+            else {}
+        )
+        try:
+            diagnostics_unsatisfied_required_tools = int(
+                diagnostics_dispatch.get(
+                    "required_tool_obligation_unsatisfied_count",
+                    0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            diagnostics_unsatisfied_required_tools = 0
+        if (
+            isinstance(response_text, str)
+            and diagnostics_dispatch
+            and not diagnostics_dispatch.get("required_effects_unresolved_effect_ids")
+            and diagnostics_unsatisfied_required_tools == 0
+        ):
+            response_text = strip_completion_ledger_suffix(response_text)
 
         workflow_use_episodes = [
             entry
