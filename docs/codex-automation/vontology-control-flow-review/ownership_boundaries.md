@@ -98,6 +98,12 @@ predicates, and KB assertions should own durable:
   evidence should keep the selected workflow, override to the tool pipeline,
   recover to a concrete workflow-execute target, fail closed, or request
   clarification.
+- Operational diagnostics workflow authority, including maintenance workflow
+  graph topology, transitions, tool-invocation inputs, context mappings,
+  schedule/launch policy, and completion/failure routes.
+- Selector fallback and recovery authority, including when a failed/default
+  selector result may be recovered to a specialised workflow, which candidate
+  is eligible, and what reasoning or recovery explanation is exposed.
 
 ## Python Support
 
@@ -191,6 +197,12 @@ Python can remain the surface for:
 - generic dispatch-preflight plumbing that loads represented policy, validates
   required-tool/evidence metadata, applies represented route-state decisions,
   records stable reason codes, and fails closed when policy authority is absent;
+- generic diagnostic tool wrappers, result redaction, report compaction,
+  finalise actions, telemetry, and bounded MCP invocation support when the
+  diagnostic workflow graph/control policy comes from represented VWL;
+- generic selector fast-path/recovery evaluators that validate represented
+  policy metadata, candidate coverage, and authority provenance, then apply the
+  represented decision or fail closed without authoring fallback policy;
 - generic HTTP/request plumbing that passes represented decisions through.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
