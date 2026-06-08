@@ -210,6 +210,13 @@ Isolated coding-agent replay backend:
 - Do not treat `-Port` alone as isolation. The isolated mode changes launcher
   ownership semantics so an automated run does not globally clean up or adopt
   unrelated local Von processes.
+- For Codex-driven Playwright checks on macOS, the normal sandbox may block
+  Chromium launch or localhost browser access even when Playwright is installed.
+  A characteristic launch failure is
+  `MachPortRendezvousServer... Permission denied`. In that case, rerun the
+  Playwright command with escalated sandbox permissions, validate against the
+  AgentTest URL such as `http://127.0.0.1:5010`, and stop the AgentTest server
+  when the browser evidence has been captured.
 
 If cleanup removes the obvious duplicates but memory pressure remains extreme,
 or kernel/pool counters stay abnormally high relative to process working sets,

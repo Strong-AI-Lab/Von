@@ -202,6 +202,29 @@ Helpful evidence includes:
 - confirmation that the issue is absent on both desktop and narrow layouts when
   required by the task.
 
+### 8.1 Playwright from Codex on macOS
+
+When Codex needs scripted browser evidence against a local Von server on macOS,
+prefer the repo's isolated AgentTest backend:
+
+- start it with `./run.sh restart -AgentTest -HealthTimeoutSec 180`;
+- validate against `http://127.0.0.1:5010`;
+- stop it afterwards with `./run.sh stop -AgentTest -NoBrowser`.
+
+If the workspace has `playwright` / `@playwright/test` installed but Chromium
+still fails to launch from Codex, check whether the failure is sandbox-related
+before treating it as a missing dependency. A typical sandbox failure includes:
+
+`MachPortRendezvousServer... Permission denied`
+
+In that case, rerun the Playwright command with escalated sandbox permissions so
+Chromium can start and connect to `127.0.0.1`. A quick smoke check is:
+
+`node -e "import('playwright').then(async ({ chromium }) => { const b = await chromium.launch({ headless: true }); const p = await b.newPage(); await p.goto('http://127.0.0.1:5010/health'); console.log(await p.textContent('body')); await b.close(); })"`
+
+The acceptance note should state whether browser evidence came from Playwright,
+the target URL, and whether the command required sandbox escalation.
+
 ## 9. When Mocking Is Still Appropriate
 
 In-browser mocking or synthetic DOM setup is appropriate when:
