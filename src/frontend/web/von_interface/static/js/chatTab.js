@@ -3673,6 +3673,37 @@ function formatThinkingEtaText(progress) {
     return `ETA ~${formatThinkingDuration(roundedMs)}`;
 }
 
+function normaliseThinkingComparisonText(value) {
+    return normaliseThinkingActivityString(value)
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function shouldDistinguishThinkingRequestAndStep(promptRaw, goalLabel) {
+    const prompt = normaliseThinkingComparisonText(promptRaw);
+    const goal = normaliseThinkingComparisonText(goalLabel);
+    return Boolean(
+        prompt
+        && goal
+        && prompt !== goal
+        && !prompt.includes(goal)
+        && !goal.includes(prompt)
+    );
+}
+
+function buildThinkingGoalPrefix(goalLabel, request = null) {
+    const cleanGoal = truncateThinkingCardSummary(goalLabel, 180);
+    if (!cleanGoal) {
+        return '';
+    }
+    const cleanPrompt = truncateThinkingCardSummary(request?.promptRaw, 140);
+    if (shouldDistinguishThinkingRequestAndStep(cleanPrompt, cleanGoal)) {
+        return `Request: ${cleanPrompt} | Step: ${cleanGoal}`;
+    }
+    return `Goal: ${cleanGoal}`;
+}
+
 function buildThinkingProgressPresentation(progress, request = null) {
     const terminalStatus = resolveThinkingTerminalStatus(progress);
     const livenessState = terminalStatus || normaliseThinkingLivenessState(progress);
@@ -3749,8 +3780,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
     if (detail && !stageText.toLowerCase().includes(detail.toLowerCase())) {
         stageText = `${stageText}: ${detail}`;
     }
-    if (goalLabel && !stageText.toLowerCase().includes(goalLabel.toLowerCase())) {
-        stageText = stageText ? `Goal: ${goalLabel} | ${stageText}` : `Goal: ${goalLabel}`;
+    const goalPrefix = buildThinkingGoalPrefix(goalLabel, request);
+    if (goalPrefix && !stageText.toLowerCase().includes(goalLabel.toLowerCase())) {
+        stageText = stageText ? `${goalPrefix} | ${stageText}` : goalPrefix;
     }
 
     if (terminalStatus) {
@@ -4870,14 +4902,15 @@ function buildThinkingCardProgressViewModel(request) {
         latestProgress?.objective_summary,
         latestProgress?.intent_summary,
         latestProgress?.goal_summary,
-        latestProgress?.goal_label,
-        summarisePromptForThinkingCard(request.promptRaw, 'Answer the prompt')
+        summarisePromptForThinkingCard(request.promptRaw, 'User request'),
+        latestProgress?.goal_label
     );
     const objectOrTargetSummary = firstThinkingCardText(
         latestProgress?.object_or_target_summary,
         latestProgress?.working_object_summary,
         latestProgress?.target_summary,
         latestProgress?.object_summary,
+        latestProgress?.goal_label,
         latestProgress?.target,
         workflowDiscovery?.requested_query,
         workflowDiscovery?.query,

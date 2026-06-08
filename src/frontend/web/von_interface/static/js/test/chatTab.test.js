@@ -2275,6 +2275,23 @@ describe('thinking liveness presentation', () => {
         );
         expect(presentation.stageText).toContain('Searching for workflows');
     });
+
+    test('distinguishes a user request from an intermediate active step', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation(
+            {
+                stage: 'context_build',
+                phase_label: 'Building context',
+                goal_label: 'Represent https://arxiv.org/abs/2511.18958'
+            },
+            {
+                promptRaw: 'Summarise that paper'
+            }
+        );
+
+        expect(presentation.stageText).toContain('Request: Summarise that paper');
+        expect(presentation.stageText).toContain('Step: Represent https://arxiv.org/abs/2511.18958');
+        expect(presentation.stageText).toContain('Building context');
+    });
 });
 
 describe('thinking card display state reducer', () => {
@@ -3826,6 +3843,33 @@ describe('thinking activity history normalisation', () => {
         expect(container.textContent).toContain('Telemetry gap');
         expect(container.textContent).toContain('Prepared LLM input has not been reported for the current stage yet.');
         expect(container.textContent).toContain('Waiting at Preparing workflow dispatch');
+    });
+
+    test('default synopsis separates the submitted prompt from the active operational step', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            promptRaw: 'Summarise that paper',
+            latestProgress: {
+                status: 'pending',
+                phase: 'context_build',
+                phase_label: 'Building context',
+                goal_label: 'Represent https://arxiv.org/abs/2511.18958',
+                subtask: 'organisation concept lookup',
+                liveness_state: 'waiting'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent;
+
+        expect(text).toContain('Objective');
+        expect(text).toContain('User request: "Summarise that paper"');
+        expect(text).toContain('Working on');
+        expect(text).toContain('Represent https://arxiv.org/abs/2511.18958');
+        expect(text).toContain('Current activity');
+        expect(text).toContain('organisation concept lookup');
+        expect(text).toContain('Wait state');
+        expect(text).toContain('Waiting at Building context');
     });
 
     test('copies progress view model in thinking and keyboard diagnostic exports', () => {
