@@ -21,6 +21,10 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-1971` - broad buttonify prose-extraction heuristic cleanup.
 - `JVNAUTOSCI-2024` - episode evaluator criteria, benchmark proxies,
   recommendation wording, and critic signal policy in Python.
+- `JVNAUTOSCI-2406` - represented selector fast-path metadata. Also covers
+  2026-06-09 evidence that `workflow_selector.py` has Python-owned
+  single-specialised-candidate recovery and fallback reasoning; update this
+  task instead of filing duplicate selector-recovery drift.
 
 ## Drift Tasks Filed By This Automation
 
@@ -109,3 +113,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   direct-response/tool-pipeline override, external multi-surface recovery, and
   workflow-execute single-candidate recovery, is authored in orchestrator Python
   instead of represented workflow/contract/recovery authority.
+- `JVNAUTOSCI-2472` - Mongo query-diagnostics maintenance workflow graph,
+  transitions, MCP tool inputs, context mappings, and startup publication still
+  originate from a Python `WorkflowDefinition`/`source="built_in"`
+  registration rather than independently authored Vontology-stored VWL.
