@@ -4796,6 +4796,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         call_id = _progress_str(safe_update.get("call_id"))
         if call_id:
             event_entry["call_id"] = call_id
+        llm_exchange_id = _progress_str(safe_update.get("llm_exchange_id"))
+        if llm_exchange_id:
+            event_entry["llm_exchange_id"] = llm_exchange_id
         llm_request = safe_update.get("llm_request")
         if isinstance(llm_request, Mapping):
             event_entry["llm_request"] = {

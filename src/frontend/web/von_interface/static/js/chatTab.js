@@ -9208,6 +9208,12 @@ function buildThinkingLiveLlmCallKey(entry, index) {
     if (explicitCallId) {
         return `call:${explicitCallId}`;
     }
+    const explicitExchangeId = normaliseThinkingActivityString(
+        entry?.llm_exchange_id || llmRequest?.llm_exchange_id
+    );
+    if (explicitExchangeId) {
+        return `exchange:${explicitExchangeId}`;
+    }
 
     const stage = normaliseThinkingActivityString(entry?.workflow_stage_id)
         || normaliseThinkingActivityString(entry?.stage)
@@ -9231,6 +9237,9 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
         : null;
     const explicitCallId = normaliseThinkingActivityString(
         entry?.call_id || entry?.llm_call_id || llmRequest?.call_id
+    );
+    const explicitExchangeId = normaliseThinkingActivityString(
+        entry?.llm_exchange_id || llmRequest?.llm_exchange_id
     );
     const promptCapture = normaliseThinkingDiagnosticCapture(
         entry?.prompt_preview || entry?.llm_prompt_preview || llmRequest?.prompt
@@ -9260,6 +9269,7 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
 
     return {
         call_id: explicitCallId || existing?.call_id || '',
+        llm_exchange_id: explicitExchangeId || existing?.llm_exchange_id || '',
         sequence_no: sequenceNo,
         stage: normaliseThinkingActivityString(entry?.workflow_stage_id)
             || normaliseThinkingActivityString(entry?.stage)
@@ -9346,6 +9356,10 @@ function buildThinkingLlmCallLogEntryKey(entry, index = null) {
     );
     if (explicitCallId) {
         return buildThinkingDiagnosticKey('llm_exchange', 'call', explicitCallId);
+    }
+    const explicitExchangeId = normaliseThinkingActivityString(entry?.llm_exchange_id);
+    if (explicitExchangeId) {
+        return buildThinkingDiagnosticKey('llm_exchange', 'exchange', explicitExchangeId);
     }
 
     if (Number.isFinite(entry?.sequence_no)) {
@@ -9470,7 +9484,7 @@ function classifyThinkingLlmCallLogEntry(entry) {
     return '';
 }
 
-function renderThinkingLlmCallLogEntriesHTML(entries) {
+function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
     if (!Array.isArray(entries) || entries.length === 0) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
     }
@@ -9508,8 +9522,15 @@ function renderThinkingLlmCallLogEntriesHTML(entries) {
 
         const promptMeta = promptTruncated ? ' (truncated)' : '';
         const responseMeta = responseTruncated ? ' (truncated)' : '';
+        const archiveLoadButton = (
+            options?.canLoadArchive === true
+            && options?.archiveLoaded !== true
+            && liveState.toLowerCase() !== 'sent'
+        )
+            ? '<button type="button" class="btn thinking-card-action" data-thinking-action="llm-call-log-toggle">Load archived exchange details</button>'
+            : '';
         const availability = (!promptText || !responseText)
-            ? `<div class="thinking-card-diagnostic-text">Missing exchange detail: ${escapeHtml(unavailableReason || 'not recorded')}</div>`
+            ? `<div class="thinking-card-diagnostic-text">Missing exchange detail: ${escapeHtml(unavailableReason || 'not recorded')}</div>${archiveLoadButton}`
             : '';
 
         const promptBlock = promptText
@@ -9563,7 +9584,7 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         : '';
 
     const liveLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && liveEntries.length > 0)
-        ? '<div class="thinking-card-diagnostic-text">Showing live LLM events currently loaded. View the archived call log for completed exchanges; timing summaries above may include exchanges not shown here yet.</div>'
+        ? '<div class="thinking-card-diagnostic-text">Showing live LLM events currently loaded. Lifecycle events with a shared call ID are grouped into one exchange. View the archived call log for completed exchanges to load prompt and response bodies.</div>'
         : '';
 
     const unloadedLine = (!state.loaded && !state.loading && !normaliseThinkingActivityString(state.error) && !hasVisibleEntries)
@@ -9575,7 +9596,10 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
         : '';
 
     const entriesHtml = (state.loaded || liveEntries.length > 0 || cachedExpandedEntries.length > 0)
-        ? renderThinkingLlmCallLogEntriesHTML(visibleEntries)
+        ? renderThinkingLlmCallLogEntriesHTML(visibleEntries, {
+            archiveLoaded: state.loaded,
+            canLoadArchive: true
+        })
         : '';
 
     const loadMoreButton = state.loaded && state.hasMore

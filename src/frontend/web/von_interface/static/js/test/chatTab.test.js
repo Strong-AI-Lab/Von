@@ -3281,6 +3281,100 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('4250ms');
     });
 
+    test('coalesces prepared and completed live LLM lifecycle events by call id', () => {
+        const request = {
+            clientRequestId: 'req-live-llm-log-stable-call-id',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                request_id: 'req-live-llm-log-stable-call-id',
+                status: 'llm_call_end',
+                stage: 'selected_workflow_execution',
+                diagnostic_events: [
+                    {
+                        sequence_no: 233,
+                        at_utc: '2026-06-08T20:09:12.955000+00:00',
+                        status: 'llm_request_prepared',
+                        stage: 'selected_workflow_execution',
+                        workflow_stage_id: 'selected_workflow_execution',
+                        call_id: 'llm-stable-123:attempt:1',
+                        llm_exchange_id: 'llm-stable-123',
+                        llm_request_state: 'prepared',
+                        llm_request_prepared_at_utc: '2026-06-08T20:09:12.955000+00:00',
+                        llm_request: {
+                            prompt: {
+                                text: 'STABLE-CALL-ID-PROMPT',
+                                char_count: 21
+                            }
+                        }
+                    },
+                    {
+                        sequence_no: 236,
+                        at_utc: '2026-06-08T20:09:16.557000+00:00',
+                        status: 'llm_call_end',
+                        stage: 'selected_workflow_execution',
+                        workflow_stage_id: 'selected_workflow_execution',
+                        call_id: 'llm-stable-123:attempt:1',
+                        llm_exchange_id: 'llm-stable-123',
+                        model: 'gpt-oss:20b',
+                        provider: 'ollama',
+                        duration_ms: 2671,
+                        success: true,
+                        llm_request_state: 'completed',
+                        llm_request_prepared_at_utc: '2026-06-08T20:09:12.955000+00:00',
+                        llm_request_sent_at_utc: '2026-06-08T20:09:13.100000+00:00',
+                        llm_first_output_at_utc: '2026-06-08T20:09:16.557000+00:00',
+                        llm_response_preview: {
+                            text: 'STABLE-CALL-ID-RESPONSE',
+                            char_count: 23
+                        }
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('STABLE-CALL-ID-PROMPT');
+        expect(html).toContain('STABLE-CALL-ID-RESPONSE');
+        expect(html).toContain('Completed');
+        expect(html).toContain('gpt-oss:20b (ollama)');
+        expect(html).toContain('2671ms');
+        const renderedRows = html.match(/data-thinking-llm-call-log-key=/g) || [];
+        expect(renderedRows).toHaveLength(1);
+    });
+
+    test('offers archived detail loading when a live LLM row is missing prompt or response detail', () => {
+        const request = {
+            clientRequestId: 'req-live-llm-log-load-archive-from-row',
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                request_id: 'req-live-llm-log-load-archive-from-row',
+                status: 'llm_call_end',
+                stage: 'selected_workflow_execution',
+                diagnostic_events: [
+                    {
+                        sequence_no: 301,
+                        at_utc: '2026-06-08T20:10:16.557000+00:00',
+                        status: 'llm_call_end',
+                        stage: 'selected_workflow_execution',
+                        workflow_stage_id: 'selected_workflow_execution',
+                        call_id: 'llm-sparse-row:attempt:1',
+                        llm_exchange_id: 'llm-sparse-row',
+                        model: 'gpt-oss:20b',
+                        provider: 'ollama',
+                        duration_ms: 2671,
+                        success: true,
+                        llm_request_state: 'completed'
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Missing exchange detail: response not recorded yet');
+        expect(html).toContain('Load archived exchange details');
+        expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
+    });
+
     test('renders each LLM interaction with timestamp, model and exact prompt/response (JVNAUTOSCI-2385)', () => {
         const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
             {

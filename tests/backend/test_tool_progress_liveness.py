@@ -1795,6 +1795,50 @@ def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> Non
     }
 
 
+def test_llm_exchange_identity_survives_progress_event_serialisation(monkeypatch) -> None:
+    _set_clock(monkeypatch, start=5600.0)
+
+    von_routes._set_tool_progress(
+        "scope-llm-exchange",
+        "req-llm-exchange",
+        {
+            "status": "llm_call_end",
+            "stage": "selected_workflow_execution",
+            "workflow_stage_id": "selected_workflow_execution",
+            "request_id": "req-llm-exchange",
+            "call_id": "llm-abc123:attempt:1",
+            "llm_exchange_id": "llm-abc123",
+            "llm_request_state": "completed",
+            "llm_request": {
+                "prompt": {
+                    "text": "PROMPT-FOR-STABLE-LLM-EXCHANGE",
+                    "char_count": 30,
+                }
+            },
+            "llm_response_preview": {
+                "text": "RESPONSE-FOR-STABLE-LLM-EXCHANGE",
+                "char_count": 32,
+            },
+            "model": "gpt-oss:20b",
+            "provider": "ollama",
+            "duration_ms": 2671,
+            "success": True,
+        },
+    )
+
+    snapshot = von_routes._get_tool_progress("scope-llm-exchange", "req-llm-exchange")
+    assert snapshot is not None
+    events = snapshot.get("diagnostic_events")
+    assert isinstance(events, list)
+    assert events
+    event = events[-1]
+    assert event["call_id"] == "llm-abc123:attempt:1"
+    assert event["llm_exchange_id"] == "llm-abc123"
+    assert event["llm_request_state"] == "completed"
+    assert event["llm_request"]["prompt"]["text"] == "PROMPT-FOR-STABLE-LLM-EXCHANGE"
+    assert event["llm_response_preview"]["text"] == "RESPONSE-FOR-STABLE-LLM-EXCHANGE"
+
+
 def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat_tail(
     monkeypatch,
 ) -> None:
