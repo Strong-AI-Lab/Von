@@ -354,4 +354,67 @@ describe('chat task queue', () => {
         expect(generateBodies[0].prompt).toBe('Recovered task');
         expect(document.querySelector('.chat-task-queue-item')).toBeNull();
     }, 15000);
+
+    test('shows precise persisted claim failure reason', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [{
+                            queue_id: 'queue-1',
+                            prompt_raw: 'Queued task',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }]
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-1') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            queue_id: 'queue-1',
+                            prompt_raw: 'Queued task',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-1/claim') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 404,
+                    json: async () => ({
+                        success: false,
+                        error: 'prompt queue record belongs to a different scope',
+                        error_code: 'scope_mismatch',
+                        details: { current_status: 'queued', scope_match: false }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent).toBe(
+            'This queued task belongs to a different browser or organisation scope.'
+        );
+    }, 15000);
 });

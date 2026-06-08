@@ -6,7 +6,7 @@ records, but it does not decide what Von should answer or how workflows run.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -14,6 +14,10 @@ from pymongo import ReturnDocument
 from pymongo.collection import Collection
 
 from ..db.mongo_client import get_chat_prompt_queue_collection
+from .namespace_service import (
+    concept_id_to_namespace_slug,
+    resolve_canonical_namespace,
+)
 
 STATUS_QUEUED = "queued"
 STATUS_IN_PROGRESS = "in_progress"
@@ -26,6 +30,10 @@ TERMINAL_STATUSES = (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED)
 VALID_STATUSES = set(ACTIVE_STATUSES + TERMINAL_STATUSES)
 MAX_PROMPT_RAW_CHARS = 100_000
 MAX_SESSION_NAME_CHARS = 500
+STALE_IN_PROGRESS_TIMEOUT_SECONDS = 24 * 60 * 60
+STALE_IN_PROGRESS_LAST_ERROR = (
+    "Prompt queue record expired after being in progress for more than 24 hours."
+)
 
 
 class ChatPromptQueueError(RuntimeError):
@@ -42,6 +50,17 @@ class InvalidChatPromptQueueInput(ChatPromptQueueError, ValueError):
 
 class ChatPromptQueueRecordNotFound(ChatPromptQueueError, LookupError):
     """Raised when a queue record is not in the expected scope/state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "not_found_or_wrong_state",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = dict(details or {})
 
 
 def _now() -> datetime:
@@ -71,6 +90,90 @@ def _coerce_scope_value(value: Any, *, field: str, required: bool = True) -> str
     return cleaned or None
 
 
+def _normalise_user_concept_id(value: Any) -> str:
+    cleaned = _coerce_scope_value(value, field="user_concept_id")
+    if cleaned is None:  # pragma: no cover - _coerce_scope_value enforces this
+        raise InvalidChatPromptQueueInput("user_concept_id is required")
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def _normalise_organisation_component(value: Any) -> str | None:
+    cleaned = _coerce_scope_value(
+        value,
+        field="organisation_concept_id",
+        required=False,
+    )
+    if cleaned is None:
+        return None
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def _normalise_namespace_component(
+    value: Any,
+    *,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+) -> str | None:
+    cleaned = _coerce_scope_value(value, field="namespace", required=False)
+    return resolve_canonical_namespace(
+        cleaned,
+        user_concept_id,
+        organisation_concept_id,
+        preserve_explicit=True,
+    )
+
+
+def _queue_scope_values(scope: Mapping[str, Any]) -> dict[str, str | None]:
+    user_id = _normalise_user_concept_id(scope.get("user_concept_id"))
+    org_id = _normalise_organisation_component(scope.get("organisation_concept_id"))
+    namespace = _normalise_namespace_component(
+        scope.get("namespace"),
+        user_concept_id=user_id,
+        organisation_concept_id=org_id,
+    )
+    return {
+        "user_concept_id": user_id,
+        "organisation_concept_id": org_id,
+        "namespace": namespace,
+    }
+
+
+def _value_variants(value: str | None, *, field: str) -> list[str | None]:
+    if value is None:
+        return [None]
+    variants: list[str | None] = [value]
+    if field == "user_concept_id":
+        slug = concept_id_to_namespace_slug(value)
+        if slug and slug not in variants:
+            variants.append(slug)
+    elif field == "organisation_concept_id":
+        slug = concept_id_to_namespace_slug(value)
+        if slug and slug not in variants:
+            variants.append(slug)
+    elif field == "namespace":
+        slug = value[3:] if value.startswith("#V#") else None
+        if slug and slug not in variants:
+            variants.append(slug)
+        if None not in variants:
+            variants.append(None)
+    return variants
+
+
+def _compatible_scope_query(scope: Mapping[str, Any]) -> dict[str, Any]:
+    canonical = _scope_query(scope)
+    return {
+        field: {"$in": _value_variants(value, field=field)}
+        for field, value in canonical.items()
+    }
+
+
+def _scope_matches(record: Mapping[str, Any], scope: Mapping[str, Any]) -> bool:
+    try:
+        return _scope_query(record) == _scope_query(scope)
+    except InvalidChatPromptQueueInput:
+        return False
+
+
 def _collection() -> Collection:
     coll = get_chat_prompt_queue_collection()
     if coll is None:
@@ -86,28 +189,93 @@ def build_queue_scope(
 ) -> dict[str, str | None]:
     """Build the persisted isolation scope for a user's queue."""
 
-    user_id = _coerce_scope_value(user_concept_id, field="user_concept_id")
-    org_id = _coerce_scope_value(
-        organisation_concept_id, field="organisation_concept_id", required=False
+    return _queue_scope_values(
+        {
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": organisation_concept_id,
+            "namespace": namespace,
+        }
     )
-    scope_namespace = _coerce_scope_value(namespace, field="namespace", required=False)
-    return {
-        "user_concept_id": user_id,
-        "organisation_concept_id": org_id,
-        "namespace": scope_namespace,
-    }
 
 
 def _scope_query(scope: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "user_concept_id": _coerce_scope_value(scope.get("user_concept_id"), field="user_concept_id"),
-        "organisation_concept_id": _coerce_scope_value(
-            scope.get("organisation_concept_id"),
-            field="organisation_concept_id",
-            required=False,
-        ),
-        "namespace": _coerce_scope_value(scope.get("namespace"), field="namespace", required=False),
+    return _queue_scope_values(scope)
+
+
+def _transition_not_found_error(
+    *,
+    scope: Mapping[str, Any],
+    queue_id: str,
+    expected_statuses: Sequence[str],
+    fallback_message: str,
+) -> ChatPromptQueueRecordNotFound:
+    doc = _collection().find_one({"queue_id": queue_id})
+    expected = [status for status in expected_statuses if status in VALID_STATUSES]
+    base_details: dict[str, Any] = {
+        "queue_id": queue_id,
+        "expected_statuses": expected,
     }
+    if not doc:
+        return ChatPromptQueueRecordNotFound(
+            fallback_message,
+            error_code="not_found",
+            details={**base_details, "exists": False},
+        )
+    current_status = doc.get("status")
+    scope_match = _scope_matches(doc, scope)
+    if not scope_match:
+        return ChatPromptQueueRecordNotFound(
+            "prompt queue record belongs to a different scope",
+            error_code="scope_mismatch",
+            details={
+                **base_details,
+                "exists": True,
+                "scope_match": False,
+                "current_status": current_status,
+            },
+        )
+    return ChatPromptQueueRecordNotFound(
+        f"prompt queue record is {current_status or 'unknown'}, not in the expected state",
+        error_code="wrong_state",
+        details={
+            **base_details,
+            "exists": True,
+            "scope_match": True,
+            "current_status": current_status,
+        },
+    )
+
+
+def expire_stale_in_progress_records(
+    *,
+    scope: Mapping[str, Any],
+    now: datetime | None = None,
+    stale_after_seconds: int = STALE_IN_PROGRESS_TIMEOUT_SECONDS,
+) -> int:
+    """Mark old in-progress records terminal so active queue state cannot persist forever."""
+
+    seconds = max(1, int(stale_after_seconds or STALE_IN_PROGRESS_TIMEOUT_SECONDS))
+    cutoff = (now or _now()) - timedelta(seconds=seconds)
+    result = _collection().update_many(
+        {
+            **_compatible_scope_query(scope),
+            "status": STATUS_IN_PROGRESS,
+            "$or": [
+                {"claimed_at": {"$lte": cutoff}},
+                {"claimed_at": None, "updated_at": {"$lte": cutoff}},
+            ],
+        },
+        {
+            "$set": {
+                **_scope_query(scope),
+                "status": STATUS_FAILED,
+                "updated_at": now or _now(),
+                "completed_at": now or _now(),
+                "last_error": STALE_IN_PROGRESS_LAST_ERROR,
+            }
+        },
+    )
+    return int(getattr(result, "modified_count", 0) or 0)
 
 
 def _serialise_datetime(value: Any) -> str | None:
@@ -148,8 +316,10 @@ def list_active_queue_records(
     if not allowed_statuses:
         allowed_statuses = list(ACTIVE_STATUSES)
     max_limit = max(1, min(int(limit or 100), 500))
+    if STATUS_IN_PROGRESS in allowed_statuses:
+        expire_stale_in_progress_records(scope=scope)
     query = {
-        **_scope_query(scope),
+        **_compatible_scope_query(scope),
         "status": {"$in": allowed_statuses},
     }
     docs = _collection().find(query).sort([("created_at", 1)]).limit(max_limit)
@@ -234,32 +404,40 @@ def update_queued_record(
         )
         set_fields["session_name"] = clean_session_name.strip() if clean_session_name else None
 
+    canonical_scope = _scope_query(scope)
     doc = _collection().find_one_and_update(
         {
-            **_scope_query(scope),
+            **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": STATUS_QUEUED,
         },
-        {"$set": set_fields},
+        {"$set": {**set_fields, **canonical_scope}},
         return_document=ReturnDocument.AFTER,
     )
     record = serialise_queue_record(doc)
     if record is None:
-        raise ChatPromptQueueRecordNotFound("queued prompt was not found")
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=[STATUS_QUEUED],
+            fallback_message="queued prompt was not found",
+        )
     return record
 
 
 def claim_queue_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, Any]:
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     now = _now()
+    canonical_scope = _scope_query(scope)
     doc = _collection().find_one_and_update(
         {
-            **_scope_query(scope),
+            **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": STATUS_QUEUED,
         },
         {
             "$set": {
+                **canonical_scope,
                 "status": STATUS_IN_PROGRESS,
                 "claimed_at": now,
                 "updated_at": now,
@@ -272,21 +450,28 @@ def claim_queue_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, 
     )
     record = serialise_queue_record(doc)
     if record is None:
-        raise ChatPromptQueueRecordNotFound("queued prompt was not found")
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=[STATUS_QUEUED],
+            fallback_message="queued prompt was not found",
+        )
     return record
 
 
 def requeue_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, Any]:
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     now = _now()
+    canonical_scope = _scope_query(scope)
     doc = _collection().find_one_and_update(
         {
-            **_scope_query(scope),
+            **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": STATUS_IN_PROGRESS,
         },
         {
             "$set": {
+                **canonical_scope,
                 "status": STATUS_QUEUED,
                 "queued_at": now,
                 "updated_at": now,
@@ -300,7 +485,12 @@ def requeue_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[st
     )
     record = serialise_queue_record(doc)
     if record is None:
-        raise ChatPromptQueueRecordNotFound("in-progress prompt was not found")
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=[STATUS_IN_PROGRESS],
+            fallback_message="in-progress prompt was not found",
+        )
     return record
 
 
@@ -315,14 +505,16 @@ def finish_prompt_record(
         raise InvalidChatPromptQueueInput("status must be a terminal queue status")
     queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
     now = _now()
+    canonical_scope = _scope_query(scope)
     doc = _collection().find_one_and_update(
         {
-            **_scope_query(scope),
+            **_compatible_scope_query(scope),
             "queue_id": queue_id_clean,
             "status": {"$in": ACTIVE_STATUSES},
         },
         {
             "$set": {
+                **canonical_scope,
                 "status": status,
                 "updated_at": now,
                 "completed_at": now,
@@ -338,7 +530,12 @@ def finish_prompt_record(
     )
     record = serialise_queue_record(doc)
     if record is None:
-        raise ChatPromptQueueRecordNotFound("active prompt was not found")
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=ACTIVE_STATUSES,
+            fallback_message="active prompt was not found",
+        )
     return record
 
 

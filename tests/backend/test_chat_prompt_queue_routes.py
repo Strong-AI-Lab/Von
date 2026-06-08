@@ -89,3 +89,25 @@ def test_chat_prompt_queue_requires_authenticated_session() -> None:
 
     assert resp.status_code == 401
     assert resp.get_json()["error"] == "Not authenticated"
+    assert resp.get_json()["error_code"] == "not_authenticated"
+
+
+def test_chat_prompt_queue_claim_reports_terminal_wrong_state(client) -> None:
+    create_resp = client.post(
+        "/von/api/chat_prompt_queue",
+        json={"prompt_raw": "Run once"},
+    )
+    assert create_resp.status_code == 201
+    queue_id = create_resp.get_json()["item"]["queue_id"]
+
+    finish_resp = client.post(
+        f"/von/api/chat_prompt_queue/{queue_id}/finish",
+        json={"status": "completed"},
+    )
+    assert finish_resp.status_code == 200
+
+    claim_resp = client.post(f"/von/api/chat_prompt_queue/{queue_id}/claim")
+    assert claim_resp.status_code == 404
+    payload = claim_resp.get_json()
+    assert payload["error_code"] == "wrong_state"
+    assert payload["details"]["current_status"] == "completed"

@@ -27728,9 +27728,50 @@ async function fetchChatPromptQueueJson(path = '', options = {}) {
         // Leave data as null when the endpoint returns an empty/non-JSON response.
     }
     if (!response.ok || data?.success === false) {
-        throw new Error(data?.error || `HTTP ${response.status}`);
+        const error = new Error(data?.error || `HTTP ${response.status}`);
+        error.httpStatus = response.status;
+        error.errorCode = data?.error_code || (response.status === 401 ? 'not_authenticated' : null);
+        error.details = data?.details && typeof data.details === 'object' ? data.details : {};
+        throw error;
     }
     return data || {};
+}
+
+function describeChatPromptQueueApiError(error, fallbackMessage) {
+    const code = typeof error?.errorCode === 'string' ? error.errorCode : null;
+    const details = error?.details && typeof error.details === 'object' ? error.details : {};
+    const currentStatus = typeof details.current_status === 'string' ? details.current_status : null;
+    if (code === 'not_authenticated') {
+        return 'Queue sync needs a signed-in browser session.';
+    }
+    if (code === 'backend_unavailable') {
+        return 'Queue storage is temporarily unavailable.';
+    }
+    if (code === 'scope_mismatch') {
+        return 'This queued task belongs to a different browser or organisation scope.';
+    }
+    if (code === 'wrong_state') {
+        if (currentStatus === CHAT_PROMPT_QUEUE_STATUS_COMPLETED) {
+            return 'This queued task already completed on the server.';
+        }
+        if (currentStatus === CHAT_PROMPT_QUEUE_STATUS_FAILED) {
+            return 'This queued task is already marked failed on the server.';
+        }
+        if (currentStatus === CHAT_PROMPT_QUEUE_STATUS_CANCELLED) {
+            return 'This queued task is already cancelled on the server.';
+        }
+        if (currentStatus === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS) {
+            return 'This queued task is already running on the server.';
+        }
+        return 'This queued task is no longer in the expected server state.';
+    }
+    if (code === 'not_found') {
+        return 'This queued task is no longer on the server.';
+    }
+    if (code === 'invalid_input') {
+        return 'This queued task could not be saved because its stored data is invalid.';
+    }
+    return fallbackMessage;
 }
 
 function mergePersistedChatPromptQueueEntry(entry) {
@@ -27828,7 +27869,10 @@ function schedulePersistedQueuedPromptUpdate(entry) {
                 renderChatTaskQueuePanel();
             }
         } catch (error) {
-            entry.syncError = 'Queued edit is not saved on the server yet.';
+            entry.syncError = describeChatPromptQueueApiError(
+                error,
+                'Queued edit is not saved on the server yet.'
+            );
             console.warn('[chatTab] Unable to update persisted queued prompt:', error);
             renderChatTaskQueuePanel();
         }
@@ -27960,7 +28004,10 @@ function ensureChatTaskQueuePanel() {
                         updateSendButtonForCurrentChatState();
                         scheduleQueuedChatPromptDrain();
                     } catch (error) {
-                        queued.syncError = 'Restart could not be saved on the server.';
+                        queued.syncError = describeChatPromptQueueApiError(
+                            error,
+                            'Restart could not be saved on the server.'
+                        );
                         console.warn('[chatTab] Unable to restart persisted prompt:', error);
                         renderChatTaskQueuePanel();
                     }
@@ -28135,7 +28182,10 @@ async function queuePromptForLater(promptRaw, options = {}) {
             return persisted;
         }
     } catch (error) {
-        localEntry.syncError = 'Queued locally; server persistence failed.';
+        localEntry.syncError = describeChatPromptQueueApiError(
+            error,
+            'Queued locally; server persistence failed.'
+        );
         console.warn('[chatTab] Unable to persist queued prompt:', error);
         renderChatTaskQueuePanel();
     }
@@ -28175,7 +28225,12 @@ async function drainQueuedChatPromptIfIdle() {
 
     if (nextEntry.queueId) {
         try {
-            nextEntry = await persistQueuedPromptUpdateNow(nextEntry);
+            const updatedEntry = await persistQueuedPromptUpdateNow(nextEntry);
+            nextEntry = {
+                ...nextEntry,
+                ...updatedEntry
+            };
+            queuedChatPrompts[nextIndex] = nextEntry;
             const claimed = await claimPersistedChatPromptQueueEntry(nextEntry);
             nextEntry = {
                 ...nextEntry,
@@ -28183,7 +28238,11 @@ async function drainQueuedChatPromptIfIdle() {
                 status: CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
             };
         } catch (error) {
-            nextEntry.syncError = 'Could not save and claim this queued task on the server.';
+            const failedEntry = queuedChatPrompts[nextIndex] || nextEntry;
+            failedEntry.syncError = describeChatPromptQueueApiError(
+                error,
+                'Could not save and claim this queued task on the server.'
+            );
             console.warn('[chatTab] Unable to claim queued prompt:', error);
             renderChatTaskQueuePanel();
             refreshChatSessionTabActivityIndicators();
@@ -28609,6 +28668,7 @@ async function handleSendPrompt(options = {}) {
                 );
             } catch (error) {
                 console.warn('[chatTab] Unable to finish persisted prompt queue record:', error);
+                void refreshChatPromptQueueFromServer({ silent: true });
             }
         }
         if (isLiveChatRequest(request)) {
