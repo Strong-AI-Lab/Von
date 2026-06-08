@@ -158,6 +158,16 @@ represented authority before filing Jira work.
   versus tool-pipeline override policy, external multi-surface recovery,
   single-candidate workflow-execute recovery, or model/user-visible recovery
   wording.
+- Maintenance or diagnostics workflows are still workflows. If a diagnostic
+  workflow graph is built as `WorkflowDefinition(...)`, registered with
+  `source="built_in"`, and republished from startup/bootstrap Python, file a
+  drift task even when the diagnostic tool and finalise action are legitimate
+  support surfaces.
+- Selector recovery is drift when Python changes a failed/default selection
+  into a concrete specialised workflow or authors fallback reasoning. A
+  represented fast-path evaluator can be support-only only when policy,
+  eligibility, and authority source come from represented metadata and absence
+  fails closed or falls through to the selector LLM.
 
 ## Recent Examples
 
@@ -216,3 +226,5 @@ represented authority before filing Jira work.
 - `JVNAUTOSCI-2365` - turn-contract dispatch override policy, including
   direct-response/tool-pipeline override, external multi-surface recovery, and
   workflow-execute single-candidate recovery, is authored in the orchestrator.
+- `JVNAUTOSCI-2472` - Python-authored Mongo diagnostics maintenance workflow
+  graph and startup publication should move to Vontology-stored VWL.
