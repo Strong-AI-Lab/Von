@@ -2891,6 +2891,93 @@ function buildRetainedThinkingCardDetailId(turnId) {
     return `thinkingCardDetailRetained-${cleanTurnId || `card-${Date.now()}`}`;
 }
 
+function hasTurnExecutionDiagnostics(debugData) {
+    return Boolean(
+        debugData
+        && typeof debugData === 'object'
+        && debugData.turn_execution_diagnostics
+        && typeof debugData.turn_execution_diagnostics === 'object'
+    );
+}
+
+function hasLoadableThinkingHistoryLocation(debugData) {
+    const historyLocation = (
+        debugData
+        && typeof debugData === 'object'
+        && debugData.history_location
+        && typeof debugData.history_location === 'object'
+    )
+        ? debugData.history_location
+        : null;
+    return Boolean(
+        historyLocation
+        && historyLocation.session_id
+        && historyLocation.history_index !== undefined
+        && historyLocation.history_index !== null
+    );
+}
+
+function renderRetainedThinkingUnavailableState(turnId, message = 'Thinking details not stored for this turn') {
+    const slot = getThinkingCardSlotForTurn(turnId);
+    if (!(slot instanceof HTMLElement)) {
+        return false;
+    }
+    const notice = document.createElement('div');
+    notice.className = 'thinking-card-history-placeholder is-unavailable';
+    notice.setAttribute('role', 'status');
+    notice.textContent = message;
+    slot.replaceChildren(notice);
+    return true;
+}
+
+function renderLoadableRetainedThinkingPlaceholder(turnId, debugData = null) {
+    if (!turnId || hasTurnExecutionDiagnostics(debugData) || !hasLoadableThinkingHistoryLocation(debugData)) {
+        return false;
+    }
+    const slot = getThinkingCardSlotForTurn(turnId);
+    if (!(slot instanceof HTMLElement)) {
+        return false;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'thinking-card-history-placeholder';
+    wrapper.setAttribute('role', 'group');
+    wrapper.setAttribute('aria-label', 'Stored Thinking details');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn thinking-card-history-load-button';
+    button.textContent = 'Thinking available, load details';
+    button.title = 'Load stored Thinking details for this turn';
+    button.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const originalText = button.textContent;
+        const originalTitle = button.title;
+        button.disabled = true;
+        button.classList.add('loading');
+        button.textContent = 'Loading Thinking details...';
+        button.title = 'Loading stored Thinking details';
+        try {
+            const loaded = await loadLlmDebugDataForTurn(turnId, { button: null });
+            if (!renderRetainedThinkingCardForDebugData(turnId, loaded)) {
+                renderRetainedThinkingUnavailableState(turnId);
+            }
+        } finally {
+            if (button.isConnected) {
+                button.disabled = false;
+                button.classList.remove('loading');
+                button.textContent = originalText || 'Thinking available, load details';
+                button.title = originalTitle || 'Load stored Thinking details for this turn';
+            }
+        }
+    });
+
+    wrapper.appendChild(button);
+    slot.replaceChildren(wrapper);
+    return true;
+}
+
 function createRetainedThinkingCardWrapper(turnId) {
     const detailId = buildRetainedThinkingCardDetailId(turnId);
     const wrapper = document.createElement('div');
@@ -2983,10 +3070,7 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
         return null;
     }
 
-    const diagnostics = (
-        debugData.turn_execution_diagnostics
-        && typeof debugData.turn_execution_diagnostics === 'object'
-    )
+    const diagnostics = hasTurnExecutionDiagnostics(debugData)
         ? debugData.turn_execution_diagnostics
         : null;
     if (!diagnostics) {
@@ -22709,7 +22793,10 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
 
             appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
             if (msg.role === 'assistant') {
-                renderRetainedThinkingCardForDebugData(turnId, llmDebugData.get(turnId));
+                const debugData = llmDebugData.get(turnId);
+                if (!renderRetainedThinkingCardForDebugData(turnId, debugData)) {
+                    renderLoadableRetainedThinkingPlaceholder(turnId, debugData);
+                }
             }
         }
     });
@@ -29560,14 +29647,17 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
             if (!response.ok) {
                 if (response.status === 404 && data?.error === 'debug_not_available') {
                     showToast('No LLM debug data stored for this turn.');
+                    renderRetainedThinkingUnavailableState(turnId);
                 }
                 return null;
             }
             if (data?.success === false && data?.error === 'debug_not_available') {
                 showToast('No LLM debug data stored for this turn.');
+                renderRetainedThinkingUnavailableState(turnId);
                 return null;
             }
             if (!data || typeof data.llm_debug_data !== 'object') {
+                renderRetainedThinkingUnavailableState(turnId);
                 return null;
             }
             const merged = {
@@ -29581,10 +29671,13 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                     : (existing?.timestamp || null)
             };
             setLlmDebugDataEntry(turnId, merged);
-            renderRetainedThinkingCardForDebugData(turnId, merged);
+            if (!renderRetainedThinkingCardForDebugData(turnId, merged)) {
+                renderRetainedThinkingUnavailableState(turnId);
+            }
             return merged;
         } catch (err) {
             console.warn('[chatTab] Failed to load LLM debug data:', err);
+            renderRetainedThinkingUnavailableState(turnId, 'Thinking details could not be loaded for this turn');
             return null;
         } finally {
             if (button) {

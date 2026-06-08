@@ -1845,7 +1845,7 @@ describe('loadChatHistory degraded handling', () => {
         expect(card.textContent).toContain('View full LLM call log');
     });
 
-    test('loads history debug on demand and renders retained thinking card for locator-only turns', async () => {
+    test('shows loadable thinking placeholder for locator-only turns without eager debug fetch', async () => {
         __testOnly_setDisplayedHistorySession('session-1');
         Object.assign(navigator, {
             clipboard: { writeText: jest.fn().mockResolvedValue(undefined) }
@@ -1933,9 +1933,17 @@ describe('loadChatHistory degraded handling', () => {
 
         await __testOnly_loadChatHistory({ segments: 1 });
 
+        const eagerDebugFetches = global.fetch.mock.calls.filter(
+            ([url]) => typeof url === 'string' && url.startsWith('/von/history/debug?')
+        );
+        expect(eagerDebugFetches).toHaveLength(0);
+
+        const placeholder = document.querySelector('.thinking-card-history-placeholder');
+        expect(placeholder).not.toBeNull();
+        expect(placeholder.textContent).toContain('Thinking available, load details');
         expect(document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper')).toBeNull();
 
-        document.querySelector('.llm-debug-button').dispatchEvent(
+        document.querySelector('.thinking-card-history-load-button').dispatchEvent(
             new MouseEvent('click', { bubbles: true, shiftKey: true })
         );
         await Promise.resolve();
@@ -1945,6 +1953,178 @@ describe('loadChatHistory degraded handling', () => {
         expect(card).not.toBeNull();
         expect(card.textContent).toContain('Selected workflow execution');
         expect(card.textContent).toContain('Every LLM interaction');
+    });
+
+    test('renders unavailable thinking state when lazy history debug is not stored', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [
+                            {
+                                role: 'assistant',
+                                content: 'Done',
+                                timestamp: '2026-06-02T14:13:00Z',
+                                history_location: {
+                                    session_id: 'session-1',
+                                    history_index: 4
+                                }
+                            }
+                        ],
+                        segments_returned: 1,
+                        total_segments: 1,
+                        has_more_history: false
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/debug?')) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 404,
+                    json: async () => ({
+                        success: false,
+                        error: 'debug_not_available'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await __testOnly_loadChatHistory({ segments: 1 });
+        document.querySelector('.thinking-card-history-load-button').dispatchEvent(
+            new MouseEvent('click', { bubbles: true })
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const slot = document.querySelector('.thinking-card-inline-slot');
+        expect(slot.textContent).toContain('Thinking details not stored for this turn');
+        expect(slot.querySelector('.thinking-card-history-placeholder.is-unavailable')).not.toBeNull();
+        expect(slot.querySelector('.thinking-card-wrapper')).toBeNull();
+    });
+
+    test('shares in-flight history debug hydration between placeholder and debug button clicks', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        let resolveDebugFetch;
+        const debugFetchPromise = new Promise((resolve) => {
+            resolveDebugFetch = resolve;
+        });
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [
+                            {
+                                role: 'assistant',
+                                content: 'Done',
+                                timestamp: '2026-06-02T14:13:00Z',
+                                history_location: {
+                                    session_id: 'session-1',
+                                    history_index: 4
+                                }
+                            }
+                        ],
+                        segments_returned: 1,
+                        total_segments: 1,
+                        has_more_history: false
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/debug?')) {
+                return debugFetchPromise;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await __testOnly_loadChatHistory({ segments: 1 });
+        const button = document.querySelector('.thinking-card-history-load-button');
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        document.querySelector('.llm-debug-button').dispatchEvent(
+            new MouseEvent('click', { bubbles: true, shiftKey: true })
+        );
+        await Promise.resolve();
+
+        expect(global.fetch.mock.calls.filter(
+            ([url]) => typeof url === 'string' && url.startsWith('/von/history/debug?')
+        )).toHaveLength(1);
+
+        resolveDebugFetch({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                success: true,
+                llm_debug_data: {
+                    timestamp: '2026-06-02T14:13:00Z',
+                    turn_execution_diagnostics: {
+                        request_id: 'request-history-duplicate-click',
+                        latest_progress: {
+                            status: 'completed',
+                            phase_label: 'Complete',
+                            result_summary: 'Shared fetch loaded'
+                        },
+                        workflow_stage_path: {
+                            path: [
+                                {
+                                    stage_id: 'selected_workflow_execution',
+                                    stage_label: 'Selected workflow execution'
+                                }
+                            ]
+                        }
+                    }
+                }
+            })
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const card = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
+        expect(card).not.toBeNull();
+        expect(card.textContent).toContain('Selected workflow execution');
     });
 });
 

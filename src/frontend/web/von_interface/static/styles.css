@@ -8826,6 +8826,45 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     display: none;
 }
 
+.thinking-card-history-placeholder {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    padding-left: clamp(24px, 4vw, 64px);
+    color: #64748b;
+    font-size: 0.78rem;
+}
+
+.thinking-card-history-placeholder.is-unavailable {
+    padding-top: 8px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.thinking-card-history-load-button {
+    min-height: 28px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.thinking-card-history-load-button:hover,
+.thinking-card-history-load-button:focus-visible {
+    border-color: #94a3b8;
+    background: #eef2f7;
+}
+
+.thinking-card-history-load-button.loading,
+.thinking-card-history-load-button:disabled {
+    cursor: wait;
+    opacity: 0.72;
+}
+
 .retained-thinking-card {
     margin-top: 4px;
     padding-left: clamp(24px, 4vw, 64px);
