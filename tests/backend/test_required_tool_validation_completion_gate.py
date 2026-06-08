@@ -323,6 +323,107 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
     )
 
 
+def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> None:
+    data: dict[str, Any] = {
+        "turn_execution_record": {
+            "required_effects": [
+                {
+                    "effect_id": "effect_required_tool_obligations_1",
+                    "intent_origin": "required_tool_obligation_ledger",
+                    "effect_type": "tool_execution",
+                    "required_tools": ["scholarly_paper.verify_representation"],
+                    "status": "not_executed",
+                    "status_reason": (
+                        "Required tool obligations were not satisfied: "
+                        "scholarly_paper.verify_representation"
+                    ),
+                    "failure_code": "required_tool_not_available_on_gateway",
+                    "failure_codes": ["required_tool_not_available_on_gateway"],
+                }
+            ],
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required tool execution was not observed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_required_tool_obligations_1"],
+                "blocking_failure_codes": ["required_tool_not_available_on_gateway"],
+                "evidence_payload": {
+                    "required_effect_count": 1,
+                    "unresolved_preconditions": [
+                        {
+                            "effect_id": "effect_required_tool_obligations_1",
+                            "effect_type": "tool_execution",
+                            "status": "not_executed",
+                            "status_reason": (
+                                "Required tool obligations were not satisfied: "
+                                "scholarly_paper.verify_representation"
+                            ),
+                            "failure_codes": [
+                                "required_tool_not_available_on_gateway"
+                            ],
+                        }
+                    ],
+                },
+            },
+        },
+        "required_prompt_tools": ["scholarly_paper.verify_representation"],
+        "prompt": "Represent this paper: https://arxiv.org/abs/2106.03245",
+        "final_response": "The paper has been successfully represented.",
+        "current_response": "The paper has been successfully represented.",
+        "invocations": [
+            {
+                "tool": "scholarly_paper.verify_representation",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "arxiv_id": "2106.03245",
+                    "scholarly_representation_verified": True,
+                    "paper_concept_id": "#V#paper_2106_03245",
+                },
+            }
+        ],
+        "aux_llm_calls": [],
+        "workflow_routing": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        "turn_expected_outcome_contract_state": {
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {"summary": "Represent arXiv:2106.03245."},
+            "required_tools": ["scholarly_paper.verify_representation"],
+        },
+        "turn_id": "req-stale-required-tool-effect",
+        "conversation_session_id": "session-stale-required-tool-effect",
+        "user_concept_id": "#V#user",
+        "org_concept_id": "#V#org",
+        "turn_execution_record_generated_at": "2026-05-02T00:00:00Z",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is True
+    assert result.outputs["completion_gate_requires_follow_up"] is False
+    assert result.outputs["completion_gate_blocking_failure_codes"] == []
+    assert any(
+        entry.get("type") == "completion_gate_record_rebuilt"
+        and entry.get("reason")
+        == "stale_required_tool_obligation_effect_satisfied_by_current_invocations"
+        for entry in data["aux_llm_calls"]
+    )
+
+
 def test_completion_gate_promotes_selected_workflow_response_to_response_text() -> None:
     data = {
         "turn_execution_record": {

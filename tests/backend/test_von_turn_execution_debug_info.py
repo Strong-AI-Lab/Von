@@ -75,6 +75,7 @@ def test_finalise_llm_debug_info_passes_supervised_structured_outputs_into_turn_
         "schema_version": "conversation_turn_selected_workflow_result.v1",
         "workflow_id": "#V#chat_assistant_workflow",
     }
+    assert captured["tool_invocations"] == []
     turn_execution_record = result["turn_execution_record"]
     assert (
         turn_execution_record["execution"]["selected_workflow_trace"]
@@ -82,6 +83,258 @@ def test_finalise_llm_debug_info_passes_supervised_structured_outputs_into_turn_
     )
     assert turn_execution_record["critic"]["verdict"] == {"verdict": "pass"}
     assert turn_execution_record["completion_gate_verdict"] == {"decision": "completed"}
+    assert result["completion_gate_verdict"]["decision"] == "completed"
+
+
+def test_finalise_llm_debug_info_prefers_turn_record_tool_invocation_evidence(
+    monkeypatch,
+) -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    captured: dict[str, Any] = {}
+
+    def _fake_build_turn_execution_record(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "workflow_routing_diagnostics": {},
+            "completion_gate": {"decision": "completed"},
+        }
+
+    monkeypatch.setattr(
+        von_routes, "build_turn_execution_record", _fake_build_turn_execution_record
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_runtime_code_version_info",
+        lambda: {"version": "test-version"},
+    )
+
+    rich_invocation = {
+        "tool": "scholarly_paper.verify_representation",
+        "status": "ok",
+        "effective_payload": {"scholarly_representation_verified": True},
+    }
+
+    von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "req-rich-evidence",
+            "interaction_timestamp_utc": "2026-06-07T00:00:00+00:00",
+            "response": "Represented.",
+            "tool_invocations": [
+                {
+                    "tool": "scholarly_paper.verify_representation",
+                    "status": "ok",
+                    "arguments": {},
+                }
+            ],
+            "turn_execution_record_tool_invocations": [rich_invocation],
+            "search_evidence": [],
+            "turn_execution_diagnostics": {},
+            "aux_llm_calls": [],
+        },
+        prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+        response_text="Represented.",
+        session_id="session-rich-evidence",
+        namespace="#V#michael_witbrock@sail_lab",
+        user_id="#V#michael_witbrock",
+        org_id="#V#sail_lab",
+        workflow_discovery=None,
+        workflow_routing=None,
+    )
+
+    assert captured["tool_invocations"] == [rich_invocation]
+
+
+def test_finalise_llm_debug_info_uses_bounded_evidence_for_arxiv_readback() -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+                "required_payload_fields": [
+                    "paper_concept_id",
+                    "file_copy_concept_id",
+                ],
+                "targets": ["2106.03245"],
+                "missing_failure_code": "arxiv_paper_representation_not_executed",
+                "wrong_target_failure_code": "arxiv_paper_representation_wrong_target",
+            }
+        ],
+    }
+    compact_invocation = {
+        "tool": "scholarly_paper.verify_representation",
+        "method": "scholarly_paper.verify_representation",
+        "status": "ok",
+        "arguments": {
+            "arxiv_id": "2106.03245",
+            "paper_concept_id": "#V#paper_2106_03245",
+            "file_copy_concept_id": "#V#file_copy_2106_03245",
+        },
+    }
+    rich_invocation = {
+        "tool": "scholarly_paper.verify_representation",
+        "method": "scholarly_paper.verify_representation",
+        "status": "ok",
+        "effective_payload": {
+            "arxiv_id": "2106.03245",
+            "paper_concept_id": "#V#paper_2106_03245",
+            "file_copy_concept_id": "#V#file_copy_2106_03245",
+            "scholarly_representation_verified": True,
+            "verification_failures": [],
+        },
+    }
+
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "req-arxiv-readback-finalise",
+            "interaction_timestamp_utc": "2026-06-07T00:00:00+00:00",
+            "response": (
+                "The paper has been successfully represented. "
+                "Paper concept: #V#paper_2106_03245."
+            ),
+            "tool_invocations": [compact_invocation],
+            "turn_execution_record_tool_invocations": [rich_invocation],
+            "search_evidence": [],
+            "turn_execution_diagnostics": {},
+            "aux_llm_calls": [],
+            "selected_workflow_trace": {
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "execution_mode": "custom_workflow",
+                "workflow_required_effects_contract": (
+                    workflow_required_effects_contract
+                ),
+                "workflow_required_effects_contract_source": "definition_metadata",
+            },
+            "completion_report": {
+                "schema_version": "conversation_turn_selected_workflow_result.v1",
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "workflow_required_effects_contract": (
+                    workflow_required_effects_contract
+                ),
+                "workflow_required_effects_contract_source": "definition_metadata",
+            },
+        },
+        prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+        response_text=(
+            "The paper has been successfully represented. "
+            "Paper concept: #V#paper_2106_03245."
+        ),
+        session_id="session-arxiv-readback-finalise",
+        namespace="#V#michael_witbrock@sail_lab",
+        user_id="#V#michael_witbrock",
+        org_id="#V#sail_lab",
+        workflow_discovery=None,
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+    )
+
+    record = result["turn_execution_record"]
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+    effect = effect_by_id["arxiv_paper_representation"]
+    assert effect["status"] == "satisfied"
+    assert effect["failure_codes"] == []
+    assert "paper_representation_not_verified" not in (
+        record["completion_gate"].get("blocking_failure_codes") or []
+    )
+    assert (
+        "arxiv_paper_representation"
+        not in record["completion_gate"]["evidence_payload"]["unresolved_effect_ids"]
+    )
+
+
+def test_finalise_llm_debug_info_republishes_canonical_completion_gate(
+    monkeypatch,
+) -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    canonical_gate = {
+        "decision": "completed",
+        "requires_follow_up": False,
+        "safe_to_claim_completion": True,
+        "blocking_effect_ids": [],
+        "blocking_failure_codes": [],
+    }
+    stale_gate = {
+        "decision": "escalation_required",
+        "requires_follow_up": True,
+        "safe_to_claim_completion": False,
+        "blocking_effect_ids": ["effect_required_tool_obligations_1"],
+        "blocking_failure_codes": ["required_tool_not_available_on_gateway"],
+    }
+
+    def _fake_build_turn_execution_record(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "workflow_routing_diagnostics": {
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "dispatch": {"required_effects_unresolved_effect_ids": []},
+            },
+            "completion_gate": dict(canonical_gate),
+        }
+
+    monkeypatch.setattr(
+        von_routes, "build_turn_execution_record", _fake_build_turn_execution_record
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_runtime_code_version_info",
+        lambda: {"version": "test-version"},
+    )
+
+    llm_debug_info = {
+        "request_id": "req-canonical-gate",
+        "interaction_timestamp_utc": "2026-06-07T00:00:00+00:00",
+        "response": "The paper has been represented.",
+        "tool_invocations": [],
+        "search_evidence": [],
+        "turn_execution_diagnostics": {
+            "completion_gate": dict(stale_gate),
+            "workflow_routing_diagnostics": {
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "dispatch": {
+                    "required_effects_unresolved_effect_ids": [
+                        "arxiv_paper_representation_1_2106_03245"
+                    ]
+                },
+            },
+        },
+        "aux_llm_calls": [],
+        "completion_gate_verdict": dict(stale_gate),
+    }
+
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info=llm_debug_info,
+        prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+        response_text="The paper has been represented.",
+        session_id="session-canonical-gate",
+        namespace="#V#michael_witbrock@sail_lab",
+        user_id="#V#michael_witbrock",
+        org_id="#V#sail_lab",
+        workflow_discovery={
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow"
+        },
+        workflow_routing={"workflow_id": "#V#arxiv_paper_representation_workflow"},
+    )
+
+    assert result["completion_gate"] == canonical_gate
+    assert result["completion_gate_verdict"] == canonical_gate
+    assert result["raw_completion_gate_verdict"] == stale_gate
+    assert result["turn_execution_diagnostics"]["completion_gate"] == canonical_gate
+    assert (
+        result["turn_execution_diagnostics"]["workflow_routing_diagnostics"][
+            "dispatch"
+        ]["required_effects_unresolved_effect_ids"]
+        == []
+    )
 
 
 def test_created_concept_label_extractor_ignores_existing_concept_results() -> None:

@@ -719,6 +719,253 @@ def test_selected_workflow_outputs_exposes_required_step_envelope_as_invocation(
     assert outputs["missing_prompt_tools"] == []
 
 
+def test_selected_workflow_outputs_loads_definition_contract_for_step_evidence(
+    monkeypatch,
+) -> None:
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+            }
+        ],
+    }
+    loaded_workflow_ids: list[str | None] = []
+
+    def _fake_load_workflow_required_effects_contract(
+        workflow_id: str | None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        loaded_workflow_ids.append(workflow_id)
+        return dict(workflow_required_effects_contract), "definition_metadata"
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.turn_execution_runtime_support._load_workflow_required_effects_contract",
+        _fake_load_workflow_required_effects_contract,
+    )
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#arxiv_paper_representation_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Paper represented.",
+            "arxiv_id": "2106.03245",
+            "workflow_step_result_envelopes": [
+                {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "get_metadata",
+                    "action_id": "get_paper_metadata",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "success": True,
+                        "arxiv_id": "2106.03245",
+                        "title": "Verification in the Loop",
+                    },
+                },
+                {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "verify_representation",
+                    "action_id": "scholarly_paper.verify_representation",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "scholarly_representation_verified": True,
+                        "paper_concept_id": "#V#paper_2106_03245",
+                        "file_copy_concept_id": "#V#file_copy_2106_03245",
+                    },
+                }
+            ],
+        },
+        rendered_child_response_text="Paper represented.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {"summary": "Represent arXiv:2106.03245."},
+            "required_tools": ["get_paper_metadata"],
+        },
+    )
+
+    assert loaded_workflow_ids == ["#V#arxiv_paper_representation_workflow"]
+    assert outputs["workflow_required_effects_contract"] == (
+        workflow_required_effects_contract
+    )
+    assert outputs["workflow_required_effects_contract_source"] == (
+        "definition_metadata"
+    )
+    assert outputs["completion_report"]["workflow_required_effects_contract_id"] == (
+        "arxiv_paper_representation_readback"
+    )
+    assert outputs["selected_workflow_trace"][
+        "workflow_required_effects_contract_id"
+    ] == "arxiv_paper_representation_readback"
+
+    invocations = outputs.get("invocations")
+    assert isinstance(invocations, list)
+    invocations_by_tool = {item["tool"]: item for item in invocations}
+    assert sorted(invocations_by_tool) == [
+        "get_paper_metadata",
+        "scholarly_paper.verify_representation",
+    ]
+    assert invocations_by_tool["get_paper_metadata"]["workflow_step_evidence"] is True
+    assert invocations_by_tool["get_paper_metadata"]["effective_payload"][
+        "arxiv_id"
+    ] == "2106.03245"
+    verifier_invocation = invocations_by_tool["scholarly_paper.verify_representation"]
+    assert verifier_invocation["workflow_step_evidence"] is True
+    assert verifier_invocation["effective_payload"]["arxiv_id"] == "2106.03245"
+    assert verifier_invocation["effective_payload"]["paper_concept_id"] == (
+        "#V#paper_2106_03245"
+    )
+
+
+def test_selected_workflow_outputs_satisfy_dynamic_arxiv_readback_effect(
+    monkeypatch,
+) -> None:
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+                "required_payload_fields": ["paper_concept_id"],
+                "targets_extractor": "arxiv_id_list",
+                "targets_source_expressions": [
+                    "selected_workflow_trace.expected_outcome_contract_state.fields.summary",
+                    "completion_report.turn_expected_outcome_contract_state.fields.summary",
+                    "workflow_discovery_result.discovery_query_input",
+                ],
+                "missing_failure_code": "arxiv_paper_representation_not_executed",
+                "wrong_target_failure_code": "arxiv_paper_representation_wrong_target",
+            }
+        ],
+    }
+
+    def _fake_load_workflow_required_effects_contract(
+        workflow_id: str | None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if workflow_id == "#V#arxiv_paper_representation_workflow":
+            return dict(workflow_required_effects_contract), "definition_metadata"
+        return None, None
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.turn_execution_runtime_support._load_workflow_required_effects_contract",
+        _fake_load_workflow_required_effects_contract,
+    )
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#arxiv_paper_representation_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "The paper has been successfully represented.",
+            "arxiv_id": "2106.03245",
+            "workflow_step_result_envelopes": [
+                {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "fetch_arxiv_metadata",
+                    "action_id": "get_paper_metadata",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "success": True,
+                        "arxiv_id": "2106.03245",
+                        "source_uri": "https://arxiv.org/abs/2106.03245",
+                        "paper_concept_id": (
+                            "#V#verification_in_the_loop_correct_by_construction_"
+                            "control_learning_with_reach_avoid_guarantees"
+                        ),
+                        "file_copy_concept_id": (
+                            "#V#arxiv_pdf_file_ed2803e9d2f04d829ffe65d792150afa"
+                        ),
+                    },
+                },
+                {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "verify_arxiv_path",
+                    "action_id": "scholarly_paper.verify_representation",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "output_payload": {
+                        "success": True,
+                        "arxiv_id": "2106.03245",
+                        "source_uri": "https://arxiv.org/abs/2106.03245",
+                        "paper_concept_id": (
+                            "#V#verification_in_the_loop_correct_by_construction_"
+                            "control_learning_with_reach_avoid_guarantees"
+                        ),
+                        "file_copy_concept_id": (
+                            "#V#arxiv_pdf_file_ed2803e9d2f04d829ffe65d792150afa"
+                        ),
+                        "result": True,
+                        "verification_profile": "arxiv",
+                        "require_file_copy": False,
+                        "scholarly_representation_verified": True,
+                        "verification_failures": [],
+                        "type_asserted": True,
+                        "file_link_verified": True,
+                    },
+                },
+            ],
+        },
+        rendered_child_response_text="The paper has been successfully represented.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {
+                "summary": "Represent this paper: https://arxiv.org/abs/2106.03245"
+            },
+            "required_tools": ["get_paper_metadata"],
+        },
+    )
+
+    record = build_turn_execution_record(
+        request_id="req-arxiv-readback",
+        session_id="session-1",
+        namespace="#V#test_namespace",
+        actor_concept_id="#V#michael_witbrock",
+        user_id="#V#michael_witbrock",
+        org_id="#V#university_of_auckland_strong_ai_lab",
+        prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+        response_text=outputs["final_response"],
+        interaction_timestamp_utc="2026-06-07T20:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=outputs["invocations"],
+        selected_workflow_trace=outputs["selected_workflow_trace"],
+        turn_expected_outcome_contract=outputs["turn_expected_outcome_contract_state"],
+        completion_report=outputs["completion_report"],
+        required_prompt_tools=outputs["required_prompt_tools"],
+    )
+
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+    workflow_effect = effect_by_id["arxiv_paper_representation_1_2106_03245"]
+    assert workflow_effect["status"] == "satisfied"
+    assert workflow_effect["targets"] == ["2106.03245"]
+    assert workflow_effect["failure_codes"] == []
+
+    gate = record["completion_gate"]
+    assert gate["decision"] == "completed"
+    assert gate["safe_to_claim_completion"] is True
+
+    summary = record["execution"]["summary"]
+    assert summary["workflow_required_effects_contract_id"] == (
+        "arxiv_paper_representation_readback"
+    )
+    assert summary["required_effects_unresolved_effect_ids"] == []
+    assert summary["required_effects_missing_required_tools"] == []
+
+
 def test_selected_workflow_outputs_credit_resolved_mcp_tool_step_evidence() -> None:
     workflow_required_effects_contract = {
         "schema_version": "workflow_required_effects_contract.v1",

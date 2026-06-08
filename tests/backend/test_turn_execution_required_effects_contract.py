@@ -571,6 +571,117 @@ def test_workflow_required_representation_contract_expands_arxiv_targets() -> No
     )
 
 
+def test_workflow_required_contract_uses_dispatch_workflow_id_when_routing_id_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "arxiv_paper_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "arxiv_paper_representation",
+                "effect_type": "scholarly_representation",
+                "required_tools": ["scholarly_paper.verify_representation"],
+                "missing_failure_code": "arxiv_paper_representation_not_executed",
+                "required_payload_fields": ["paper_concept_id"],
+            }
+        ],
+    }
+    loaded_workflow_ids: list[str | None] = []
+
+    def _fake_load_workflow_required_effects_contract(
+        *,
+        workflow_id: str | None,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        loaded_workflow_ids.append(workflow_id)
+        if workflow_id == "#V#arxiv_paper_representation_workflow":
+            return dict(workflow_contract), "definition_metadata"
+        return None, None
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_workflow_required_effects_contract",
+        _fake_load_workflow_required_effects_contract,
+    )
+
+    record = _build_record(
+        prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+        response_text="The paper has been successfully represented.",
+        workflow_routing={
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "custom_workflow",
+                "dispatch_workflow_id": "#V#arxiv_paper_representation_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "completed",
+                "selected_execution_mode": "custom_workflow",
+                "dispatch_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "completed": True,
+                "final_state": "completed",
+            },
+        ],
+        tool_invocations=[
+            {
+                "tool": "scholarly_paper.verify_representation",
+                "effective_payload": {
+                    "success": True,
+                    "arxiv_id": "2106.03245",
+                    "scholarly_representation_verified": True,
+                    "paper_concept_id": (
+                        "#V#verification_in_the_loop_correct_by_construction_"
+                        "control_learning_with_reach_avoid_guarantees"
+                    ),
+                    "file_copy_concept_id": "#V#file_copy_2106_03245",
+                },
+            }
+        ],
+    )
+
+    assert loaded_workflow_ids == ["#V#arxiv_paper_representation_workflow"]
+    workflow_effects = [
+        effect
+        for effect in (record.get("required_effects") or [])
+        if isinstance(effect, dict)
+        and effect.get("intent_origin") == "workflow_authored"
+    ]
+    assert len(workflow_effects) == 1
+    effect = workflow_effects[0]
+    assert effect.get("effect_id") == "arxiv_paper_representation"
+    assert effect.get("status") == "satisfied"
+
+    execution_summary = (record.get("execution") or {}).get("summary") or {}
+    assert execution_summary.get("selected_workflow_id") == (
+        "#V#arxiv_paper_representation_workflow"
+    )
+    assert execution_summary.get("selected_workflow_id_source") == (
+        "dispatch_workflow_id"
+    )
+    assert execution_summary.get("workflow_required_effects_contract_id") == (
+        "arxiv_paper_representation_readback"
+    )
+    assert execution_summary.get("workflow_required_effects_materialised_count") == 1
+    assert execution_summary.get("required_effects_unresolved_effect_ids") == []
+
+    dispatch = ((record.get("workflow_routing_diagnostics") or {}).get("dispatch")) or {}
+    assert dispatch.get("workflow_required_effects_contract_id") == (
+        "arxiv_paper_representation_readback"
+    )
+    assert dispatch.get("workflow_required_effects_materialised_count") == 1
+    assert dispatch.get("required_effects_unresolved_effect_ids") == []
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+
+
 def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_prompt_semantics() -> (
     None
 ):

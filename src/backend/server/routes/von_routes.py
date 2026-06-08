@@ -5675,6 +5675,59 @@ def _serialise_tool_invocations_for_llm_debug(
     return serialised
 
 
+def _serialise_tool_invocations_for_turn_execution_record(
+    tool_invocations: Any,
+) -> list[dict[str, Any]]:
+    """Persist bounded payload evidence needed by effect/read-back validators."""
+
+    if not isinstance(tool_invocations, list):
+        return []
+
+    serialised: list[dict[str, Any]] = []
+    for raw_invocation in tool_invocations:
+        if not isinstance(raw_invocation, Mapping):
+            continue
+
+        tool_name = raw_invocation.get("tool") or raw_invocation.get("method")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+        tool_name = tool_name.strip()
+
+        entry: dict[str, Any] = {
+            "tool": tool_name,
+            "method": tool_name,
+        }
+        for key in (
+            "status",
+            "error",
+            "error_code",
+            "blocked",
+            "call_id",
+            "result_summary",
+            "duration_ms",
+            "workflow_step_evidence",
+            "workflow_action_id",
+            "workflow_id",
+            "workflow_state_id",
+        ):
+            if key in raw_invocation:
+                entry[key] = raw_invocation.get(key)
+
+        for key in (
+            "effective_payload",
+            "payload",
+            "effective_arguments",
+            "arguments",
+        ):
+            value = raw_invocation.get(key)
+            if isinstance(value, Mapping):
+                entry[key] = _sanitise_diagnostic_export_payload(value)
+
+        serialised.append(entry)
+
+    return serialised
+
+
 def _reconstruct_tool_messages_from_invocations(
     tool_invocations: Any,
     *,
@@ -6328,13 +6381,20 @@ def _finalise_llm_debug_info(
         if isinstance(llm_debug_info.get("tool_invocations"), list)
         else []
     )
+    turn_record_tool_invocations_payload = (
+        llm_debug_info.get("turn_execution_record_tool_invocations")
+        if isinstance(llm_debug_info.get("turn_execution_record_tool_invocations"), list)
+        else tool_invocations_payload
+    )
     search_evidence_payload = (
         llm_debug_info.get("search_evidence")
         if isinstance(llm_debug_info.get("search_evidence"), list)
         else None
     )
     if search_evidence_payload is None:
-        search_evidence_payload = build_search_tool_evidence(tool_invocations_payload)
+        search_evidence_payload = build_search_tool_evidence(
+            turn_record_tool_invocations_payload
+        )
         if search_evidence_payload:
             llm_debug_info["search_evidence"] = search_evidence_payload
 
@@ -6391,7 +6451,7 @@ def _finalise_llm_debug_info(
             interaction_timestamp_utc=llm_debug_info.get("interaction_timestamp_utc"),
             workflow_discovery=workflow_discovery_payload,
             workflow_routing=workflow_routing_payload,
-            tool_invocations=tool_invocations_payload,
+            tool_invocations=turn_record_tool_invocations_payload,
             search_evidence=search_evidence_payload,
             turn_execution_diagnostics=(
                 llm_debug_info.get("turn_execution_diagnostics")
@@ -6452,6 +6512,18 @@ def _finalise_llm_debug_info(
                 diagnostics_payload["workflow_routing_diagnostics"] = dict(
                     routing_diagnostics
                 )
+        completion_gate = turn_execution_record.get("completion_gate")
+        if isinstance(completion_gate, Mapping):
+            raw_completion_gate_verdict = llm_debug_info.get("completion_gate_verdict")
+            if isinstance(raw_completion_gate_verdict, Mapping):
+                llm_debug_info["raw_completion_gate_verdict"] = dict(
+                    raw_completion_gate_verdict
+                )
+            llm_debug_info["completion_gate"] = dict(completion_gate)
+            llm_debug_info["completion_gate_verdict"] = dict(completion_gate)
+            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
+            if isinstance(diagnostics_payload, dict):
+                diagnostics_payload["completion_gate"] = dict(completion_gate)
     except Exception as exc:
         try:
             current_app.logger.warning(
@@ -13361,6 +13433,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
             tool_invocations
         )
+        turn_record_tool_invocations = (
+            _serialise_tool_invocations_for_turn_execution_record(tool_invocations)
+        )
         search_evidence = build_search_tool_evidence(tool_invocations)
 
         llm_debug_info = {
@@ -13415,6 +13490,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "context_concept_references": context_concept_references,
             "tool_stats": tool_stats,  # MCP tool result statistics
             "tool_invocations": serialised_tool_invocations,
+            "turn_execution_record_tool_invocations": turn_record_tool_invocations,
             "search_evidence": search_evidence,
             "aux_llm_calls": auxiliary_llm_calls,
             "workflow_use_episodes": workflow_use_episodes,

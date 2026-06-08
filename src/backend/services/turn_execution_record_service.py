@@ -3808,6 +3808,24 @@ def build_workflow_routing_diagnostics(
                 )
                 or []
             ),
+            "workflow_required_effects_contract_id": _safe_str(
+                execution_summary_payload.get("workflow_required_effects_contract_id")
+            ),
+            "workflow_required_effects_declared_count": _safe_non_negative_int(
+                execution_summary_payload.get(
+                    "workflow_required_effects_declared_count"
+                )
+            ),
+            "workflow_required_effects_contract_source": _safe_str(
+                execution_summary_payload.get(
+                    "workflow_required_effects_contract_source"
+                )
+            ),
+            "workflow_required_effects_materialised_count": _safe_non_negative_int(
+                execution_summary_payload.get(
+                    "workflow_required_effects_materialised_count"
+                )
+            ),
             "required_tool_obligations": required_tool_obligations_payload,
             "required_tool_obligation_unsatisfied_count": _safe_non_negative_int(
                 execution_summary_payload.get(
@@ -8104,6 +8122,13 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
         selected_workflow_trace=selected_workflow_trace_payload,
     )
+    dispatched_workflow_id = _safe_str(execution_summary.get("dispatch_workflow_id"))
+    if dispatched_workflow_id and not selected_workflow_id:
+        selected_workflow_id = dispatched_workflow_id
+        execution_summary = dict(execution_summary)
+        if not _safe_str(execution_summary.get("selected_workflow_id")):
+            execution_summary["selected_workflow_id"] = dispatched_workflow_id
+            execution_summary["selected_workflow_id_source"] = "dispatch_workflow_id"
     (
         execution_surface_successful_tools,
         execution_surface_failed_tools,
@@ -8439,23 +8464,6 @@ def build_turn_execution_record(
             execution_summary["tool_call_repair_outcome"] = repair_outcome
         if repair_stop_reason:
             execution_summary["tool_call_repair_stop_reason"] = repair_stop_reason
-    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
-        workflow_discovery=workflow_discovery,
-        workflow_routing=workflow_routing,
-        turn_execution_diagnostics=(
-            turn_execution_diagnostics
-            if isinstance(turn_execution_diagnostics, Mapping)
-            else None
-        ),
-        aux_llm_calls=aux_llm_calls,
-        turn_expected_outcome_contract=(
-            resolved_turn_expected_outcome_contract.to_state_payload()
-            if turn_expected_outcome_contract_available
-            else None
-        ),
-        execution_summary=execution_summary,
-    )
-
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,
         successful_write_tools=effective_successful_write_tools,
@@ -8667,6 +8675,23 @@ def build_turn_execution_record(
         execution_summary_with_contract["missing_prompt_tools"] = list(
             effective_missing_prompt_tools
         )
+
+    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=workflow_discovery,
+        workflow_routing=workflow_routing,
+        turn_execution_diagnostics=(
+            turn_execution_diagnostics
+            if isinstance(turn_execution_diagnostics, Mapping)
+            else None
+        ),
+        aux_llm_calls=aux_llm_calls,
+        turn_expected_outcome_contract=(
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_available
+            else None
+        ),
+        execution_summary=execution_summary_with_contract,
+    )
 
     llm_call_log = [
         {str(key): value for key, value in entry.items() if isinstance(key, str)}

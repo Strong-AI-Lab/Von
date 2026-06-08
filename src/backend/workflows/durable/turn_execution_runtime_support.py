@@ -704,6 +704,46 @@ def _required_tools_from_workflow_required_effects_contract(
     return _dedupe_string_sequence(tools)
 
 
+def _load_workflow_required_effects_contract(
+    workflow_id: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    workflow_id_value = _safe_str(workflow_id)
+    if not workflow_id_value:
+        return None, None
+
+    definition = None
+    try:
+        from ..registry_factory import get_shared_workflow_registry_read_only
+
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+        if registry is not None:
+            registration = registry.get_registration(workflow_id_value)
+            if registration is not None:
+                definition = registration.definition
+    except Exception:
+        definition = None
+
+    if definition is None:
+        try:
+            from ..vontology_loader import load_workflow_definition_from_vontology
+
+            definition = load_workflow_definition_from_vontology(workflow_id_value)
+        except Exception:
+            definition = None
+
+    metadata_raw = getattr(definition, "metadata", None)
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    contract = metadata.get("required_effects_contract")
+    if not isinstance(contract, Mapping):
+        return None, None
+
+    source = _safe_str(metadata.get("required_effects_contract_source"))
+    return (
+        {str(key): value for key, value in contract.items() if isinstance(key, str)},
+        source or "definition_metadata",
+    )
+
+
 def _derive_required_effect_invocations_from_workflow_steps(
     *,
     child_outputs: Mapping[str, Any],
@@ -1554,6 +1594,77 @@ def _completion_gate_record_lacks_required_tool_effects(
     return required_effect_count <= 0 and safe_to_claim and not requires_follow_up
 
 
+def _completion_gate_record_has_stale_required_tool_obligation_effect(
+    *,
+    record: Mapping[str, Any],
+    data: Mapping[str, Any],
+) -> bool:
+    required_effects = record.get("required_effects")
+    if not isinstance(required_effects, list) or not required_effects:
+        return False
+
+    stale_required_tools: list[str] = []
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        effect_id = _safe_str(effect.get("effect_id"))
+        intent_origin = _safe_str(effect.get("intent_origin"))
+        if not (
+            effect_id == "effect_required_tool_obligations_1"
+            or intent_origin == "required_tool_obligation_ledger"
+        ):
+            continue
+        effect_status = _safe_str(effect.get("status"))
+        if effect_status not in {"not_executed", "not_satisfied"}:
+            continue
+        stale_required_tools.extend(
+            _dedupe_string_sequence(effect.get("required_tools") or [])
+        )
+
+    stale_required_tools = _dedupe_string_sequence(stale_required_tools)
+    if not stale_required_tools:
+        return False
+
+    raw_invocations = data.get("invocations")
+    invocations = raw_invocations if isinstance(raw_invocations, list) else []
+    if not invocations:
+        return False
+
+    try:
+        from ...services.required_tool_obligation_service import (
+            build_required_tool_obligation_ledger,
+        )
+
+        refreshed_ledger = build_required_tool_obligation_ledger(
+            required_tools=stale_required_tools,
+            invocations=[
+                invocation for invocation in invocations if isinstance(invocation, Mapping)
+            ],
+        )
+    except Exception:
+        return False
+
+    return (
+        int(refreshed_ledger.get("required_tool_count") or 0) > 0
+        and int(refreshed_ledger.get("unsatisfied_count") or 0) == 0
+    )
+
+
+def _completion_gate_record_rebuild_reason(
+    *,
+    record: Mapping[str, Any],
+    data: Mapping[str, Any],
+) -> str | None:
+    if _completion_gate_record_lacks_required_tool_effects(record=record, data=data):
+        return "stale_zero_required_effects_with_required_tools"
+    if _completion_gate_record_has_stale_required_tool_obligation_effect(
+        record=record,
+        data=data,
+    ):
+        return "stale_required_tool_obligation_effect_satisfied_by_current_invocations"
+    return None
+
+
 def render_selected_workflow_user_response(
     *,
     selected_workflow_id: str | None,
@@ -1917,6 +2028,18 @@ def build_turn_execution_selected_workflow_outputs(
     workflow_required_effects_contract_source = _safe_str(
         child_outputs_map.get("workflow_required_effects_contract_source")
     )
+    if workflow_required_effects_contract_payload is None:
+        (
+            loaded_contract,
+            loaded_contract_source,
+        ) = _load_workflow_required_effects_contract(clean_selected_workflow_id)
+        if isinstance(loaded_contract, Mapping):
+            workflow_required_effects_contract_payload = loaded_contract
+            workflow_required_effects_contract_source = (
+                workflow_required_effects_contract_source
+                or loaded_contract_source
+                or "definition_metadata"
+            )
     workflow_required_effects_contract_id = _safe_str(
         child_outputs_map.get("workflow_required_effects_contract_id")
     ) or (
@@ -2001,10 +2124,16 @@ def build_turn_execution_selected_workflow_outputs(
         ),
         child_allowed_tools,
     )
+    contract_required_tools = _filter_string_sequence_to_allowed(
+        resolved_turn_expected_outcome_contract.required_tools,
+        child_allowed_tools,
+    )
     derived_workflow_step_invocations = (
         _derive_required_effect_invocations_from_workflow_steps(
             child_outputs=child_outputs_map,
-            required_tools=workflow_required_tools,
+            required_tools=_dedupe_string_sequence(
+                [*workflow_required_tools, *contract_required_tools]
+            ),
         )
     )
     child_invocation_maps = _merge_mapping_sequences(
@@ -2013,10 +2142,6 @@ def build_turn_execution_selected_workflow_outputs(
     )
     if child_invocation_maps:
         outputs["invocations"] = list(child_invocation_maps)
-    contract_required_tools = _filter_string_sequence_to_allowed(
-        resolved_turn_expected_outcome_contract.required_tools,
-        child_allowed_tools,
-    )
     contract_missing_tools = _missing_required_tools_from_invocations(
         required_tools=contract_required_tools,
         invocations=child_invocation_maps,
@@ -2654,13 +2779,12 @@ def run_turn_execution_completion_gate(
 
     data = request.data
     record = data.get("turn_execution_record")
-    record_is_stale = bool(
-        isinstance(record, Mapping)
-        and _completion_gate_record_lacks_required_tool_effects(
-            record=record,
-            data=data,
-        )
+    record_rebuild_reason = (
+        _completion_gate_record_rebuild_reason(record=record, data=data)
+        if isinstance(record, Mapping)
+        else None
     )
+    record_is_stale = bool(record_rebuild_reason)
     if not isinstance(record, Mapping) or record_is_stale:
         critic_result = run_turn_execution_critic(
             request,
@@ -2679,7 +2803,7 @@ def run_turn_execution_completion_gate(
                         annotate_python_decision_event(
                             {
                                 "type": "completion_gate_record_rebuilt",
-                                "reason": "stale_zero_required_effects_with_required_tools",
+                                "reason": record_rebuild_reason,
                                 "required_tools": _required_tools_from_turn_context(
                                     data
                                 ),
@@ -2690,7 +2814,8 @@ def run_turn_execution_completion_gate(
                             decision_class="completion_gate_record_rebuild",
                             decision_source="required_tool_contract_presence",
                             changed_outcome=True,
-                            reason_code="stale_zero_required_effects",
+                            reason_code=record_rebuild_reason
+                            or "stale_turn_execution_record",
                             possible_inappropriate_python_code_use=False,
                         )
                     )
