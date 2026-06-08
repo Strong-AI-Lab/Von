@@ -23,7 +23,7 @@ variable "region_name" {
   description = "OpenStack region name."
 
   validation {
-    condition     = trim(var.region_name) != ""
+    condition     = trimspace(var.region_name) != ""
     error_message = "region_name is required and cannot be empty."
   }
 }
@@ -33,7 +33,7 @@ variable "network_id" {
   description = "OpenStack network UUID for the instance NIC."
 
   validation {
-    condition     = trim(var.network_id) != ""
+    condition     = trimspace(var.network_id) != ""
     error_message = "network_id is required and cannot be empty."
   }
 }
@@ -43,7 +43,7 @@ variable "subnet_id" {
   description = "OpenStack subnet UUID for the primary fixed IP."
 
   validation {
-    condition     = trim(var.subnet_id) != ""
+    condition     = trimspace(var.subnet_id) != ""
     error_message = "subnet_id is required and cannot be empty."
   }
 }
@@ -54,7 +54,7 @@ variable "external_network_pool" {
   default     = ""
 
   validation {
-    condition     = (!var.assign_floating_ip || !var.create_floating_ip) || trim(var.external_network_pool) != ""
+    condition     = (!var.assign_floating_ip || !var.create_floating_ip) || trimspace(var.external_network_pool) != ""
     error_message = "external_network_pool must be set when assign_floating_ip=true and create_floating_ip=true."
   }
 }
@@ -64,7 +64,7 @@ variable "image_id" {
   description = "Image UUID used for the compute instance."
 
   validation {
-    condition     = trim(var.image_id) != ""
+    condition     = trimspace(var.image_id) != ""
     error_message = "image_id is required and cannot be empty."
   }
 }
@@ -74,7 +74,7 @@ variable "flavor_name" {
   description = "OpenStack flavor name."
 
   validation {
-    condition     = trim(var.flavor_name) != ""
+    condition     = trimspace(var.flavor_name) != ""
     error_message = "flavor_name is required and cannot be empty."
   }
 }
@@ -84,7 +84,7 @@ variable "key_pair_name" {
   description = "OpenStack key pair name for SSH access."
 
   validation {
-    condition     = trim(var.key_pair_name) != ""
+    condition     = trimspace(var.key_pair_name) != ""
     error_message = "key_pair_name is required and cannot be empty."
   }
 }
@@ -121,7 +121,7 @@ variable "application_ingress_rules" {
   validation {
     condition = alltrue([
       for rule in var.application_ingress_rules :
-      trim(rule.protocol) != "" &&
+      trimspace(rule.protocol) != "" &&
       rule.port_range_min > 0 &&
       rule.port_range_max >= rule.port_range_min &&
       can(cidrhost(rule.remote_ip_prefix, 0))
@@ -195,7 +195,7 @@ variable "existing_floating_ip_address" {
   default     = null
 
   validation {
-    condition     = (!var.assign_floating_ip || var.create_floating_ip) || (var.existing_floating_ip_address != null && trim(var.existing_floating_ip_address) != "")
+    condition     = (!var.assign_floating_ip || var.create_floating_ip) || (var.existing_floating_ip_address != null && trimspace(var.existing_floating_ip_address) != "")
     error_message = "existing_floating_ip_address is required when assign_floating_ip=true and create_floating_ip=false."
   }
 }
@@ -290,7 +290,7 @@ variable "bootstrap_repo_url" {
   default     = "https://github.com/Strong-AI-Lab/Von.git"
 
   validation {
-    condition     = trim(var.bootstrap_repo_url) != ""
+    condition     = trimspace(var.bootstrap_repo_url) != ""
     error_message = "bootstrap_repo_url cannot be empty."
   }
 }
@@ -301,7 +301,7 @@ variable "bootstrap_repo_ref" {
   default     = "main"
 
   validation {
-    condition     = trim(var.bootstrap_repo_ref) != ""
+    condition     = trimspace(var.bootstrap_repo_ref) != ""
     error_message = "bootstrap_repo_ref cannot be empty."
   }
 }
@@ -312,7 +312,7 @@ variable "bootstrap_python_package" {
   default     = "python3"
 
   validation {
-    condition     = trim(var.bootstrap_python_package) != ""
+    condition     = trimspace(var.bootstrap_python_package) != ""
     error_message = "bootstrap_python_package cannot be empty."
   }
 }
@@ -323,7 +323,7 @@ variable "bootstrap_python_venv_package" {
   default     = "python3-venv"
 
   validation {
-    condition     = trim(var.bootstrap_python_venv_package) != ""
+    condition     = trimspace(var.bootstrap_python_venv_package) != ""
     error_message = "bootstrap_python_venv_package cannot be empty."
   }
 }
@@ -334,7 +334,7 @@ variable "bootstrap_app_host" {
   default     = "127.0.0.1"
 
   validation {
-    condition     = trim(var.bootstrap_app_host) != ""
+    condition     = trimspace(var.bootstrap_app_host) != ""
     error_message = "bootstrap_app_host cannot be empty."
   }
 }
@@ -356,7 +356,7 @@ variable "bootstrap_domain_name" {
   default     = "localhost"
 
   validation {
-    condition     = trim(var.bootstrap_domain_name) != ""
+    condition     = trimspace(var.bootstrap_domain_name) != ""
     error_message = "bootstrap_domain_name cannot be empty."
   }
 }
@@ -424,7 +424,7 @@ variable "bootstrap_flask_secret_key" {
   sensitive   = true
 
   validation {
-    condition     = var.bootstrap_flask_secret_key == null || length(trim(var.bootstrap_flask_secret_key)) >= 32
+    condition     = var.bootstrap_flask_secret_key == null || length(trimspace(var.bootstrap_flask_secret_key)) >= 32
     error_message = "bootstrap_flask_secret_key must be null or at least 32 characters."
   }
 }
@@ -435,7 +435,7 @@ variable "bootstrap_google_oauth_strict_startup" {
   default     = false
 
   validation {
-    condition     = !var.bootstrap_google_oauth_strict_startup || (var.bootstrap_google_oauth_redirect_uri != null && trim(var.bootstrap_google_oauth_redirect_uri) != "")
+    condition     = !var.bootstrap_google_oauth_strict_startup || (var.bootstrap_google_oauth_redirect_uri != null && trimspace(var.bootstrap_google_oauth_redirect_uri) != "")
     error_message = "bootstrap_google_oauth_redirect_uri must be provided when bootstrap_google_oauth_strict_startup=true."
   }
 }
@@ -446,7 +446,7 @@ variable "bootstrap_google_oauth_redirect_uri" {
   default     = null
 
   validation {
-    condition     = var.bootstrap_google_oauth_redirect_uri == null || can(regex("^https?://", trim(var.bootstrap_google_oauth_redirect_uri)))
+    condition     = var.bootstrap_google_oauth_redirect_uri == null || can(regex("^https?://", trimspace(var.bootstrap_google_oauth_redirect_uri)))
     error_message = "bootstrap_google_oauth_redirect_uri must be null or an absolute http/https URI."
   }
 }
@@ -458,7 +458,7 @@ variable "bootstrap_google_oauth_client_id" {
   sensitive   = true
 
   validation {
-    condition     = var.bootstrap_google_oauth_client_id == null || trim(var.bootstrap_google_oauth_client_id) != ""
+    condition     = var.bootstrap_google_oauth_client_id == null || trimspace(var.bootstrap_google_oauth_client_id) != ""
     error_message = "bootstrap_google_oauth_client_id must be null or non-empty."
   }
 }
@@ -470,7 +470,7 @@ variable "bootstrap_google_oauth_client_secret" {
   sensitive   = true
 
   validation {
-    condition     = var.bootstrap_google_oauth_client_secret == null || trim(var.bootstrap_google_oauth_client_secret) != ""
+    condition     = var.bootstrap_google_oauth_client_secret == null || trimspace(var.bootstrap_google_oauth_client_secret) != ""
     error_message = "bootstrap_google_oauth_client_secret must be null or non-empty."
   }
 
@@ -568,7 +568,7 @@ variable "bootstrap_mongo_uri" {
   sensitive   = true
 
   validation {
-    condition     = var.bootstrap_mongo_uri == null || can(regex("^mongodb(\\+srv)?://", trim(var.bootstrap_mongo_uri)))
+    condition     = var.bootstrap_mongo_uri == null || can(regex("^mongodb(\\+srv)?://", trimspace(var.bootstrap_mongo_uri)))
     error_message = "bootstrap_mongo_uri must be null or a mongodb:// / mongodb+srv:// URI."
   }
 }
@@ -590,7 +590,7 @@ variable "bootstrap_mongo_read_probe_collection" {
   default     = "application_settings"
 
   validation {
-    condition     = trim(var.bootstrap_mongo_read_probe_collection) != ""
+    condition     = trimspace(var.bootstrap_mongo_read_probe_collection) != ""
     error_message = "bootstrap_mongo_read_probe_collection cannot be empty."
   }
 }
@@ -601,7 +601,7 @@ variable "bootstrap_mongo_write_probe_collection" {
   default     = "_von_startup_probe"
 
   validation {
-    condition     = trim(var.bootstrap_mongo_write_probe_collection) != ""
+    condition     = trimspace(var.bootstrap_mongo_write_probe_collection) != ""
     error_message = "bootstrap_mongo_write_probe_collection cannot be empty."
   }
 }

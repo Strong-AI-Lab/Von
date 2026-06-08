@@ -3,7 +3,7 @@ variable "name" {
   description = "Compute instance name."
 
   validation {
-    condition     = trim(var.name) != ""
+    condition     = trimspace(var.name) != ""
     error_message = "name is required and cannot be empty."
   }
 }
@@ -13,7 +13,7 @@ variable "image_id" {
   description = "Image UUID for the compute instance."
 
   validation {
-    condition     = trim(var.image_id) != ""
+    condition     = trimspace(var.image_id) != ""
     error_message = "image_id is required and cannot be empty."
   }
 }
@@ -23,7 +23,7 @@ variable "flavor_name" {
   description = "OpenStack flavor name."
 
   validation {
-    condition     = trim(var.flavor_name) != ""
+    condition     = trimspace(var.flavor_name) != ""
     error_message = "flavor_name is required and cannot be empty."
   }
 }
@@ -33,7 +33,7 @@ variable "key_pair_name" {
   description = "OpenStack key pair name."
 
   validation {
-    condition     = trim(var.key_pair_name) != ""
+    condition     = trimspace(var.key_pair_name) != ""
     error_message = "key_pair_name is required and cannot be empty."
   }
 }
@@ -43,7 +43,7 @@ variable "network_id" {
   description = "Network UUID used by the primary port."
 
   validation {
-    condition     = trim(var.network_id) != ""
+    condition     = trimspace(var.network_id) != ""
     error_message = "network_id is required and cannot be empty."
   }
 }
@@ -53,7 +53,7 @@ variable "subnet_id" {
   description = "Subnet UUID used for the primary fixed IP."
 
   validation {
-    condition     = trim(var.subnet_id) != ""
+    condition     = trimspace(var.subnet_id) != ""
     error_message = "subnet_id is required and cannot be empty."
   }
 }

@@ -631,6 +631,30 @@ function Get-ProcessCommandLine {
     }
 }
 
+function Get-ProcessWorkingDirectory {
+    param([int]$ProcessId)
+    try {
+        if (-not $IsWindows) {
+            $lsof = Get-Command lsof -ErrorAction SilentlyContinue
+            if ($lsof) {
+                $lines = & $lsof.Source -a -p $ProcessId -d cwd -Fn 2>$null
+                foreach ($line in $lines) {
+                    if ($line -like 'n*') {
+                        return $line.Substring(1)
+                    }
+                }
+            }
+
+            $procCwd = "/proc/$ProcessId/cwd"
+            if (Test-Path $procCwd) {
+                return (Resolve-Path $procCwd -ErrorAction Stop).Path
+            }
+        }
+    }
+    catch { }
+    return ''
+}
+
 function Get-ProjectPythonExecutable {
     $candidatePaths = @()
     $pdmPythonPath = Join-Path $Root '.pdm-python'
@@ -725,8 +749,17 @@ function Test-IsVonMainProcess {
     $normalisedCmd = $cmdLine.ToLowerInvariant().Replace('\', '/')
     $normalisedRoot = $Root.ToLowerInvariant().Replace('\', '/')
     if (-not $normalisedCmd.Contains('src/workflows/von/main.py')) { return $false }
-    if (-not $normalisedCmd.Contains($normalisedRoot)) { return $false }
-    return $true
+    if ($normalisedCmd.Contains($normalisedRoot)) { return $true }
+
+    # Launchers start the server from $Root with a relative script argument.
+    # In that case the command line may not contain the absolute repo path.
+    $workingDirectory = Get-ProcessWorkingDirectory -ProcessId $ProcessId
+    if ($workingDirectory) {
+        $normalisedWorkingDirectory = $workingDirectory.ToLowerInvariant().Replace('\', '/')
+        if ($normalisedWorkingDirectory -eq $normalisedRoot) { return $true }
+    }
+
+    return $false
 }
 
 function Stop-ProcessWithEscalation {

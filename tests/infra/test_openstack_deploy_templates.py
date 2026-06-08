@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -19,6 +20,19 @@ RESTORE_DRILL_TEMPLATE = (
     REPO_ROOT / "infra/openstack/templates/scripts/von_restore_drill.sh.tftpl"
 )
 RUNBOOK_DOC = REPO_ROOT / "docs/engineering/openstack_operations_runbooks.md"
+OPENSTACK_MODULE_DIRS = [
+    REPO_ROOT / "infra/openstack/modules/compute_instance",
+    REPO_ROOT / "infra/openstack/modules/floating_ip",
+    REPO_ROOT / "infra/openstack/modules/persistent_volume",
+    REPO_ROOT / "infra/openstack/modules/security_group",
+]
+SCRIPT_TEMPLATES = [
+    DEPLOY_TEMPLATE,
+    MONITOR_TEMPLATE,
+    BACKUP_TEMPLATE,
+    RESTORE_DRILL_TEMPLATE,
+    REPO_ROOT / "infra/openstack/templates/scripts/von_ops_common.sh.tftpl",
+]
 
 
 def test_deploy_template_includes_health_gate_and_rollback_paths() -> None:
@@ -94,3 +108,53 @@ def test_operations_runbook_doc_exists_with_incident_sections() -> None:
     assert "DB Credential Rotation" in content
     assert "/admin/db/health?probe=rw" in content
     assert "Rebuild from IaC" in content
+
+
+def test_bash_parameter_expansions_are_escaped_for_terraform_templates() -> None:
+    terraform_vars = {
+        "alert_webhook_url",
+        "app_port",
+        "audit_log_path",
+        "backup_audit_log_path",
+        "backup_directory",
+        "backup_retention_days",
+        "bootstrap_repo_ref",
+        "bootstrap_repo_url",
+        "central_log_audit_log_path",
+        "central_log_directory",
+        "current_symlink",
+        "deploy_audit_log_path",
+        "deploy_log_path",
+        "enable_https",
+        "env_file",
+        "healthcheck_path",
+        "log_collection_lookback_minutes",
+        "monitor_auth_failure_threshold",
+        "monitor_db_failure_threshold",
+        "monitor_log_lookback_minutes",
+        "monitoring_events_log_path",
+        "release_root",
+        "restore_drill_audit_log_path",
+        "service_group",
+        "service_name",
+        "service_user",
+        "tls_cert_path",
+        "tls_expiry_warning_days",
+    }
+    allowed_interpolations = {f"${{{name}}}" for name in terraform_vars}
+
+    for template in SCRIPT_TEMPLATES:
+        content = template.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?<!\$)\$\{[^}]+\}", content):
+            interpolation = match.group(0)
+            assert interpolation in allowed_interpolations, (
+                f"{template} contains unescaped Bash interpolation "
+                f"{interpolation}; use $${{...}} for shell expansion."
+            )
+
+
+def test_openstack_modules_pin_provider_source() -> None:
+    for module_dir in OPENSTACK_MODULE_DIRS:
+        content = (module_dir / "versions.tf").read_text(encoding="utf-8")
+        assert 'source  = "terraform-provider-openstack/openstack"' in content
+        assert 'version = "~> 2.1"' in content

@@ -66,17 +66,17 @@ locals {
   })
 
   von_deploy_script = templatefile("${path.module}/templates/scripts/deploy_von_release.sh.tftpl", {
-    service_name           = "von"
-    service_user           = var.bootstrap_service_user
-    service_group          = var.bootstrap_service_group
-    release_root           = var.bootstrap_release_root
-    current_symlink        = var.bootstrap_current_symlink
-    deploy_log_path        = var.bootstrap_deploy_log_path
-    deploy_audit_log_path  = var.bootstrap_deploy_audit_log_path
-    healthcheck_path       = var.bootstrap_healthcheck_path
-    app_port               = var.bootstrap_app_port
-    bootstrap_repo_url     = var.bootstrap_repo_url
-    bootstrap_repo_ref     = var.bootstrap_repo_ref
+    service_name          = "von"
+    service_user          = var.bootstrap_service_user
+    service_group         = var.bootstrap_service_group
+    release_root          = var.bootstrap_release_root
+    current_symlink       = var.bootstrap_current_symlink
+    deploy_log_path       = var.bootstrap_deploy_log_path
+    deploy_audit_log_path = var.bootstrap_deploy_audit_log_path
+    healthcheck_path      = var.bootstrap_healthcheck_path
+    app_port              = var.bootstrap_app_port
+    bootstrap_repo_url    = var.bootstrap_repo_url
+    bootstrap_repo_ref    = var.bootstrap_repo_ref
   })
 
   von_ops_common_script = templatefile("${path.module}/templates/scripts/von_ops_common.sh.tftpl", {
@@ -84,20 +84,20 @@ locals {
   })
 
   von_monitor_script = templatefile("${path.module}/templates/scripts/von_monitor_health.sh.tftpl", {
-    monitoring_events_log_path      = var.bootstrap_monitoring_events_log_path
-    monitor_log_lookback_minutes    = var.bootstrap_monitor_log_lookback_minutes
-    monitor_auth_failure_threshold  = var.bootstrap_monitor_auth_failure_threshold
-    monitor_db_failure_threshold    = var.bootstrap_monitor_db_failure_threshold
-    tls_expiry_warning_days         = var.bootstrap_tls_expiry_warning_days
-    tls_cert_path                   = var.bootstrap_tls_cert_path
-    enable_https                    = var.bootstrap_enable_https
-    app_port                        = var.bootstrap_app_port
-    healthcheck_path                = var.bootstrap_healthcheck_path
+    monitoring_events_log_path     = var.bootstrap_monitoring_events_log_path
+    monitor_log_lookback_minutes   = var.bootstrap_monitor_log_lookback_minutes
+    monitor_auth_failure_threshold = var.bootstrap_monitor_auth_failure_threshold
+    monitor_db_failure_threshold   = var.bootstrap_monitor_db_failure_threshold
+    tls_expiry_warning_days        = var.bootstrap_tls_expiry_warning_days
+    tls_cert_path                  = var.bootstrap_tls_cert_path
+    enable_https                   = var.bootstrap_enable_https
+    app_port                       = var.bootstrap_app_port
+    healthcheck_path               = var.bootstrap_healthcheck_path
   })
 
   von_log_collector_script = templatefile("${path.module}/templates/scripts/von_collect_logs.sh.tftpl", {
-    central_log_directory          = var.bootstrap_central_log_directory
-    central_log_audit_log_path     = var.bootstrap_central_log_audit_log_path
+    central_log_directory           = var.bootstrap_central_log_directory
+    central_log_audit_log_path      = var.bootstrap_central_log_audit_log_path
     log_collection_lookback_minutes = var.bootstrap_log_collection_lookback_minutes
   })
 
@@ -110,10 +110,10 @@ locals {
   })
 
   von_restore_drill_script = templatefile("${path.module}/templates/scripts/von_restore_drill.sh.tftpl", {
-    backup_directory            = var.bootstrap_backup_directory
+    backup_directory             = var.bootstrap_backup_directory
     restore_drill_audit_log_path = var.bootstrap_restore_drill_audit_log_path
-    release_root               = var.bootstrap_release_root
-    env_file                   = var.bootstrap_env_file
+    release_root                 = var.bootstrap_release_root
+    env_file                     = var.bootstrap_env_file
   })
 
   von_monitor_service_unit = templatefile("${path.module}/templates/systemd/von-monitor.service.tftpl", {})
@@ -137,71 +137,71 @@ locals {
   })
 
   managed_bootstrap_user_data = templatefile("${path.module}/templates/cloud-init/von_bootstrap.yaml.tftpl", {
-    service_user               = var.bootstrap_service_user
-    service_group              = var.bootstrap_service_group
-    app_dir                    = var.bootstrap_app_dir
-    release_root               = var.bootstrap_release_root
-    current_symlink            = var.bootstrap_current_symlink
-    current_symlink_parent     = dirname(var.bootstrap_current_symlink)
-    env_file                   = var.bootstrap_env_file
-    python_package             = var.bootstrap_python_package
-    python_venv_package        = var.bootstrap_python_venv_package
-    app_port                   = var.bootstrap_app_port
-    app_host                   = var.bootstrap_app_host
-    domain_name                = var.bootstrap_domain_name
-    enable_https               = var.bootstrap_enable_https
-    generate_self_signed_cert  = var.bootstrap_generate_self_signed_cert
-    tls_cert_path              = var.bootstrap_tls_cert_path
-    tls_key_path               = var.bootstrap_tls_key_path
-    healthcheck_path           = var.bootstrap_healthcheck_path
-    deploy_log_path            = var.bootstrap_deploy_log_path
-    bootstrap_repo_url         = var.bootstrap_repo_url
-    bootstrap_repo_ref         = var.bootstrap_repo_ref
-    bootstrap_waitress_threads = var.bootstrap_waitress_threads
-    flask_secret_key           = var.bootstrap_flask_secret_key
-    google_oauth_strict_startup = var.bootstrap_google_oauth_strict_startup
-    google_oauth_redirect_uri  = var.bootstrap_google_oauth_redirect_uri
-    google_oauth_client_id     = var.bootstrap_google_oauth_client_id
-    google_oauth_client_secret = var.bootstrap_google_oauth_client_secret
-    google_oauth_client_id_file = var.bootstrap_google_oauth_client_id_file
-    google_oauth_client_secret_file = var.bootstrap_google_oauth_client_secret_file
+    service_user                          = var.bootstrap_service_user
+    service_group                         = var.bootstrap_service_group
+    app_dir                               = var.bootstrap_app_dir
+    release_root                          = var.bootstrap_release_root
+    current_symlink                       = var.bootstrap_current_symlink
+    current_symlink_parent                = dirname(var.bootstrap_current_symlink)
+    env_file                              = var.bootstrap_env_file
+    python_package                        = var.bootstrap_python_package
+    python_venv_package                   = var.bootstrap_python_venv_package
+    app_port                              = var.bootstrap_app_port
+    app_host                              = var.bootstrap_app_host
+    domain_name                           = var.bootstrap_domain_name
+    enable_https                          = var.bootstrap_enable_https
+    generate_self_signed_cert             = var.bootstrap_generate_self_signed_cert
+    tls_cert_path                         = var.bootstrap_tls_cert_path
+    tls_key_path                          = var.bootstrap_tls_key_path
+    healthcheck_path                      = var.bootstrap_healthcheck_path
+    deploy_log_path                       = var.bootstrap_deploy_log_path
+    bootstrap_repo_url                    = var.bootstrap_repo_url
+    bootstrap_repo_ref                    = var.bootstrap_repo_ref
+    bootstrap_waitress_threads            = var.bootstrap_waitress_threads
+    flask_secret_key                      = var.bootstrap_flask_secret_key
+    google_oauth_strict_startup           = var.bootstrap_google_oauth_strict_startup
+    google_oauth_redirect_uri             = var.bootstrap_google_oauth_redirect_uri
+    google_oauth_client_id                = var.bootstrap_google_oauth_client_id
+    google_oauth_client_secret            = var.bootstrap_google_oauth_client_secret
+    google_oauth_client_id_file           = var.bootstrap_google_oauth_client_id_file
+    google_oauth_client_secret_file       = var.bootstrap_google_oauth_client_secret_file
     google_oauth_enable_dynamic_redirects = var.bootstrap_google_oauth_enable_dynamic_redirects
-    mongo_strict_startup       = var.bootstrap_mongo_strict_startup
-    mongo_startup_probe        = var.bootstrap_mongo_startup_probe
-    mongo_require_tls          = var.bootstrap_mongo_require_tls
-    mongo_allow_local_fallback = var.bootstrap_mongo_allow_local_fallback
-    mongo_allowed_host_suffixes = var.bootstrap_mongo_allowed_host_suffixes
-    mongo_uri                  = var.bootstrap_mongo_uri
-    mongo_uri_file             = var.bootstrap_mongo_uri_file
-    mongo_read_probe_collection = var.bootstrap_mongo_read_probe_collection
-    mongo_write_probe_collection = var.bootstrap_mongo_write_probe_collection
-    enable_monitoring          = var.bootstrap_enable_monitoring
-    enable_log_collection      = var.bootstrap_enable_log_collection
-    enable_backup_automation   = var.bootstrap_enable_backup_automation
-    enable_restore_drill       = var.bootstrap_enable_restore_drill
-    backup_directory           = var.bootstrap_backup_directory
-    central_log_directory      = var.bootstrap_central_log_directory
-    service_unit_content       = local.von_service_unit
-    nginx_config_content       = local.von_nginx_config
-    deploy_script_content      = local.von_deploy_script
-    ops_common_script_content  = local.von_ops_common_script
-    monitor_script_content     = local.von_monitor_script
-    log_collector_script_content = local.von_log_collector_script
-    backup_script_content      = local.von_backup_script
-    restore_drill_script_content = local.von_restore_drill_script
-    monitor_service_content    = local.von_monitor_service_unit
-    monitor_timer_content      = local.von_monitor_timer_unit
-    log_collector_service_content = local.von_log_collector_service_unit
-    log_collector_timer_content = local.von_log_collector_timer_unit
-    backup_service_content     = local.von_backup_service_unit
-    backup_timer_content       = local.von_backup_timer_unit
-    restore_drill_service_content = local.von_restore_drill_service_unit
-    restore_drill_timer_content = local.von_restore_drill_timer_unit
+    mongo_strict_startup                  = var.bootstrap_mongo_strict_startup
+    mongo_startup_probe                   = var.bootstrap_mongo_startup_probe
+    mongo_require_tls                     = var.bootstrap_mongo_require_tls
+    mongo_allow_local_fallback            = var.bootstrap_mongo_allow_local_fallback
+    mongo_allowed_host_suffixes           = var.bootstrap_mongo_allowed_host_suffixes
+    mongo_uri                             = var.bootstrap_mongo_uri
+    mongo_uri_file                        = var.bootstrap_mongo_uri_file
+    mongo_read_probe_collection           = var.bootstrap_mongo_read_probe_collection
+    mongo_write_probe_collection          = var.bootstrap_mongo_write_probe_collection
+    enable_monitoring                     = var.bootstrap_enable_monitoring
+    enable_log_collection                 = var.bootstrap_enable_log_collection
+    enable_backup_automation              = var.bootstrap_enable_backup_automation
+    enable_restore_drill                  = var.bootstrap_enable_restore_drill
+    backup_directory                      = var.bootstrap_backup_directory
+    central_log_directory                 = var.bootstrap_central_log_directory
+    service_unit_content                  = local.von_service_unit
+    nginx_config_content                  = local.von_nginx_config
+    deploy_script_content                 = local.von_deploy_script
+    ops_common_script_content             = local.von_ops_common_script
+    monitor_script_content                = local.von_monitor_script
+    log_collector_script_content          = local.von_log_collector_script
+    backup_script_content                 = local.von_backup_script
+    restore_drill_script_content          = local.von_restore_drill_script
+    monitor_service_content               = local.von_monitor_service_unit
+    monitor_timer_content                 = local.von_monitor_timer_unit
+    log_collector_service_content         = local.von_log_collector_service_unit
+    log_collector_timer_content           = local.von_log_collector_timer_unit
+    backup_service_content                = local.von_backup_service_unit
+    backup_timer_content                  = local.von_backup_timer_unit
+    restore_drill_service_content         = local.von_restore_drill_service_unit
+    restore_drill_timer_content           = local.von_restore_drill_timer_unit
   })
 
   effective_user_data = (
     var.user_data != null && trimspace(var.user_data) != ""
-  ) ? var.user_data : (
+    ) ? var.user_data : (
     var.enable_managed_bootstrap ? local.managed_bootstrap_user_data : null
   )
 }

@@ -90,7 +90,7 @@ try {
             Invoke-Terraform -Arguments @('validate', '-no-color')
 
             # Trigger variable validations without mutating infrastructure state.
-            $tempPlan = Join-Path $env:TEMP ("von_{0}_{1}.tfplan" -f $Environment, [guid]::NewGuid().ToString('N'))
+            $tempPlan = Join-Path ([System.IO.Path]::GetTempPath()) ("von_{0}_{1}.tfplan" -f $Environment, [guid]::NewGuid().ToString('N'))
             try {
                 Invoke-Terraform -Arguments @(
                     'plan',

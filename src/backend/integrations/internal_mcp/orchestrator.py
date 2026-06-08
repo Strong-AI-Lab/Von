@@ -1427,11 +1427,11 @@ class _CustomWorkflowDispatchSupport:
 
         try:
             candidate_count = int(discovery_payload.get("candidate_count") or 0)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             candidate_count = 0
         try:
             match_count = int(discovery_payload.get("match_count") or 0)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             match_count = 0
         if candidate_count > 0 or match_count > 0:
             return False
@@ -6746,7 +6746,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw, str):
                     try:
                         raw = datetime.fromisoformat(raw)
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         continue
                 if isinstance(raw, datetime):
                     if raw.tzinfo is None:
@@ -20816,7 +20816,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(max_predicates_value, (int, float, str))
                         else 3
                     )
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     max_predicates_int = 3
                 derivation_context = self._predicate_follow_up_derivation_context(
                     derivation_spec,
@@ -36245,7 +36245,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 parsed = default
             if parsed <= 0:
                 return default
@@ -37235,7 +37235,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 parsed = default
             if parsed <= 0:
                 return default

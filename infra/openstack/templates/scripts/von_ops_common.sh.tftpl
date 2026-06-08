@@ -8,18 +8,18 @@ von_ops_log() {
 }
 
 von_ops_resolve_alert_webhook() {
-  if [[ -n "${VON_ALERT_WEBHOOK_URL:-}" ]]; then
-    printf '%s' "${VON_ALERT_WEBHOOK_URL}"
+  if [[ -n "$${VON_ALERT_WEBHOOK_URL:-}" ]]; then
+    printf '%s' "$${VON_ALERT_WEBHOOK_URL}"
     return
   fi
-  printf '%s' "${DEFAULT_ALERT_WEBHOOK_URL}"
+  printf '%s' "$${DEFAULT_ALERT_WEBHOOK_URL}"
 }
 
 von_ops_send_alert() {
-  local severity="${1:-warning}"
-  local component="${2:-operations}"
-  local summary="${3:-Operational event}"
-  local details="${4:-}"
+  local severity="$${1:-warning}"
+  local component="$${2:-operations}"
+  local summary="$${3:-Operational event}"
+  local details="$${4:-}"
 
   local webhook
   webhook="$(von_ops_resolve_alert_webhook)"
@@ -62,7 +62,7 @@ von_ops_append_audit_event() {
   local component="$2"
   local outcome="$3"
   local summary="$4"
-  local details="${5:-}"
+  local details="$${5:-}"
 
   mkdir -p "$(dirname "$audit_log_path")"
   touch "$audit_log_path"

@@ -51,9 +51,9 @@ if [[ "$ENABLE_HTTPS" == "true" ]]; then
   fi
 fi
 
-if [[ "${#issues[@]}" -gt 0 ]]; then
-  details="$(printf '%s; ' "${issues[@]}")"
-  summary="Monitoring detected ${#issues[@]} reliability/security issue(s)."
+if [[ "$${#issues[@]}" -gt 0 ]]; then
+  details="$(printf '%s; ' "$${issues[@]}")"
+  summary="Monitoring detected $${#issues[@]} reliability/security issue(s)."
   von_ops_send_alert "critical" "von-monitor" "$summary" "$details" || true
   von_ops_append_audit_event "$MONITOR_EVENTS_LOG_PATH" "von-monitor" "failed" "$summary" "$details"
   von_ops_log "ERROR: $summary $details"

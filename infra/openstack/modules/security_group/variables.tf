@@ -3,7 +3,7 @@ variable "name" {
   description = "Security group name."
 
   validation {
-    condition     = trim(var.name) != ""
+    condition     = trimspace(var.name) != ""
     error_message = "name is required and cannot be empty."
   }
 }
@@ -37,7 +37,7 @@ variable "rules" {
   validation {
     condition = alltrue([
       for rule in var.rules :
-      (try(trim(rule.remote_ip_prefix), "") != "" || try(trim(rule.remote_group_id), "") != "")
+      (try(trimspace(rule.remote_ip_prefix), "") != "" || try(trimspace(rule.remote_group_id), "") != "")
     ])
     error_message = "Each rule must define remote_ip_prefix or remote_group_id."
   }
@@ -45,7 +45,7 @@ variable "rules" {
   validation {
     condition = alltrue([
       for rule in var.rules :
-      try(trim(rule.remote_ip_prefix), "") == "" || can(cidrhost(rule.remote_ip_prefix, 0))
+      try(trimspace(rule.remote_ip_prefix), "") == "" || can(cidrhost(rule.remote_ip_prefix, 0))
     ])
     error_message = "When provided, remote_ip_prefix must be a valid CIDR."
   }

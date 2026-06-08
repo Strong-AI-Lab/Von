@@ -3,7 +3,7 @@ variable "name" {
   description = "Volume name."
 
   validation {
-    condition     = trim(var.name) != ""
+    condition     = trimspace(var.name) != ""
     error_message = "name is required and cannot be empty."
   }
 }

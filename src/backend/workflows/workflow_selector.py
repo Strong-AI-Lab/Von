@@ -148,7 +148,7 @@ class WorkflowSelector:
     def _format_candidate_percentage(value: Any) -> str | None:
         try:
             number = float(value)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return None
         if number < 0:
             return None
@@ -791,7 +791,7 @@ class WorkflowSelector:
     def _format_policy_fragment_number(value: Any) -> str | None:
         try:
             return f"{float(value):.2f}"
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return None
 
     @staticmethod
@@ -1527,7 +1527,7 @@ class WorkflowSelector:
             if raw_conf is not None:
                 try:
                     confidence = max(0.0, min(1.0, float(raw_conf)))
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     pass
                 break
 

@@ -173,6 +173,34 @@ $result = [ordered]@{{
     assert any("did not match listener PID" in line for line in payload["logs"])
 
 
+def test_run_ps1_von_main_process_accepts_relative_script_from_repo_root() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+function global:Get-ProcessCommandLine {{
+    param([int]$ProcessId)
+    '/opt/python -u src/workflows/von/main.py --port 5001'
+}}
+function global:Get-ProcessWorkingDirectory {{
+    param([int]$ProcessId)
+    if ($ProcessId -eq 4242) {{ return {ps_quote(str(REPO_ROOT))} }}
+    return '/tmp/not-von'
+}}
+$result = [ordered]@{{
+    repo_cwd = [bool](Test-IsVonMainProcess -ProcessId 4242)
+    other_cwd = [bool](Test-IsVonMainProcess -ProcessId 4343)
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "repo_cwd": True,
+        "other_cwd": False,
+    }
+
+
 def test_run_ps1_agent_test_disables_log_ready_shortcut() -> None:
     script = f"""
 $ErrorActionPreference = 'Stop'

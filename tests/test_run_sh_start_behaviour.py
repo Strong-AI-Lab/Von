@@ -99,6 +99,77 @@ PY
     assert payload == {"stable": False, "calls": 3}
 
 
+def test_run_sh_von_main_process_accepts_relative_script_from_repo_root() -> None:
+    payload = _run_bash_probe(
+        r"""
+python_cmd() { command -v python3; }
+get_process_commandline() {
+    printf '%s' '/opt/python -u src/workflows/von/main.py --port 5001'
+}
+get_process_cwd() {
+    printf '%s' "$1"
+}
+
+repo_cwd="$PWD"
+other_cwd="/tmp/not-von"
+
+if is_von_main_process "$repo_cwd"; then repo_result=True; else repo_result=False; fi
+if is_von_main_process "$other_cwd"; then other_result=True; else other_result=False; fi
+
+python3 - <<PY
+import json
+print(json.dumps({
+    "repo_cwd": $repo_result,
+    "other_cwd": $other_result,
+}))
+PY
+"""
+    )
+
+    assert payload == {
+        "repo_cwd": True,
+        "other_cwd": False,
+    }
+
+
+def test_run_sh_restart_takeover_not_bypassed_by_existing_pid() -> None:
+    payload = _run_bash_probe(
+        r"""
+logs=()
+takeovers=()
+log() { logs+=("$*"); }
+get_pid() { printf '4242'; }
+process_exists() { [ "${1:-}" = "4242" ]; }
+restart_port_takeover() {
+    takeovers+=("$1")
+    return 1
+}
+open_browser_if_needed() {
+    logs+=("browser opened")
+}
+
+if start_server 1; then status=0; else status=$?; fi
+
+LOGS="$(printf '%s\n' "${logs[@]}")" \
+TAKEOVERS="$(printf '%s\n' "${takeovers[@]}")" \
+python3 - <<PY
+import json
+import os
+print(json.dumps({
+    "status": $status,
+    "logs": [line for line in os.environ.get("LOGS", "").splitlines() if line],
+    "takeovers": [line for line in os.environ.get("TAKEOVERS", "").splitlines() if line],
+}))
+PY
+"""
+    )
+
+    assert payload["status"] == 1
+    assert payload["takeovers"] == ["4242"]
+    assert not any("Already running" in line for line in payload["logs"])
+    assert "browser opened" not in payload["logs"]
+
+
 def test_run_sh_detached_launcher_returns_live_child_pid() -> None:
     payload = _run_bash_probe(
         r"""

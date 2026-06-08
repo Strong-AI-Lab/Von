@@ -26,11 +26,11 @@ fi
 tar_items=()
 for path in "$release_path" "$ENV_FILE" "/etc/nginx/sites-available/von.conf" "/var/log/von/deploy_audit.jsonl"; do
   if [[ -e "$path" ]]; then
-    tar_items+=("${path#/}")
+    tar_items+=("$${path#/}")
   fi
 done
 
-if [[ "${#tar_items[@]}" -eq 0 ]]; then
+if [[ "$${#tar_items[@]}" -eq 0 ]]; then
   summary="Backup failed: no source files were available."
   details="release=$release_path env_file=$ENV_FILE"
   von_ops_send_alert "critical" "von-backup" "$summary" "$details" || true
@@ -38,7 +38,7 @@ if [[ "${#tar_items[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-tar -czf "$backup_file" -C / "${tar_items[@]}"
+tar -czf "$backup_file" -C / "$${tar_items[@]}"
 
 backup_sha256="$(sha256sum "$backup_file" | awk '{print $1}')"
 pruned_count="$(find "$BACKUP_DIRECTORY" -type f -name 'von-backup-*.tar.gz' -mtime "+$BACKUP_RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')"

@@ -26,20 +26,20 @@ trap cleanup EXIT
 tar -xzf "$latest_backup" -C "$temp_dir"
 
 issues=()
-if [[ ! -d "$temp_dir/${RELEASE_ROOT#/}" ]]; then
-  issues+=("missing release root path in backup: ${RELEASE_ROOT}")
+if [[ ! -d "$temp_dir/$${RELEASE_ROOT#/}" ]]; then
+  issues+=("missing release root path in backup: $${RELEASE_ROOT}")
 fi
 
-if [[ ! -f "$temp_dir/${ENV_FILE#/}" ]]; then
-  issues+=("missing env file in backup: ${ENV_FILE}")
+if [[ ! -f "$temp_dir/$${ENV_FILE#/}" ]]; then
+  issues+=("missing env file in backup: $${ENV_FILE}")
 fi
 
 if [[ ! -f "$temp_dir/etc/nginx/sites-available/von.conf" ]]; then
   issues+=("missing nginx config in backup: /etc/nginx/sites-available/von.conf")
 fi
 
-if [[ "${#issues[@]}" -gt 0 ]]; then
-  details="$(printf '%s; ' "${issues[@]}")"
+if [[ "$${#issues[@]}" -gt 0 ]]; then
+  details="$(printf '%s; ' "$${issues[@]}")"
   summary="Restore drill validation failed."
   von_ops_send_alert "critical" "von-restore-drill" "$summary" "$details" || true
   von_ops_append_audit_event "$RESTORE_DRILL_AUDIT_LOG_PATH" "von-restore-drill" "failed" "$summary" "$details"

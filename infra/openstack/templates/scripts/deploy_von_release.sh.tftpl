@@ -46,7 +46,7 @@ run_as_service_user() {
 }
 
 to_bool() {
-  case "${1,,}" in
+  case "$${1,,}" in
     1|true|yes|y|on) printf 'true' ;;
     *) printf 'false' ;;
   esac
@@ -54,7 +54,7 @@ to_bool() {
 
 write_audit_event() {
   local outcome="$1"
-  local exit_code="${2:-0}"
+  local exit_code="$${2:-0}"
 
   if [[ "$AUDIT_WRITTEN" -eq 1 ]]; then
     return 0
@@ -184,7 +184,7 @@ prepare_release_environment() {
   run_as_service_user "$release_path/.venv/bin/python" -m pip install -e "$release_path"
 }
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "$${EUID}" -ne 0 ]]; then
   log "ERROR: deploy_von_release.sh must run as root."
   exit 1
 fi
@@ -195,7 +195,7 @@ RELEASE_PATH=""
 ARTIFACT_PATH=""
 BOOTSTRAP_MODE=0
 DEPLOY_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-DEPLOY_ACTOR="${SUDO_USER:-root}"
+DEPLOY_ACTOR="$${SUDO_USER:-root}"
 DEPLOY_OUTCOME="started"
 NEW_RELEASE=""
 PREVIOUS_RELEASE=""

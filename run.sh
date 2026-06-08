@@ -1074,7 +1074,33 @@ is_von_main_process() {
     if printf '%s' "$cmd_norm" | grep -F -q "/strong-ai-lab/von/"; then
         return 0
     fi
+
+    # Launchers start the server from $ROOT with a relative script argument.
+    # In that case the command line may not contain the absolute repo path.
+    local cwd_norm=""
+    cwd_norm="$(get_process_cwd "$pid" | tr '[:upper:]' '[:lower:]' | sed 's#\\#/#g')" || true
+    if [ -n "$cwd_norm" ] && [ "$cwd_norm" = "$root_norm" ]; then
+        return 0
+    fi
     return 1
+}
+
+get_process_cwd() {
+    local pid="${1:-}"
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    "$py" -c 'import os,sys,psutil
+pid=int(sys.argv[1])
+try:
+    print(os.path.normpath(psutil.Process(pid).cwd()))
+except Exception:
+    raise SystemExit(1)' "$pid" 2>/dev/null
 }
 
 stop_process_with_escalation() {
@@ -1449,10 +1475,14 @@ start_server() {
         existing="$(get_von_main_pid_by_port || true)"
     fi
     if [ -n "$existing" ] && process_exists "$existing"; then
-        log "Already running (PID=$existing). Use ./run.sh stop or restart."
-        write_pidfile "$existing"
-        open_browser_if_needed
-        return 0
+        if [ "$restart_takeover" = "1" ]; then
+            restart_port_takeover "$existing" || return 1
+        else
+            log "Already running (PID=$existing). Use ./run.sh stop or restart."
+            write_pidfile "$existing"
+            open_browser_if_needed
+            return 0
+        fi
     fi
 
     if [ "$restart_takeover" = "1" ]; then
