@@ -69,6 +69,7 @@ $env:TF_VAR_bootstrap_flask_secret_key = '<YOUR-SECRET-HERE>'
 $env:TF_VAR_bootstrap_google_oauth_client_id = '<YOUR-CLIENT-ID-HERE>'
 $env:TF_VAR_bootstrap_google_oauth_client_secret = '<YOUR-CLIENT-SECRET-HERE>'
 $env:TF_VAR_bootstrap_mongo_uri = '<YOUR-MONGODB-URI-HERE>'
+$env:TF_VAR_bootstrap_openai_api_key = '<YOUR-OPENAI-KEY-HERE>'
 ```
 
 Set OpenStack auth profile (example):
@@ -138,6 +139,25 @@ systemctl list-timers | grep -E 'von-(monitor|log-collector|backup|restore-drill
 - [ ] `nginx.service` is active.
 - [ ] reliability timers are present.
 
+### 6.4 Workflow/model bootstrap checks
+
+For hosted LLM-backed workflows, set the scoped model seed values before apply:
+
+```powershell
+$env:TF_VAR_bootstrap_default_llm_provider = 'openai'
+$env:TF_VAR_bootstrap_default_llm_model = 'gpt-5.5'
+$env:TF_VAR_bootstrap_default_llm_organisation_concept_id = '#V#university_of_auckland_strong_ai_lab'
+```
+
+After deployment, check:
+
+```bash
+curl -fsS https://<your-domain>/admin/workflow_materialisation_diagnostics
+```
+
+- [ ] Durable workflow startup is no longer stuck in `initialising`.
+- [ ] A basic chat request succeeds rather than failing with `workflow_definition_not_found`.
+
 ## 7) Functional testing checklist (after deployment)
 
 Use this quick pass:
@@ -186,6 +206,8 @@ If still broken, use:
 - Do not open SSH/HTTPS ingress to `0.0.0.0/0` unless explicitly approved.
 - Do not run backend tests against `VON_DB_NAME=von_db`.
 - Do not skip `validate` and `plan` before `apply`.
+- Do not confuse a green `/health` with a complete chat-capable deployment;
+  workflow/materialisation diagnostics and a real chat smoke test are required.
 
 ## 11) “Done” checklist for a healthy deployment
 
@@ -196,4 +218,3 @@ If still broken, use:
 - [ ] `von.service` and `nginx.service` are active.
 - [ ] Monitoring/backup timers are active.
 - [ ] Basic UI + chat test succeeded.
-

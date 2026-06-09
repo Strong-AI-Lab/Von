@@ -83,6 +83,18 @@ bootstrap_google_oauth_enable_dynamic_redirects = false
 # bootstrap_google_oauth_client_id = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
 # bootstrap_google_oauth_client_secret = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
 
+# LLM provider bootstrap for real chat/workflow execution.
+# Leave bootstrap_openai_api_key unset when using TF_VAR_bootstrap_openai_api_key.
+# Setting it to null here prevents runtime injection from reaching cloud-init.
+# bootstrap_openai_api_key = "REPLACE_WITH_LOCAL_UNTRACKED_SECRET"
+bootstrap_openai_api_key_file = "/etc/von/secrets/openai_api_key"
+
+# Optional: seed a scoped model setting after first deploy.
+# Set all three values together to seed the organisation default.
+# bootstrap_default_llm_provider = "openai"
+# bootstrap_default_llm_model = "gpt-5.5"
+# bootstrap_default_llm_organisation_concept_id = "#V#university_of_auckland_strong_ai_lab"
+
 # Mongo Atlas hardening for hosted staging.
 bootstrap_mongo_strict_startup         = true
 bootstrap_mongo_startup_probe          = true

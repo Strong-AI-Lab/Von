@@ -41,6 +41,10 @@ write_files:
       FLASK_SESSION_COOKIE_SECURE=${enable_https ? 1 : 0}
       GOOGLE_OAUTH_STRICT_STARTUP=${google_oauth_strict_startup ? 1 : 0}
       GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS=${google_oauth_enable_dynamic_redirects ? "true" : "false"}
+      OPENAI_API_KEY_FILE=${openai_api_key_file}
+%{ if default_llm_provider != null && lower(default_llm_provider) == "openai" && default_llm_model != null ~}
+      VON_DEFAULT_OPENAI_MODEL=${jsonencode(default_llm_model)}
+%{ endif ~}
       VON_MONGO_STRICT_STARTUP=${mongo_strict_startup ? 1 : 0}
       VON_MONGO_STARTUP_PROBE=${mongo_startup_probe ? 1 : 0}
       VON_MONGO_REQUIRE_TLS=${mongo_require_tls ? 1 : 0}
@@ -72,6 +76,14 @@ write_files:
     permissions: "0600"
     content: |
       ${google_oauth_client_secret}
+%{ endif ~}
+
+%{ if openai_api_key != null ~}
+  - path: ${openai_api_key_file}
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ${openai_api_key}
 %{ endif ~}
 
 %{ if mongo_uri != null ~}
@@ -183,7 +195,7 @@ runcmd:
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root '${backup_directory}' '${central_log_directory}'"]
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root /etc/von"]
   - [bash, -lc, "set -euo pipefail; install -d -m 0750 -o root -g ${service_group} /etc/von/secrets"]
-  - [bash, -lc, "set -euo pipefail; for secret_file in '${google_oauth_client_id_file}' '${google_oauth_client_secret_file}' '${mongo_uri_file}'; do if [ -f \"$secret_file\" ]; then chown root:${service_group} \"$secret_file\"; chmod 0640 \"$secret_file\"; fi; done"]
+  - [bash, -lc, "set -euo pipefail; for secret_file in '${google_oauth_client_id_file}' '${google_oauth_client_secret_file}' '${openai_api_key_file}' '${mongo_uri_file}'; do if [ -f \"$secret_file\" ]; then chown root:${service_group} \"$secret_file\"; chmod 0640 \"$secret_file\"; fi; done"]
 %{ if enable_https && generate_self_signed_cert ~}
   - [bash, -lc, "set -euo pipefail; if [ ! -f '${tls_cert_path}' ] || [ ! -f '${tls_key_path}' ]; then install -d -m 0755 /etc/ssl/certs /etc/ssl/private; openssl req -x509 -nodes -newkey rsa:4096 -days 365 -subj '/CN=${domain_name}' -keyout '${tls_key_path}' -out '${tls_cert_path}'; chmod 0600 '${tls_key_path}'; fi"]
 %{ endif ~}
@@ -202,5 +214,8 @@ runcmd:
   - [bash, -lc, "set -euo pipefail; systemctl enable von-restore-drill.timer; systemctl start von-restore-drill.timer"]
 %{ endif ~}
   - [bash, -lc, "set -euo pipefail; /usr/local/bin/deploy_von_release.sh --repo-url '${bootstrap_repo_url}' --repo-ref '${bootstrap_repo_ref}' --bootstrap"]
+%{ if default_llm_provider != null && default_llm_model != null && (default_llm_organisation_concept_id != null || default_llm_user_concept_id != null) ~}
+  - [bash, -lc, "set -euo pipefail; set -a; . '${env_file}'; set +a; cd '${current_symlink}'; '${current_symlink}/.venv/bin/python' '${current_symlink}/scripts/bootstrap_llm_setting.py' --provider '${default_llm_provider}' --model '${default_llm_model}'%{ if default_llm_organisation_concept_id != null } --organisation-concept-id '${default_llm_organisation_concept_id}'%{ endif }%{ if default_llm_user_concept_id != null } --user-concept-id '${default_llm_user_concept_id}'%{ endif }"]
+%{ endif ~}
 
 final_message: "Von managed bootstrap completed."

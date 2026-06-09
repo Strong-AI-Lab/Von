@@ -174,6 +174,12 @@ locals {
     google_oauth_client_id_file           = var.bootstrap_google_oauth_client_id_file
     google_oauth_client_secret_file       = var.bootstrap_google_oauth_client_secret_file
     google_oauth_enable_dynamic_redirects = var.bootstrap_google_oauth_enable_dynamic_redirects
+    openai_api_key                        = var.bootstrap_openai_api_key
+    openai_api_key_file                   = var.bootstrap_openai_api_key_file
+    default_llm_provider                  = var.bootstrap_default_llm_provider
+    default_llm_model                     = var.bootstrap_default_llm_model
+    default_llm_organisation_concept_id   = var.bootstrap_default_llm_organisation_concept_id
+    default_llm_user_concept_id           = var.bootstrap_default_llm_user_concept_id
     mongo_strict_startup                  = var.bootstrap_mongo_strict_startup
     mongo_startup_probe                   = var.bootstrap_mongo_startup_probe
     mongo_require_tls                     = var.bootstrap_mongo_require_tls

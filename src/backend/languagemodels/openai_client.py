@@ -1,8 +1,9 @@
 # src/backend/languagemodels/openai_client.py
 
-import os
 import logging
 from openai import OpenAI
+
+from ..utils.runtime_env import load_secret_from_env_or_file
 
 
 logger = logging.getLogger(__name__)
@@ -10,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 class OpenAIClient:
     def __init__(self, api_key_env_var="OPENAI_API_KEY"):
-        self.api_key = os.getenv(api_key_env_var)
+        self.api_key = load_secret_from_env_or_file(
+            api_key_env_var,
+            f"{api_key_env_var}_FILE",
+        )
         if not self.api_key and api_key_env_var:
             try:
                 from dotenv import dotenv_values  # type: ignore

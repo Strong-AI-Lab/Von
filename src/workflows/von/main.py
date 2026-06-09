@@ -208,6 +208,7 @@ _apply_dotenv_overrides(
         # OpenAI credentials and default model overrides — allow .env to
         # override stale inherited shell values after a local restart.
         "OPENAI_API_KEY",
+        "OPENAI_API_KEY_FILE",
         "VON_DEFAULT_OLLAMA_MODEL",
         "VON_DEFAULT_OPENAI_MODEL",
         "VON_DEFAULT_GEMINI_MODEL",

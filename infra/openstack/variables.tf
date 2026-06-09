@@ -516,6 +516,73 @@ variable "bootstrap_google_oauth_enable_dynamic_redirects" {
   }
 }
 
+variable "bootstrap_openai_api_key" {
+  type        = string
+  description = "Optional inline OpenAI API key for managed bootstrap secret-file injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_openai_api_key == null || trimspace(var.bootstrap_openai_api_key) != ""
+    error_message = "bootstrap_openai_api_key must be null or non-empty."
+  }
+}
+
+variable "bootstrap_openai_api_key_file" {
+  type        = string
+  description = "Path used by runtime OPENAI_API_KEY_FILE."
+  default     = "/etc/von/secrets/openai_api_key"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_openai_api_key_file))
+    error_message = "bootstrap_openai_api_key_file must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_default_llm_provider" {
+  type        = string
+  description = "Optional provider to seed as the scoped cloud default LLM setting."
+  default     = null
+
+  validation {
+    condition     = var.bootstrap_default_llm_provider == null || contains(["openai", "gemini", "ollama"], lower(trimspace(var.bootstrap_default_llm_provider)))
+    error_message = "bootstrap_default_llm_provider must be null, openai, gemini, or ollama."
+  }
+}
+
+variable "bootstrap_default_llm_model" {
+  type        = string
+  description = "Optional model identifier to seed as the scoped cloud default LLM setting."
+  default     = null
+
+  validation {
+    condition     = var.bootstrap_default_llm_model == null || can(regex("^[A-Za-z0-9_.:/#-]+$", trimspace(var.bootstrap_default_llm_model)))
+    error_message = "bootstrap_default_llm_model must be null or a simple model identifier."
+  }
+}
+
+variable "bootstrap_default_llm_organisation_concept_id" {
+  type        = string
+  description = "Optional organisation concept id whose scoped LLM setting should be seeded during bootstrap."
+  default     = null
+
+  validation {
+    condition     = var.bootstrap_default_llm_organisation_concept_id == null || can(regex("^(#V#)?[A-Za-z0-9_@.-]+$", trimspace(var.bootstrap_default_llm_organisation_concept_id)))
+    error_message = "bootstrap_default_llm_organisation_concept_id must be null or a valid concept id slug."
+  }
+}
+
+variable "bootstrap_default_llm_user_concept_id" {
+  type        = string
+  description = "Optional user concept id whose scoped LLM setting should be seeded during bootstrap."
+  default     = null
+
+  validation {
+    condition     = var.bootstrap_default_llm_user_concept_id == null || can(regex("^(#V#)?[A-Za-z0-9_@.-]+$", trimspace(var.bootstrap_default_llm_user_concept_id)))
+    error_message = "bootstrap_default_llm_user_concept_id must be null or a valid concept id slug."
+  }
+}
+
 variable "bootstrap_mongo_strict_startup" {
   type        = bool
   description = "When true, Von startup fails-fast if Mongo URI/security policy checks fail."

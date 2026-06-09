@@ -82,6 +82,17 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "MONGO_ALLOW_LOCAL_FALLBACK" in content
     assert "VON_MONGO_ALLOWED_HOST_SUFFIXES" in content
     assert "MONGO_URI_FILE" in content
+    assert "OPENAI_API_KEY_FILE" in content
+
+
+def test_cloud_init_bootstrap_can_seed_scoped_llm_setting() -> None:
+    content = CLOUD_INIT_TEMPLATE.read_text(encoding="utf-8")
+    assert "scripts/bootstrap_llm_setting.py" in content
+    assert "--provider '${default_llm_provider}'" in content
+    assert "--model '${default_llm_model}'" in content
+    assert "--organisation-concept-id" in content
+    assert "--user-concept-id" in content
+    assert "'${openai_api_key_file}'" in content
 
 
 def test_cloud_init_user_schema_uses_supported_service_account_fields() -> None:
@@ -201,6 +212,7 @@ def test_openstack_environment_examples_do_not_null_secret_runtime_inputs() -> N
         "bootstrap_flask_secret_key",
         "bootstrap_google_oauth_client_id",
         "bootstrap_google_oauth_client_secret",
+        "bootstrap_openai_api_key",
         "bootstrap_mongo_uri",
     ]
     secret_null_assignment = re.compile(

@@ -91,6 +91,46 @@ class TestValidateOpenAIConfig:
         assert any("Unusual" in m for m in msgs)
 
 
+class TestOpenAIKeyFileResolution:
+    """Cloud bootstrap can provide provider secrets through *_FILE env vars."""
+
+    @patch("src.backend.languagemodels.llm_interface.resolve_llm_setting")
+    @patch("src.backend.languagemodels.llm_interface.get_openai_env_var")
+    @patch("src.backend.languagemodels.llm_interface.OpenAIClient")
+    def test_initialize_clients_reads_openai_api_key_file(
+        self,
+        mock_openai_client,
+        mock_get_openai_env_var,
+        mock_resolve_llm_setting,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import src.backend.languagemodels.llm_interface as mod
+
+        key_file = tmp_path / "openai_api_key"
+        key_value = "sk-" + "x" * 50
+        key_file.write_text(key_value, encoding="utf-8")
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(key_file))
+        mock_get_openai_env_var.return_value = "OPENAI_API_KEY"
+        mock_resolve_llm_setting.return_value = {
+            "provider": "openai",
+            "model": "gpt-5",
+        }
+
+        mod._openai_client = None
+        mod._last_openai_env_var = None
+        mod._last_openai_key = None
+
+        mod.initialize_clients(force=True)
+
+        mock_openai_client.assert_called_once_with(
+            api_key=key_value,
+            api_key_env_var="OPENAI_API_KEY",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Lazy Ollama initialisation
 # ---------------------------------------------------------------------------

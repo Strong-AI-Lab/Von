@@ -181,6 +181,29 @@ committing plaintext credentials:
 
 Do not commit real OAuth secrets in tracked tfvars files.
 
+## LLM provider bootstrap
+
+Managed bootstrap can also seed the provider secret and scoped model setting
+needed for real chat/workflow execution:
+
+- `bootstrap_openai_api_key_file` defaults to `/etc/von/secrets/openai_api_key`.
+- OpenAI keys can be injected with `TF_VAR_bootstrap_openai_api_key` or by
+  pre-provisioning `bootstrap_openai_api_key_file` on host.
+- `bootstrap_default_llm_provider`, `bootstrap_default_llm_model`, and either
+  `bootstrap_default_llm_organisation_concept_id` or
+  `bootstrap_default_llm_user_concept_id` can seed the scoped LLM setting after
+  first deploy using Von's settings service.
+
+Do not assign `bootstrap_openai_api_key = null` in local tfvars when using
+`TF_VAR_bootstrap_openai_api_key`; tfvars values override runtime environment
+variables.
+
+Operational note:
+
+- `/health` can be green before the workflow/model path is actually usable.
+  After deploy, check `/admin/workflow_materialisation_diagnostics` and run a
+  real `/von/generate` smoke test before closing the environment task.
+
 ## Mongo Atlas hardening and startup probes
 
 Managed bootstrap also supports MongoDB Atlas startup hardening:

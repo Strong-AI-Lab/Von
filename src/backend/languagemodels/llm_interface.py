@@ -36,6 +36,7 @@ from .structured_tool_calling import (
     get_llm_client as get_structured_client,
 )
 from .structured_tool_calling.client import resolve_safe_temperature_for_model
+from ..utils.runtime_env import load_secret_from_env_or_file
 
 try:  # Optional dependency (local model runtime) — imported lazily to avoid
     # the module-level Client() creation in ollama/__init__.py which calls
@@ -199,6 +200,14 @@ _OLLAMA_AUTO_PULL_RETRY_BUDGET = _int_env(
 
 _OLLAMA_AUTO_PULL_LOCK = threading.Lock()
 _OLLAMA_AUTO_PULL_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _resolve_secret_env_value(env_var: Optional[str]) -> Optional[str]:
+    """Resolve an environment secret value, accepting the conventional *_FILE form."""
+
+    if not env_var:
+        return None
+    return load_secret_from_env_or_file(env_var, f"{env_var}_FILE")
 
 
 def _is_ollama_model_not_found_error(exc: Exception) -> bool:
@@ -534,7 +543,7 @@ def initialize_clients(force: bool = False):
     global _ollama_client, _openai_client, _last_openai_env_var, _last_openai_key
 
     current_env_var = get_openai_env_var()
-    current_key = os.getenv(current_env_var) if current_env_var else None
+    current_key = _resolve_secret_env_value(current_env_var)
 
     # Check if OpenAI settings have changed
     env_var_changed = current_env_var != _last_openai_env_var
@@ -585,7 +594,10 @@ def initialize_clients(force: bool = False):
                     warnings.warn(message, UserWarning)
                     logger.warning(message)
 
-                _openai_client = OpenAIClient(api_key_env_var=current_env_var)
+                _openai_client = OpenAIClient(
+                    api_key=current_key,
+                    api_key_env_var=current_env_var,
+                )
                 logger.info("OpenAI client initialized/reinitialized.")
                 _last_openai_env_var = current_env_var
                 _last_openai_key = current_key
@@ -1403,7 +1415,7 @@ class OpenAIClient(LLMInterface):
             api_key: Optional direct API key
             api_key_env_var: Name of environment variable containing the API key
         """
-        env_val = os.environ.get(api_key_env_var) if api_key_env_var else None
+        env_val = _resolve_secret_env_value(api_key_env_var)
         if not env_val and api_key_env_var:
             try:
                 from dotenv import dotenv_values  # type: ignore
