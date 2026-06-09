@@ -37,22 +37,27 @@ def _print_regression_summary(
     report: dict[str, object],
     verbose: bool = False,
     quiet: bool = False,
+    quiet_on_pass: bool = False,
 ) -> None:
-    if not quiet:
-        print("Running workflow purity gate...")
-    
-    summary_text = str(report.get("summary_text") or "Workflow purity report generated.")
-    print(summary_text)
-
-    if quiet:
-        return
-
     baseline = report.get("baseline")
     comparison = baseline.get("comparison") if isinstance(baseline, dict) else {}
     if not isinstance(comparison, dict):
         comparison = {}
 
     regression_detected = bool(comparison.get("regression_detected"))
+
+    if quiet_on_pass and not regression_detected:
+        print("Workflow purity gate passed.")
+        return
+
+    if not quiet:
+        print("Running workflow purity gate...")
+
+    summary_text = str(report.get("summary_text") or "Workflow purity report generated.")
+    print(summary_text)
+
+    if quiet:
+        return
 
     increased = comparison.get("increased_counters")
     if isinstance(increased, dict) and increased:
@@ -116,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only print the summary line.",
     )
+    parser.add_argument(
+        "--quiet-on-pass",
+        action="store_true",
+        help="Only print the pass line when the gate passes; print failure details on regression.",
+    )
     args = parser.parse_args(argv)
 
     project_root = Path(args.project_root).resolve()
@@ -139,7 +149,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Refreshed workflow-purity baseline: {path.as_posix()}")
         return 0
 
-    _print_regression_summary(report, verbose=args.verbose, quiet=args.quiet)
+    _print_regression_summary(
+        report,
+        verbose=args.verbose,
+        quiet=args.quiet,
+        quiet_on_pass=args.quiet_on_pass,
+    )
     comparison = ((report.get("baseline") or {}).get("comparison") or {})
     if isinstance(comparison, dict) and comparison.get("regression_detected"):
         return 1

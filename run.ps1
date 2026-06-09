@@ -2204,12 +2204,12 @@ function Start-WorkflowPurityCheckNonBlocking {
     $launchMode = 'pdm-fallback'
     if (Test-Path $venvPython) {
         $purityExe = $venvPython
-        $purityArgs = @($purityScript, '--quiet')
+        $purityArgs = @($purityScript, '--quiet-on-pass')
         $launchMode = 'direct-python'
     }
     else {
         $purityExe = $pdm
-        $purityArgs = @('run', 'python', $purityScript, '--quiet')
+        $purityArgs = @('run', 'python', $purityScript, '--quiet-on-pass')
     }
 
     if (-not $powerShellExe) {

@@ -1528,9 +1528,9 @@ start_server() {
     elif [ -f "$purity_script" ]; then
         log "Running Workflow Purity Check (warn-only)..."
         if [ "$launch_mode" = "pdm-fallback" ]; then
-            "$py" run python "$purity_script" 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
+            "$py" run python "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
         else
-            "$py" "$purity_script" 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
+            "$py" "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
         fi
     fi
 
