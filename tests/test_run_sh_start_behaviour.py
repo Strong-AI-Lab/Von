@@ -170,6 +170,95 @@ PY
     assert "browser opened" not in payload["logs"]
 
 
+def test_run_sh_workflow_purity_check_respects_daily_success_ttl() -> None:
+    payload = _run_bash_probe(
+        r"""
+	tmpdir="$(mktemp -d)"
+	fake_python="$tmpdir/fake-python"
+	purity_calls="$tmpdir/purity-calls.log"
+	cat > "$fake_python" <<SH
+#!/usr/bin/env sh
+printf 'called %s\n' "\$*" >> "$purity_calls"
+exit 0
+SH
+	chmod +x "$fake_python"
+
+	logs=()
+	log() { logs+=("$*"); }
+	get_pid() { return 0; }
+	get_von_main_pid_by_port() { return 0; }
+	get_listening_pid_by_port() { return 0; }
+	set_admin_token_env() { :; }
+	stop_python_processes_by_script() { :; }
+	python_cmd() { printf '%s' "$fake_python"; }
+	open_browser_if_needed() { :; }
+	launch_detached_process() { printf '4242'; }
+	rotate_logs() { :; }
+	refine_pid_to_child() { :; }
+	sync_pidfile_to_listener() { :; }
+	run_daily_backup_if_due() { :; }
+	run_test_db_refresh_if_due() { :; }
+	start_rag_worker_bg() { :; }
+	start_concept_index_worker_bg() { :; }
+	log_von_version() { :; }
+
+	PORT=5124
+	AGENT_TEST_INSTANCE=0
+	SKIP_HEALTH=1
+	NO_BROWSER=1
+	RUN_DIR="$tmpdir/.run"
+	LOGS_DIR="$tmpdir/logs"
+	mkdir -p "$RUN_DIR" "$LOGS_DIR"
+	PID_FILE="$RUN_DIR/von_${PORT}.pid"
+	NEW_LOG="$LOGS_DIR/von_${PORT}.log"
+	SERVER_ERR_LOG="$NEW_LOG.err"
+	CURRENT_LOG="$LOGS_DIR/von_${PORT}_current.log"
+	TOKEN_FILE="$RUN_DIR/admin_token.txt"
+	WORKFLOW_PURITY_SUCCESS_FILE="$RUN_DIR/workflow_purity_check_last_success.env"
+	WORKFLOW_PURITY_TTL_SECONDS=86400
+
+	: > "$WORKFLOW_PURITY_SUCCESS_FILE"
+	start_server
+	skip_logs="$(printf '%s\n' "${logs[@]}")"
+	skip_call_count=0
+	if [ -f "$purity_calls" ]; then
+	    skip_call_count="$(wc -l < "$purity_calls" | tr -d ' ')"
+	fi
+
+	logs=()
+	VON_FORCE_WORKFLOW_PURITY_CHECK=1 start_server
+	force_logs="$(printf '%s\n' "${logs[@]}")"
+	force_call_count=0
+	if [ -f "$purity_calls" ]; then
+	    force_call_count="$(wc -l < "$purity_calls" | tr -d ' ')"
+	fi
+
+	SKIP_LOGS="$skip_logs" FORCE_LOGS="$force_logs" python3 - <<PY
+import json
+import os
+print(json.dumps({
+    "skip_logs": [line for line in os.environ.get("SKIP_LOGS", "").splitlines() if line],
+    "force_logs": [line for line in os.environ.get("FORCE_LOGS", "").splitlines() if line],
+    "skip_call_count": int("$skip_call_count"),
+    "force_call_count": int("$force_call_count"),
+}))
+PY
+	rm -rf "$tmpdir"
+	"""
+    )
+
+    assert payload["skip_call_count"] == 0
+    assert any("Skipping workflow purity check" in line for line in payload["skip_logs"])
+    assert not any(
+        "Running Workflow Purity Check" in line for line in payload["skip_logs"]
+    )
+    assert payload["force_call_count"] == 1
+    assert any("Workflow purity check forced" in line for line in payload["force_logs"])
+    assert any(
+        "Running Workflow Purity Check" in line for line in payload["force_logs"]
+    )
+
+
 def test_run_sh_detached_launcher_returns_live_child_pid() -> None:
     payload = _run_bash_probe(
         r"""
