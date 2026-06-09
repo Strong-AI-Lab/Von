@@ -179,13 +179,20 @@ Managed bootstrap exposes Mongo startup guardrails for hosted deployments:
 
 Secret handling guidance:
 
-- keep `bootstrap_mongo_uri = null` in committed tfvars.
+- do not set `bootstrap_mongo_uri = null` in tfvars when using
+  `TF_VAR_bootstrap_mongo_uri`; tfvars values override runtime environment
+  variables.
 - inject `TF_VAR_bootstrap_mongo_uri` at apply time, or pre-provision
   `/etc/von/secrets/mongo_uri` out-of-band.
 
 Operational checks:
 
-- restrict Atlas network allowlist to approved host/NAT egress IPs only.
+- restrict the Atlas project database access list to approved host/NAT egress
+  IPs only. For Catalyst VMs with a floating IP, add the floating IP used for
+  outbound Atlas connections.
+- remember that Atlas Admin API calls use a separate API-key or service-account
+  access list: the operator machine running discovery or access-list scans must
+  also be on that list.
 - validate post-deploy DB path with `/admin/db/health?probe=rw`.
 
 With strict startup enabled, Von fails fast with clear diagnostics when Mongo

@@ -193,13 +193,20 @@ Managed bootstrap also supports MongoDB Atlas startup hardening:
 
 Secret handling:
 
-- keep `bootstrap_mongo_uri = null` in committed tfvars.
+- do not set `bootstrap_mongo_uri = null` in tfvars when using
+  `TF_VAR_bootstrap_mongo_uri`; tfvars values override runtime environment
+  variables.
 - inject secrets at runtime using `TF_VAR_bootstrap_mongo_uri`, or pre-provision
   `bootstrap_mongo_uri_file` on host.
 
 Operational note:
 
-- Atlas network access should be restricted to approved host/NAT egress addresses.
+- Atlas project database network access should be restricted to approved host/NAT
+  egress addresses. For Catalyst VMs with a floating IP, add the floating IP
+  used for outbound Atlas connections.
+- Atlas Admin API calls have a separate API-key or service-account access list:
+  the operator machine that runs discovery or access-list scans must also be
+  allowed there.
 - after deploy, use `/admin/db/health?probe=rw` for basic DB auth/read/write verification.
 
 ## Guardrails built in

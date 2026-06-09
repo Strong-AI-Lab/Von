@@ -10,6 +10,14 @@ locals {
     environment = var.environment
   }, var.metadata)
 
+  # OpenStack creates an allow-all IPv4 egress rule on new security groups.
+  # Managing that same rule explicitly causes a 409 SecurityGroupRuleExists
+  # response on Catalyst Cloud, so only non-default egress CIDRs are created.
+  managed_allowed_egress_cidrs = [
+    for cidr in var.allowed_egress_cidrs : cidr
+    if trimspace(cidr) != "0.0.0.0/0"
+  ]
+
   security_group_rules = concat(
     [
       for cidr in var.ssh_ingress_cidrs : {
@@ -34,7 +42,7 @@ locals {
       }
     ],
     [
-      for cidr in var.allowed_egress_cidrs : {
+      for cidr in local.managed_allowed_egress_cidrs : {
         direction        = "egress"
         ethertype        = "IPv4"
         protocol         = null

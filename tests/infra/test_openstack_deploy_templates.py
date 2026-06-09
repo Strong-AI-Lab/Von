@@ -20,6 +20,11 @@ RESTORE_DRILL_TEMPLATE = (
     REPO_ROOT / "infra/openstack/templates/scripts/von_restore_drill.sh.tftpl"
 )
 RUNBOOK_DOC = REPO_ROOT / "docs/engineering/openstack_operations_runbooks.md"
+OPENSTACK_ENV_EXAMPLES = [
+    REPO_ROOT / "infra/openstack/environments/dev/dev.tfvars.example",
+    REPO_ROOT / "infra/openstack/environments/staging/staging.tfvars.example",
+    REPO_ROOT / "infra/openstack/environments/prod/prod.tfvars.example",
+]
 OPENSTACK_MODULE_DIRS = [
     REPO_ROOT / "infra/openstack/modules/compute_instance",
     REPO_ROOT / "infra/openstack/modules/floating_ip",
@@ -38,6 +43,7 @@ SCRIPT_TEMPLATES = [
 def test_deploy_template_includes_health_gate_and_rollback_paths() -> None:
     content = DEPLOY_TEMPLATE.read_text(encoding="utf-8")
     assert "wait_for_health" in content
+    assert "VON_BOOTSTRAP_HEALTHCHECK_ATTEMPTS:-120" in content
     assert "rollback_release" in content
     assert "healthcheck_failed_rollback_succeeded" in content
     assert "healthcheck_failed_rollback_failed" in content
@@ -74,6 +80,28 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "MONGO_ALLOW_LOCAL_FALLBACK" in content
     assert "VON_MONGO_ALLOWED_HOST_SUFFIXES" in content
     assert "MONGO_URI_FILE" in content
+
+
+def test_cloud_init_user_schema_uses_supported_service_account_fields() -> None:
+    content = CLOUD_INIT_TEMPLATE.read_text(encoding="utf-8")
+    assert "homedir: ${app_dir}" in content
+    assert "home: ${app_dir}" not in content
+    assert "create_home:" not in content
+
+
+def test_cloud_init_secret_files_are_readable_by_service_group_only() -> None:
+    content = CLOUD_INIT_TEMPLATE.read_text(encoding="utf-8")
+    assert "install -d -m 0750 -o root -g ${service_group} /etc/von/secrets" in content
+    assert "chown root:${service_group}" in content
+    assert "chmod 0640" in content
+    assert "owner: root:${service_group}" not in content
+    assert re.search(r"(?m)^\s*owner: root:root\n\s*permissions: \"0600\"", content)
+
+
+def test_cloud_init_template_indents_generated_file_content_blocks() -> None:
+    content = CLOUD_INIT_TEMPLATE.read_text(encoding="utf-8")
+    assert not re.search(r"(?m)^\$\{indent\(6, [a-z_]+_content\)\}", content)
+    assert "      ${indent(6, service_unit_content)}" in content
 
 
 def test_workflow_contains_ci_gates_and_manual_deploy_trigger() -> None:
@@ -158,3 +186,28 @@ def test_openstack_modules_pin_provider_source() -> None:
         content = (module_dir / "versions.tf").read_text(encoding="utf-8")
         assert 'source  = "terraform-provider-openstack/openstack"' in content
         assert 'version = "~> 2.1"' in content
+
+
+def test_openstack_stack_does_not_manage_provider_default_egress_rule() -> None:
+    content = (REPO_ROOT / "infra/openstack/main.tf").read_text(encoding="utf-8")
+    assert "managed_allowed_egress_cidrs" in content
+    assert 'trimspace(cidr) != "0.0.0.0/0"' in content
+
+
+def test_openstack_environment_examples_do_not_null_secret_runtime_inputs() -> None:
+    secret_names = [
+        "bootstrap_flask_secret_key",
+        "bootstrap_google_oauth_client_id",
+        "bootstrap_google_oauth_client_secret",
+        "bootstrap_mongo_uri",
+    ]
+    secret_null_assignment = re.compile(
+        rf"(?m)^\s*({'|'.join(secret_names)})\s*=\s*null\b"
+    )
+
+    for example_path in OPENSTACK_ENV_EXAMPLES:
+        content = example_path.read_text(encoding="utf-8")
+        assert not secret_null_assignment.search(content), (
+            f"{example_path} assigns a secret bootstrap variable to null; "
+            "tfvars overrides TF_VAR_* runtime injection."
+        )

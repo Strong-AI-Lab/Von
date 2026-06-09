@@ -136,15 +136,24 @@ on_exit() {
 }
 
 wait_for_health() {
-  local attempts=30
-  local delay_seconds=2
+  local attempts="$${VON_DEPLOY_HEALTHCHECK_ATTEMPTS:-60}"
+  local delay_seconds="$${VON_DEPLOY_HEALTHCHECK_DELAY_SECONDS:-5}"
+  if [[ "$BOOTSTRAP_MODE" -eq 1 ]]; then
+    attempts="$${VON_BOOTSTRAP_HEALTHCHECK_ATTEMPTS:-120}"
+    delay_seconds="$${VON_BOOTSTRAP_HEALTHCHECK_DELAY_SECONDS:-5}"
+  fi
+
+  log "Waiting for service health at $HEALTHCHECK_URL (attempts=$attempts, delay_seconds=$delay_seconds)."
+
   local attempt
   for attempt in $(seq 1 "$attempts"); do
-    if curl -fsS "$HEALTHCHECK_URL" >/dev/null; then
+    if curl -fsS "$HEALTHCHECK_URL" >/dev/null 2>&1; then
+      log "Service became healthy on attempt $attempt."
       return 0
     fi
     sleep "$delay_seconds"
   done
+  log "ERROR: service did not become healthy after $attempts attempt(s)."
   return 1
 }
 

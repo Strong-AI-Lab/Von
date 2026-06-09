@@ -156,3 +156,7 @@ infra/openstack/**/terraform.tfstate
 infra/openstack/**/terraform.tfstate.*
 infra/openstack/environments/*/*.tfvars
 !infra/openstack/environments/*/*.tfvars.example
+clouds.yaml
+secure.yaml
+**/clouds.yaml
+**/secure.yaml
