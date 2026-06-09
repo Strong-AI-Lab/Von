@@ -2739,6 +2739,12 @@ def run_turn_execution_critic(
             max_items=10,
             max_string_length=800,
         ),
+        "requested_evidence_lineage": _bounded_snapshot(
+            turn_execution_record.get("requested_evidence_lineage"),
+            max_depth=8,
+            max_items=10,
+            max_string_length=800,
+        ),
         "turn_expected_outcome_contract_state": turn_execution_record.get(
             "turn_expected_outcome_contract_state"
         ),

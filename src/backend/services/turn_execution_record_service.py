@@ -70,6 +70,7 @@ FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION = "final_answer_synthesis_teleme
 TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
     "tool_evidence_projection_reachability.v1"
 )
+REQUESTED_EVIDENCE_LINEAGE_SCHEMA_VERSION = "requested_evidence_lineage.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
 _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS = frozenset(
@@ -2811,6 +2812,296 @@ def _extract_tool_evidence_projection_reachability(
         "redacted_field_concept_ids": _dedupe_string_sequence(redacted_field_ids),
         "entries": entries,
     }
+
+
+def _field_lineage_entries_from_projection_entry(
+    entry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    lineage_entries: list[dict[str, Any]] = []
+    field_sets = (
+        ("preserved_fields", "satisfied"),
+        ("missing_required_fields", "unresolved"),
+        ("omitted_fields", "omitted"),
+        ("redacted_fields", "redacted"),
+    )
+    for field_key, status in field_sets:
+        raw_fields = entry.get(field_key)
+        if not isinstance(raw_fields, Sequence) or isinstance(
+            raw_fields, (str, bytes, bytearray)
+        ):
+            continue
+        for field in raw_fields:
+            if not isinstance(field, Mapping):
+                continue
+            field_concept_id = _safe_str(field.get("field_concept_id"))
+            output_key = _safe_str(field.get("output_key"))
+            if not field_concept_id and not output_key:
+                continue
+            field_entry: dict[str, Any] = {
+                "field_concept_id": field_concept_id,
+                "output_key": output_key,
+                "status": status,
+                "source": "final_answer_tool_evidence_projection",
+                "tool": _safe_str(entry.get("tool")),
+                "tool_concept_id": _safe_str(entry.get("tool_concept_id")),
+                "source_tool_invocation_id": _safe_str(
+                    entry.get("source_tool_invocation_id")
+                ),
+                "evidence_view_concept_ids": _dedupe_string_sequence(
+                    entry.get("evidence_view_concept_ids") or []
+                ),
+                "reason": _safe_str(field.get("reason")),
+            }
+            lineage_entries.append(
+                {
+                    key: value
+                    for key, value in field_entry.items()
+                    if value not in (None, [], {})
+                }
+            )
+    return lineage_entries
+
+
+def _requested_field_status_counts(
+    fields: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    counts = {
+        "satisfied": 0,
+        "unresolved": 0,
+        "omitted": 0,
+        "redacted": 0,
+    }
+    for field in fields:
+        if not isinstance(field, Mapping):
+            continue
+        status = _safe_str(field.get("status"))
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _final_response_lineage_payload(response_text: Any) -> dict[str, Any]:
+    text = response_text if isinstance(response_text, str) else str(response_text or "")
+    return {
+        "source": "final_visible_response",
+        "text_checked_sha256": _hash_text(text),
+        "text_checked_char_count": len(text),
+        "text_checked_preview": text[:1000],
+    }
+
+
+def _effect_resolver_chain_payload(
+    effect: Mapping[str, Any],
+    *,
+    contract_id: str | None,
+    contract_source: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "effect_id": _safe_str(effect.get("effect_id")),
+        "effect_type": _safe_str(effect.get("effect_type")),
+        "status": _safe_str(effect.get("status")),
+        "status_reason": _safe_str(effect.get("status_reason")),
+        "required_tools": _dedupe_string_sequence(effect.get("required_tools") or []),
+        "required_tools_match": _safe_str(effect.get("required_tools_match")),
+        "targets": _dedupe_string_sequence(effect.get("targets") or []),
+        "failure_codes": _normalise_failure_codes(effect.get("failure_codes")),
+        "failure_code": _safe_str(effect.get("failure_code")),
+        "source": _safe_str(effect.get("source")) or contract_source,
+        "intent_origin": _safe_str(effect.get("intent_origin")),
+        "represented_contract_id": contract_id,
+        "represented_contract_source": contract_source,
+    }
+    return {key: item for key, item in payload.items() if item not in (None, [], {})}
+
+
+def _build_requested_evidence_lineage(
+    *,
+    response_text: Any,
+    final_answer_synthesis: Mapping[str, Any] | None,
+    required_effects: Sequence[Mapping[str, Any]],
+    turn_expected_outcome_contract: Mapping[str, Any] | None,
+    prompt_required_evidence_contract: Mapping[str, Any] | None,
+    workflow_required_effects_contract: Mapping[str, Any] | None,
+    workflow_required_effects_contract_source: str | None,
+    completion_gate: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    tool_projection = (
+        final_answer_synthesis.get("tool_evidence_projection")
+        if isinstance(final_answer_synthesis, Mapping)
+        else None
+    )
+    projection_entries = (
+        tool_projection.get("entries") if isinstance(tool_projection, Mapping) else None
+    )
+    requested_fields: list[dict[str, Any]] = []
+    if isinstance(projection_entries, Sequence) and not isinstance(
+        projection_entries, (str, bytes, bytearray)
+    ):
+        for projection_entry in projection_entries:
+            if isinstance(projection_entry, Mapping):
+                requested_fields.extend(
+                    _field_lineage_entries_from_projection_entry(projection_entry)
+                )
+
+    expected_required_tools = _dedupe_string_sequence(
+        (
+            turn_expected_outcome_contract.get("required_tools")
+            if isinstance(turn_expected_outcome_contract, Mapping)
+            else []
+        )
+        or []
+    )
+    expected_target_concept_ids = _dedupe_string_sequence(
+        (
+            turn_expected_outcome_contract.get("target_concept_ids")
+            if isinstance(turn_expected_outcome_contract, Mapping)
+            else []
+        )
+        or []
+    )
+
+    prompt_contract_id = (
+        _safe_str(prompt_required_evidence_contract.get("contract_id"))
+        if isinstance(prompt_required_evidence_contract, Mapping)
+        else None
+    )
+    workflow_contract_id = (
+        _safe_str(workflow_required_effects_contract.get("contract_id"))
+        if isinstance(workflow_required_effects_contract, Mapping)
+        else None
+    )
+    evidence_view_concept_ids = _dedupe_string_sequence(
+        [
+            evidence_view_id
+            for field in requested_fields
+            if isinstance(field, Mapping)
+            for evidence_view_id in (field.get("evidence_view_concept_ids") or [])
+        ]
+    )
+    represented_contract_ids = _dedupe_string_sequence(
+        [
+            prompt_contract_id,
+            workflow_contract_id,
+            *evidence_view_concept_ids,
+        ]
+    )
+
+    resolver_chains: list[dict[str, Any]] = []
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        effect_type = _safe_str(effect.get("effect_type"))
+        if not (
+            _is_evidence_effect_type(effect_type)
+            or effect_type in {"tool_execution", "workflow_execution"}
+        ):
+            continue
+        contract_id = (
+            workflow_contract_id
+            if _safe_str(effect.get("source")) == "workflow_required_effects_contract"
+            else prompt_contract_id
+        )
+        contract_source = (
+            workflow_required_effects_contract_source
+            if contract_id == workflow_contract_id
+            else _safe_str(effect.get("source"))
+        )
+        resolver_chains.append(
+            _effect_resolver_chain_payload(
+                effect,
+                contract_id=contract_id,
+                contract_source=contract_source,
+            )
+        )
+
+    field_counts = _requested_field_status_counts(requested_fields)
+    unresolved_fields = [
+        dict(field)
+        for field in requested_fields
+        if isinstance(field, Mapping) and field.get("status") == "unresolved"
+    ]
+    unresolved_resolvers = [
+        dict(chain)
+        for chain in resolver_chains
+        if isinstance(chain, Mapping)
+        and _safe_str(chain.get("status")) in {"not_satisfied", "not_executed"}
+    ]
+    gate_payload = dict(completion_gate) if isinstance(completion_gate, Mapping) else {}
+    gate_evidence = (
+        gate_payload.get("evidence_payload")
+        if isinstance(gate_payload.get("evidence_payload"), Mapping)
+        else {}
+    )
+    answer_consistency_blocker = (
+        gate_evidence.get("required_evidence_answer_consistency_blocker")
+        if isinstance(gate_evidence, Mapping)
+        else None
+    )
+
+    if not any(
+        [
+            requested_fields,
+            resolver_chains,
+            expected_required_tools,
+            expected_target_concept_ids,
+            represented_contract_ids,
+            isinstance(tool_projection, Mapping),
+        ]
+    ):
+        return None
+
+    lineage: dict[str, Any] = {
+        "schema_version": REQUESTED_EVIDENCE_LINEAGE_SCHEMA_VERSION,
+        "final_response": _final_response_lineage_payload(response_text),
+        "turn_expected_required_tools": expected_required_tools,
+        "turn_expected_target_concept_ids": expected_target_concept_ids,
+        "represented_contract_ids": represented_contract_ids,
+        "requested_fields": requested_fields,
+        "requested_field_status_counts": field_counts,
+        "unresolved_requested_fields": unresolved_fields,
+        "resolver_chains": resolver_chains,
+        "unresolved_resolver_chains": unresolved_resolvers,
+        "final_answer_projection": (
+            {
+                "projection_count": _safe_non_negative_int(
+                    tool_projection.get("projection_count")
+                ),
+                "tools": _dedupe_string_sequence(tool_projection.get("tools") or []),
+                "tool_concept_ids": _dedupe_string_sequence(
+                    tool_projection.get("tool_concept_ids") or []
+                ),
+                "source_tool_invocation_ids": _dedupe_string_sequence(
+                    tool_projection.get("source_tool_invocation_ids") or []
+                ),
+                "preserved_field_concept_ids": _dedupe_string_sequence(
+                    tool_projection.get("preserved_field_concept_ids") or []
+                ),
+                "missing_required_field_concept_ids": _dedupe_string_sequence(
+                    tool_projection.get("missing_required_field_concept_ids") or []
+                ),
+                "omitted_field_concept_ids": _dedupe_string_sequence(
+                    tool_projection.get("omitted_field_concept_ids") or []
+                ),
+                "redacted_field_concept_ids": _dedupe_string_sequence(
+                    tool_projection.get("redacted_field_concept_ids") or []
+                ),
+            }
+            if isinstance(tool_projection, Mapping)
+            else None
+        ),
+        "answer_consistency_blocker": (
+            dict(answer_consistency_blocker)
+            if isinstance(answer_consistency_blocker, Mapping)
+            else None
+        ),
+        "completion_gate_decision": _safe_str(gate_payload.get("decision")),
+        "completion_gate_safe_to_claim_completion": (
+            gate_payload.get("safe_to_claim_completion")
+            if isinstance(gate_payload.get("safe_to_claim_completion"), bool)
+            else None
+        ),
+    }
+    return {key: item for key, item in lineage.items() if item not in (None, [], {})}
 
 
 def _select_latest_summariser_request_entry(
@@ -8680,6 +8971,32 @@ def build_turn_execution_record(
             blocker=prompt_required_evidence_answer_consistency_blocker,
         )
 
+    requested_evidence_lineage = _build_requested_evidence_lineage(
+        response_text=response_text,
+        final_answer_synthesis=final_answer_synthesis,
+        required_effects=required_effects,
+        turn_expected_outcome_contract=(
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_available
+            else None
+        ),
+        prompt_required_evidence_contract=prompt_required_evidence_contract,
+        workflow_required_effects_contract=workflow_required_effects_contract,
+        workflow_required_effects_contract_source=workflow_required_effects_contract_source,
+        completion_gate=completion_gate,
+    )
+    if isinstance(requested_evidence_lineage, Mapping):
+        completion_gate = dict(completion_gate)
+        gate_evidence_payload = (
+            dict(completion_gate.get("evidence_payload"))
+            if isinstance(completion_gate.get("evidence_payload"), Mapping)
+            else {}
+        )
+        gate_evidence_payload["requested_evidence_lineage"] = dict(
+            requested_evidence_lineage
+        )
+        completion_gate["evidence_payload"] = gate_evidence_payload
+
     latest_progress = (
         turn_execution_diagnostics.get("latest_progress")
         if isinstance(turn_execution_diagnostics, Mapping)
@@ -8832,6 +9149,20 @@ def build_turn_execution_record(
     execution_summary_with_contract["required_evidence_answer_consistency_source"] = (
         prompt_required_evidence_answer_consistency_source
     )
+    if isinstance(requested_evidence_lineage, Mapping):
+        execution_summary_with_contract["requested_evidence_lineage_observed"] = True
+        execution_summary_with_contract["requested_evidence_field_count"] = len(
+            requested_evidence_lineage.get("requested_fields") or []
+        )
+        execution_summary_with_contract["requested_evidence_unresolved_field_count"] = (
+            len(requested_evidence_lineage.get("unresolved_requested_fields") or [])
+        )
+        execution_summary_with_contract["requested_evidence_resolver_chain_count"] = (
+            len(requested_evidence_lineage.get("resolver_chains") or [])
+        )
+        execution_summary_with_contract[
+            "requested_evidence_unresolved_resolver_chain_count"
+        ] = len(requested_evidence_lineage.get("unresolved_resolver_chains") or [])
     execution_summary_with_contract["final_answer_synthesis_observed"] = bool(
         final_answer_synthesis
     )
@@ -8938,6 +9269,11 @@ def build_turn_execution_record(
             "required_effects_contract": primary_required_effects_contract,
             "prompt_required_mutation_contract": prompt_required_mutation_contract,
             "workflow_required_effects_contract": workflow_required_effects_contract,
+            "requested_evidence_lineage": (
+                dict(requested_evidence_lineage)
+                if isinstance(requested_evidence_lineage, Mapping)
+                else None
+            ),
             "required_prompt_tools": (
                 list(effective_required_prompt_tools)
                 if effective_required_prompt_tools
@@ -8974,11 +9310,13 @@ def build_turn_execution_record(
         "completion_gate_verdict": completion_gate_verdict,
         "completion_report": completion_report,
         "final_answer_synthesis": final_answer_synthesis,
+        "requested_evidence_lineage": requested_evidence_lineage,
         "final_response": {
             "response_sha256": _hash_text(response_text),
             "completion_claim_detected": bool(completion_claim["detected"]),
             "completion_claim_validated": bool(completion_claim["validated"]),
             "synthesis_observed": bool(final_answer_synthesis),
+            "requested_evidence_lineage_observed": bool(requested_evidence_lineage),
         },
     }
     return ensure_turn_execution_record_execution_correctness(record_payload)

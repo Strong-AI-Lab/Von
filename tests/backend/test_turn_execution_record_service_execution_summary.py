@@ -150,11 +150,53 @@ def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry()
     ]
     assert projection["omitted_field_concept_ids"] == ["#V#gmail_message_snippet_field"]
     assert projection["redacted_field_concept_ids"] == ["#V#gmail_message_body_field"]
+    lineage = record["requested_evidence_lineage"]
+    assert lineage["schema_version"] == "requested_evidence_lineage.v1"
+    assert lineage["final_response"]["source"] == "final_visible_response"
+    assert lineage["final_response"]["text_checked_char_count"] == len(
+        "I found two relevant messages."
+    )
+    assert {
+        (entry.get("field_concept_id"), entry.get("status"))
+        for entry in lineage["requested_fields"]
+    } == {
+        ("#V#gmail_message_subject_field", "satisfied"),
+        ("#V#gmail_message_sender_field", "unresolved"),
+        ("#V#gmail_message_snippet_field", "omitted"),
+        ("#V#gmail_message_body_field", "redacted"),
+    }
+    assert lineage["unresolved_requested_fields"] == [
+        {
+            "field_concept_id": "#V#gmail_message_sender_field",
+            "output_key": "sender",
+            "status": "unresolved",
+            "source": "final_answer_tool_evidence_projection",
+            "tool": "gmail_list_messages",
+            "tool_concept_id": "#V#gmail_list_messages_tool",
+            "source_tool_invocation_id": "tool-call-1",
+            "evidence_view_concept_ids": [
+                "#V#gmail_message_final_answer_evidence_view"
+            ],
+            "reason": "missing_from_payload",
+        }
+    ]
+    assert "#V#gmail_message_final_answer_evidence_view" in (
+        lineage["represented_contract_ids"]
+    )
     assert record["execution"]["summary"]["final_answer_synthesis_observed"] is True
     assert (
         record["execution"]["summary"]["final_answer_synthesis_projection_count"] == 1
     )
+    assert record["execution"]["summary"]["requested_evidence_lineage_observed"] is True
+    assert record["execution"]["summary"]["requested_evidence_field_count"] == 4
+    assert (
+        record["completion_gate"]["evidence_payload"]["requested_evidence_lineage"][
+            "requested_field_status_counts"
+        ]["unresolved"]
+        == 1
+    )
     assert record["final_response"]["synthesis_observed"] is True
+    assert record["final_response"]["requested_evidence_lineage_observed"] is True
 
 
 def test_turn_record_treats_narration_prompt_as_final_answer_synthesis() -> None:
@@ -2078,6 +2120,15 @@ def test_turn_execution_record_rejects_search_only_kr_required_tool_run() -> Non
     assert (
         BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS
         in summary["required_tool_obligation_blocking_failure_codes"]
+    )
+    lineage = record["requested_evidence_lineage"]
+    assert lineage["turn_expected_required_tools"] == _KR_REQUIRED_TOOLS
+    assert lineage["unresolved_resolver_chains"]
+    assert any(
+        chain.get("effect_type") == "tool_execution"
+        and BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS
+        in (chain.get("failure_codes") or [])
+        for chain in lineage["unresolved_resolver_chains"]
     )
     assert summary["required_tool_obligations"]["unsatisfied_required_tools"] == [
         "create_concepts",

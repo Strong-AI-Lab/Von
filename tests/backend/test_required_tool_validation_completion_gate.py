@@ -572,6 +572,49 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
     None
 ):
     summary_only_answer = "Execution status: processed the Gmail request successfully."
+    projected_tool_payload = {
+        "tool": "gmail_list_messages",
+        "status": "ok",
+        "call_id": "gmail-list-1",
+        "payload": {
+            "messages": [
+                {
+                    "message_id": "msg-1",
+                    "sender": "sender@example.test",
+                    "subject": "Lab scheduling",
+                    "date": "2026-06-06",
+                    "snippet": "Labels: Work, Lab",
+                }
+            ],
+            "_tool_evidence_projection": {
+                "tool_concept_id": "#V#gmail_list_messages_tool",
+                "evidence_view_concept_ids": [
+                    "#V#gmail_message_final_answer_evidence_view"
+                ],
+                "preserved_fields": [
+                    {
+                        "field_concept_id": "#V#gmail_sender_field",
+                        "output_key": "sender",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_subject_field",
+                        "output_key": "subject",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_date_field",
+                        "output_key": "date",
+                    },
+                    {
+                        "field_concept_id": "#V#gmail_snippet_field",
+                        "output_key": "snippet",
+                    },
+                ],
+                "missing_required_fields": [],
+                "omitted_fields": [],
+                "redacted_fields": [],
+            },
+        },
+    }
     data = {
         "turn_id": "req-gmail-summary-only-blocked",
         "conversation_session_id": "session-gmail-summary-only-blocked",
@@ -630,7 +673,19 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
             },
             "recommendations": [],
         },
-        "aux_llm_calls": [],
+        "aux_llm_calls": [
+            {
+                "type": "workflow_model_policy_stage",
+                "stage": "summariser",
+                "workflow_stage_id": "final_answer",
+                "request": {
+                    "prompt": "Compose the final answer.",
+                    "context_messages": [
+                        {"role": "tool", "content": json.dumps(projected_tool_payload)}
+                    ],
+                },
+            }
+        ],
     }
     request = SimpleNamespace(
         data=data,
@@ -661,6 +716,17 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
     evidence_payload = result.outputs["completion_gate_evidence_payload"]
     blocker = evidence_payload["required_evidence_answer_consistency_blocker"]
     assert blocker["blocker_source"] == "critic_verdict"
+    lineage = evidence_payload["requested_evidence_lineage"]
+    assert lineage["final_response"]["text_checked_sha256"]
+    assert lineage["final_response"]["text_checked_preview"] == summary_only_answer
+    assert lineage["answer_consistency_blocker"]["failure_code"] == (
+        "projected_final_answer_evidence_not_consumed"
+    )
+    assert lineage["requested_field_status_counts"]["satisfied"] == 4
+    assert lineage["represented_contract_ids"] == [
+        "#V#gmail_message_final_answer_evidence_view"
+    ]
+    assert lineage["completion_gate_safe_to_claim_completion"] is False
 
 
 def test_kr_required_tools_block_completion_when_write_and_readback_are_absent() -> (
