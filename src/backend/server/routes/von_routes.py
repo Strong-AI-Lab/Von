@@ -13876,6 +13876,9 @@ def history():
     if not user_concept_id:
         return jsonify(
             {
+                "authenticated": False,
+                "availability_status": "unauthenticated",
+                "history_unavailable_reason": "not_authenticated",
                 "history": [],
                 "segments_returned": 0,
                 "total_segments": 0,
@@ -14054,6 +14057,8 @@ def _build_transient_chat_history_payload(
         {
             "degraded": True,
             "retryable": True,
+            "availability_status": "transient_storage_error",
+            "history_unavailable_reason": "transient_chat_history_error",
             "error": error_message,
             "detail": str(exc)[:300],
         }

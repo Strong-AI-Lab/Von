@@ -1688,6 +1688,7 @@ describe('loadChatHistory degraded handling', () => {
                         degraded: true,
                         retryable: true,
                         error: 'Chat history temporarily unavailable; please retry.',
+                        history_unavailable_reason: 'transient_chat_history_error',
                         detail: 'read circuit open'
                     })
                 });
@@ -1711,7 +1712,7 @@ describe('loadChatHistory degraded handling', () => {
         expect(document.getElementById('scrollableField').textContent).toContain('Kept content');
         expect(document.getElementById('historyBanner').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('historyBannerText').textContent).toContain(
-            'temporarily unavailable'
+            'storage is temporarily unavailable'
         );
     });
 

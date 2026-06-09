@@ -44,6 +44,7 @@ class _TrackingCursor:
         self._rows = list(rows)
         self.sort_calls = []
         self.limit_calls = []
+        self.batch_size_calls = []
 
     def sort(self, sort_spec):
         self.sort_calls.append(sort_spec)
@@ -59,6 +60,10 @@ class _TrackingCursor:
     def limit(self, limit):
         self.limit_calls.append(limit)
         self._rows = self._rows[:limit]
+        return self
+
+    def batch_size(self, batch_size):
+        self.batch_size_calls.append(batch_size)
         return self
 
     def max_time_ms(self, _max_time_ms):
@@ -192,6 +197,42 @@ def test_light_session_summaries_sort_and_limit_before_materialising(monkeypatch
     assert result["raw_session_count_is_bounded"] is True
 
 
+def test_light_session_summaries_bound_agent_visibility_overfetch(monkeypatch):
+    docs = [
+        {
+            "user_id": "#V#u",
+            "session_id": f"s-{index}",
+            "session_name": f"Session {index}",
+            "namespace": "#V#u@org",
+            "created_at": _utc("2026-02-20T00:00:00Z"),
+            "updated_at": _utc("2026-02-20T00:01:00Z"),
+        }
+        for index in range(1, 400)
+    ]
+    collection = _TrackingMetadataCollection(docs)
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: collection,
+    )
+
+    result = chat_history_service.get_chat_history_session_summaries_result(
+        "#V#u",
+        limit=200,
+        namespace="#V#u@org",
+        include_legacy=False,
+        summary_mode="light",
+        agent_visibility="exclude",
+        keep_newest_agent_created=True,
+    )
+
+    assert collection.cursor is not None
+    assert collection.cursor.limit_calls == [250]
+    assert collection.cursor.batch_size_calls == [250]
+    assert result["metadata_query_limit"] == 250
+    assert result["raw_session_count_is_bounded"] is True
+
+
 def test_chat_history_indexes_include_namespaced_recency_index() -> None:
     class _IndexCollection:
         def __init__(self) -> None:
@@ -227,6 +268,23 @@ def test_chat_history_indexes_include_namespaced_recency_index() -> None:
             ("created_at", -1),
         ],
         "name": "namespace_1_user_id_1_updated_at_-1_created_at_-1",
+    } in collection.created_indexes
+    assert {
+        "spec": [
+            ("namespace", 1),
+            ("user_id", 1),
+            ("updated_at", -1),
+            ("created_at", -1),
+            ("session_id", 1),
+            ("session_name", 1),
+            ("organisation_concept_id", 1),
+            ("origin_kind", 1),
+            ("created_by_actor_concept_id", 1),
+            ("created_by_actor_type", 1),
+            ("is_agent_created", 1),
+            ("test_artifact_kind", 1),
+        ],
+        "name": "namespace_user_recency_session_metadata_v1",
     } in collection.created_indexes
 
 

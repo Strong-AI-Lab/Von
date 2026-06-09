@@ -3466,6 +3466,27 @@ function clearHistoryLoadState({ sessionId = null } = {}) {
     historyLoadState.sessionId = null;
 }
 
+function describeHistoryUnavailable(data, fallbackMessage = '') {
+    const reason = (typeof data?.history_unavailable_reason === 'string')
+        ? data.history_unavailable_reason.trim()
+        : '';
+    if (reason === 'not_authenticated') {
+        return 'Sign in to load conversation history.';
+    }
+    if (reason === 'not_authorised') {
+        return 'This conversation is not available for the selected user or organisation.';
+    }
+    if (reason === 'transient_chat_history_error') {
+        return 'Conversation history storage is temporarily unavailable; please retry.';
+    }
+    if (typeof data?.error === 'string' && data.error.trim()) {
+        return data.error.trim();
+    }
+    return (typeof fallbackMessage === 'string' && fallbackMessage.trim())
+        ? fallbackMessage.trim()
+        : 'Conversation history temporarily unavailable; please retry.';
+}
+
 function setHistoryLoadState({
     sessionId = null,
     message = '',
@@ -22666,9 +22687,7 @@ async function loadChatHistory(options = {}) {
         console.log(`[chatTab] loadChatHistory response: ok=${response.ok}, segments=${data.segments_returned}, total=${data.total_segments}, history_len=${data.history ? data.history.length : 'undefined'}`);
 
         if (data?.degraded === true) {
-            const degradedMessage = (typeof data?.error === 'string' && data.error.trim())
-                ? data.error.trim()
-                : 'Conversation history temporarily unavailable; please retry.';
+            const degradedMessage = describeHistoryUnavailable(data);
             setHistoryLoadState({
                 sessionId: targetSessionId,
                 message: degradedMessage,

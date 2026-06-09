@@ -52,6 +52,9 @@ _CHAT_HISTORY_INDEXES_LOCK = threading.Lock()
 _CHAT_HISTORY_READ_CIRCUIT_LOCK = threading.Lock()
 _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC = 0.0
 _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR: Optional[str] = None
+_CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME = (
+    "namespace_user_recency_session_metadata_v1"
+)
 CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
 CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
@@ -379,6 +382,48 @@ def _history_array_expr(field_name: str = "history") -> Dict[str, Any]:
     return {"$ifNull": [f"${field_name}", []]}
 
 
+def _history_without_debug_payload_expr(history_expr: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an aggregation expression that removes embedded debug payloads."""
+
+    return {
+        "$map": {
+            "input": history_expr,
+            "as": "entry",
+            "in": {
+                "$cond": [
+                    {"$eq": [{"$type": "$$entry"}, "object"]},
+                    {
+                        "$arrayToObject": {
+                            "$filter": {
+                                "input": {"$objectToArray": "$$entry"},
+                                "as": "field",
+                                "cond": {"$ne": ["$$field.k", "llm_debug_data"]},
+                            }
+                        }
+                    },
+                    "$$entry",
+                ]
+            },
+        }
+    }
+
+
+def _history_tail_projection_expr(
+    *,
+    history_tail_limit: int,
+    include_debug: bool,
+) -> Dict[str, Any]:
+    history_expr: Dict[str, Any] = {
+        "$slice": [
+            _history_array_expr(),
+            -history_tail_limit,
+        ]
+    }
+    if include_debug:
+        return history_expr
+    return _history_without_debug_payload_expr(history_expr)
+
+
 def _ensure_chat_history_indexes(collection) -> None:
     global _CHAT_HISTORY_INDEXES_READY
     if _CHAT_HISTORY_INDEXES_READY:
@@ -431,6 +476,24 @@ def _ensure_chat_history_indexes(collection) -> None:
                         ("created_at", DESCENDING),
                     ],
                     name="namespace_1_user_id_1_updated_at_-1_created_at_-1",
+                )
+            if _CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("updated_at", DESCENDING),
+                        ("created_at", DESCENDING),
+                        ("session_id", ASCENDING),
+                        ("session_name", ASCENDING),
+                        ("organisation_concept_id", ASCENDING),
+                        ("origin_kind", ASCENDING),
+                        ("created_by_actor_concept_id", ASCENDING),
+                        ("created_by_actor_type", ASCENDING),
+                        ("is_agent_created", ASCENDING),
+                        ("test_artifact_kind", ASCENDING),
+                    ],
+                    name=_CHAT_HISTORY_LIGHT_SESSION_METADATA_INDEX_NAME,
                 )
         except Exception as exc:
             logger.warning(
@@ -1415,12 +1478,10 @@ def get_chat_history_segments(
                         {"$match": query},
                         {
                             "$project": {
-                                "history": {
-                                    "$slice": [
-                                        _history_array_expr(),
-                                        -history_tail_limit,
-                                    ]
-                                },
+                                "history": _history_tail_projection_expr(
+                                    history_tail_limit=history_tail_limit,
+                                    include_debug=include_debug,
+                                ),
                                 "history_length": {"$size": _history_array_expr()},
                             }
                         },
@@ -2535,6 +2596,7 @@ def _get_chat_history_session_summaries_metadata_only(
 ) -> List[Dict[str, Any]]:
     projection: Dict[str, Any] = _add_chat_session_provenance_projection(
         {
+            "_id": 0,
             "session_id": 1,
             "session_name": 1,
             "created_at": 1,
@@ -2559,6 +2621,10 @@ def _get_chat_history_session_summaries_metadata_only(
         try:
             cursor = cursor.limit(safe_limit)
         except AttributeError:
+            pass
+        try:
+            cursor = cursor.batch_size(safe_limit)
+        except Exception:
             pass
     docs = list(cursor)
 
@@ -2592,7 +2658,7 @@ def _bounded_light_session_metadata_query_limit(
     if visibility == CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE or (
         visibility == CHAT_SESSION_AGENT_VISIBILITY_INCLUDE and keep_newest
     ):
-        return min(1000, max(safe_limit * 5, safe_limit + 100))
+        return max(safe_limit, min(300, safe_limit + 50))
     return safe_limit
 
 
@@ -2908,6 +2974,7 @@ def get_chat_history_session_summary(
 
     metadata_projection: Dict[str, Any] = _add_chat_session_provenance_projection(
         {
+            "_id": 0,
             "session_id": 1,
             "session_name": 1,
             "created_at": 1,

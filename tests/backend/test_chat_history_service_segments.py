@@ -172,6 +172,28 @@ class _FakeBlobStore:
         ]
 
 
+class _CaptureAggregateCollection:
+    def __init__(self) -> None:
+        self.pipeline = None
+
+    def aggregate(self, pipeline, **_kwargs):
+        self.pipeline = pipeline
+        return iter(
+            [
+                {
+                    "history": [
+                        {
+                            "role": "assistant",
+                            "content": "tail",
+                            "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        }
+                    ],
+                    "history_length": 3,
+                }
+            ]
+        )
+
+
 def test_get_chat_history_segments_skips_empty_segments(monkeypatch):
     from src.backend.services import chat_history_service
 
@@ -750,3 +772,63 @@ def test_get_chat_history_debug_entry_prefers_exact_namespace_document_over_lega
     )
 
     assert debug_data == {"model": "exact-model"}
+
+
+def test_get_chat_history_segments_strips_debug_payload_in_mongo_tail_projection(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    collection = _CaptureAggregateCollection()
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: collection,
+    )
+
+    segments_result = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        namespace="#V#u@org",
+        include_locations=True,
+        include_debug=False,
+        history_tail_limit=1,
+        return_meta=True,
+    )
+
+    assert collection.pipeline is not None
+    projection = collection.pipeline[1]["$project"]
+    history_projection = projection["history"]
+    assert "$map" in history_projection
+    mapped_entry = history_projection["$map"]["in"]
+    assert "llm_debug_data" in str(mapped_entry)
+
+    segments, meta = segments_result
+    assert meta["history_truncated"] is True
+    assert segments[0][0]["content"] == "tail"
+
+
+def test_get_chat_history_segments_keeps_debug_projection_when_requested(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    collection = _CaptureAggregateCollection()
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: collection,
+    )
+
+    chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        namespace="#V#u@org",
+        include_locations=True,
+        include_debug=True,
+        history_tail_limit=1,
+    )
+
+    assert collection.pipeline is not None
+    projection = collection.pipeline[1]["$project"]
+    assert "$slice" in projection["history"]
