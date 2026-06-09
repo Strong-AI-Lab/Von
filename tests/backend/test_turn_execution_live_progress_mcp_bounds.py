@@ -71,6 +71,66 @@ def _large_serialised_progress_payload() -> dict[str, Any]:
             {"stage": "workflow_routing", "state": "complete"},
             {"stage": "selected_workflow_execution", "state": "active"},
         ],
+        "turn_timing_trace": {
+            "schema_version": "turn_timing_trace.v1",
+            "span_count": 12,
+            "stored_span_count": 12,
+            "dropped_span_count": 0,
+            "summary": {
+                "elapsed_ms": 760274,
+                "phase_elapsed_ms": 700000,
+                "operation_elapsed_ms": 60274,
+                "llm_elapsed_ms": 42000,
+                "tool_elapsed_ms": 12000,
+            },
+            "slowest_spans": [
+                {
+                    "span_id": "slow-1",
+                    "stage_id": "workflow_routing",
+                    "operation_kind": "llm_call",
+                    "operation_name": "gpt-5-mini",
+                    "duration_ms": 42000,
+                }
+            ],
+            "model_prompt_summary": [
+                {
+                    "stage_id": "workflow_routing",
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "prompt_id": "#V#workflow_selector_prompt",
+                    "call_count": 1,
+                    "duration_ms": 42000,
+                }
+            ],
+            "operation_totals": [
+                {
+                    "operation_kind": "llm_call",
+                    "operation_name": "gpt-5-mini",
+                    "span_count": 1,
+                    "duration_ms": 42000,
+                }
+            ],
+            "spans": [
+                {
+                    "span_id": f"timing-span-{index}",
+                    "stage_id": "workflow_routing",
+                    "operation_kind": "llm_call",
+                    "operation_name": "gpt-5-mini",
+                    "duration_ms": 1000 + index,
+                }
+                for index in range(12)
+            ],
+        },
+        "timing_spans": [
+            {
+                "span_id": f"timing-span-{index}",
+                "stage_id": "workflow_routing",
+                "operation_kind": "llm_call",
+                "operation_name": "gpt-5-mini",
+                "duration_ms": 1000 + index,
+            }
+            for index in range(12)
+        ],
     }
 
 
@@ -108,7 +168,12 @@ def test_live_progress_default_projection_is_bounded(monkeypatch) -> None:
     assert "diagnostic_events" not in result
     assert "stage_diagnostics" not in result
     assert "llm_request" not in result
+    assert "turn_timing_trace" not in result
+    assert "timing_spans" not in result
+    assert result["timing_summary"]["span_count"] == 12
+    assert result["timing_summary"]["slowest_spans"][0]["duration_ms"] == 42000
     assert result["section_counts"]["diagnostic_events"] == 30
+    assert result["section_counts"]["timing_spans"] == 12
     assert result["detail_access"]["arguments"]["section"] == "<one of available_sections>"
     assert len(json.dumps(result, indent=2, default=str)) < 20_000
 
@@ -138,6 +203,35 @@ def test_live_progress_section_projection_paginates_large_details(monkeypatch) -
         "event 4",
         "event 5",
         "event 6",
+    ]
+
+
+def test_live_progress_timing_span_section_projection_paginates(monkeypatch) -> None:
+    from src.backend.services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    _install_live_progress_stubs(monkeypatch, _large_serialised_progress_payload())
+
+    result = get_turn_execution_live_progress_payload(
+        request_id="req-large-live-progress",
+        namespace="#V#tester@org",
+        section="timing_spans",
+        limit=4,
+        offset=8,
+    )
+
+    assert result is not None
+    assert result["projection"] == "section"
+    assert result["section"] == "timing_spans"
+    assert result["total"] == 12
+    assert result["returned"] == 4
+    assert result["next_offset"] is None
+    assert [item["span_id"] for item in result["items"]] == [
+        "timing-span-8",
+        "timing-span-9",
+        "timing-span-10",
+        "timing-span-11",
     ]
 
 

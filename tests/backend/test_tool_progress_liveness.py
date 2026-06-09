@@ -3238,3 +3238,104 @@ def test_serialised_tool_progress_state_includes_live_workflow_routing_diagnosti
     assert routing_diagnostics["selector"]["selection_resolution"] == (
         "candidate_label_exact_match"
     )
+
+
+def test_tool_progress_serialisation_exposes_bounded_turn_timing_trace(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=3000.0)
+
+    von_routes._set_tool_progress(
+        "scope-timing",
+        "req-timing",
+        {
+            "status": "thinking",
+            "stage": "tool_execute",
+            "phase": "tool_execute",
+            "request_id": "req-timing",
+        },
+    )
+    clock["now"] += 1.0
+    von_routes._set_tool_progress(
+        "scope-timing",
+        "req-timing",
+        {
+            "status": "heartbeat",
+            "stage": "response_finalising",
+            "phase": "response_finalising",
+            "timing_spans": [
+                {
+                    "span_id": "support-finalise-debug",
+                    "stage_id": "response_finalising",
+                    "operation_kind": "diagnostics_assembly",
+                    "operation_name": "build_turn_execution_diagnostics",
+                    "duration_ms": 37,
+                    "status": "success",
+                }
+            ],
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-timing", "req-timing")
+    assert state is not None
+    assert "_timing_spans" in state
+
+    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+    trace = serialised["turn_timing_trace"]
+
+    assert trace["schema_version"] == "turn_timing_trace.v1"
+    assert "timing_spans" in serialised
+    assert "_timing_spans" not in serialised
+    assert any(
+        span.get("span_id") == "support-finalise-debug" for span in trace["spans"]
+    )
+    assert serialised["timing_summary"]["slowest_spans"]
+
+
+def test_turn_execution_diagnostics_include_model_prompt_and_tool_timing() -> None:
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-diagnostics-timing",
+        prompt_text="What happened?",
+        tool_progress_state={"request_id": "req-diagnostics-timing"},
+        llm_calls=[
+            {
+                "workflow_stage_id": "workflow_routing",
+                "model": "gpt-5-mini",
+                "provider": "openai",
+                "prompt_id": "#V#workflow_selector_prompt",
+                "duration_ms": 250,
+                "success": True,
+            }
+        ],
+        tool_invocations=[
+            {
+                "tool": "turn_execution_get_live_progress",
+                "duration_ms": 19,
+                "status": "completed",
+                "arguments": {"request_id": "req-diagnostics-timing"},
+            }
+        ],
+        timing_spans=[
+            {
+                "span_id": "persist-history",
+                "stage_id": "response_finalising",
+                "operation_kind": "chat_history_persistence",
+                "operation_name": "persist_assistant_message",
+                "duration_ms": 41,
+            }
+        ],
+    )
+
+    trace = diagnostics["turn_timing_trace"]
+    timing_breakdown = diagnostics["timing_breakdown"]
+
+    assert trace["summary"]["llm_elapsed_ms"] == 250
+    assert trace["summary"]["tool_elapsed_ms"] == 19
+    assert trace["model_prompt_summary"][0]["prompt_id"] == (
+        "#V#workflow_selector_prompt"
+    )
+    assert any(
+        row["operation_kind"] == "chat_history_persistence"
+        for row in timing_breakdown["operation_totals"]
+    )
+    assert timing_breakdown["slowest_spans"][0]["duration_ms"] == 250

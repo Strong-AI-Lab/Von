@@ -21,6 +21,8 @@ _LIVE_PROGRESS_DETAIL_SECTIONS = frozenset(
         "selected_workflow_execution",
         "stage_diagnostics",
         "thinking_interpretability",
+        "timing_spans",
+        "turn_timing_trace",
         "workflow_routing_diagnostics",
         "workflow_stage_path",
     }
@@ -156,6 +158,23 @@ def _build_bounded_live_progress_payload(
 
     selected_workflow_execution = payload.get("selected_workflow_execution")
     selected_workflow_summary = _summarise_mapping(selected_workflow_execution)
+    timing_summary = payload.get("timing_summary")
+    if not isinstance(timing_summary, Mapping):
+        timing_trace = payload.get("turn_timing_trace")
+        if isinstance(timing_trace, Mapping):
+            timing_summary = {
+                "schema_version": "turn_timing_summary.v1",
+                "span_count": timing_trace.get("span_count"),
+                "stored_span_count": timing_trace.get("stored_span_count"),
+                "dropped_span_count": timing_trace.get("dropped_span_count"),
+                "summary": timing_trace.get("summary"),
+                "slowest_spans": list(timing_trace.get("slowest_spans") or [])[:5],
+                "model_prompt_summary": list(
+                    timing_trace.get("model_prompt_summary") or []
+                )[:5],
+            }
+        else:
+            timing_summary = None
 
     return {
         "schema_version": "turn_live_progress_snapshot.v1",
@@ -182,6 +201,7 @@ def _build_bounded_live_progress_payload(
             _DEFAULT_RECENT_EVENT_LIMIT,
         ),
         "latest_stage_diagnostic": latest_stage_diagnostic,
+        "timing_summary": timing_summary,
         "workflow_stage_path_summary": _summarise_mapping(
             payload.get("workflow_stage_path")
         ),

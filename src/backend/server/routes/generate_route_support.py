@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from contextlib import nullcontext
 from typing import Any, Callable, Mapping, Sequence
 
 from src.backend.services.debug_payload_store import (
@@ -464,10 +465,29 @@ def _persist_generate_turn_messages(
     truncate_large_tool_results_fn: Callable[..., list[dict[str, Any]]],
     add_chat_history_message_fn: Callable[..., Any],
     limit_context_size_fn: Callable[..., list[dict[str, Any]]],
+    timing_recorder: Any | None = None,
+    refresh_llm_debug_timing_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    truncated_tool_messages = truncate_large_tool_results_fn(
-        tool_messages, max_tool_content_chars=5000
-    )
+    def _maybe_span(
+        *, operation_name: str, attributes: Mapping[str, Any] | None = None
+    ):
+        span_fn = getattr(timing_recorder, "span", None)
+        if callable(span_fn):
+            return span_fn(
+                stage_id="response_finalising",
+                operation_kind="chat_history_persistence",
+                operation_name=operation_name,
+                attributes=attributes,
+            )
+        return nullcontext()
+
+    with _maybe_span(
+        operation_name="compact_tool_messages_for_history",
+        attributes={"tool_message_count": len(tool_messages)},
+    ):
+        truncated_tool_messages = truncate_large_tool_results_fn(
+            tool_messages, max_tool_content_chars=5000
+        )
     llm_debug_payload = dict(llm_debug_info)
     request_id = (
         str(llm_debug_payload.get("request_id")).strip()
@@ -475,20 +495,26 @@ def _persist_generate_turn_messages(
         else None
     )
     storage_tool_messages: list[dict[str, Any]] = []
-    for tool_msg in truncated_tool_messages:
-        if not isinstance(tool_msg, Mapping):
-            continue
-        compacted = compact_debug_payload_for_storage(
-            dict(tool_msg),
-            root_kind="chat_history.tool_message",
-            namespace=user_namespace,
-            request_id=request_id,
-            threshold_bytes=default_tool_message_threshold_bytes(),
-            fail_soft=True,
-        )
-        storage_tool_messages.append(
-            compacted.payload if isinstance(compacted.payload, dict) else dict(tool_msg)
-        )
+    with _maybe_span(
+        operation_name="offload_large_tool_message_debug_payloads",
+        attributes={"tool_message_count": len(truncated_tool_messages)},
+    ):
+        for tool_msg in truncated_tool_messages:
+            if not isinstance(tool_msg, Mapping):
+                continue
+            compacted = compact_debug_payload_for_storage(
+                dict(tool_msg),
+                root_kind="chat_history.tool_message",
+                namespace=user_namespace,
+                request_id=request_id,
+                threshold_bytes=default_tool_message_threshold_bytes(),
+                fail_soft=True,
+            )
+            storage_tool_messages.append(
+                compacted.payload
+                if isinstance(compacted.payload, dict)
+                else dict(tool_msg)
+            )
     updated_context = [
         dict(message)
         for message in (current_context or [])
@@ -497,45 +523,59 @@ def _persist_generate_turn_messages(
 
     if history_user_id:
         if not user_message_persisted_early:
+            with _maybe_span(operation_name="persist_user_message"):
+                add_chat_history_message_fn(
+                    user_id=history_user_id,
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": prompt_text,
+                        "author_user_id": user_concept_id,
+                    },
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
+                    skip_rag_indexing=True,
+                )
+        with _maybe_span(
+            operation_name="persist_tool_messages",
+            attributes={"tool_message_count": len(storage_tool_messages)},
+        ):
+            for tool_msg in storage_tool_messages:
+                add_chat_history_message_fn(
+                    user_id=history_user_id,
+                    session_id=session_id,
+                    message=tool_msg,
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
+                    skip_rag_indexing=True,
+                )
+        if callable(refresh_llm_debug_timing_fn):
+            refresh_llm_debug_timing_fn(llm_debug_payload)
+        with _maybe_span(operation_name="persist_assistant_message"):
             add_chat_history_message_fn(
                 user_id=history_user_id,
                 session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": prompt_text,
-                    "author_user_id": user_concept_id,
-                },
+                message={"role": "assistant", "content": response_text},
+                llm_debug_data=llm_debug_payload,
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,
                 role_in_org=role_in_org,
                 skip_rag_indexing=True,
             )
-        for tool_msg in storage_tool_messages:
-            add_chat_history_message_fn(
-                user_id=history_user_id,
-                session_id=session_id,
-                message=tool_msg,
-                namespace=user_namespace,
-                organisation_concept_id=org_concept_id,
-                role_in_org=role_in_org,
-                skip_rag_indexing=True,
-            )
-        add_chat_history_message_fn(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={"role": "assistant", "content": response_text},
-            llm_debug_data=llm_debug_payload,
-            namespace=user_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-            skip_rag_indexing=True,
-        )
     else:
+        if callable(refresh_llm_debug_timing_fn):
+            refresh_llm_debug_timing_fn(llm_debug_payload)
         updated_context.append({"role": "user", "content": prompt_text})
         updated_context.extend(storage_tool_messages)
         updated_context.append({"role": "assistant", "content": response_text})
 
-    return limit_context_size_fn(updated_context, max_messages=20)
+    with _maybe_span(
+        operation_name="limit_context_after_history_persistence",
+        attributes={"context_message_count": len(updated_context)},
+    ):
+        return limit_context_size_fn(updated_context, max_messages=20)
 
 
 def _build_generate_success_body(
