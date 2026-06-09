@@ -9,7 +9,10 @@ reports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any, Dict, Mapping
+
+from pymongo import UpdateOne
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import bypass_access_control
@@ -22,7 +25,6 @@ from ..security.visibility_predicates import (
     SPECIFIC_TO_USER_PREDICATES,
     collect_visibility_values,
 )
-from . import concept_service
 
 
 VISIBILITY_FIELD_FAMILIES: tuple[dict[str, Any], ...] = (
@@ -55,6 +57,28 @@ class VisibilityMigrationPlan:
     updated_relationships: dict[str, Any]
     changed: bool
     conflicts: tuple[dict[str, Any], ...]
+
+
+def _visibility_update_document(plan: VisibilityMigrationPlan) -> dict[str, Any]:
+    set_values: dict[str, Any] = {
+        "updated_at": datetime.now(timezone.utc),
+    }
+    unset_values: dict[str, str] = {}
+    for family in VISIBILITY_FIELD_FAMILIES:
+        canonical = str(family["canonical"])
+        legacy = tuple(str(field) for field in family["legacy"])
+        canonical_value = plan.updated_relationships.get(canonical)
+        if canonical_value:
+            set_values[f"relationships.{canonical}"] = list(canonical_value)
+        else:
+            unset_values[f"relationships.{canonical}"] = ""
+        for legacy_field in legacy:
+            unset_values[f"relationships.{legacy_field}"] = ""
+
+    update: dict[str, Any] = {"$set": set_values}
+    if unset_values:
+        update["$unset"] = unset_values
+    return update
 
 
 def _normalise_concept_values(raw: Any) -> list[str]:
@@ -234,6 +258,18 @@ def migrate_visibility_predicate_storage(
     conflict_count = 0
     errors: list[dict[str, Any]] = []
     samples: list[dict[str, Any]] = []
+    pending_writes: list[UpdateOne] = []
+
+    def _flush_pending_writes() -> None:
+        nonlocal updated_count
+        if not pending_writes:
+            return
+        collection = ConceptsRepository.collection()
+        if collection is None:
+            raise RuntimeError("Concepts collection not available")
+        result = collection.bulk_write(list(pending_writes), ordered=False)
+        updated_count += int(result.modified_count or 0)
+        pending_writes.clear()
 
     with bypass_access_control():
         cursor = ConceptsRepository.find(
@@ -261,33 +297,34 @@ def migrate_visibility_predicate_storage(
             if dry_run:
                 continue
             try:
-                concept_service.update_concept(
-                    concept_id=plan.concept_id,
-                    update_data={"relationships": plan.updated_relationships},
-                    defer_side_effects=True,
-                )
-                updated_count += 1
-                read_back = ConceptsRepository.find_one(
-                    {"concept_id": plan.concept_id},
-                    _projection(),
-                )
-                read_back_plan = build_visibility_migration_plan(
-                    read_back or {},
-                    remove_legacy=True,
-                )
-                if read_back_plan is not None and not read_back_plan.changed:
-                    verified_count += 1
-                else:
-                    errors.append(
-                        {
-                            "concept_id": plan.concept_id,
-                            "error": "read_back_still_needs_migration",
-                        }
+                pending_writes.append(
+                    UpdateOne(
+                        {"concept_id": plan.concept_id},
+                        _visibility_update_document(plan),
                     )
+                )
+                if len(pending_writes) >= 500:
+                    _flush_pending_writes()
             except Exception as exc:
                 errors.append(
                     {
                         "concept_id": plan.concept_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        if not dry_run:
+            try:
+                _flush_pending_writes()
+                post_verify = audit_visibility_predicate_storage(
+                    sample_limit=0,
+                    scan_limit=scan_limit_value or None,
+                )
+                remaining = int(post_verify.get("would_update_count") or 0)
+                verified_count = max(0, would_update_count - remaining)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "concept_id": "*bulk*",
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )

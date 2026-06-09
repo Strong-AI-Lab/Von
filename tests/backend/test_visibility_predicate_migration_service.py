@@ -66,9 +66,9 @@ def test_migrate_visibility_predicate_storage_dry_run_does_not_update(monkeypatc
 
     monkeypatch.setattr(svc.ConceptsRepository, "find", lambda *args, **kwargs: iter(concepts))
     monkeypatch.setattr(
-        svc.concept_service,
-        "update_concept",
-        lambda **kwargs: writes.append(kwargs),
+        svc.ConceptsRepository,
+        "update_one",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
     )
 
     report = svc.migrate_visibility_predicate_storage(dry_run=True)
@@ -93,17 +93,35 @@ def test_migrate_visibility_predicate_storage_apply_updates_and_verifies(monkeyp
         }
     }
     writes = []
+    find_calls = 0
 
-    monkeypatch.setattr(svc.ConceptsRepository, "find", lambda *args, **kwargs: iter(concepts))
+    def _find(*_args, **_kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        if find_calls == 1:
+            return iter(concepts)
+        return iter([stored["#V#legacy"]])
 
-    def _update_concept(**kwargs):
-        writes.append(kwargs)
-        stored[kwargs["concept_id"]]["relationships"] = kwargs["update_data"][
-            "relationships"
-        ]
-        return stored[kwargs["concept_id"]]
+    class _BulkResult:
+        modified_count = 1
 
-    monkeypatch.setattr(svc.concept_service, "update_concept", _update_concept)
+    class _FakeCollection:
+        def bulk_write(self, operations, ordered=False):
+            writes.extend(operations)
+            for operation in operations:
+                filter_doc = operation._filter
+                update_doc = operation._doc
+                relationships = stored[filter_doc["concept_id"]]["relationships"]
+                for key, value in update_doc.get("$set", {}).items():
+                    if key.startswith("relationships."):
+                        relationships[key.removeprefix("relationships.")] = value
+                for key in update_doc.get("$unset", {}):
+                    if key.startswith("relationships."):
+                        relationships.pop(key.removeprefix("relationships."), None)
+            return _BulkResult()
+
+    monkeypatch.setattr(svc.ConceptsRepository, "find", _find)
+    monkeypatch.setattr(svc.ConceptsRepository, "collection", lambda: _FakeCollection())
     monkeypatch.setattr(
         svc.ConceptsRepository,
         "find_one",
@@ -117,6 +135,12 @@ def test_migrate_visibility_predicate_storage_apply_updates_and_verifies(monkeyp
     assert report["updated_count"] == 1
     assert report["verified_count"] == 1
     assert report["error_count"] == 0
-    assert writes[0]["update_data"]["relationships"] == {
-        "#V#specific_to_user": ["#V#user_a"]
+    update_doc = writes[0]._doc
+    assert update_doc["$set"]["relationships.#V#specific_to_user"] == ["#V#user_a"]
+    assert update_doc["$unset"] == {
+        "relationships.specific_to_user": "",
+        "relationships.specific_to_org": "",
+        "relationships.specific_to_organisation": "",
+        "relationships.#V#specific_to_org": "",
+        "relationships.#V#specific_to_organisation": "",
     }

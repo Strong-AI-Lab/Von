@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
+from pymongo import ReplaceOne
 from pymongo.collection import Collection
 
 from ..db.mongo_client import (
@@ -229,6 +230,23 @@ def rebuild_relationship_extent_index(
 
     total_sources = 0
     total_edges = 0
+    def _flush_pending_docs(pending_docs: list[dict[str, Any]]) -> None:
+        if not pending_docs:
+            return
+        docs_by_relation_id: dict[str, dict[str, Any]] = {}
+        for doc in pending_docs:
+            relation_id = doc.get("relation_id")
+            if not isinstance(relation_id, str) or not relation_id:
+                continue
+            docs_by_relation_id[relation_id] = doc
+        if not docs_by_relation_id:
+            return
+        operations = [
+            ReplaceOne({"relation_id": relation_id}, doc, upsert=True)
+            for relation_id, doc in docs_by_relation_id.items()
+        ]
+        coll.bulk_write(operations, ordered=False)
+
     try:
         coll.delete_many({})
         with bypass_access_control():
@@ -237,16 +255,25 @@ def rebuild_relationship_extent_index(
                 {"concept_id": 1, "relationships": 1, "updated_at": 1},
             )
             pending_docs: list[dict[str, Any]] = []
+            seen_source_ids: set[str] = set()
             for concept_doc in cursor:
                 source_id = concept_doc.get("concept_id")
                 if not isinstance(source_id, str) or not source_id.strip():
                     continue
+                source_id = source_id.strip()
+                if source_id in seen_source_ids:
+                    logger.warning(
+                        "[relationship_extent_index] skipping duplicate source concept_id during rebuild: %s",
+                        source_id,
+                    )
+                    continue
+                seen_source_ids.add(source_id)
                 total_sources += 1
                 docs = _index_docs_for_concept(concept_doc)
                 total_edges += len(docs)
                 pending_docs.extend(docs)
                 if batch_size > 0 and len(pending_docs) >= batch_size:
-                    coll.insert_many(pending_docs, ordered=False)
+                    _flush_pending_docs(pending_docs)
                     pending_docs = []
                 if batch_size > 0 and total_sources % batch_size == 0:
                     logger.info(
@@ -254,7 +281,7 @@ def rebuild_relationship_extent_index(
                         total_sources,
                     )
             if pending_docs:
-                coll.insert_many(pending_docs, ordered=False)
+                _flush_pending_docs(pending_docs)
 
         finished_at = _utc_now()
         state = {
