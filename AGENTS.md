@@ -210,6 +210,7 @@ Verify all of the following:
 6. Keep types and individuals cleanly separated.
 7. Distinguish carefully between predicate types and predicate instances. `#V#binary_predicate` is a type of predicate, so it is a type-level concept. Concrete predicates such as `#V#hasSubprocedure`, `#V#hasInstance`, and most domain predicates are instances of `#V#predicate` (and may also be instances of a specialised predicate type such as `#V#binary_predicate`). Do not create persisted predicate concepts as types under `#V#predicate` unless you are intentionally defining a new predicate subtype. If the concept is meant to be used as an actual relationship, it should usually be an instance of `#V#predicate`, not a type of it.
 8. Record chosen canonical concept IDs in Jira for ontology-shaping work.
+9. When the user asks to add, write, store, or create a "Von manual", runbook, guide, or other durable document *inside Von*, treat that as Vontology document/blob authoring by default, not as repo-only documentation. Follow the MCP-mediated manual/document workflow in `docs/engineering/operational_engineering_guide.md`: resolve the document/manual type, store the document through the Von file-copy/blob path, create or reuse the corresponding described concept, link concept to blob with a canonical predicate, index/read back the file-copy, and create a Von review/follow-up task when requested. Do not use direct DB access or claim completion from only a local file.
 
 ## 7. Task lifecycle discipline
 

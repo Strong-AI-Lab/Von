@@ -438,7 +438,52 @@ checkout-local venv.
 - Prefer workflow MCP tools as the default control surface for workflow
   behaviour when the behaviour can be represented there.
 
-### 6.1a Reusable workflow authoring during replay-driven fixes
+### 6.1a Von manual and durable document authoring
+
+When the user says something like "add a Von manual", "write a Von runbook",
+"store this as a Von guide", or "put this manual in Von blob", treat the request
+as Vontology document/blob authoring unless they explicitly ask for repo-only
+documentation.
+
+This is a Vontology/MCP-mediated workflow:
+
+1. Resolve the relevant type and predicates first. Prefer an existing specific
+   manual/runbook/document type when one exists; otherwise use `#V#document` as
+   the parent type. Prefer canonical predicates, especially
+   `#V#propositional_information_thing_has_computer_file` for the
+   document-to-file-copy edge when available.
+2. Draft any source file needed for blob import in an ignored workspace path
+   such as `.run/manuals/`. This file is only an import source; do not commit it
+   unless the user also asked for repo documentation.
+3. Register the file through the Von file-copy/blob path, normally
+   `import_local_file_copy`, with explicit `namespace`, user/org context where
+   supported, source metadata, and no secret-bearing content. Do not use direct
+   blob, Mongo, or filesystem shortcuts for the persisted Von artefact.
+4. Create or reuse the corresponding Vontology concept through
+   `create_concepts` or the canonical Vontology concept API. Attach useful
+   text relations such as `hasName`, `hasDescription`, and a concise
+   `hasContent` summary so the concept is intelligible without opening the
+   blob. Preserve user-authored wording exactly when they supplied the manual
+   text.
+5. Link the document concept to the file-copy concept with the canonical
+   document/file-copy predicate. Add provenance context such as related Jira
+   issue, source system, namespace, and file-copy concept ID.
+6. Read the file-copy back with `read_file_copy` and, when useful, index it with
+   `index_file_copy`. Do not claim "stored in Von blob" if only the local
+   staging file or a text relation exists.
+7. If the user asks for review, follow-up, or "send me a task", create a Von
+   native task with the manual concept ID, file-copy concept ID, review focus,
+   and acceptance criteria. Assign it to the authenticated/known user by
+   default unless told otherwise.
+8. Report the durable IDs at the end: manual/document concept, file-copy/blob
+   concept, indexed document ID when available, and task concept ID when one was
+   created. State any read-back or indexing blocker explicitly.
+
+If a first-class Vontology workflow exists later for manual/document authoring,
+prefer invoking that workflow over hand-sequencing the same MCP calls. Until
+then, this recipe is the expected operational workflow.
+
+### 6.1b Reusable workflow authoring during replay-driven fixes
 
 When a real-path replay or `JVNAUTOSCI-1894`-style test uncovers a missing
 capability that is really a broader research/lab task class, prefer authoring a
