@@ -18,6 +18,7 @@ from .turn_execution_record_service import (
     build_workflow_routing_diagnostics,
     get_turn_execution_records_collection,
 )
+from .turn_timing_telemetry_service import build_turn_timing_trace
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -691,6 +692,68 @@ def _build_minimal_timing_breakdown(
     }
 
 
+def _llm_calls_from_debug(llm_debug: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(llm_debug, Mapping):
+        return []
+    direct_calls = llm_debug.get("llm_calls")
+    if isinstance(direct_calls, list):
+        return [dict(item) for item in direct_calls if isinstance(item, Mapping)]
+    interaction = llm_debug.get("llm_interaction")
+    if isinstance(interaction, Mapping) and isinstance(interaction.get("calls"), list):
+        return [
+            dict(item)
+            for item in interaction.get("calls", [])
+            if isinstance(item, Mapping)
+        ]
+    return []
+
+
+def _attach_minimal_turn_timing_trace(
+    payload: dict[str, Any],
+    *,
+    llm_debug: Mapping[str, Any] | None,
+    tool_history: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    if isinstance(payload.get("turn_timing_trace"), Mapping):
+        return
+    trace = build_turn_timing_trace(
+        request_id=_safe_str(payload.get("request_id")),
+        phase_history=(
+            payload.get("phase_history")
+            if isinstance(payload.get("phase_history"), list)
+            else []
+        ),
+        diagnostic_events=(
+            payload.get("latest_progress", {}).get("diagnostic_events")
+            if isinstance(payload.get("latest_progress"), Mapping)
+            and isinstance(
+                payload.get("latest_progress", {}).get("diagnostic_events"), list
+            )
+            else []
+        ),
+        llm_calls=_llm_calls_from_debug(llm_debug),
+        tool_history=tool_history or [],
+        elapsed_ms_value=(
+            int(payload.get("elapsed_ms"))
+            if isinstance(payload.get("elapsed_ms"), (int, float))
+            and not isinstance(payload.get("elapsed_ms"), bool)
+            else None
+        ),
+    )
+    payload["turn_timing_trace"] = trace
+    timing_breakdown = (
+        dict(payload.get("timing_breakdown"))
+        if isinstance(payload.get("timing_breakdown"), Mapping)
+        else _build_minimal_timing_breakdown(llm_debug=llm_debug)
+    )
+    timing_breakdown["operation_totals"] = list(trace.get("operation_totals") or [])
+    timing_breakdown["slowest_spans"] = list(trace.get("slowest_spans") or [])
+    timing_breakdown["model_prompt_summary"] = list(
+        trace.get("model_prompt_summary") or []
+    )
+    payload["timing_breakdown"] = timing_breakdown
+
+
 def _string_key_mapping(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -1101,6 +1164,11 @@ def _build_fallback_turn_execution_diagnostics(
         llm_debug=llm_debug_mapping,
         turn_record=turn_record,
     )
+    _attach_minimal_turn_timing_trace(
+        payload,
+        llm_debug=llm_debug_mapping,
+        tool_history=tool_history,
+    )
     return payload
 
 
@@ -1252,6 +1320,12 @@ def _normalise_embedded_diagnostics_payload(
     for key, value in tool_counts.items():
         if not isinstance(payload.get(key), int):
             payload[key] = value
+
+    _attach_minimal_turn_timing_trace(
+        payload,
+        llm_debug=llm_debug_mapping,
+        tool_history=tool_history,
+    )
 
     _repair_workflow_routing_diagnostics(
         payload,

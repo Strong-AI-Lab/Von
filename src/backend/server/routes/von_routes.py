@@ -108,6 +108,11 @@ from ...services.tool_progress_store_service import (
     fetch_tool_progress_state,
     queue_tool_progress_state_persistence,
 )
+from ...services.turn_timing_telemetry_service import (
+    TurnTimingRecorder,
+    build_turn_timing_trace,
+    merge_timing_spans,
+)
 from ...services.turn_execution_record_service import (
     build_search_tool_evidence,
     build_turn_execution_record,
@@ -1141,8 +1146,47 @@ def _serialise_tool_progress_state(
     payload["thinking_interpretability"] = _build_thinking_interpretability_payload(
         payload
     )
+    llm_calls_for_timing = [
+        cast(dict[str, Any], entry)
+        for entry in (payload.get("llm_calls") or [])
+        if isinstance(entry, dict)
+    ]
+    tool_invocations_for_timing = [
+        cast(dict[str, Any], entry)
+        for entry in (payload.get("tool_invocations") or [])
+        if isinstance(entry, dict)
+    ]
+    extra_timing_spans = _extract_turn_timing_spans_from_payload(payload)
+    elapsed_ms_value = None
+    elapsed_raw = _progress_number(payload.get("elapsed_ms"))
+    if elapsed_raw is not None:
+        elapsed_ms_value = int(max(0.0, elapsed_raw))
+    turn_timing_trace = build_turn_timing_trace(
+        request_id=_progress_str(payload.get("request_id")),
+        phase_history=phase_history,
+        diagnostic_events=diagnostic_events,
+        llm_calls=llm_calls_for_timing,
+        tool_history=tool_history,
+        tool_invocations=tool_invocations_for_timing,
+        extra_spans=extra_timing_spans,
+        elapsed_ms_value=elapsed_ms_value,
+    )
+    payload["turn_timing_trace"] = turn_timing_trace
+    payload["timing_spans"] = list(turn_timing_trace.get("spans") or [])
+    payload["timing_summary"] = {
+        "schema_version": "turn_timing_summary.v1",
+        "span_count": turn_timing_trace.get("span_count"),
+        "stored_span_count": turn_timing_trace.get("stored_span_count"),
+        "dropped_span_count": turn_timing_trace.get("dropped_span_count"),
+        "summary": turn_timing_trace.get("summary"),
+        "slowest_spans": list(turn_timing_trace.get("slowest_spans") or [])[:5],
+        "model_prompt_summary": list(
+            turn_timing_trace.get("model_prompt_summary") or []
+        )[:5],
+    }
     payload.pop("_workflow_runtime_stages", None)
     payload.pop("_phase_history", None)
+    payload.pop("_timing_spans", None)
     payload.pop("_stage_summaries", None)
 
     return payload
@@ -2666,6 +2710,51 @@ def _build_timing_breakdown(
     }
 
 
+def _attach_turn_timing_trace_to_breakdown(
+    timing_breakdown: Mapping[str, Any] | None,
+    turn_timing_trace: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    payload = dict(timing_breakdown) if isinstance(timing_breakdown, Mapping) else {}
+    if not isinstance(turn_timing_trace, Mapping):
+        return payload
+    payload["operation_totals"] = list(turn_timing_trace.get("operation_totals") or [])
+    payload["slowest_spans"] = list(turn_timing_trace.get("slowest_spans") or [])
+    payload["model_prompt_summary"] = list(
+        turn_timing_trace.get("model_prompt_summary") or []
+    )
+    summary = turn_timing_trace.get("summary")
+    if isinstance(summary, Mapping):
+        totals = dict(payload.get("totals") or {})
+        for key in (
+            "operation_elapsed_ms",
+            "llm_elapsed_ms",
+            "tool_elapsed_ms",
+            "phase_elapsed_ms",
+        ):
+            if key in summary:
+                totals[key] = summary.get(key)
+        payload["totals"] = totals
+    return payload
+
+
+def _extract_turn_timing_spans_from_payload(
+    payload: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    spans: list[dict[str, Any]] = []
+    for key in ("_timing_spans", "timing_spans"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            spans.extend(dict(item) for item in value if isinstance(item, Mapping))
+    timing_trace = payload.get("turn_timing_trace")
+    if isinstance(timing_trace, Mapping):
+        trace_spans = timing_trace.get("spans")
+        if isinstance(trace_spans, list):
+            spans.extend(dict(item) for item in trace_spans if isinstance(item, Mapping))
+    return merge_timing_spans([], spans)
+
+
 def _canonicalise_turn_execution_stage_id(stage: Any) -> str | None:
     clean_stage = _progress_str(stage)
     if not clean_stage:
@@ -3294,6 +3383,8 @@ def _build_turn_execution_diagnostics(
     generated_at_utc: str | None = None,
     llm_calls: list[dict[str, Any]] | None = None,
     aux_llm_calls: list[dict[str, Any]] | None = None,
+    tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+    timing_spans: Sequence[Mapping[str, Any]] | None = None,
     response_transformations: Mapping[str, Any] | None = None,
     critic_verdict: Mapping[str, Any] | None = None,
     completion_gate_verdict: Mapping[str, Any] | None = None,
@@ -3399,11 +3490,35 @@ def _build_turn_execution_diagnostics(
         for entry in (tool_observation_summary.get("tool_history") or [])
         if isinstance(entry, dict)
     ]
-    timing_breakdown = _build_timing_breakdown(
-        diagnostic_events=diagnostic_events,
+    extra_timing_spans = _extract_turn_timing_spans_from_payload(latest_progress)
+    if isinstance(timing_spans, Sequence) and not isinstance(
+        timing_spans, (str, bytes, bytearray)
+    ):
+        extra_timing_spans = merge_timing_spans(extra_timing_spans, timing_spans)
+    tool_invocation_entries = [
+        cast(Mapping[str, Any], entry)
+        for entry in (tool_invocations or [])
+        if isinstance(entry, Mapping)
+    ]
+    turn_timing_trace = build_turn_timing_trace(
+        request_id=effective_request_id,
         phase_history=phase_history,
+        diagnostic_events=diagnostic_events,
         llm_calls=llm_call_entries,
+        tool_history=tool_history,
+        tool_invocations=tool_invocation_entries,
+        response_transformations=response_transformations,
+        extra_spans=extra_timing_spans,
         elapsed_ms_value=elapsed_ms_value,
+    )
+    timing_breakdown = _attach_turn_timing_trace_to_breakdown(
+        _build_timing_breakdown(
+            diagnostic_events=diagnostic_events,
+            phase_history=phase_history,
+            llm_calls=llm_call_entries,
+            elapsed_ms_value=elapsed_ms_value,
+        ),
+        turn_timing_trace,
     )
     stage_diagnostics = _build_turn_execution_stage_diagnostics(
         diagnostic_events=diagnostic_events,
@@ -3471,6 +3586,7 @@ def _build_turn_execution_diagnostics(
         "workflow_discovery": workflow_payload,
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "llm_calls": llm_call_entries,
+        "turn_timing_trace": turn_timing_trace,
         "aux_llm_calls": (
             [
                 cast(dict[str, Any], entry)
@@ -4656,7 +4772,41 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             tools_started = max(tools_started, int(explicit_done))
             tools_completed = max(tools_completed, int(explicit_done))
 
+        incoming_timing_spans: list[dict[str, Any]] = []
+        raw_incoming_timing_spans = safe_update.get("timing_spans")
+        if isinstance(raw_incoming_timing_spans, list):
+            incoming_timing_spans.extend(
+                dict(entry)
+                for entry in raw_incoming_timing_spans
+                if isinstance(entry, Mapping)
+            )
+        raw_incoming_trace = safe_update.get("turn_timing_trace")
+        if isinstance(raw_incoming_trace, Mapping):
+            raw_trace_spans = raw_incoming_trace.get("spans")
+            if isinstance(raw_trace_spans, list):
+                incoming_timing_spans.extend(
+                    dict(entry)
+                    for entry in raw_trace_spans
+                    if isinstance(entry, Mapping)
+                )
+
         merged = {**existing, **safe_update}
+        if incoming_timing_spans:
+            merged["_timing_spans"] = merge_timing_spans(
+                _extract_turn_timing_spans_from_payload(existing),
+                incoming_timing_spans,
+            )
+        elif isinstance(existing.get("_timing_spans"), list):
+            merged["_timing_spans"] = merge_timing_spans(
+                [],
+                [
+                    dict(entry)
+                    for entry in existing["_timing_spans"]
+                    if isinstance(entry, Mapping)
+                ],
+            )
+        merged.pop("timing_spans", None)
+        merged.pop("turn_timing_trace", None)
         if "success" in safe_update:
             success_value = safe_update.get("success")
             if isinstance(success_value, bool):
@@ -9786,6 +9936,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
     request_start_perf = time.perf_counter()
+    turn_timing_recorder = TurnTimingRecorder(request_id=request_id)
     workflow_discovery_result = None
     progress_heartbeat_stop_event: threading.Event | None = None
     progress_heartbeat_thread: threading.Thread | None = None
@@ -13402,11 +13553,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     persist_history=bool(history_user_id),
                 )
             )
-            _emit_generate_progress(response_finalising_payload)
+            with turn_timing_recorder.span(
+                stage_id="response_finalising",
+                operation_kind="progress_update",
+                operation_name="emit_response_finalising_progress",
+            ):
+                _emit_generate_progress(response_finalising_payload)
 
-        tool_progress_snapshot = _snapshot_tool_progress_for_request(
-            progress_scope_key, request_id
-        )
+        with turn_timing_recorder.span(
+            stage_id="response_finalising",
+            operation_kind="progress_snapshot",
+            operation_name="snapshot_tool_progress_for_diagnostics",
+        ):
+            tool_progress_snapshot = _snapshot_tool_progress_for_request(
+                progress_scope_key, request_id
+            )
         selected_workflow_trace_payload = (
             dict(raw_selected_workflow_trace)
             if isinstance(
@@ -13419,57 +13580,69 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
             else None
         )
-        turn_execution_mcp_access = _build_turn_execution_mcp_access(
-            request_id=request_id,
-            session_id=session_id,
-            namespace=user_namespace,
-            history_owner_user_id=history_user_id,
-            organisation_concept_id=org_concept_id,
-            workflow_routing=workflow_routing_info,
-            aux_llm_calls=auxiliary_llm_calls,
-            selected_workflow_trace=selected_workflow_trace_payload,
-        )
-        turn_execution_diagnostics = _build_turn_execution_diagnostics(
-            request_id=request_id,
-            prompt_text=prompt_text,
-            elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-            tool_progress_state=tool_progress_snapshot,
-            workflow_discovery=workflow_discovery_result,
-            workflow_routing=workflow_routing_info,
-            llm_calls=llm_interaction["calls"],
-            aux_llm_calls=auxiliary_llm_calls,
-            response_transformations=(
-                response_transformations
-                if "response_transformations" in locals()
-                and isinstance(response_transformations, Mapping)
-                else None
-            ),
-            critic_verdict=(
-                dict(raw_critic_verdict)
-                if isinstance(
-                    raw_critic_verdict := getattr(
-                        orchestrator_result,
-                        "critic_verdict",
-                        None,
-                    ),
-                    Mapping,
-                )
-                else None
-            ),
-            completion_gate_verdict=(
-                dict(raw_completion_gate_verdict)
-                if isinstance(
-                    raw_completion_gate_verdict := getattr(
-                        orchestrator_result,
-                        "completion_gate_verdict",
-                        None,
-                    ),
-                    Mapping,
-                )
-                else None
-            ),
-            mcp_access=turn_execution_mcp_access,
-        )
+        with turn_timing_recorder.span(
+            stage_id="response_finalising",
+            operation_kind="mcp_access_metadata",
+            operation_name="build_turn_execution_mcp_access",
+        ):
+            turn_execution_mcp_access = _build_turn_execution_mcp_access(
+                request_id=request_id,
+                session_id=session_id,
+                namespace=user_namespace,
+                history_owner_user_id=history_user_id,
+                organisation_concept_id=org_concept_id,
+                workflow_routing=workflow_routing_info,
+                aux_llm_calls=auxiliary_llm_calls,
+                selected_workflow_trace=selected_workflow_trace_payload,
+            )
+        with turn_timing_recorder.span(
+            stage_id="response_finalising",
+            operation_kind="diagnostics_assembly",
+            operation_name="build_turn_execution_diagnostics",
+        ):
+            turn_execution_diagnostics = _build_turn_execution_diagnostics(
+                request_id=request_id,
+                prompt_text=prompt_text,
+                elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+                tool_progress_state=tool_progress_snapshot,
+                workflow_discovery=workflow_discovery_result,
+                workflow_routing=workflow_routing_info,
+                llm_calls=llm_interaction["calls"],
+                aux_llm_calls=auxiliary_llm_calls,
+                tool_invocations=tool_invocations,
+                timing_spans=turn_timing_recorder.spans(),
+                response_transformations=(
+                    response_transformations
+                    if "response_transformations" in locals()
+                    and isinstance(response_transformations, Mapping)
+                    else None
+                ),
+                critic_verdict=(
+                    dict(raw_critic_verdict)
+                    if isinstance(
+                        raw_critic_verdict := getattr(
+                            orchestrator_result,
+                            "critic_verdict",
+                            None,
+                        ),
+                        Mapping,
+                    )
+                    else None
+                ),
+                completion_gate_verdict=(
+                    dict(raw_completion_gate_verdict)
+                    if isinstance(
+                        raw_completion_gate_verdict := getattr(
+                            orchestrator_result,
+                            "completion_gate_verdict",
+                            None,
+                        ),
+                        Mapping,
+                    )
+                    else None
+                ),
+                mcp_access=turn_execution_mcp_access,
+            )
         diagnostics_routing = turn_execution_diagnostics.get(
             "workflow_routing_diagnostics"
         )
@@ -13618,17 +13791,88 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
 
-        llm_debug_info = _finalise_llm_debug_info(
-            llm_debug_info=llm_debug_info,
-            prompt_text=prompt_text,
-            response_text=response_text,
-            session_id=session_id,
-            namespace=user_namespace,
-            user_id=history_user_id or user_concept_id,
-            org_id=org_concept_id,
-            workflow_discovery=workflow_discovery_result,
-            workflow_routing=workflow_routing_info,
-        )
+        with turn_timing_recorder.span(
+            stage_id="response_finalising",
+            operation_kind="debug_record_assembly",
+            operation_name="finalise_llm_debug_info",
+        ):
+            llm_debug_info = _finalise_llm_debug_info(
+                llm_debug_info=llm_debug_info,
+                prompt_text=prompt_text,
+                response_text=response_text,
+                session_id=session_id,
+                namespace=user_namespace,
+                user_id=history_user_id or user_concept_id,
+                org_id=org_concept_id,
+                workflow_discovery=workflow_discovery_result,
+                workflow_routing=workflow_routing_info,
+            )
+
+        def _refresh_llm_debug_timing_payload(debug_payload: dict[str, Any]) -> None:
+            diagnostics_payload = debug_payload.get("turn_execution_diagnostics")
+            if not isinstance(diagnostics_payload, dict):
+                return
+            trace = build_turn_timing_trace(
+                request_id=request_id,
+                phase_history=(
+                    diagnostics_payload.get("phase_history")
+                    if isinstance(diagnostics_payload.get("phase_history"), list)
+                    else []
+                ),
+                diagnostic_events=(
+                    diagnostics_payload.get("latest_progress", {}).get(
+                        "diagnostic_events"
+                    )
+                    if isinstance(diagnostics_payload.get("latest_progress"), Mapping)
+                    and isinstance(
+                        diagnostics_payload.get("latest_progress", {}).get(
+                            "diagnostic_events"
+                        ),
+                        list,
+                    )
+                    else []
+                ),
+                llm_calls=(
+                    diagnostics_payload.get("llm_calls")
+                    if isinstance(diagnostics_payload.get("llm_calls"), list)
+                    else []
+                ),
+                tool_history=(
+                    diagnostics_payload.get("tool_history")
+                    if isinstance(diagnostics_payload.get("tool_history"), list)
+                    else []
+                ),
+                tool_invocations=turn_record_tool_invocations,
+                response_transformations=(
+                    diagnostics_payload.get("response_transformations")
+                    if isinstance(
+                        diagnostics_payload.get("response_transformations"), Mapping
+                    )
+                    else None
+                ),
+                extra_spans=turn_timing_recorder.spans(),
+                elapsed_ms_value=(
+                    int(diagnostics_payload.get("elapsed_ms"))
+                    if isinstance(diagnostics_payload.get("elapsed_ms"), (int, float))
+                    and not isinstance(diagnostics_payload.get("elapsed_ms"), bool)
+                    else None
+                ),
+            )
+            diagnostics_payload["turn_timing_trace"] = trace
+            diagnostics_payload["timing_breakdown"] = (
+                _attach_turn_timing_trace_to_breakdown(
+                    diagnostics_payload.get("timing_breakdown"),
+                    trace,
+                )
+            )
+            turn_record_payload = debug_payload.get("turn_execution_record")
+            if isinstance(turn_record_payload, dict):
+                turn_record_payload["turn_execution_diagnostics"] = diagnostics_payload
+                turn_record_payload["timing_breakdown"] = diagnostics_payload.get(
+                    "timing_breakdown"
+                )
+
+        _refresh_llm_debug_timing_payload(llm_debug_info)
 
         current_app.config["CONTEXT"] = _persist_generate_turn_messages(
             history_user_id=history_user_id,
@@ -13646,7 +13890,30 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             truncate_large_tool_results_fn=_truncate_large_tool_results,
             add_chat_history_message_fn=_add_chat_history_message,
             limit_context_size_fn=_limit_context_size,
+            timing_recorder=turn_timing_recorder,
+            refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
         )
+
+        with turn_timing_recorder.span(
+            stage_id="response_finalising",
+            operation_kind="durable_instance_finalisation",
+            operation_name="finalise_conversation_turn_instance",
+        ):
+            _finalise_generate_conversation_turn_instance(
+                state=conversation_turn_instance_state,
+                auxiliary_llm_calls=auxiliary_llm_calls,
+                session_id=session_id,
+                request_id=request_id,
+                user_namespace=user_namespace,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                presenter_mode_requested=presenter_mode_requested,
+                completed=True,
+                final_state="completed",
+                debug_payload=llm_debug_info,
+                logger=current_app.logger,
+            )
+        _refresh_llm_debug_timing_payload(llm_debug_info)
 
         if show_tool_use_progress:
             turn_record_completion_gate = None
@@ -13660,25 +13927,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 aux_calls=auxiliary_llm_calls,
                 completion_gate=turn_record_completion_gate,
             )
-            _stop_tool_progress_heartbeat(
-                progress_heartbeat_stop_event, progress_heartbeat_thread
-            )
-            _emit_generate_progress(final_progress_payload)
-
-        _finalise_generate_conversation_turn_instance(
-            state=conversation_turn_instance_state,
-            auxiliary_llm_calls=auxiliary_llm_calls,
-            session_id=session_id,
-            request_id=request_id,
-            user_namespace=user_namespace,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            presenter_mode_requested=presenter_mode_requested,
-            completed=True,
-            final_state="completed",
-            debug_payload=llm_debug_info,
-            logger=current_app.logger,
-        )
+            final_progress_payload["timing_spans"] = turn_timing_recorder.spans()
+            with turn_timing_recorder.span(
+                stage_id="response_finalising",
+                operation_kind="progress_update",
+                operation_name="stop_progress_heartbeat",
+            ):
+                _stop_tool_progress_heartbeat(
+                    progress_heartbeat_stop_event, progress_heartbeat_thread
+                )
+            final_progress_payload["timing_spans"] = turn_timing_recorder.spans()
+            with turn_timing_recorder.span(
+                stage_id="response_finalising",
+                operation_kind="progress_update",
+                operation_name="emit_terminal_progress",
+            ):
+                _emit_generate_progress(final_progress_payload)
+        _refresh_llm_debug_timing_payload(llm_debug_info)
         return jsonify(
             _build_generate_success_body(
                 request_id=request_id,
