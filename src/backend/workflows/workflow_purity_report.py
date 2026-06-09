@@ -355,6 +355,18 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
                 r"TYPED TOOL BLOCKERS|Typed tool blockers",
                 re.IGNORECASE,
             ),
+            "python_authored_screen_backfill_non_negotiable_rule": re.compile(
+                r"Non-negotiable rule",
+                re.IGNORECASE,
+            ),
+            "python_authored_screen_backfill_critical_tool_policy": re.compile(
+                r"CRITICAL:\s*Only state facts",
+                re.IGNORECASE,
+            ),
+            "python_authored_screen_backfill_diagnostic_ledger_policy": re.compile(
+                r"diagnostic ledger content as supplementary evidence",
+                re.IGNORECASE,
+            ),
         },
     },
 )

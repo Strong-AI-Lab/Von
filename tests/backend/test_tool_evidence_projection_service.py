@@ -327,6 +327,41 @@ def test_surfaceable_concept_projection_collects_nested_workflow_outputs() -> No
     ]
 
 
+def test_surfaceable_concept_projection_preserves_generic_verified_handles() -> None:
+    evidence = project_surfaceable_concept_evidence(
+        {
+            "result": {
+                "dataset_concept_id": "#V#symmetry_dataset_representation",
+                "dataset_verified": True,
+                "verification_failures": [],
+            }
+        }
+    )
+
+    assert evidence == [
+        {
+            "concept_id": "#V#symmetry_dataset_representation",
+            "source_key": "dataset_concept_id",
+            "source_path": "result.dataset_concept_id",
+            "artefact_type": "dataset_concept",
+            "verified": True,
+            "verification_key": "dataset_verified",
+            "verification_status": "verified",
+            "verification_failure_key": "verification_failures",
+            "verification_failure_count": 0,
+        }
+    ]
+    assert render_surfaceable_concept_lines(
+        evidence,
+        include_source_paths=True,
+        include_verification_status=True,
+    ) == [
+        "Verified dataset concept: #V#symmetry_dataset_representation "
+        "(verified=true; verification_key=dataset_verified; "
+        "verification_failures=0; source=result.dataset_concept_id)."
+    ]
+
+
 def test_nested_workflow_progress_projection_uses_represented_facts_only() -> None:
     evidence = project_nested_workflow_progress_evidence(
         {

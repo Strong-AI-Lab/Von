@@ -1882,7 +1882,6 @@ def _run_gateway_llm_step_no_tools(
         workflow_stage_id: str | None = None,
         call_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
-        call_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -2247,7 +2246,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         workflow_stage_id: str | None = None,
         call_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
-        call_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,

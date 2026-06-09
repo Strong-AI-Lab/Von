@@ -101,6 +101,11 @@ _CREATED_MUTATION_KINDS = {
     "linked",
     "bound",
 }
+_VERIFICATION_FAILURE_KEYS = {
+    "verification_failures",
+    "validation_failures",
+    "readback_failures",
+}
 
 
 @dataclass(frozen=True)
@@ -177,6 +182,10 @@ def project_surfaceable_concept_evidence(
             "represented_artefact_concept_ids",
         }:
             return "represented_artefact"
+        if lowered.endswith("_concept_id"):
+            return lowered[: -len("_id")]
+        if lowered.endswith("_concept_ids"):
+            return lowered[: -len("_ids")]
         return None
 
     def _mutation_kind_from_key_or_path(
@@ -210,6 +219,55 @@ def project_surfaceable_concept_evidence(
         if isinstance(value, str):
             return value.strip().lower() in {"true", "yes", "created"}
         return False
+
+    def _normalise_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "verified", "ok"}:
+                return True
+            if lowered in {"0", "false", "no", "not_verified", "failed"}:
+                return False
+        return None
+
+    def _container_has_verification_evidence(container: Mapping[str, Any]) -> bool:
+        return bool(_verification_info_from_container(container))
+
+    def _verification_info_from_container(
+        container: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        info: dict[str, Any] = {}
+        for raw_key, value in container.items():
+            key = str(raw_key or "").strip()
+            lowered = key.lower()
+            if not key:
+                continue
+            if lowered in {"verified", "is_verified"} or lowered.endswith("_verified"):
+                verified = _normalise_bool(value)
+                if verified is not None:
+                    info["verified"] = verified
+                    info["verification_key"] = key
+                    info["verification_status"] = (
+                        "verified" if verified else "not_verified"
+                    )
+                    break
+        for raw_key, value in container.items():
+            key = str(raw_key or "").strip()
+            lowered = key.lower()
+            if not key:
+                continue
+            if lowered not in _VERIFICATION_FAILURE_KEYS and not lowered.endswith(
+                "_failures"
+            ):
+                continue
+            if isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                info["verification_failure_key"] = key
+                info["verification_failure_count"] = len(value)
+                break
+        return info
 
     def _container_marks_surfaceable(
         container: Mapping[str, Any], path: tuple[str, ...]
@@ -271,6 +329,7 @@ def project_surfaceable_concept_evidence(
         arxiv_id = _clean_text(container_map.get("arxiv_id"))
         if arxiv_id:
             entry["arxiv_id"] = arxiv_id
+        entry.update(_verification_info_from_container(container_map))
         entries.append(entry)
 
     def _scan_string_preview(text: str, path: tuple[str, ...]) -> None:
@@ -317,6 +376,24 @@ def project_surfaceable_concept_evidence(
                 next_path = (*path, key)
                 if lowered_key in _NON_SURFACEABLE_CONCEPT_KEYS:
                     continue
+                if (
+                    lowered_key.endswith("_concept_id")
+                    and isinstance(nested, str)
+                    and (
+                        _container_marks_surfaceable(container, next_path)
+                        or _container_has_verification_evidence(container)
+                    )
+                ):
+                    _add(
+                        nested,
+                        source_key=key,
+                        source_path=next_path,
+                        container=container,
+                        mutation_kind=mutation_kind
+                        or _mutation_kind_from_key_or_path(key, next_path),
+                        artefact_type=artefact_type,
+                    )
+                    continue
                 if lowered_key in _SURFACEABLE_SINGLE_KEYS and isinstance(nested, str):
                     _add(
                         nested,
@@ -342,6 +419,25 @@ def project_surfaceable_concept_evidence(
                         or _mutation_kind_from_key_or_path(key, next_path),
                         artefact_type=artefact_type,
                     )
+                    continue
+                if (
+                    lowered_key.endswith("_concept_ids")
+                    and _container_has_verification_evidence(container)
+                    and isinstance(nested, Sequence)
+                    and not isinstance(nested, (str, bytes, bytearray))
+                ):
+                    for index, item in enumerate(nested):
+                        if not isinstance(item, str):
+                            continue
+                        _add(
+                            item,
+                            source_key=key,
+                            source_path=(*next_path, str(index)),
+                            container=container,
+                            mutation_kind=mutation_kind
+                            or _mutation_kind_from_key_or_path(key, next_path),
+                            artefact_type=artefact_type,
+                        )
                     continue
                 if (
                     lowered_key in _SURFACEABLE_LIST_KEYS
@@ -646,6 +742,8 @@ def render_surfaceable_concept_lines(
     *,
     existing_text: str | None = None,
     max_lines: int = 12,
+    include_source_paths: bool = False,
+    include_verification_status: bool = False,
 ) -> list[str]:
     lines: list[str] = []
     existing = existing_text or ""
@@ -672,13 +770,35 @@ def render_surfaceable_concept_lines(
             label = (
                 "Linked file copy" if mutation_kind == "linked" else "File copy concept"
             )
+        elif artefact_type.endswith("_concept"):
+            label = artefact_type.replace("_", " ").capitalize()
         elif mutation_kind in _CREATED_MUTATION_KINDS:
             label = f"{mutation_kind.replace('_', ' ').capitalize()} concept"
         elif mutation_kind == "existing":
             label = "Existing concept"
         else:
             label = "Concept"
-        line = f"{label}: {clean_id}."
+        if bool(entry.get("verified")):
+            label = f"Verified {label[:1].lower()}{label[1:]}"
+        suffix_parts: list[str] = []
+        if include_verification_status:
+            if "verified" in entry:
+                suffix_parts.append(
+                    "verified=true" if bool(entry.get("verified")) else "verified=false"
+                )
+            verification_key = _clean_str(entry.get("verification_key"))
+            if verification_key:
+                suffix_parts.append(f"verification_key={verification_key}")
+            if "verification_failure_count" in entry:
+                suffix_parts.append(
+                    f"verification_failures={entry.get('verification_failure_count')}"
+                )
+        if include_source_paths:
+            source_path = _clean_str(entry.get("source_path"))
+            if source_path:
+                suffix_parts.append(f"source={source_path}")
+        suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+        line = f"{label}: {clean_id}{suffix}."
         if line not in lines:
             lines.append(line)
     return lines

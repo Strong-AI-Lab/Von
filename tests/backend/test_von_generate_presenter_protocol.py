@@ -1769,6 +1769,54 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
 
 
+def test_presenter_mode_tool_summary_fallback_surfaces_verified_artefact_handle(
+    monkeypatch,
+):
+    import json
+
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
+
+    llm = _StubLLM("<spoken>Short talk track.</spoken>")
+    app = _make_app(monkeypatch, llm)
+
+    tool_payload = {
+        "tool": "dataset_representation.verify",
+        "status": "ok",
+        "duration_ms": 12,
+        "payload": {
+            "dataset_concept_id": "#V#symmetry_dataset_representation",
+            "dataset_verified": True,
+            "verification_failures": [],
+        },
+    }
+    tool_message = {"role": "tool", "content": json.dumps(tool_payload)}
+    orchestrator_result = OrchestratorResult(
+        response_text="<spoken>The representation is ready.</spoken>",
+        extra_messages=[tool_message],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Represent this dataset", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert "Surfaceable artefact handles:" in screen_text
+    assert "Verified dataset concept: #V#symmetry_dataset_representation" in screen_text
+    assert "Write activity notes:" in screen_text
+    assert "No write activity was detected" not in screen_text
+    assert "Description updated: NO" not in screen_text
+
+
 def test_follow_up_summary_suppresses_internal_status_reason_with_detector_event():
     from src.backend.server.routes.von_routes import (
         _build_presenter_follow_up_summary_from_tool_messages,
@@ -2030,6 +2078,77 @@ def test_tool_messages_prompt_blob_recovers_target_concept_id_from_preview_and_v
     assert "source_concept_id=#V#example_subject" in blob
     assert "predicate_concept_id=#V#example_predicate" in blob
     assert "target_concept_id=#V#learning_to_tell_two_spirals_apart" in blob
+
+
+def test_tool_messages_prompt_blob_surfaces_verified_artefact_handles_first():
+    import json
+
+    from src.backend.server.routes.von_routes import _build_tool_messages_prompt_blob
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "scholarly_paper.verify_representation",
+                    "status": "ok",
+                    "payload": {
+                        "result_snapshot": {
+                            "paper_concept_id": "#V#on_the_ability_of_deep_networks_to_learn_symmetries_from_data_a_neural_kernel_theory",
+                            "file_copy_concept_id": "#V#arxiv_pdf_file_c89705d1eb8849608b7f64ccfc7fb953",
+                            "scholarly_representation_verified": True,
+                            "verification_failures": [],
+                        }
+                    },
+                }
+            ),
+        }
+    ]
+
+    blob = _build_tool_messages_prompt_blob(tool_messages)
+
+    artefact_section = blob.index("SURFACEABLE ARTEFACT HANDLES")
+    write_section = blob.index("TOOL WRITES LEDGER")
+    writes_not_detected_section = blob.index("WRITES NOT DETECTED")
+    assert artefact_section < write_section < writes_not_detected_section
+    assert (
+        "#V#on_the_ability_of_deep_networks_to_learn_symmetries_from_data_a_neural_kernel_theory"
+        in blob
+    )
+    assert "#V#arxiv_pdf_file_c89705d1eb8849608b7f64ccfc7fb953" in blob
+    assert "verified=true" in blob
+    assert "verification_key=scholarly_representation_verified" in blob
+    assert "Description updated: NO" not in blob
+    assert "surfaceable artefact handles above" in blob
+
+
+def test_tool_messages_prompt_blob_surfaces_generic_verified_concept_handle():
+    import json
+
+    from src.backend.server.routes.von_routes import _build_tool_messages_prompt_blob
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "dataset_representation.verify",
+                    "status": "ok",
+                    "payload": {
+                        "dataset_concept_id": "#V#symmetry_dataset_representation",
+                        "dataset_verified": True,
+                        "verification_failures": [],
+                    },
+                }
+            ),
+        }
+    ]
+
+    blob = _build_tool_messages_prompt_blob(tool_messages)
+
+    assert "SURFACEABLE ARTEFACT HANDLES" in blob
+    assert "Verified dataset concept: #V#symmetry_dataset_representation" in blob
+    assert "source=dataset_concept_id" in blob
 
 
 def test_presenter_screen_summary_includes_create_concepts_canonical_ids():

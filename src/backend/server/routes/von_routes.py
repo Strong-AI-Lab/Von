@@ -98,6 +98,8 @@ from ...services.turn_execution_diagnostic_event_service import (
 )
 from ...services.tool_evidence_projection_service import (
     project_nested_workflow_progress_evidence,
+    project_surfaceable_concept_evidence,
+    render_surfaceable_concept_lines,
 )
 from ...services.runtime_code_version_service import (
     get_runtime_code_version_info,
@@ -7793,6 +7795,115 @@ def _extract_nested_workflow_tool_evidence(
     }
 
 
+def _extract_surfaceable_artefact_tool_evidence(
+    payload: Mapping[str, Any],
+    *,
+    max_lines: int = 12,
+) -> dict[str, Any]:
+    """Project durable artefact handles from structured tool payloads."""
+
+    if not isinstance(payload, Mapping):
+        return {"evidence": [], "lines": [], "telemetry": None}
+
+    candidates: list[dict[str, Any]] = []
+    def _looks_like_raw_workflow_aggregate(value: Mapping[str, Any]) -> bool:
+        workflow_markers = {
+            "iteration_results",
+            "subworkflow_invocation",
+            "subworkflow_result_envelope",
+            "workflow_terminal",
+            "workflow_terminal_state",
+            "tool_invocations",
+            "last_action_outputs",
+        }
+        stack: list[tuple[Any, int]] = [(value, 0)]
+        while stack:
+            current, depth = stack.pop()
+            if depth > 5:
+                continue
+            if isinstance(current, Mapping):
+                if any(marker in current for marker in workflow_markers):
+                    return True
+                for nested in current.values():
+                    if isinstance(nested, (Mapping, list, tuple)):
+                        stack.append((nested, depth + 1))
+            elif isinstance(current, (list, tuple)):
+                for nested in current:
+                    if isinstance(nested, (Mapping, list, tuple)):
+                        stack.append((nested, depth + 1))
+        return False
+
+    raw_surfaceable = payload.get("_surfaceable_concepts")
+    raw_surfaceable_present = isinstance(raw_surfaceable, Sequence) and not isinstance(
+        raw_surfaceable, (str, bytes, bytearray)
+    )
+    if raw_surfaceable_present:
+        for entry in raw_surfaceable:
+            if isinstance(entry, Mapping):
+                candidates.append(dict(entry))
+
+    if raw_surfaceable_present or not _looks_like_raw_workflow_aggregate(payload):
+        try:
+            candidates.extend(
+                project_surfaceable_concept_evidence(
+                    payload,
+                    max_items=max(max_lines * 2, max_lines),
+                )
+            )
+        except Exception:
+            pass
+
+    by_concept_id: dict[str, dict[str, Any]] = {}
+    for entry in candidates:
+        concept_id = _progress_str(entry.get("concept_id"))
+        if not concept_id or not concept_id.startswith("#V#"):
+            continue
+        key = concept_id.lower()
+        existing = by_concept_id.get(key)
+        if existing is None:
+            by_concept_id[key] = dict(entry)
+            by_concept_id[key]["concept_id"] = concept_id
+            continue
+        for field, value in entry.items():
+            if field not in existing and value is not None:
+                existing[field] = value
+
+    evidence = list(by_concept_id.values())[:max_lines]
+    lines = render_surfaceable_concept_lines(
+        evidence,
+        max_lines=max_lines,
+        include_source_paths=True,
+        include_verification_status=True,
+    )
+    if not evidence and not lines:
+        return {"evidence": [], "lines": [], "telemetry": None}
+
+    source_paths = [
+        source_path
+        for entry in evidence
+        if (source_path := _progress_str(entry.get("source_path")))
+    ]
+    verification_keys = [
+        verification_key
+        for entry in evidence
+        if (verification_key := _progress_str(entry.get("verification_key")))
+    ]
+    telemetry = {
+        "schema_version": "surfaceable_artefact_handle_projection.v1",
+        "handle_count": len(evidence),
+        "line_count": len(lines),
+        "concept_ids": [
+            concept_id
+            for entry in evidence
+            if (concept_id := _progress_str(entry.get("concept_id")))
+        ],
+        "source_paths": source_paths,
+        "verification_keys": verification_keys,
+        "verified_count": sum(1 for entry in evidence if bool(entry.get("verified"))),
+    }
+    return {"evidence": evidence, "lines": lines, "telemetry": telemetry}
+
+
 def _format_represented_progress_fact_line(fact: Mapping[str, Any]) -> str | None:
     label = _progress_str(fact.get("label"))
     if not label:
@@ -7861,9 +7972,12 @@ def _build_presenter_screen_summary_from_tool_messages(
     nested_workflow_evidence_seen = False
     nested_workflow_lines: list[str] = []
     nested_line_seen: set[str] = set()
+    surfaceable_artefact_lines: list[str] = []
+    surfaceable_artefact_line_seen: set[str] = set()
     represented_contract_ids: list[str] = []
     represented_contract_seen: set[str] = set()
     represented_projection_events: list[dict[str, Any]] = []
+    surfaceable_projection_events: list[dict[str, Any]] = []
 
     index = 0
     for msg in tool_messages:
@@ -7932,6 +8046,21 @@ def _build_presenter_screen_summary_from_tool_messages(
                 if concept_labels:
                     lines.append(f"   created: {', '.join(concept_labels)}")
 
+            surfaceable_evidence = _extract_surfaceable_artefact_tool_evidence(
+                payload,
+                max_lines=12,
+            )
+            surfaceable_telemetry = surfaceable_evidence.get("telemetry")
+            if isinstance(surfaceable_telemetry, Mapping):
+                surfaceable_projection_events.append(dict(surfaceable_telemetry))
+            for surfaceable_line in surfaceable_evidence.get("lines", []):
+                _append_unique_presenter_line(
+                    surfaceable_artefact_lines,
+                    surfaceable_artefact_line_seen,
+                    surfaceable_line,
+                    limit=12,
+                )
+
             nested_evidence = _extract_nested_workflow_tool_evidence(
                 tool_name_text, payload
             )
@@ -7956,6 +8085,11 @@ def _build_presenter_screen_summary_from_tool_messages(
     if index == 0:
         return None
 
+    if surfaceable_artefact_lines:
+        lines.append("")
+        lines.append("Surfaceable artefact handles:")
+        lines.extend(surfaceable_artefact_lines)
+
     write_activity_seen = any(
         (
             description_write_seen,
@@ -7977,6 +8111,11 @@ def _build_presenter_screen_summary_from_tool_messages(
             lines.append("- Name writes detected")
         if concept_create_seen:
             lines.append("- Concept creation detected")
+    elif surfaceable_artefact_lines:
+        lines.append("Write activity notes:")
+        lines.append(
+            "- No top-level write-tool ledger entries were detected; use the artefact handles above as the primary durable-result evidence."
+        )
     elif nested_workflow_evidence_seen and nested_workflow_lines:
         lines.append("Top-level write-tool summary was unavailable.")
         lines.append(
@@ -8003,6 +8142,8 @@ def _build_presenter_screen_summary_from_tool_messages(
                 "projection_events": represented_projection_events,
                 "fact_count": len(nested_workflow_lines),
                 "workflow_evidence_seen": bool(nested_workflow_evidence_seen),
+                "surfaceable_artefact_handle_count": len(surfaceable_artefact_lines),
+                "surfaceable_projection_events": surfaceable_projection_events,
             }
         )
 
@@ -8322,8 +8463,10 @@ def _build_tool_messages_prompt_blob(
 
     executed_lines: list[str] = []
     writes_lines: list[str] = []
+    surfaceable_artefact_lines: list[str] = []
     relation_evidence_lines: list[str] = []
     nested_workflow_lines: list[str] = []
+    surfaceable_artefact_seen: set[str] = set()
     nested_workflow_evidence_seen = False
     nested_line_seen: set[str] = set()
     nested_contract_ids: list[str] = []
@@ -8547,6 +8690,17 @@ def _build_tool_messages_prompt_blob(
 
         _append_relation_evidence(tool_name, payload)
         _mark_description_write(tool_name, payload)
+        surfaceable_evidence = _extract_surfaceable_artefact_tool_evidence(
+            payload,
+            max_lines=16,
+        )
+        for surfaceable_line in surfaceable_evidence.get("lines", []):
+            _append_unique_presenter_line(
+                surfaceable_artefact_lines,
+                surfaceable_artefact_seen,
+                surfaceable_line,
+                limit=16,
+            )
         nested_evidence = _extract_nested_workflow_tool_evidence(tool_name, payload)
         nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
             nested_evidence.get("workflow_evidence_seen")
@@ -8563,15 +8717,11 @@ def _build_tool_messages_prompt_blob(
                 limit=16,
             )
 
-    # Always include an explicit description verdict because it is a common source of confusion.
     if description_write_seen:
         writes_lines.append(
             "- Description updated: YES (evidence present in tool results)"
         )
-    else:
-        writes_lines.append("- Description updated: NO (no description write tool ran)")
 
-    # Provide a small "did not happen" block to make negative facts explicit.
     did_not_lines: list[str] = []
     if not relationship_write_seen:
         did_not_lines.append(
@@ -8587,17 +8737,34 @@ def _build_tool_messages_prompt_blob(
         )
     if not concept_create_seen:
         did_not_lines.append(
-            "- No top-level concept creation evidence detected"
-            if nested_workflow_evidence_seen
-            else "- No concept creation detected"
+            "- No top-level concept creation evidence detected; surfaceable artefact handles above may still identify verified or existing represented concepts."
+            if surfaceable_artefact_lines
+            else (
+                "- No top-level concept creation evidence detected"
+                if nested_workflow_evidence_seen
+                else "- No concept creation detected"
+            )
         )
 
     blob_lines: list[str] = []
     blob_lines.append("TOOL EXECUTION (authoritative):")
     blob_lines.extend(executed_lines or ["- (no parsed tool results)"])
+    if surfaceable_artefact_lines:
+        blob_lines.append("")
+        blob_lines.append("SURFACEABLE ARTEFACT HANDLES (authoritative evidence):")
+        blob_lines.extend(surfaceable_artefact_lines)
     blob_lines.append("")
     blob_lines.append("TOOL WRITES LEDGER (authoritative):")
-    blob_lines.extend(writes_lines or ["- No writes detected"])
+    blob_lines.extend(
+        writes_lines
+        or (
+            [
+                "- No top-level write-ledger entries detected; see surfaceable artefact handles above for durable-result evidence."
+            ]
+            if surfaceable_artefact_lines
+            else ["- No writes detected"]
+        )
+    )
     if nested_workflow_evidence_seen:
         blob_lines.append("")
         blob_lines.append("REPRESENTED WORKFLOW PROGRESS FACTS:")
@@ -12230,8 +12397,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 "Return ONLY one block: <screen>...</screen>. "
                                 "Do not include <spoken>. Do not include JSON. "
                                 "Use New Zealand English spelling. "
-                                "CRITICAL: Only state facts that are explicitly present in the tool results summary. "
-                                "Do not infer, guess, or add any claims beyond tool outputs."
+                                "Use only the supplied user request, represented screen prompt, model response, and tool/evidence summary."
                             )
                             synthesis_user = (
                                 "User request:\n"
@@ -12247,13 +12413,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     and screen_prompt_text.strip()
                                     else ""
                                 )
-                                + "Tool results summary (authoritative):\n"
+                                + "Tool/evidence summary:\n"
                                 f"{tool_blob}\n"
-                                "\nNon-negotiable rule:\n"
-                                "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
-                                "  You may say it is still empty/vacuous or that no tool updated it.\n"
-                                "- Treat diagnostic ledger content as supplementary evidence, not the main answer.\n"
-                                "- If the tool results summary includes an authoritative write-activity section, preserve it without contradiction, but do not make it the whole response unless the user asked for diagnostics.\n"
                                 + (
                                     "- The model response contains internal execution diagnostics. Rewrite them into user-facing screen content. "
                                     "Do not copy raw labels like 'Execution status', 'Blocking effect IDs', 'Unresolved preconditions', "
@@ -12436,8 +12597,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         screen_backfill_error_class = type(exc).__name__
                         screen_candidate = None
 
-                # If the LLM tries to claim a description write without evidence,
-                # discard it and fall back to the deterministic tool summary.
+                # Legacy support-only safety net: if the screen model claims a
+                # description write without tool evidence, discard it and expose
+                # the deterministic evidence summary instead.
                 if (
                     screen_candidate
                     and screen_backfill_source == "llm_synthesis"
@@ -12457,6 +12619,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         for p in description_claim_patterns
                     ):
                         screen_candidate = None
+                        auxiliary_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "presenter_screen_backfill",
+                                    "stage": "screen_backfill",
+                                    "source": "llm_synthesis",
+                                    "suppressed_claim": "description_write_without_tool_evidence",
+                                },
+                                stage="screen_backfill",
+                                component="presenter_routes",
+                                function="_presenter_screen_backfill_description_claim_guard",
+                                decision_class="presenter_support_safety_net",
+                                decision_source="structural_pattern_detection",
+                                changed_outcome=True,
+                                reason_code="description_claim_without_tool_evidence_suppressed",
+                                possible_inappropriate_python_code_use=True,
+                            )
+                        )
 
                 if not screen_candidate:
                     fallback_summary = supplementary_screen_summary or (
