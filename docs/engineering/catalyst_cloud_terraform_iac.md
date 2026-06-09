@@ -166,6 +166,14 @@ Avoid committed plaintext secrets:
 With strict startup enabled, Von fails fast with actionable diagnostics when
 OAuth configuration is missing, localhost/insecure, or otherwise unsafe.
 
+Managed cloud bootstrap also writes `VON_DURABLE_WORKFLOWS_ENABLE=1` into
+`/etc/von/von.env`. Without durable workflow startup, `/health` can pass while
+real `/von/generate` turns fail closed because the authoritative
+conversation-turn workflow runtime is not available. Keep
+`VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP=0` for cloud bootstrap; workflow
+inventory/indexing can perform slower background work, so chat acceptance should
+check `/admin/workflow_materialisation_diagnostics` after `/health`.
+
 ## 9) Mongo Atlas hardening and credential rotation posture
 
 Managed bootstrap exposes Mongo startup guardrails for hosted deployments:

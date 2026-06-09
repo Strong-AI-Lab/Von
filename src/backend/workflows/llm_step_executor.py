@@ -1881,6 +1881,7 @@ def _run_gateway_llm_step_no_tools(
         candidate: Mapping[str, Any] | None = None,
         workflow_stage_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
+        call_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1888,6 +1889,8 @@ def _run_gateway_llm_step_no_tools(
             "duration_ms": duration_ms,
             "stage": stage,
         }
+        if isinstance(call_id, str) and call_id.strip():
+            entry["call_id"] = call_id.strip()
         if usage:
             entry["usage"] = dict(usage)
         if note:
@@ -2240,6 +2243,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         candidate: Mapping[str, Any] | None = None,
         workflow_stage_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
+        call_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -2247,6 +2251,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             "duration_ms": duration_ms,
             "stage": stage,
         }
+        if isinstance(call_id, str) and call_id.strip():
+            entry["call_id"] = call_id.strip()
         if usage:
             entry["usage"] = dict(usage)
         if note:

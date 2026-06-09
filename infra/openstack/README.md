@@ -87,7 +87,8 @@ Bootstrap behaviour:
 - installs runtime dependencies (`python3`, `python3-venv`, `git`, `nginx`)
 - creates and configures service/runtime directories under `/opt/von`
 - writes `/etc/systemd/system/von.service` and `/etc/nginx/sites-available/von.conf`
-- writes `/etc/von/von.env` with secure cookie defaults and OAuth startup controls
+- writes `/etc/von/von.env` with secure cookie defaults, OAuth startup controls,
+  and durable workflow startup enabled for real chat/workflow turns
 - enables and starts `nginx` and `von`
 - performs first deployment by invoking `/usr/local/bin/deploy_von_release.sh`
 

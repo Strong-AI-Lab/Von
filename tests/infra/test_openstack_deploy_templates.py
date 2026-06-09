@@ -74,6 +74,8 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "GOOGLE_OAUTH_STRICT_STARTUP" in content
     assert "GOOGLE_OAUTH_CLIENT_SECRET_FILE" in content
     assert "FLASK_SESSION_COOKIE_SECURE" in content
+    assert "VON_DURABLE_WORKFLOWS_ENABLE=1" in content
+    assert "VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP=0" in content
     assert "VON_MONGO_STRICT_STARTUP" in content
     assert "VON_MONGO_STARTUP_PROBE" in content
     assert "VON_MONGO_REQUIRE_TLS" in content

@@ -511,6 +511,50 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
     assert captured["check_cancellation"] is None
 
 
+def test_execute_llm_step_preserves_gateway_llm_call_id(monkeypatch) -> None:
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            record_llm_call = kwargs.get("record_llm_call")
+            assert callable(record_llm_call)
+            record_llm_call(
+                call_type="llm_call",
+                model_name="test-model",
+                duration_ms=12.0,
+                stage="selector",
+                provider="openai",
+                call_id="llm-test:attempt:1",
+            )
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={},
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"stage": "selector"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["llm_calls"][0]["call_id"] == "llm-test:attempt:1"
+    assert (
+        result.outputs["llm_step_envelope"]["llm_calls"][0]["call_id"]
+        == "llm-test:attempt:1"
+    )
+
+
 def test_execute_llm_step_passes_cancellation_to_gateway_llm(
     monkeypatch,
 ) -> None:
