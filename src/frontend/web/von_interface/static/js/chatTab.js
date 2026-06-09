@@ -2500,6 +2500,12 @@ function syncThinkingCanonicalHistoriesFromProgress(request, progress) {
         updated = true;
     }
 
+    const timingSummary = cloneThinkingTimingSummary(progress.timing_summary);
+    if (timingSummary) {
+        request.timingSummary = timingSummary;
+        updated = true;
+    }
+
     return updated;
 }
 
@@ -2511,7 +2517,7 @@ function syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnos
     let updated = false;
 
     if (diagnostics.latest_progress && typeof diagnostics.latest_progress === 'object') {
-        request.latestProgress = { ...diagnostics.latest_progress };
+        request.latestProgress = cloneThinkingLatestProgress(diagnostics.latest_progress);
         updated = true;
     }
 
@@ -2565,16 +2571,15 @@ function syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnos
         updated = true;
     }
 
-    if (diagnostics.timing_breakdown && typeof diagnostics.timing_breakdown === 'object') {
-        request.timingBreakdown = {
-            ...diagnostics.timing_breakdown,
-            stages: Array.isArray(diagnostics.timing_breakdown.stages)
-                ? diagnostics.timing_breakdown.stages.map((entry) => ({ ...entry }))
-                : [],
-            llm_calls_by_stage_model: Array.isArray(diagnostics.timing_breakdown.llm_calls_by_stage_model)
-                ? diagnostics.timing_breakdown.llm_calls_by_stage_model.map((entry) => ({ ...entry }))
-                : []
-        };
+    const timingSummary = cloneThinkingTimingSummary(diagnostics.timing_summary);
+    if (timingSummary) {
+        request.timingSummary = timingSummary;
+        updated = true;
+    }
+
+    const timingBreakdown = cloneThinkingTimingBreakdown(diagnostics.timing_breakdown);
+    if (timingBreakdown) {
+        request.timingBreakdown = timingBreakdown;
         updated = true;
     }
 
@@ -2830,10 +2835,10 @@ function createThinkingCardHistorySnapshot(request) {
     const latestProgress = currentLatestProgress
         ? (
             isTerminalThinkingProgress(currentLatestProgress) || !syntheticTerminalProgress
-                ? { ...currentLatestProgress }
+                ? cloneThinkingLatestProgress(currentLatestProgress)
                 : { ...syntheticTerminalProgress }
         )
-        : (syntheticTerminalProgress ? { ...syntheticTerminalProgress } : null);
+        : (syntheticTerminalProgress ? cloneThinkingLatestProgress(syntheticTerminalProgress) : null);
     const activityHistory = Array.isArray(request.activityHistory)
         ? request.activityHistory.map((entry) => ({ ...entry }))
         : [];
@@ -2881,17 +2886,8 @@ function createThinkingCardHistorySnapshot(request) {
     const stageDiagnostics = Array.isArray(request.stageDiagnostics)
         ? request.stageDiagnostics.map((entry) => ({ ...entry }))
         : [];
-    const timingBreakdown = (request.timingBreakdown && typeof request.timingBreakdown === 'object')
-        ? {
-            ...request.timingBreakdown,
-            stages: Array.isArray(request.timingBreakdown.stages)
-                ? request.timingBreakdown.stages.map((entry) => ({ ...entry }))
-                : [],
-            llm_calls_by_stage_model: Array.isArray(request.timingBreakdown.llm_calls_by_stage_model)
-                ? request.timingBreakdown.llm_calls_by_stage_model.map((entry) => ({ ...entry }))
-                : []
-        }
-        : null;
+    const timingBreakdown = cloneThinkingTimingBreakdown(request.timingBreakdown);
+    const timingSummary = cloneThinkingTimingSummary(request.timingSummary);
 
     const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
     const completedDisplayState = reduceThinkingCardDisplayState(
@@ -2913,6 +2909,7 @@ function createThinkingCardHistorySnapshot(request) {
         workflowStagePath,
         stageDiagnostics,
         timingBreakdown,
+        timingSummary,
         latestProgress,
         thinkingCardMode: getThinkingCardMode(request),
         expandedThinkingDiagnosticKeys: request.expandedThinkingDiagnosticKeys instanceof Set
@@ -5135,13 +5132,203 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
 /**
  * Update the thinking card meta element (elapsed time + liveness metadata).
  */
-function getThinkingTimingRows(request) {
-    const timing = (request?.timingBreakdown && typeof request.timingBreakdown === 'object')
+function cloneThinkingTimingEntryArray(value) {
+    return Array.isArray(value)
+        ? value
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({ ...entry }))
+        : [];
+}
+
+function cloneThinkingSlowestSpanRows(value) {
+    return Array.isArray(value)
+        ? value
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({
+                span_id: normaliseThinkingActivityString(entry.span_id),
+                stage_id: normaliseThinkingActivityString(entry.stage_id || entry.stage),
+                operation_kind: normaliseThinkingActivityString(entry.operation_kind),
+                operation_name: normaliseThinkingActivityString(entry.operation_name),
+                duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
+                status: normaliseThinkingActivityString(entry.status),
+                source: normaliseThinkingActivityString(entry.source),
+                model: normaliseThinkingActivityString(entry.model),
+                provider: normaliseThinkingActivityString(entry.provider),
+                prompt_id: normaliseThinkingActivityString(entry.prompt_id)
+            }))
+        : [];
+}
+
+function cloneThinkingOperationTotalRows(value) {
+    return Array.isArray(value)
+        ? value
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({
+                operation_kind: normaliseThinkingActivityString(entry.operation_kind),
+                operation_name: normaliseThinkingActivityString(entry.operation_name),
+                span_count: Number.isFinite(entry.span_count) ? Number(entry.span_count) : null,
+                duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null
+            }))
+        : [];
+}
+
+function cloneThinkingLatencySummary(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    return {
+        min_ms: Number.isFinite(value.min_ms) ? Number(value.min_ms) : null,
+        max_ms: Number.isFinite(value.max_ms) ? Number(value.max_ms) : null,
+        mean_ms: Number.isFinite(value.mean_ms) ? Number(value.mean_ms) : null
+    };
+}
+
+function cloneThinkingTimingSummaryTotals(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    return {
+        elapsed_ms: Number.isFinite(value.elapsed_ms) ? Number(value.elapsed_ms) : null,
+        phase_elapsed_ms: Number.isFinite(value.phase_elapsed_ms) ? Number(value.phase_elapsed_ms) : null,
+        operation_elapsed_ms: Number.isFinite(value.operation_elapsed_ms) ? Number(value.operation_elapsed_ms) : null,
+        llm_elapsed_ms: Number.isFinite(value.llm_elapsed_ms) ? Number(value.llm_elapsed_ms) : null,
+        tool_elapsed_ms: Number.isFinite(value.tool_elapsed_ms) ? Number(value.tool_elapsed_ms) : null
+    };
+}
+
+function cloneThinkingModelPromptTimingRows(value) {
+    return Array.isArray(value)
+        ? value
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({
+                stage_id: normaliseThinkingActivityString(entry.stage_id || entry.stage),
+                provider: normaliseThinkingActivityString(entry.provider),
+                model: normaliseThinkingActivityString(entry.model),
+                prompt_id: normaliseThinkingActivityString(entry.prompt_id),
+                prompt_sha256: normaliseThinkingActivityString(entry.prompt_sha256),
+                call_count: Number.isFinite(entry.call_count) ? Number(entry.call_count) : null,
+                success_count: Number.isFinite(entry.success_count) ? Number(entry.success_count) : null,
+                failure_count: Number.isFinite(entry.failure_count) ? Number(entry.failure_count) : null,
+                duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
+                first_output_latency_ms: cloneThinkingLatencySummary(entry.first_output_latency_ms)
+            }))
+        : [];
+}
+
+function cloneThinkingTimingSummary(summary) {
+    if (!summary || typeof summary !== 'object') {
+        return null;
+    }
+    return {
+        schema_version: normaliseThinkingActivityString(summary.schema_version),
+        generated_at_utc: normaliseThinkingActivityString(summary.generated_at_utc),
+        span_count: Number.isFinite(summary.span_count) ? Number(summary.span_count) : null,
+        stored_span_count: Number.isFinite(summary.stored_span_count) ? Number(summary.stored_span_count) : null,
+        dropped_span_count: Number.isFinite(summary.dropped_span_count) ? Number(summary.dropped_span_count) : null,
+        summary: cloneThinkingTimingSummaryTotals(summary.summary),
+        slowest_spans: cloneThinkingSlowestSpanRows(summary.slowest_spans),
+        model_prompt_summary: cloneThinkingModelPromptTimingRows(summary.model_prompt_summary)
+    };
+}
+
+function cloneThinkingLatestProgress(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return null;
+    }
+    const copy = { ...progress };
+    const timingSummary = cloneThinkingTimingSummary(progress.timing_summary);
+    if (timingSummary) {
+        copy.timing_summary = timingSummary;
+    }
+    return copy;
+}
+
+function cloneThinkingTimingBreakdown(timing) {
+    if (!timing || typeof timing !== 'object') {
+        return null;
+    }
+    return {
+        schema_version: normaliseThinkingActivityString(timing.schema_version),
+        stages: cloneThinkingTimingEntryArray(timing.stages),
+        llm_calls_by_stage_model: cloneThinkingTimingEntryArray(timing.llm_calls_by_stage_model),
+        totals: timing.totals && typeof timing.totals === 'object'
+            ? { ...timing.totals }
+            : null,
+        slowest_spans: cloneThinkingSlowestSpanRows(timing.slowest_spans),
+        operation_totals: cloneThinkingOperationTotalRows(timing.operation_totals),
+        model_prompt_summary: cloneThinkingModelPromptTimingRows(timing.model_prompt_summary)
+    };
+}
+
+function getThinkingTimingBreakdown(request) {
+    return (request?.timingBreakdown && typeof request.timingBreakdown === 'object')
         ? request.timingBreakdown
         : null;
+}
+
+function getThinkingTimingSummary(request) {
+    const candidates = [
+        request?.timingSummary,
+        request?.latestProgress?.timing_summary
+    ];
+    for (const candidate of candidates) {
+        if (candidate && typeof candidate === 'object') {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function getThinkingTimingRows(request) {
+    const timing = getThinkingTimingBreakdown(request);
     return Array.isArray(timing?.llm_calls_by_stage_model)
         ? timing.llm_calls_by_stage_model.filter((entry) => entry && typeof entry === 'object')
         : [];
+}
+
+function getThinkingSlowestTimingSpans(request) {
+    const timing = getThinkingTimingBreakdown(request);
+    const summary = getThinkingTimingSummary(request);
+    const candidates = [
+        timing?.slowest_spans,
+        summary?.slowest_spans
+    ];
+    for (const candidate of candidates) {
+        const rows = Array.isArray(candidate)
+            ? candidate.filter((entry) => entry && typeof entry === 'object')
+            : [];
+        if (rows.length > 0) {
+            return rows
+                .slice()
+                .sort((left, right) => Number(right.duration_ms || 0) - Number(left.duration_ms || 0));
+        }
+    }
+    return [];
+}
+
+function getThinkingOperationTotalRows(request) {
+    const timing = getThinkingTimingBreakdown(request);
+    return Array.isArray(timing?.operation_totals)
+        ? timing.operation_totals.filter((entry) => entry && typeof entry === 'object')
+        : [];
+}
+
+function getThinkingModelPromptTimingRows(request) {
+    const timing = getThinkingTimingBreakdown(request);
+    const summary = getThinkingTimingSummary(request);
+    const candidates = [
+        timing?.model_prompt_summary,
+        summary?.model_prompt_summary
+    ];
+    for (const candidate of candidates) {
+        const rows = Array.isArray(candidate)
+            ? candidate.filter((entry) => entry && typeof entry === 'object')
+            : [];
+        if (rows.length > 0) {
+            return rows;
+        }
+    }
+    return [];
 }
 
 function hasSufficientThinkingTimingBaseline(row) {
@@ -8937,6 +9124,172 @@ function renderThinkingWorkflowStageHistoryHTML(request, mode = THINKING_CARD_MO
     }, 'thinking-card-tool thinking-card-activity')).join('');
 }
 
+function formatThinkingTimingOperationLabel(operationKind, operationName) {
+    const kind = normaliseThinkingActivityString(operationKind);
+    const name = normaliseThinkingActivityString(operationName);
+    const kindLabel = kind ? formatThinkingActivityFallbackLabel(kind) : '';
+    if (!name || name === kind) {
+        return kindLabel || name;
+    }
+    return kindLabel ? `${kindLabel} / ${name}` : name;
+}
+
+function formatThinkingTimingModelProviderLabel(row) {
+    const model = normaliseThinkingActivityString(row?.model);
+    const provider = normaliseThinkingActivityString(row?.provider);
+    if (provider && model) {
+        return `${provider}/${model}`;
+    }
+    return model || provider;
+}
+
+function formatThinkingTimingSpanLine(row, options = {}) {
+    if (!row || typeof row !== 'object') {
+        return '';
+    }
+    const includePrompt = options.includePrompt !== false;
+    const stage = normaliseThinkingActivityString(row.stage_id || row.stage)
+        || 'unscoped';
+    const operation = formatThinkingTimingOperationLabel(row.operation_kind, row.operation_name);
+    const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    const status = formatThinkingActivityFallbackLabel(row.status);
+    const model = formatThinkingTimingModelProviderLabel(row);
+    const promptId = includePrompt ? normaliseThinkingActivityString(row.prompt_id) : '';
+
+    return [
+        formatThinkingActivityFallbackLabel(stage),
+        operation,
+        duration,
+        status,
+        model,
+        promptId ? `prompt ${promptId}` : ''
+    ].filter(Boolean).join(' · ');
+}
+
+function deriveThinkingTimingSpanState(row) {
+    const status = normaliseThinkingActivityString(row?.status).toLowerCase();
+    if (['success', 'completed', 'complete', 'done'].includes(status)) {
+        return 'success';
+    }
+    if (['failure', 'failed', 'error', 'errored'].includes(status)) {
+        return 'failure';
+    }
+    return 'pending';
+}
+
+function formatThinkingOperationTotalLine(row) {
+    if (!row || typeof row !== 'object') {
+        return '';
+    }
+    const operation = formatThinkingTimingOperationLabel(row.operation_kind, row.operation_name);
+    const count = Number.isFinite(row.span_count)
+        ? formatThinkingCountLabel(Number(row.span_count), 'span')
+        : '';
+    const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    return [operation, count, duration].filter(Boolean).join(' · ');
+}
+
+function formatThinkingModelPromptTimingLine(row) {
+    if (!row || typeof row !== 'object') {
+        return '';
+    }
+    const stage = normaliseThinkingActivityString(row.stage_id || row.stage);
+    const model = formatThinkingTimingModelProviderLabel(row);
+    const promptId = normaliseThinkingActivityString(row.prompt_id);
+    const calls = Number.isFinite(row.call_count)
+        ? formatThinkingCountLabel(Number(row.call_count), 'call')
+        : '';
+    const successCount = Number.isFinite(row.success_count)
+        ? `${Number(row.success_count)} ok`
+        : '';
+    const failureCount = Number.isFinite(row.failure_count) && Number(row.failure_count) > 0
+        ? `${Number(row.failure_count)} failed`
+        : '';
+    const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    const latencySummary = row.first_output_latency_ms && typeof row.first_output_latency_ms === 'object'
+        ? row.first_output_latency_ms
+        : null;
+    const firstOutput = latencySummary && Number.isFinite(latencySummary.mean_ms)
+        ? `first output avg ${formatThinkingDiagnosticDuration(latencySummary.mean_ms)}`
+        : '';
+
+    return [
+        stage ? formatThinkingActivityFallbackLabel(stage) : '',
+        model,
+        promptId ? `prompt ${promptId}` : '',
+        calls,
+        successCount,
+        failureCount,
+        duration,
+        firstOutput
+    ].filter(Boolean).join(' · ');
+}
+
+function buildThinkingTimingSummaryFacts(request) {
+    const summary = getThinkingTimingSummary(request);
+    if (!summary || typeof summary !== 'object') {
+        return [];
+    }
+    const timing = summary.summary && typeof summary.summary === 'object'
+        ? summary.summary
+        : {};
+    const spanBits = [];
+    if (Number.isFinite(summary.span_count)) {
+        spanBits.push(String(Number(summary.span_count)));
+    }
+    if (Number.isFinite(summary.stored_span_count) && summary.stored_span_count !== summary.span_count) {
+        spanBits.push(`${Number(summary.stored_span_count)} stored`);
+    }
+    if (Number.isFinite(summary.dropped_span_count) && Number(summary.dropped_span_count) > 0) {
+        spanBits.push(`${Number(summary.dropped_span_count)} dropped`);
+    }
+    return [
+        { label: 'Spans', value: spanBits.join(' · ') },
+        { label: 'Elapsed', value: formatThinkingDiagnosticDuration(timing.elapsed_ms) },
+        { label: 'Phase time', value: formatThinkingDiagnosticDuration(timing.phase_elapsed_ms) },
+        { label: 'Operation time', value: formatThinkingDiagnosticDuration(timing.operation_elapsed_ms) },
+        { label: 'LLM time', value: formatThinkingDiagnosticDuration(timing.llm_elapsed_ms) },
+        { label: 'Tool time', value: formatThinkingDiagnosticDuration(timing.tool_elapsed_ms) }
+    ];
+}
+
+function buildThinkingTimingDiagnosticPanelHTML(request, mode = THINKING_CARD_MODE_EXPERT) {
+    const renderMode = normaliseThinkingCardMode(mode);
+    if (renderMode === THINKING_CARD_MODE_DEFAULT) {
+        return '';
+    }
+    const slowestRows = getThinkingSlowestTimingSpans(request);
+    const operationRows = getThinkingOperationTotalRows(request);
+    const modelPromptRows = getThinkingModelPromptTimingRows(request);
+    const slowestLimit = renderMode === THINKING_CARD_MODE_DEBUG
+        ? slowestRows.length
+        : Math.min(5, slowestRows.length);
+    const operationLimit = renderMode === THINKING_CARD_MODE_DEBUG
+        ? operationRows.length
+        : Math.min(5, operationRows.length);
+    const modelPromptLimit = renderMode === THINKING_CARD_MODE_DEBUG
+        ? modelPromptRows.length
+        : Math.min(5, modelPromptRows.length);
+    const sections = [
+        buildThinkingDiagnosticListHTML(
+            'Slowest spans',
+            slowestRows.slice(0, slowestLimit).map((row) => formatThinkingTimingSpanLine(row))
+        ),
+        buildThinkingDiagnosticListHTML(
+            'Operation totals',
+            operationRows.slice(0, operationLimit).map(formatThinkingOperationTotalLine)
+        ),
+        buildThinkingDiagnosticListHTML(
+            'Model/prompt timing',
+            modelPromptRows.slice(0, modelPromptLimit).map(formatThinkingModelPromptTimingLine)
+        )
+    ];
+    return renderThinkingDiagnosticPanelHTML({
+        facts: buildThinkingTimingSummaryFacts(request),
+        sections
+    });
+}
+
 function formatThinkingLlmTimingLine(row) {
     if (!row || typeof row !== 'object') {
         return '';
@@ -8980,27 +9333,53 @@ function formatThinkingLlmTimingLine(row) {
 
 function renderThinkingTimingBreakdownHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
     const renderMode = normaliseThinkingCardMode(mode);
+    const sections = [];
+    const slowestRows = getThinkingSlowestTimingSpans(request);
+    if (slowestRows.length > 0) {
+        const topSpan = slowestRows[0];
+        sections.push(renderThinkingDiagnosticRowHTML({
+            label: slowestRows.length > 1 ? 'Slowest timing spans' : 'Slowest timing span',
+            detail: formatThinkingTimingSpanLine(topSpan, {
+                includePrompt: renderMode !== THINKING_CARD_MODE_DEFAULT
+            }),
+            state: deriveThinkingTimingSpanState(topSpan),
+            diagnosticKey: buildThinkingDiagnosticKey('timing', 'slowest_spans'),
+            diagnosticHtml: buildThinkingTimingDiagnosticPanelHTML(request, renderMode)
+        }, 'thinking-card-tool thinking-card-activity'));
+    }
+
     if (renderMode === THINKING_CARD_MODE_DEFAULT) {
-        return '';
+        return sections.join('');
     }
+
+    const operationLines = getThinkingOperationTotalRows(request)
+        .map(formatThinkingOperationTotalLine)
+        .filter(Boolean);
+    if (slowestRows.length === 0 && operationLines.length > 0) {
+        sections.push(renderThinkingDiagnosticRowHTML({
+            label: 'Operation timing',
+            detail: operationLines[0],
+            diagnosticKey: buildThinkingDiagnosticKey('timing', 'operation_totals'),
+            diagnosticHtml: buildThinkingDiagnosticListHTML('Operation totals', operationLines)
+        }, 'thinking-card-tool thinking-card-activity'));
+    }
+
     const rows = getThinkingTimingRows(request);
-    if (rows.length === 0) {
-        return '';
-    }
     const timingLines = rows
         .map(formatThinkingLlmTimingLine)
         .filter(Boolean);
-    if (timingLines.length === 0) {
-        return '';
+    if (timingLines.length > 0) {
+        sections.push(renderThinkingDiagnosticRowHTML({
+            label: 'LLM timing',
+            detail: timingLines[0],
+            diagnosticKey: buildThinkingDiagnosticKey('timing', 'llm'),
+            diagnosticHtml: renderMode === THINKING_CARD_MODE_DEBUG
+                ? buildThinkingDiagnosticListHTML('LLM calls by stage/model', timingLines)
+                : ''
+        }, 'thinking-card-tool thinking-card-activity'));
     }
-    return renderThinkingDiagnosticRowHTML({
-        label: 'LLM timing',
-        detail: timingLines[0],
-        diagnosticKey: buildThinkingDiagnosticKey('timing', 'llm'),
-        diagnosticHtml: renderMode === THINKING_CARD_MODE_DEBUG
-            ? buildThinkingDiagnosticListHTML('LLM calls by stage/model', timingLines)
-            : ''
-    }, 'thinking-card-tool thinking-card-activity');
+
+    return sections.join('');
 }
 
 /**
@@ -9047,11 +9426,11 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode);
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const llmCallLogHtml = renderThinkingLlmCallLogSectionHTML(request, mode);
+    const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (mode === THINKING_CARD_MODE_DEFAULT && synopsisHtml) {
-        return synopsisHtml + workflowStageHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
+        return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
-    const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (workflowStageHtml) {
         return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
@@ -27289,6 +27668,8 @@ function buildThinkingDiagnosticsPayload(request) {
     const elapsedMs = backendElapsedMs ?? getThinkingRequestElapsedMs(request);
     const locatorPayload = buildThinkingDiagnosticsLocatorPayload(request);
     const progressViewModel = buildThinkingCardProgressViewModel(request);
+    const timingSummary = cloneThinkingTimingSummary(request.timingSummary)
+        || cloneThinkingTimingSummary(latestProgress?.timing_summary);
 
     return {
         schema_version: 'thinking_diagnostics_snapshot.v1',
@@ -27323,7 +27704,8 @@ function buildThinkingDiagnosticsPayload(request) {
                 : latestProgress
         ),
         workflow_stage_path: request.workflowStagePath || null,
-        timing_breakdown: request.timingBreakdown || null,
+        timing_summary: timingSummary,
+        timing_breakdown: cloneThinkingTimingBreakdown(request.timingBreakdown),
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request),
         mcp_access: locatorPayload?.mcp_access || null
     };

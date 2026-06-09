@@ -2780,7 +2780,50 @@ describe('thinking activity history normalisation', () => {
                         blocking_effect_ids: ['effect_tool_execution_1']
                     }
                 }
-            ]
+            ],
+            timing_summary: {
+                schema_version: 'turn_timing_summary.v1',
+                span_count: 3,
+                stored_span_count: 3,
+                dropped_span_count: 0,
+                slowest_spans: [
+                    {
+                        stage_id: 'workflow_routing',
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        duration_ms: 42000
+                    }
+                ]
+            },
+            timing_breakdown: {
+                schema_version: 'conversation_turn_timing_breakdown.v1',
+                slowest_spans: [
+                    {
+                        stage_id: 'workflow_routing',
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        duration_ms: 42000
+                    }
+                ],
+                operation_totals: [
+                    {
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        span_count: 1,
+                        duration_ms: 42000
+                    }
+                ],
+                model_prompt_summary: [
+                    {
+                        stage_id: 'workflow_routing',
+                        provider: 'openai',
+                        model: 'gpt-5-mini',
+                        prompt_id: '#V#workflow_selector_prompt',
+                        call_count: 1,
+                        duration_ms: 42000
+                    }
+                ]
+            }
         };
 
         expect(__testOnly_syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics)).toBe(true);
@@ -2793,6 +2836,48 @@ describe('thinking activity history normalisation', () => {
         expect(request.progressEvents).toEqual(diagnostics.progress_events);
         expect(request.activityHistory).toEqual(diagnostics.activity_history);
         expect(request.stageDiagnostics).toEqual(diagnostics.stage_diagnostics);
+        expect(request.timingSummary).toEqual(expect.objectContaining({
+            schema_version: 'turn_timing_summary.v1',
+            span_count: 3,
+            stored_span_count: 3,
+            dropped_span_count: 0,
+            slowest_spans: [
+                expect.objectContaining({
+                    stage_id: 'workflow_routing',
+                    operation_kind: 'llm_call',
+                    operation_name: 'gpt-5-mini',
+                    duration_ms: 42000
+                })
+            ]
+        }));
+        expect(request.timingBreakdown).toEqual(expect.objectContaining({
+            slowest_spans: [
+                expect.objectContaining({
+                    stage_id: 'workflow_routing',
+                    operation_kind: 'llm_call',
+                    operation_name: 'gpt-5-mini',
+                    duration_ms: 42000
+                })
+            ],
+            operation_totals: [
+                expect.objectContaining({
+                    operation_kind: 'llm_call',
+                    operation_name: 'gpt-5-mini',
+                    span_count: 1,
+                    duration_ms: 42000
+                })
+            ],
+            model_prompt_summary: [
+                expect.objectContaining({
+                    stage_id: 'workflow_routing',
+                    provider: 'openai',
+                    model: 'gpt-5-mini',
+                    prompt_id: '#V#workflow_selector_prompt',
+                    call_count: 1,
+                    duration_ms: 42000
+                })
+            ]
+        }));
     });
 
     test('prefers backend elapsed time and preserves canonical workflow selection and routing diagnostics', () => {
@@ -3781,6 +3866,185 @@ describe('thinking activity history normalisation', () => {
         expect(sparseHtml).toContain('LLM timing');
         expect(sparseHtml).toContain('gpt-baseline');
         expect(sparseHtml).not.toContain('usual');
+    });
+
+    test('renders compact slowest-span timing without exposing raw payload fields', () => {
+        const request = {
+            thinkingCardMode: 'default',
+            clientRequestId: 'req-timing-spans',
+            latestProgress: {
+                status: 'completed',
+                phase: 'response_finalising',
+                stage: 'response_finalising'
+            },
+            timingSummary: {
+                schema_version: 'turn_timing_summary.v1',
+                span_count: 3,
+                stored_span_count: 3,
+                dropped_span_count: 0,
+                summary: {
+                    elapsed_ms: 61000,
+                    phase_elapsed_ms: 12000,
+                    operation_elapsed_ms: 49000,
+                    llm_elapsed_ms: 42000,
+                    tool_elapsed_ms: 5000
+                },
+                slowest_spans: [
+                    {
+                        span_id: 'llm-selector',
+                        stage_id: 'workflow_routing',
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        duration_ms: 42000,
+                        status: 'success',
+                        provider: 'openai',
+                        model: 'gpt-5-mini',
+                        prompt_id: '#V#workflow_selector_prompt',
+                        prompt_text: 'raw prompt body should stay hidden'
+                    }
+                ]
+            },
+            timingBreakdown: {
+                schema_version: 'conversation_turn_timing_breakdown.v1',
+                slowest_spans: [
+                    {
+                        span_id: 'llm-selector',
+                        stage_id: 'workflow_routing',
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        duration_ms: 42000,
+                        status: 'success',
+                        provider: 'openai',
+                        model: 'gpt-5-mini',
+                        prompt_id: '#V#workflow_selector_prompt',
+                        prompt_text: 'raw prompt body should stay hidden'
+                    },
+                    {
+                        span_id: 'tool-progress',
+                        stage_id: 'tool_execute',
+                        operation_kind: 'tool_call',
+                        operation_name: 'turn_execution_get_live_progress',
+                        duration_ms: 5000,
+                        status: 'success',
+                        arguments: { request_id: 'private request id should stay hidden' },
+                        result: 'private tool result should stay hidden'
+                    },
+                    {
+                        span_id: 'response-finalising',
+                        stage_id: 'response_finalising',
+                        operation_kind: 'response_transformation',
+                        operation_name: 'presenter_final_answer',
+                        duration_ms: 3000,
+                        status: 'success',
+                        email_body: 'private email body should stay hidden'
+                    }
+                ],
+                operation_totals: [
+                    {
+                        operation_kind: 'llm_call',
+                        operation_name: 'gpt-5-mini',
+                        span_count: 1,
+                        duration_ms: 42000
+                    },
+                    {
+                        operation_kind: 'tool_call',
+                        operation_name: 'turn_execution_get_live_progress',
+                        span_count: 1,
+                        duration_ms: 5000
+                    },
+                    {
+                        operation_kind: 'response_transformation',
+                        operation_name: 'presenter_final_answer',
+                        span_count: 1,
+                        duration_ms: 3000
+                    }
+                ],
+                model_prompt_summary: [
+                    {
+                        stage_id: 'workflow_routing',
+                        provider: 'openai',
+                        model: 'gpt-5-mini',
+                        prompt_id: '#V#workflow_selector_prompt',
+                        call_count: 1,
+                        success_count: 1,
+                        failure_count: 0,
+                        duration_ms: 42000,
+                        first_output_latency_ms: {
+                            mean_ms: 900
+                        }
+                    }
+                ]
+            }
+        };
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(defaultHtml).toContain('Slowest timing spans');
+        expect(defaultHtml).toContain('Workflow routing');
+        expect(defaultHtml).toContain('Llm call / gpt-5-mini');
+        expect(defaultHtml).toContain('42000 ms');
+        expect(defaultHtml).toContain('openai/gpt-5-mini');
+        expect(defaultHtml).not.toContain('#V#workflow_selector_prompt');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML({
+            ...request,
+            thinkingCardMode: 'expert'
+        });
+        expect(expertHtml).toContain('Slowest spans');
+        expect(expertHtml).toContain('Tool execute');
+        expect(expertHtml).toContain('Response finalising');
+        expect(expertHtml).toContain('turn_execution_get_live_progress');
+        expect(expertHtml).toContain('presenter_final_answer');
+        expect(expertHtml).toContain('Operation totals');
+        expect(expertHtml).toContain('Model/prompt timing');
+        expect(expertHtml).toContain('#V#workflow_selector_prompt');
+        expect(expertHtml).toContain('first output avg 900 ms');
+
+        expect(expertHtml).not.toContain('raw prompt body should stay hidden');
+        expect(expertHtml).not.toContain('private request id should stay hidden');
+        expect(expertHtml).not.toContain('private tool result should stay hidden');
+        expect(expertHtml).not.toContain('private email body should stay hidden');
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.timing_summary.slowest_spans).toHaveLength(1);
+        expect(diagnosticsPayload.timing_breakdown.slowest_spans).toHaveLength(3);
+        expect(diagnosticsPayload.timing_breakdown.operation_totals).toHaveLength(3);
+        expect(diagnosticsPayload.timing_breakdown.model_prompt_summary).toHaveLength(1);
+        const exportedJson = JSON.stringify(diagnosticsPayload);
+        expect(exportedJson).not.toContain('raw prompt body should stay hidden');
+        expect(exportedJson).not.toContain('private request id should stay hidden');
+        expect(exportedJson).not.toContain('private tool result should stay hidden');
+        expect(exportedJson).not.toContain('private email body should stay hidden');
+    });
+
+    test('renders live timing summary slowest spans when no archived breakdown is loaded', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'default',
+            latestProgress: {
+                status: 'heartbeat',
+                phase: 'response_finalising',
+                stage: 'response_finalising',
+                timing_summary: {
+                    schema_version: 'turn_timing_summary.v1',
+                    span_count: 1,
+                    stored_span_count: 1,
+                    dropped_span_count: 0,
+                    slowest_spans: [
+                        {
+                            stage_id: 'response_finalising',
+                            operation_kind: 'chat_history_persistence',
+                            operation_name: 'persist_assistant_message',
+                            duration_ms: 1800,
+                            status: 'success'
+                        }
+                    ]
+                }
+            }
+        });
+
+        expect(html).toContain('Slowest timing span');
+        expect(html).toContain('Response finalising');
+        expect(html).toContain('Chat history persistence / persist_assistant_message');
+        expect(html).toContain('1800 ms');
     });
 
     test('builds a canonical progress view model from explicit turn state', () => {
