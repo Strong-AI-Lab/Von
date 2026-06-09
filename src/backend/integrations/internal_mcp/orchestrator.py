@@ -17497,13 +17497,6 @@ class InternalMCPChatOrchestrator:
             context_telemetry=context_telemetry,
         )
         request_prepared_at_utc = self._utc_now_iso()
-        llm_exchange_id = self._build_live_llm_exchange_id(
-            stage=stage,
-            workflow_stage_id=workflow_stage_id,
-            prepared_at_utc=request_prepared_at_utc,
-            request_telemetry=request_telemetry,
-        )
-        prepared_call_id = self._build_live_llm_call_id(llm_exchange_id, 1)
         if callable(emit_progress):
             emit_progress(
                 {
@@ -17513,8 +17506,6 @@ class InternalMCPChatOrchestrator:
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
-                        llm_exchange_id=llm_exchange_id,
-                        call_id=prepared_call_id,
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
@@ -17599,9 +17590,6 @@ class InternalMCPChatOrchestrator:
                 attempt_meta["model_switch_reason"] = (
                     f"previous_attempt_failed:{last_failure_class}"
                 )
-            attempt_call_id = self._build_live_llm_call_id(
-                llm_exchange_id, attempt_no
-            )
 
             reachability = self._probe_model_candidate_reachability(
                 telemetry=telemetry,
@@ -17631,13 +17619,6 @@ class InternalMCPChatOrchestrator:
                             "failure_kind": "provider_unreachable",
                             **_stage_extra,
                             **attempt_meta,
-                            **self._build_live_llm_progress_payload(
-                                request_telemetry=request_telemetry,
-                                request_state="failed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
-                                prepared_at_utc=request_prepared_at_utc,
-                            ),
                         }
                     )
                 record_llm_call(
@@ -17650,7 +17631,6 @@ class InternalMCPChatOrchestrator:
                     provider=provider,
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -17708,8 +17688,6 @@ class InternalMCPChatOrchestrator:
                         **self._build_live_llm_progress_payload(
                             request_telemetry=request_telemetry,
                             request_state="sent",
-                            llm_exchange_id=llm_exchange_id,
-                            call_id=attempt_call_id,
                             prepared_at_utc=request_prepared_at_utc,
                             sent_at_utc=request_sent_at_utc,
                         ),
@@ -17745,8 +17723,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="received_output",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                                 first_output_at_utc=first_output_at_utc,
@@ -17768,8 +17744,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="completed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                                 first_output_at_utc=first_output_at_utc,
@@ -17791,7 +17765,6 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                     exchange_blob_ref=self._capture_llm_exchange_blob(
                         stage=stage,
                         workflow_stage_id=workflow_stage_id,
@@ -17880,8 +17853,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="cancelled",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                             ),
@@ -17901,7 +17872,6 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                 )
                 raise
             except Exception as exc:
@@ -17959,8 +17929,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="failed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                             ),
@@ -17980,7 +17948,6 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -18232,67 +18199,18 @@ class InternalMCPChatOrchestrator:
     def _utc_now_iso() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    @staticmethod
-    def _build_live_llm_exchange_id(
-        *,
-        stage: str | None,
-        workflow_stage_id: str | None,
-        prepared_at_utc: str | None,
-        request_telemetry: Mapping[str, Any] | None,
-    ) -> str:
-        prompt_hash: str | None = None
-        context_message_count: Any = None
-        tool_count: Any = None
-        if isinstance(request_telemetry, Mapping):
-            prompt_capture = request_telemetry.get("prompt")
-            prompt_text = (
-                prompt_capture.get("text")
-                if isinstance(prompt_capture, Mapping)
-                and isinstance(prompt_capture.get("text"), str)
-                else None
-            )
-            if prompt_text:
-                prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-            context_message_count = request_telemetry.get("context_message_count")
-            tool_count = request_telemetry.get("tool_count")
-        seed = {
-            "stage": stage,
-            "workflow_stage_id": workflow_stage_id,
-            "prepared_at_utc": prepared_at_utc,
-            "prompt_sha256": prompt_hash,
-            "context_message_count": context_message_count,
-            "tool_count": tool_count,
-        }
-        rendered = json.dumps(seed, sort_keys=True, separators=(",", ":"), default=str)
-        return f"llm-{hashlib.sha256(rendered.encode('utf-8')).hexdigest()[:16]}"
-
-    @staticmethod
-    def _build_live_llm_call_id(
-        exchange_id: str,
-        attempt_no: int | None,
-    ) -> str:
-        if isinstance(attempt_no, int) and attempt_no > 0:
-            return f"{exchange_id}:attempt:{attempt_no}"
-        return exchange_id
-
     @classmethod
     def _build_live_llm_progress_payload(
         cls,
         *,
         request_telemetry: Mapping[str, Any] | None,
         request_state: str | None,
-        llm_exchange_id: str | None = None,
-        call_id: str | None = None,
         prepared_at_utc: str | None = None,
         sent_at_utc: str | None = None,
         first_output_at_utc: str | None = None,
         response: Any = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
-        if isinstance(llm_exchange_id, str) and llm_exchange_id.strip():
-            payload["llm_exchange_id"] = llm_exchange_id.strip()
-        if isinstance(call_id, str) and call_id.strip():
-            payload["call_id"] = call_id.strip()
         if isinstance(request_telemetry, Mapping) and request_telemetry:
             payload["llm_request"] = dict(request_telemetry)
         if isinstance(request_state, str) and request_state.strip():
@@ -18439,13 +18357,6 @@ class InternalMCPChatOrchestrator:
             context_telemetry=context_telemetry,
         )
         request_prepared_at_utc = self._utc_now_iso()
-        llm_exchange_id = self._build_live_llm_exchange_id(
-            stage=stage,
-            workflow_stage_id=workflow_stage_id,
-            prepared_at_utc=request_prepared_at_utc,
-            request_telemetry=request_telemetry,
-        )
-        prepared_call_id = self._build_live_llm_call_id(llm_exchange_id, 1)
         if callable(emit_progress):
             emit_progress(
                 {
@@ -18455,8 +18366,6 @@ class InternalMCPChatOrchestrator:
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
-                        llm_exchange_id=llm_exchange_id,
-                        call_id=prepared_call_id,
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
@@ -18538,9 +18447,6 @@ class InternalMCPChatOrchestrator:
                 attempt_meta["model_switch_reason"] = (
                     f"previous_attempt_failed:{last_failure_class}"
                 )
-            attempt_call_id = self._build_live_llm_call_id(
-                llm_exchange_id, attempt_no
-            )
 
             supports_structured = (
                 hasattr(client, "generate_with_tools")
@@ -18712,8 +18618,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="failed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                             ),
                         }
@@ -18728,7 +18632,6 @@ class InternalMCPChatOrchestrator:
                     provider=provider,
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                 )
                 errors.append(
                     {
@@ -18772,8 +18675,6 @@ class InternalMCPChatOrchestrator:
                         **self._build_live_llm_progress_payload(
                             request_telemetry=request_telemetry,
                             request_state="sent",
-                            llm_exchange_id=llm_exchange_id,
-                            call_id=attempt_call_id,
                             prepared_at_utc=request_prepared_at_utc,
                             sent_at_utc=request_sent_at_utc,
                         ),
@@ -18820,8 +18721,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="received_output",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                                 first_output_at_utc=first_output_at_utc,
@@ -18843,8 +18742,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="completed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                                 first_output_at_utc=first_output_at_utc,
@@ -18873,7 +18770,6 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                     exchange_blob_ref=self._capture_llm_exchange_blob(
                         stage=stage,
                         workflow_stage_id=workflow_stage_id,
@@ -19041,8 +18937,6 @@ class InternalMCPChatOrchestrator:
                             **self._build_live_llm_progress_payload(
                                 request_telemetry=request_telemetry,
                                 request_state="failed",
-                                llm_exchange_id=llm_exchange_id,
-                                call_id=attempt_call_id,
                                 prepared_at_utc=request_prepared_at_utc,
                                 sent_at_utc=request_sent_at_utc,
                             ),
@@ -19062,7 +18956,6 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
-                    call_id=attempt_call_id,
                 )
                 errors.append(
                     {
@@ -36156,7 +36049,6 @@ class InternalMCPChatOrchestrator:
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
-            call_id: str | None = None,
             exchange_blob_ref: Mapping[str, Any] | None = None,
         ) -> None:
             payload: dict[str, Any] = {
@@ -36171,8 +36063,6 @@ class InternalMCPChatOrchestrator:
                 payload["stage"] = stage.strip()
             if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
                 payload["workflow_stage_id"] = workflow_stage_id.strip()
-            if isinstance(call_id, str) and call_id.strip():
-                payload["call_id"] = call_id.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
@@ -37175,7 +37065,6 @@ class InternalMCPChatOrchestrator:
             provider: str | None = None,
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
-            call_id: str | None = None,
             exchange_blob_ref: Mapping[str, Any] | None = None,
         ) -> None:
             payload: dict[str, Any] = {
@@ -37190,8 +37079,6 @@ class InternalMCPChatOrchestrator:
                 payload["stage"] = stage.strip()
             if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
                 payload["workflow_stage_id"] = workflow_stage_id.strip()
-            if isinstance(call_id, str) and call_id.strip():
-                payload["call_id"] = call_id.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
             if isinstance(candidate, Mapping) and candidate:
@@ -45448,9 +45335,33 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result_with_dispatch_telemetry
 
+        preserved_response_text = None
+        for response_key in (
+            "completion_gate_preserved_response",
+            "turn_recovery_previous_response_text",
+            "turn_recovery_previous_final_response",
+            "turn_recovery_previous_selected_workflow_response",
+            "turn_recovery_response_text",
+            "turn_next_action_response_text",
+            "llm_step_response",
+        ):
+            candidate_response_text = self._coerce_non_empty_text(
+                tc_result.data.get(response_key)
+            )
+            if (
+                candidate_response_text
+                and not candidate_response_text.lstrip().startswith("Execution status:")
+                and not self._looks_like_machine_json_text(candidate_response_text)
+            ):
+                preserved_response_text = candidate_response_text
+                break
+
         final_response = tc_result.data.get("final_response", "")
         if not isinstance(final_response, str):
             final_response = str(final_response)
+        if not final_response.strip():
+            if preserved_response_text:
+                final_response = preserved_response_text
         tool_messages = tc_result.data.get("tool_messages", [])
         invocations = tc_result.data.get("invocations", [])
         iteration_count = tc_result.data.get("iteration_count", 0)
@@ -45477,6 +45388,14 @@ class InternalMCPChatOrchestrator:
             aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
             source_stage="run.tool_workflow_final",
         )
+        if (
+            preserved_response_text
+            and (
+                not final_response_text.strip()
+                or final_response_text.lstrip().startswith("Execution status:")
+            )
+        ):
+            final_response_text = preserved_response_text
 
         gate_requires_follow_up = bool(
             tc_result.data.get("completion_gate_requires_follow_up", False)
@@ -45523,6 +45442,15 @@ class InternalMCPChatOrchestrator:
             execution_mode="tool_pipeline",
             workflow_result=tc_result,
         )
+        if preserved_response_text:
+            result_response_text = result.response_text
+            if not isinstance(result_response_text, str):
+                result_response_text = str(result_response_text or "")
+            if (
+                not result_response_text.strip()
+                or result_response_text.lstrip().startswith("Execution status:")
+            ):
+                result = replace(result, response_text=preserved_response_text)
         _finalise_selection_experience_record(
             result=result,
             outcome=(

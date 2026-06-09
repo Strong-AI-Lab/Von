@@ -157,6 +157,63 @@ def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry()
     assert record["final_response"]["synthesis_observed"] is True
 
 
+def test_turn_record_treats_narration_prompt_as_final_answer_synthesis() -> None:
+    aux_llm_calls = [
+        {
+            "type": "workflow_model_policy_stage",
+            "stage": "llm.action",
+            "policy_stage": "llm.action",
+            "request": {
+                "prompt": (
+                    "# prompt_turn_execution_narrate_completion_report\n"
+                    "You are composing the user-facing answer."
+                ),
+                "context_messages": [
+                    {"role": "system", "content": "system rules"},
+                    {
+                        "role": "user",
+                        "content": "Selected Workflow User Response: grounded answer",
+                    },
+                ],
+                "context_summary": {"message_count": 2},
+                "context_lineage": {"stage": "narration"},
+            },
+        }
+    ]
+    llm_calls = [
+        {
+            "type": "llm.generate",
+            "stage": "llm.action",
+            "model": "gpt-test",
+            "duration_ms": 45,
+        }
+    ]
+
+    record = build_turn_execution_record(
+        request_id="req-narration-synthesis",
+        session_id="session-narration-synthesis",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="What did the workflow find?",
+        response_text="grounded answer",
+        interaction_timestamp_utc="2026-06-09T01:00:00Z",
+        workflow_routing={"verdict": "tool_calling", "source": "selector"},
+        tool_invocations=[],
+        aux_llm_calls=aux_llm_calls,
+        llm_calls=llm_calls,
+    )
+
+    synthesis = record["final_answer_synthesis"]
+    assert synthesis["stage"] == "llm.action"
+    assert synthesis["request"]["prompt"]["text"].startswith(
+        "# prompt_turn_execution_narrate_completion_report"
+    )
+    assert synthesis["llm_call"]["stage"] == "llm.action"
+    assert synthesis["context_lineage"] == {"stage": "narration"}
+    assert record["execution"]["summary"]["final_answer_synthesis_observed"] is True
+
+
 def test_worker_unavailable_failure_code_only_applies_to_tool_routes() -> None:
     summary = _summarise_tool_execution_context(
         workflow_routing={

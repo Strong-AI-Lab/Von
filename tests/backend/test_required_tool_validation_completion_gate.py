@@ -651,7 +651,13 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
     assert "projected_final_answer_evidence_not_consumed" in (
         result.outputs["completion_gate_blocking_failure_codes"]
     )
-    assert result.outputs["final_response"] == summary_only_answer
+    assert result.outputs["final_response"].startswith(
+        "Execution status: required grounded evidence was not retrieved."
+    )
+    assert (
+        "projected_final_answer_evidence_not_consumed"
+        in result.outputs["final_response"]
+    )
     evidence_payload = result.outputs["completion_gate_evidence_payload"]
     blocker = evidence_payload["required_evidence_answer_consistency_blocker"]
     assert blocker["blocker_source"] == "critic_verdict"

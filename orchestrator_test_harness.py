@@ -12,6 +12,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 from src.backend.services.conversation_turn_workflow_vontology_service import (
     _load_expected_outcome_prompt_seed_text,
+    _load_postcondition_critic_prompt_seed_text,
     _load_synthesiser_context_framing_prompt_seed_text,
     _load_narration_prompt_seed_text,
 )
@@ -531,6 +532,7 @@ def build_db_independent_orchestrator(
     }
     expected_outcome_prompt_id = "#V#prompt_turn_execution_expected_outcome_inference"
     narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
+    postcondition_critic_prompt_id = "#V#prompt_turn_execution_postcondition_critic"
     entity_information_retrieval_prompt_id = (
         "#V#entity_information_retrieval_prompt"
     )
@@ -572,6 +574,13 @@ def build_db_independent_orchestrator(
                 return SimpleNamespace(
                     text=_load_narration_prompt_seed_text(),
                     prompt_id=narration_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            if postcondition_critic_prompt_id in requested_prompt_ids:
+                return SimpleNamespace(
+                    text=_load_postcondition_critic_prompt_seed_text(),
+                    prompt_id=postcondition_critic_prompt_id,
                     variables=dict(variables or {}),
                     truncated=False,
                 )
@@ -689,6 +698,13 @@ def build_db_independent_orchestrator(
             return SimpleNamespace(
                 text=_load_write_tool_request_evidence_prompt_seed_text(),
                 prompt_id=write_tool_request_evidence_prompt_id,
+                variables=dict(variables or {}),
+                truncated=False,
+            )
+        if postcondition_critic_prompt_id in requested_prompt_ids:
+            return SimpleNamespace(
+                text=_load_postcondition_critic_prompt_seed_text(),
+                prompt_id=postcondition_critic_prompt_id,
                 variables=dict(variables or {}),
                 truncated=False,
             )

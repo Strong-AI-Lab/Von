@@ -936,6 +936,29 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert (
         recovery_retry.actions[0].action_id == "turn_execution.prepare_recovery_retry"
     )
+    recovery_retry_mappings = (
+        recovery_retry.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_recovery_previous_response_text"
+        and mapping.get("tool_output_field") == "turn_recovery_previous_response_text"
+        for mapping in recovery_retry_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_recovery_previous_final_response"
+        and mapping.get("tool_output_field") == "turn_recovery_previous_final_response"
+        for mapping in recovery_retry_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key")
+        == "turn_recovery_previous_selected_workflow_response"
+        and mapping.get("tool_output_field")
+        == "turn_recovery_previous_selected_workflow_response"
+        for mapping in recovery_retry_mappings
+    )
     assert any(
         t.to_state == "execution" and t.reason == "recovery_retry_prepared"
         for t in recovery_retry.transitions

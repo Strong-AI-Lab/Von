@@ -997,6 +997,39 @@ def _build_turn_execution_prepare_recovery_retry_handler() -> Any:
                 else "no_unresolved_target_found"
             ),
         }
+        previous_response_text = (
+            _coerce_non_empty_text(
+                request.data.get("completion_gate_preserved_response")
+            )
+            or _coerce_non_empty_text(
+                request.data.get("turn_recovery_previous_response_text")
+            )
+            or _coerce_non_empty_text(
+                request.data.get("turn_recovery_previous_final_response")
+            )
+            or _coerce_non_empty_text(
+                request.data.get("turn_recovery_previous_selected_workflow_response")
+            )
+            or _coerce_non_empty_text(request.data.get("turn_recovery_response_text"))
+            or _coerce_non_empty_text(
+                request.data.get("turn_next_action_response_text")
+            )
+            or _coerce_non_empty_text(
+                request.data.get("completion_report_response_text")
+            )
+            or _coerce_non_empty_text(request.data.get("response_text"))
+            or _coerce_non_empty_text(request.data.get("final_response"))
+            or _coerce_non_empty_text(
+                request.data.get("selected_workflow_user_response")
+            )
+            or _coerce_non_empty_text(request.data.get("current_response"))
+        )
+        previous_final_response = _coerce_non_empty_text(
+            request.data.get("final_response")
+        )
+        previous_selected_workflow_response = _coerce_non_empty_text(
+            request.data.get("selected_workflow_user_response")
+        )
 
         outputs: dict[str, Any] = {
             "selected_workflow_id": target_workflow_id,
@@ -1017,6 +1050,11 @@ def _build_turn_execution_prepare_recovery_retry_handler() -> Any:
             )
             or "",
             "turn_recovery_retry_selection": selection_payload,
+            "turn_recovery_previous_response_text": previous_response_text or "",
+            "turn_recovery_previous_final_response": previous_final_response or "",
+            "turn_recovery_previous_selected_workflow_response": (
+                previous_selected_workflow_response or ""
+            ),
             "response_text": "",
             "final_response": "",
             "current_response": "",

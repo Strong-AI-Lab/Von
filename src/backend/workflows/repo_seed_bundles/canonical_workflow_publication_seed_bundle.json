@@ -4140,6 +4140,11 @@
                 "tool_output_field": "final_response"
               },
               {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_preserved_response_to_completion_gate_preserved_response",
+                "context_key": "completion_gate_preserved_response",
+                "tool_output_field": "completion_gate_preserved_response"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_decision_to_completion_gate_decision",
                 "context_key": "completion_gate_decision",
                 "tool_output_field": "completion_gate_decision"
@@ -4228,6 +4233,7 @@
             "state_id": "completion_gate",
             "writes_context_keys": [
               "final_response",
+              "completion_gate_preserved_response",
               "completion_gate_decision",
               "completion_gate_decision_reason",
               "completion_gate_blocking_effect_ids",
@@ -4573,6 +4579,23 @@
             ],
             "execution_mode": "deterministic",
             "state_id": "apply_recovery_retry",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_retry_output_previous_response_to_turn_recovery_previous_response_text",
+                "context_key": "turn_recovery_previous_response_text",
+                "tool_output_field": "turn_recovery_previous_response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_retry_output_previous_final_response_to_turn_recovery_previous_final_response",
+                "context_key": "turn_recovery_previous_final_response",
+                "tool_output_field": "turn_recovery_previous_final_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_retry_output_previous_selected_response_to_turn_recovery_previous_selected_workflow_response",
+                "context_key": "turn_recovery_previous_selected_workflow_response",
+                "tool_output_field": "turn_recovery_previous_selected_workflow_response"
+              }
+            ],
             "writes_context_keys": [
               "selected_workflow_id",
               "workflow_continuation_launch_inputs",
@@ -4583,6 +4606,9 @@
               "turn_recovery_last_target_token",
               "turn_recovery_last_effect_id",
               "turn_recovery_retry_selection",
+              "turn_recovery_previous_response_text",
+              "turn_recovery_previous_final_response",
+              "turn_recovery_previous_selected_workflow_response",
               "source_uri",
               "arxiv_id",
               "file_copy_concept_id",

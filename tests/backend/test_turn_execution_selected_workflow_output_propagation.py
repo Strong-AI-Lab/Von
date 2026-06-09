@@ -258,6 +258,44 @@ def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools()
     )
 
 
+def test_selected_workflow_outputs_promote_child_preserved_user_response() -> None:
+    ledger_response = (
+        "Execution status: required grounded evidence was not retrieved.\n\n"
+        "Completion blockers: required_evidence_answer_consistency."
+    )
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#entity_information_retrieval_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": ledger_response,
+            "final_response": ledger_response,
+            "current_response": ledger_response,
+            "completion_gate_preserved_response": (
+                "I couldn't find any grounded represented links."
+            ),
+            "completion_report": {"response_text": ledger_response},
+        },
+        rendered_child_response_text="",
+        child_result_snapshot={"response_text": ledger_response},
+    )
+
+    assert outputs["response_text"] == (
+        "I couldn't find any grounded represented links."
+    )
+    assert outputs["final_response"] == (
+        "I couldn't find any grounded represented links."
+    )
+    assert outputs["selected_workflow_user_response"] == (
+        "I couldn't find any grounded represented links."
+    )
+    assert outputs["completion_report"]["response_text"] == (
+        "I couldn't find any grounded represented links."
+    )
+
+
 def test_selected_workflow_outputs_preserve_parent_dispatch_telemetry() -> None:
     parent_aux = [
         {

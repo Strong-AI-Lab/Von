@@ -72,6 +72,13 @@ TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
 )
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
+_FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS = frozenset(
+    {"#V#prompt_turn_execution_narrate_completion_report"}
+)
+_FINAL_ANSWER_SYNTHESIS_PROMPT_MARKERS = (
+    "# prompt_turn_execution_narrate_completion_report",
+)
+
 _TURN_EXECUTION_INDEXES_READY = False
 _TURN_EXECUTION_INDEXES_LOCK = threading.Lock()
 _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS = 50_000
@@ -2813,19 +2820,29 @@ def _select_latest_summariser_request_entry(
         aux_llm_calls,
         entry_type="workflow_model_policy_stage",
     )
+    final_answer_fallback: dict[str, Any] | None = None
     for entry in reversed(entries):
         stage = (_safe_str(entry.get("stage")) or "").lower()
         if stage == "summariser":
             return entry
-    return None
+        if final_answer_fallback is None and _entry_targets_final_answer_synthesis(
+            entry
+        ):
+            final_answer_fallback = entry
+    return final_answer_fallback
 
 
 def _select_latest_summariser_llm_call(
     llm_calls: Sequence[Mapping[str, Any]] | None,
     *,
+    stage: str | None,
     workflow_stage_id: str | None,
 ) -> dict[str, Any] | None:
     fallback: Mapping[str, Any] | None = None
+    preferred_stages = {"summariser"}
+    stage_lower = (stage or "").strip().lower()
+    if stage_lower:
+        preferred_stages.add(stage_lower)
     for entry in reversed(llm_calls or ()):
         if not isinstance(entry, Mapping):
             continue
@@ -2833,7 +2850,7 @@ def _select_latest_summariser_llm_call(
         call_type = (
             _safe_str(entry.get("type")) or _safe_str(entry.get("call_type")) or ""
         )
-        if stage != "summariser" or not call_type.startswith("llm.generate"):
+        if stage not in preferred_stages or not call_type.startswith("llm.generate"):
             continue
         entry_workflow_stage_id = _safe_str(entry.get("workflow_stage_id"))
         if workflow_stage_id and entry_workflow_stage_id == workflow_stage_id:
@@ -2841,6 +2858,52 @@ def _select_latest_summariser_llm_call(
         if fallback is None:
             fallback = entry
     return _normalise_llm_call_entry(fallback) if fallback is not None else None
+
+
+def _request_prompt_text(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    prompt = value.get("prompt")
+    if isinstance(prompt, Mapping):
+        return _safe_str(prompt.get("text")) or _safe_str(prompt.get("preview"))
+    return _safe_str(prompt)
+
+
+def _request_prompt_concept_ids(value: Any) -> list[str]:
+    if not isinstance(value, Mapping):
+        return []
+    prompt_ids: list[Any] = []
+    for key in ("requested_prompt_ids", "requested_prompt_concept_ids"):
+        raw_ids = value.get(key)
+        if isinstance(raw_ids, Sequence) and not isinstance(
+            raw_ids, (str, bytes, bytearray)
+        ):
+            prompt_ids.extend(raw_ids)
+    for key in ("prompt_id", "resolved_prompt_id", "resolved_prompt_concept_id"):
+        prompt_ids.append(value.get(key))
+
+    prompt = value.get("prompt")
+    if isinstance(prompt, Mapping):
+        for key in ("prompt_id", "resolved_prompt_id", "resolved_prompt_concept_id"):
+            prompt_ids.append(prompt.get(key))
+    return _dedupe_string_sequence(prompt_ids)
+
+
+def _entry_targets_final_answer_synthesis(entry: Mapping[str, Any]) -> bool:
+    request = entry.get("request")
+    request_prompt_ids = set(_request_prompt_concept_ids(request))
+    entry_prompt_ids = set(_request_prompt_concept_ids(entry))
+    if (request_prompt_ids | entry_prompt_ids) & _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS:
+        return True
+
+    prompt_text = _request_prompt_text(request)
+    if not prompt_text:
+        return False
+    prompt_text_lower = prompt_text.lower()
+    return any(
+        marker.lower() in prompt_text_lower
+        for marker in _FINAL_ANSWER_SYNTHESIS_PROMPT_MARKERS
+    )
 
 
 def _build_final_answer_synthesis_telemetry(
@@ -2866,6 +2929,7 @@ def _build_final_answer_synthesis_telemetry(
     )
     llm_call = _select_latest_summariser_llm_call(
         llm_calls,
+        stage=stage,
         workflow_stage_id=workflow_stage_id,
     )
     if request_entry is None and llm_call is None:

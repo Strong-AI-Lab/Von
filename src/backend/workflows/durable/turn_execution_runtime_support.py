@@ -1940,6 +1940,43 @@ def build_turn_execution_selected_workflow_outputs(
             child_result_snapshot=child_snapshot,
         )
     )
+
+    def _preserved_child_user_response() -> str | None:
+        for payload in (child_outputs_map, child_snapshot or {}):
+            for field_name in (
+                "completion_gate_preserved_response",
+                "turn_recovery_previous_response_text",
+                "turn_recovery_previous_final_response",
+                "turn_recovery_previous_selected_workflow_response",
+                "selected_workflow_user_response",
+                "final_response",
+                "response_text",
+            ):
+                candidate = _sanitise_user_response_candidate(payload.get(field_name))
+                if not candidate:
+                    continue
+                if _looks_like_machine_json_text(candidate):
+                    continue
+                return candidate
+        completion_report_candidate = child_outputs_map.get("completion_report")
+        if isinstance(completion_report_candidate, Mapping):
+            candidate = _sanitise_user_response_candidate(
+                completion_report_candidate.get("response_text")
+            )
+            if candidate and not _looks_like_machine_json_text(candidate):
+                return candidate
+        return None
+
+    preserved_child_user_response = _preserved_child_user_response()
+    if preserved_child_user_response and (
+        not derived_user_response
+        or _coerce_non_empty_text(derived_user_response).startswith(
+            "Execution status:"
+        )
+        or _looks_like_machine_json_text(derived_user_response)
+    ):
+        derived_user_response = preserved_child_user_response
+
     if derived_user_response and initial_surfaceable_evidence:
         missing_surface_lines = render_surfaceable_concept_lines(
             initial_surfaceable_evidence,
@@ -3052,6 +3089,24 @@ def run_turn_execution_completion_gate(
         response_text = selected_workflow_user_response
         current_response = selected_workflow_user_response
 
+    def _preservable_user_response(value: Any) -> str | None:
+        candidate = _sanitise_user_response_candidate(value)
+        if not candidate or _looks_like_machine_json_text(candidate):
+            return None
+        return candidate
+
+    preserved_user_response = _preservable_user_response(
+        data.get("completion_gate_preserved_response")
+    )
+    user_response_for_preservation = (
+        preserved_user_response
+        or _preservable_user_response(final_response)
+        or _preservable_user_response(response_text)
+        or _preservable_user_response(current_response)
+        or _preservable_user_response(selected_workflow_user_response)
+        or _preservable_user_response(data.get("llm_step_response"))
+    )
+
     if safe_to_claim_completion:
         selected_workflow_user_response = strip_completion_ledger_suffix(
             selected_workflow_user_response
@@ -3124,9 +3179,10 @@ def run_turn_execution_completion_gate(
 
         preserve_existing_user_response = bool(
             unresolved_effect_types == {"required_evidence_answer_consistency"}
-            and isinstance(final_response, str)
-            and final_response.strip()
+            and user_response_for_preservation
         )
+        if preserve_existing_user_response:
+            preserved_user_response = user_response_for_preservation
         replace_existing_user_response = bool(
             unresolved_effect_types
             and not preserve_existing_user_response
@@ -3606,6 +3662,7 @@ def run_turn_execution_completion_gate(
             "execution_budget_diagnostics": budget_diagnostics,
             "completion_gate_escalation_signal": escalation_signal,
             "completion_gate_escalation_reason": escalation_reason,
+            "completion_gate_preserved_response": preserved_user_response,
             "workflow_introspection_autotrigger": introspection_autotrigger,
             "episode_evaluation_autotrigger": introspection_autotrigger,
             "result": requires_follow_up,
