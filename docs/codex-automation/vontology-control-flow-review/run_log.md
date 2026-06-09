@@ -212,3 +212,27 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   not drift, because current runtime evidence reads represented
   `#V#hasWorkflowProgressProjectionJson` metadata rather than the script.
 - No production code was changed by this review run.
+
+## 2026-06-10T02:06:51.5417152+12:00
+
+- Read required repo guidance, security guidance, workflow manual,
+  operational/authority-alignment docs, current automation memory path, and
+  repo-local review memory.
+- Local `main` was clean and aligned with `origin/main` at `c4bafc33`.
+  Reviewed recent commits since the previous run: `6a2ce349` launcher/cloud
+  deploy fixes, `90187a47` exception syntax fixes, and `c4bafc33` Python
+  minimum-syntax guardrail.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  all guarded counts were `0` and the gate passed.
+- Rechecked drift-prone orchestrator/selector edits in the recent commits.
+  They were Python syntax fixes inside already-known selector/required-tool
+  seams, not fresh policy additions.
+- Sampled non-test `WorkflowDefinition(...)` builders and the registry path.
+  Runtime registry construction still uses Vontology lazy registration; Python
+  test definitions remain watch items, while the Mongo diagnostics workflow is
+  already tracked by `JVNAUTOSCI-2472`.
+- Treated Atlas Query Insights report/review services as support-only for now:
+  they are read-only operational diagnostics/Jira triage tools and do not
+  mutate indexes, author workflow policy, or feed represented learning loops.
+- No new Jira issues were created and no production code was changed by this
+  review run.

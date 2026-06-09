@@ -251,6 +251,15 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   represented tool-evidence projection into critic/completion evidence. File
   only if Python starts deciding field/view semantics or user-facing answer
   wording rather than preserving represented projection metadata.
+- 2026-06-10: recent Python minimum-syntax guardrail files
+  (`scripts/check_python_min_syntax.py`, `.githooks/pre-commit*`, and the CI
+  workflow) are mechanical compatibility checks, not workflow/KB authority.
+- 2026-06-10: Atlas Query Insights report/review tooling
+  (`atlas_query_insights_service.py`, `atlas_query_review_service.py`, and
+  companion scripts) looked support-only while it remains read-only operational
+  diagnostics/Jira triage. File only if its thresholds/categories/recommended
+  next steps become recurring workflow policy, user-facing Von answer policy,
+  or inputs to prompt/model/workflow learning without represented authority.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
