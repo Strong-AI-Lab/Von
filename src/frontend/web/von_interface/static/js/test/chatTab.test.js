@@ -54,6 +54,8 @@ import {
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
+    __testOnly_buildThinkingCriticViewModel,
+    __testOnly_copyThinkingCriticDetails,
     __testOnly_renderThinkingLlmCallLogEntriesHTML,
     __testOnly_getThinkingPrecedenceTelemetry,
     __testOnly_refreshThinkingCardProgressUi,
@@ -1913,7 +1915,18 @@ describe('loadChatHistory degraded handling', () => {
                                         status: 'success',
                                         tool: 'find_relations_with_argument'
                                     }
-                                ]
+                                ],
+                                critic_verdict: {
+                                    verdict: 'follow_up_required',
+                                    assessment_summary: 'The completed answer still has critic caveats.',
+                                    recommendations: ['Review the unsupported claim before relying on the answer.'],
+                                    evidence_payload: {
+                                        answer_consistency_blocker: {
+                                            failure_code: 'unsupported_claims_warning',
+                                            status_reason: 'Unsupported claim remains.'
+                                        }
+                                    }
+                                }
                             }
                         }
                     })
@@ -1954,6 +1967,13 @@ describe('loadChatHistory degraded handling', () => {
         expect(card).not.toBeNull();
         expect(card.textContent).toContain('Selected workflow execution');
         expect(card.textContent).toContain('Every LLM interaction');
+        const criticButton = card.querySelector('[data-thinking-role="critic"]');
+        expect(criticButton).not.toBeNull();
+        expect(criticButton.getAttribute('aria-hidden')).toBe('false');
+        criticButton.click();
+        expect(card.textContent).toContain('Critic review');
+        expect(card.textContent).toContain('follow_up_required');
+        expect(card.textContent).toContain('unsupported_claims_warning');
     });
 
     test('renders unavailable thinking state when lazy history debug is not stored', async () => {
@@ -5511,6 +5531,7 @@ describe('thinking card toggle accessibility', () => {
                             <button class="thinking-card-mode-button" type="button" data-thinking-role="mode" data-thinking-mode="expert" aria-hidden="true" aria-pressed="false">Expert</button>
                             <button class="thinking-card-mode-button" type="button" data-thinking-role="mode" data-thinking-mode="debug" aria-hidden="true" aria-pressed="false">Debug</button>
                         </div>
+                        <button id="thinkingCardCriticButton" type="button" data-thinking-role="critic" aria-hidden="true" aria-expanded="false" aria-controls="loadingIndicatorDetail">Critic</button>
                         <button id="thinkingCardToggleButton" type="button" data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
                             <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
                             <span class="visually-hidden">Toggle thinking details</span>
@@ -5547,10 +5568,108 @@ describe('thinking card toggle accessibility', () => {
             toggleButton: wrapper.querySelector('[data-thinking-role="toggle"]'),
             detail: wrapper.querySelector('[data-thinking-role="detail"]'),
             copyButton: wrapper.querySelector('[data-thinking-role="copy"]'),
+            criticButton: wrapper.querySelector('[data-thinking-role="critic"]'),
             sizeIncreaseButton: wrapper.querySelector('[data-thinking-role="size-increase"]'),
             sizeDecreaseButton: wrapper.querySelector('[data-thinking-role="size-decrease"]')
         };
     }
+
+    test('keeps critic control hidden when completed thinking has no critic output', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000,
+            thinkingCardDisplayState: { expanded: false, autoFurlApplied: true },
+            latestProgress: {
+                status: 'completed',
+                phase_label: 'Complete',
+                result_summary: 'Response generated'
+            }
+        };
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_setThinkingState(false, request, { preserveFinishedCard: true });
+        __testOnly_refreshThinkingCardProgressUi(request);
+
+        const criticButton = document.getElementById('thinkingCardCriticButton');
+        expect(criticButton.getAttribute('aria-hidden')).toBe('true');
+        expect(criticButton.disabled).toBe(true);
+        expect(document.getElementById('loadingIndicatorDetail').textContent).not.toContain('Critic review');
+    });
+
+    test('shows concise critic review from completed thinking card on demand', async () => {
+        Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            writable: true,
+            value: { writeText: jest.fn().mockResolvedValue(undefined) }
+        });
+        const request = {
+            clientRequestId: 'req-critic-visible',
+            resultTurnId: 'a-critic-visible',
+            thinkingStartedAtMs: Date.now() - 1000,
+            thinkingCardDisplayState: { expanded: false, autoFurlApplied: true },
+            latestProgress: {
+                request_id: 'req-critic-visible',
+                status: 'completed',
+                phase_label: 'Complete',
+                result_summary: 'Response generated'
+            },
+            criticOutput: {
+                source: 'turn_execution_diagnostics.critic_verdict',
+                verdict: 'follow_up_required',
+                assessment_summary: 'The answer cites a claim that was not supported by retrieved evidence.',
+                has_unresolved_checks: true,
+                unresolved_check_count: 1,
+                recommendations: ['Either fetch supporting evidence or narrow the claim.'],
+                required_evidence_answer_consistency_blocker: {
+                    failure_code: 'unsupported_claims',
+                    failure_codes: ['unsupported_claims'],
+                    status: 'not_satisfied',
+                    status_reason: 'Evidence does not include the specific relation.'
+                },
+                evidence_payload: {
+                    answer_consistency_blocker: {
+                        failure_code: 'unsupported_claims_warning',
+                        status_reason: 'Unsupported claim remains in the visible answer.'
+                    }
+                }
+            }
+        };
+
+        expect(__testOnly_buildThinkingCriticViewModel(request)).toEqual(expect.objectContaining({
+            verdict: 'follow_up_required',
+            assessmentSummary: expect.stringContaining('not supported')
+        }));
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_setThinkingState(false, request, { preserveFinishedCard: true });
+        __testOnly_refreshThinkingCardProgressUi(request);
+        __testOnly_bindThinkingCardControls();
+
+        const criticButton = document.getElementById('thinkingCardCriticButton');
+        expect(criticButton.getAttribute('aria-hidden')).toBe('false');
+        expect(criticButton.getAttribute('aria-expanded')).toBe('false');
+
+        criticButton.click();
+
+        const detail = document.getElementById('loadingIndicatorDetail');
+        expect(criticButton.getAttribute('aria-expanded')).toBe('true');
+        expect(document.getElementById('thinkingCardWrapper').classList.contains('is-expanded')).toBe(true);
+        expect(detail.textContent).toContain('Critic review');
+        expect(detail.textContent).toContain('follow_up_required');
+        expect(detail.textContent).toContain('not supported');
+        expect(detail.textContent).toContain('Either fetch supporting evidence');
+        expect(detail.textContent).toContain('unsupported_claims');
+        expect(detail.textContent).toContain('unsupported_claims_warning');
+        expect(detail.textContent).not.toContain('"evidence_payload"');
+
+        const copyButton = detail.querySelector('[data-thinking-action="critic-copy"]');
+        expect(copyButton).not.toBeNull();
+        await __testOnly_copyThinkingCriticDetails(copyButton, request);
+        const copied = JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]);
+        expect(copied.schema_version).toBe('thinking_card_critic_output.v1');
+        expect(copied.request_id).toBe('req-critic-visible');
+        expect(copied.critic_verdict.evidence_payload.answer_consistency_blocker.failure_code)
+            .toBe('unsupported_claims_warning');
+    });
 
     test('mode switch rerenders the active card without changing the request path', () => {
         const request = {

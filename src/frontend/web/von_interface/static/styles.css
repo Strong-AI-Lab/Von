@@ -8764,6 +8764,12 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border-color: #f87171;
 }
 
+.thinking-card-critic-button[aria-expanded="true"] {
+    color: #92400e;
+    border-color: #fbbf24;
+    background: #fef3c7;
+}
+
 .thinking-card-toggle {
     width: 22px;
     height: 22px;
@@ -9140,6 +9146,26 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     color: #1f2937;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+.thinking-card-critic-panel {
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    border: 1px solid #fde68a;
+    border-left: 3px solid #f59e0b;
+    border-radius: 8px;
+    background: #fffbeb;
+}
+
+.thinking-card-critic-panel .thinking-card-diagnostic-section-title {
+    color: #92400e;
+}
+
+.thinking-card-critic-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
 }
 
 .thinking-card-diagnostic-list,

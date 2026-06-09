@@ -1322,6 +1322,8 @@ const THINKING_CARD_BODY_MIN_HEIGHT_PX = 120;
 const THINKING_CARD_BODY_DEFAULT_HEIGHT_PX = 220;
 const THINKING_CARD_BODY_MAX_HEIGHT_PX = 520;
 const THINKING_CARD_BODY_STEP_PX = 80;
+const THINKING_CRITIC_COPY_BUTTON_LABEL = 'Copy critic details';
+const THINKING_CRITIC_OUTPUT_SCHEMA_VERSION = 'thinking_card_critic_output.v1';
 
 function getThinkingCardWrapperEl(cardRoot = null) {
     if (cardRoot instanceof HTMLElement) {
@@ -1380,6 +1382,10 @@ function getThinkingCardCopyButtonEl(cardRoot = null) {
     return getThinkingCardElementByRole('copy', cardRoot, 'copyThinkingDiagnosticsButton');
 }
 
+function getThinkingCardCriticButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('critic', cardRoot, 'thinkingCardCriticButton');
+}
+
 function getThinkingCardAbortButtonEl(cardRoot = null) {
     return getThinkingCardElementByRole('abort', cardRoot, 'abortButton');
 }
@@ -1398,6 +1404,414 @@ function getThinkingCardModeButtons(cardRoot = null) {
         return [];
     }
     return Array.from(wrapper.querySelectorAll('[data-thinking-role="mode"][data-thinking-mode]'));
+}
+
+function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneThinkingCriticObject(value) {
+    if (!isPlainObject(value)) {
+        return null;
+    }
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+        return { ...value };
+    }
+}
+
+function normaliseThinkingCriticText(value, maxChars = 320) {
+    const text = normaliseThinkingActivityString(value);
+    return text ? truncateThinkingCardSummary(text, maxChars) : '';
+}
+
+function normaliseThinkingCriticTextList(value, maxItems = 8) {
+    const values = [];
+    const append = (candidate) => {
+        const text = normaliseThinkingCriticText(candidate, 420);
+        if (text && !values.includes(text)) {
+            values.push(text);
+        }
+    };
+
+    if (Array.isArray(value)) {
+        value.forEach((item) => {
+            if (isPlainObject(item)) {
+                append(formatThinkingCriticObjectSummary(item));
+            } else {
+                append(item);
+            }
+        });
+    } else if (isPlainObject(value)) {
+        append(formatThinkingCriticObjectSummary(value));
+    } else {
+        append(value);
+    }
+
+    return values.slice(0, maxItems);
+}
+
+function collectThinkingCriticStringValues(target, value, maxItems = 12) {
+    if (!Array.isArray(target) || target.length >= maxItems) {
+        return;
+    }
+    if (Array.isArray(value)) {
+        value.forEach((item) => collectThinkingCriticStringValues(target, item, maxItems));
+        return;
+    }
+    const text = normaliseThinkingCriticText(value, 160);
+    if (text && !target.includes(text)) {
+        target.push(text);
+    }
+}
+
+function formatThinkingCriticObjectSummary(value) {
+    if (!isPlainObject(value)) {
+        return normaliseThinkingCriticText(value);
+    }
+    const priorityKeys = [
+        'failure_code',
+        'status',
+        'status_reason',
+        'decision_reason',
+        'blocker_source',
+        'reason',
+        'detail',
+        'description',
+        'message',
+        'evidence_note',
+        'summary'
+    ];
+    const bits = [];
+    priorityKeys.forEach((key) => {
+        const text = normaliseThinkingCriticText(value[key], key === 'summary' ? 260 : 160);
+        if (text && !bits.includes(text)) {
+            bits.push(text);
+        }
+    });
+    if (bits.length === 0) {
+        Object.entries(value).slice(0, 4).forEach(([key, item]) => {
+            if (Array.isArray(item) || isPlainObject(item)) {
+                return;
+            }
+            const text = normaliseThinkingCriticText(item, 140);
+            if (text) {
+                bits.push(`${key}: ${text}`);
+            }
+        });
+    }
+    return bits.join(' · ');
+}
+
+function collectThinkingCriticBlockerObjects(criticOutput) {
+    const blockers = [];
+    const append = (candidate) => {
+        if (Array.isArray(candidate)) {
+            candidate.forEach(append);
+            return;
+        }
+        if (!isPlainObject(candidate)) {
+            const text = normaliseThinkingCriticText(candidate, 420);
+            if (text && !blockers.includes(text)) {
+                blockers.push(text);
+            }
+            return;
+        }
+        const text = formatThinkingCriticObjectSummary(candidate);
+        if (text && !blockers.includes(text)) {
+            blockers.push(text);
+        }
+    };
+
+    append(criticOutput.blockers);
+    append(criticOutput.blocking_failures);
+    append(criticOutput.answer_consistency_blocker);
+    append(criticOutput.required_evidence_answer_consistency_blocker);
+    append(criticOutput.evidence_payload?.answer_consistency_blocker);
+    append(criticOutput.completion_gate?.blocking_blockers);
+    append(criticOutput.summary?.blockers);
+    return blockers.slice(0, 8);
+}
+
+function hasMeaningfulThinkingCriticOutput(value) {
+    if (!isPlainObject(value)) {
+        return false;
+    }
+    const meaningfulKeys = [
+        'verdict',
+        'assessment_summary',
+        'assessment',
+        'summary',
+        'recommendations',
+        'blockers',
+        'blocking_failures',
+        'required_evidence_answer_consistency_blocker',
+        'failure_code',
+        'failure_codes',
+        'blocking_failure_codes',
+        'has_unresolved_checks',
+        'unresolved_check_count',
+        'evidence_payload',
+        'completion_gate'
+    ];
+    return meaningfulKeys.some((key) => {
+        const candidate = value[key];
+        if (candidate === undefined || candidate === null) {
+            return false;
+        }
+        if (typeof candidate === 'boolean') {
+            return true;
+        }
+        if (typeof candidate === 'number') {
+            return Number.isFinite(candidate);
+        }
+        if (typeof candidate === 'string') {
+            return candidate.trim().length > 0;
+        }
+        if (Array.isArray(candidate)) {
+            return candidate.length > 0;
+        }
+        return isPlainObject(candidate) && Object.keys(candidate).length > 0;
+    });
+}
+
+function extractThinkingCriticOutput(source) {
+    if (!source || typeof source !== 'object') {
+        return null;
+    }
+    const candidates = [
+        source.criticOutput,
+        source.critic_verdict,
+        source.critic?.verdict,
+        source.turnExecutionDiagnostics?.critic_verdict,
+        source.turnExecutionDiagnostics?.critic?.verdict,
+        source.turn_execution_diagnostics?.critic_verdict,
+        source.turn_execution_diagnostics?.critic?.verdict,
+        source.latestProgress?.critic_verdict,
+        source.latestProgress?.turn_execution_diagnostics?.critic_verdict
+    ];
+    for (const candidate of candidates) {
+        const cloned = cloneThinkingCriticObject(candidate);
+        if (hasMeaningfulThinkingCriticOutput(cloned)) {
+            return cloned;
+        }
+    }
+    return null;
+}
+
+function syncThinkingCriticOutputFromSource(request, source) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+    const criticOutput = extractThinkingCriticOutput(source);
+    if (criticOutput) {
+        request.criticOutput = criticOutput;
+    }
+    return criticOutput;
+}
+
+function ensureThinkingCriticPanelId(request) {
+    if (request && typeof request === 'object' && request.thinkingCriticPanelId) {
+        return request.thinkingCriticPanelId;
+    }
+    const raw = normaliseThinkingActivityString(
+        request?.resultTurnId || request?.clientRequestId || request?.latestProgress?.request_id
+    );
+    const suffix = raw.replace(/[^a-zA-Z0-9_-]+/g, '-') || 'active';
+    const panelId = `thinkingCriticPanel-${suffix}`;
+    if (request && typeof request === 'object') {
+        request.thinkingCriticPanelId = panelId;
+    }
+    return panelId;
+}
+
+function buildThinkingCriticViewModel(request) {
+    const criticOutput = extractThinkingCriticOutput(request);
+    if (!criticOutput) {
+        return null;
+    }
+
+    const failureCodes = [];
+    collectThinkingCriticStringValues(failureCodes, criticOutput.failure_code);
+    collectThinkingCriticStringValues(failureCodes, criticOutput.failure_codes);
+    collectThinkingCriticStringValues(failureCodes, criticOutput.blocking_failure_codes);
+    collectThinkingCriticStringValues(
+        failureCodes,
+        criticOutput.evidence_payload?.answer_consistency_blocker?.failure_code
+    );
+    collectThinkingCriticStringValues(
+        failureCodes,
+        criticOutput.evidence_payload?.answer_consistency_blocker?.failure_codes
+    );
+    collectThinkingCriticStringValues(
+        failureCodes,
+        criticOutput.required_evidence_answer_consistency_blocker?.failure_code
+    );
+    collectThinkingCriticStringValues(
+        failureCodes,
+        criticOutput.required_evidence_answer_consistency_blocker?.failure_codes
+    );
+    collectThinkingCriticStringValues(failureCodes, criticOutput.completion_gate?.blocking_failure_codes);
+    collectThinkingCriticStringValues(failureCodes, criticOutput.summary?.failure_codes);
+
+    const recommendations = [
+        ...normaliseThinkingCriticTextList(criticOutput.recommendations, 8),
+        ...normaliseThinkingCriticTextList(criticOutput.summary?.recommendations, 8)
+    ].filter((value, index, array) => value && array.indexOf(value) === index).slice(0, 8);
+
+    const blockers = collectThinkingCriticBlockerObjects(criticOutput);
+    const unresolvedBits = [];
+    if (criticOutput.has_unresolved_checks !== undefined) {
+        unresolvedBits.push(`unresolved checks: ${criticOutput.has_unresolved_checks ? 'yes' : 'no'}`);
+    }
+    if (criticOutput.unresolved_check_count !== undefined && criticOutput.unresolved_check_count !== null) {
+        unresolvedBits.push(`count: ${normaliseThinkingCriticText(criticOutput.unresolved_check_count, 40)}`);
+    }
+
+    return {
+        panelId: ensureThinkingCriticPanelId(request),
+        verdict: normaliseThinkingCriticText(criticOutput.verdict || criticOutput.summary?.verdict, 120),
+        assessmentSummary: normaliseThinkingCriticText(
+            criticOutput.assessment_summary
+            || criticOutput.assessment
+            || criticOutput.summary?.assessment_summary,
+            720
+        ),
+        recommendations,
+        blockers,
+        failureCodes,
+        unresolvedSummary: unresolvedBits.join(' · '),
+        source: normaliseThinkingCriticText(criticOutput.source, 180),
+        raw: criticOutput
+    };
+}
+
+function renderThinkingCriticListHTML(items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return '';
+    }
+    return `<ul class="thinking-card-diagnostic-list">${items
+        .map((item) => `<li>${escapeHtml(item)}</li>`)
+        .join('')}</ul>`;
+}
+
+function renderThinkingCriticPanelHTML(request) {
+    if (!request || request.thinkingCriticPanelOpen !== true) {
+        return '';
+    }
+    const viewModel = buildThinkingCriticViewModel(request);
+    if (!viewModel) {
+        return '';
+    }
+    const facts = [];
+    if (viewModel.verdict) {
+        facts.push(`<div class="thinking-card-diagnostic-fact"><dt>Verdict</dt><dd>${escapeHtml(viewModel.verdict)}</dd></div>`);
+    }
+    if (viewModel.assessmentSummary) {
+        facts.push(`<div class="thinking-card-diagnostic-fact"><dt>Assessment</dt><dd>${escapeHtml(viewModel.assessmentSummary)}</dd></div>`);
+    }
+    if (viewModel.unresolvedSummary) {
+        facts.push(`<div class="thinking-card-diagnostic-fact"><dt>Unresolved checks</dt><dd>${escapeHtml(viewModel.unresolvedSummary)}</dd></div>`);
+    }
+    if (viewModel.source) {
+        facts.push(`<div class="thinking-card-diagnostic-fact"><dt>Source</dt><dd><span class="thinking-card-diagnostic-inline-code">${escapeHtml(viewModel.source)}</span></dd></div>`);
+    }
+
+    const recommendationsHtml = viewModel.recommendations.length > 0
+        ? `<div class="thinking-card-diagnostic-section"><div class="thinking-card-diagnostic-section-title">Recommendations</div>${renderThinkingCriticListHTML(viewModel.recommendations)}</div>`
+        : '';
+    const blockersHtml = viewModel.blockers.length > 0
+        ? `<div class="thinking-card-diagnostic-section"><div class="thinking-card-diagnostic-section-title">Blockers</div>${renderThinkingCriticListHTML(viewModel.blockers)}</div>`
+        : '';
+    const failureCodesHtml = viewModel.failureCodes.length > 0
+        ? `<div class="thinking-card-diagnostic-section"><div class="thinking-card-diagnostic-section-title">Failure codes</div>${renderThinkingCriticListHTML(viewModel.failureCodes)}</div>`
+        : '';
+
+    return `<section class="thinking-card-critic-panel" id="${escapeHtml(viewModel.panelId)}" data-thinking-critic-panel>
+        <div class="thinking-card-diagnostic-section-title">Critic review</div>
+        ${facts.length > 0 ? `<dl class="thinking-card-diagnostic-facts">${facts.join('')}</dl>` : ''}
+        ${recommendationsHtml}${blockersHtml}${failureCodesHtml}
+        <div class="thinking-card-critic-actions">
+            <button type="button" class="btn thinking-card-action" aria-hidden="false" data-thinking-action="critic-copy">${escapeHtml(THINKING_CRITIC_COPY_BUTTON_LABEL)}</button>
+        </div>
+    </section>`;
+}
+
+function syncThinkingCriticControlStateToDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const criticButton = getThinkingCardCriticButtonEl(cardRoot);
+    if (!(criticButton instanceof HTMLButtonElement)) {
+        return;
+    }
+    const viewModel = buildThinkingCriticViewModel(request);
+    const visible = !!viewModel;
+    criticButton.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    criticButton.disabled = !visible;
+    criticButton.setAttribute('aria-expanded', visible && request?.thinkingCriticPanelOpen === true ? 'true' : 'false');
+    criticButton.setAttribute('aria-controls', viewModel?.panelId || getLoadingIndicatorDetailEl(cardRoot)?.id || '');
+    criticButton.setAttribute(
+        'title',
+        visible && request?.thinkingCriticPanelOpen === true ? 'Hide critic review' : 'Show critic review'
+    );
+    criticButton.setAttribute(
+        'aria-label',
+        visible && request?.thinkingCriticPanelOpen === true ? 'Hide critic review' : 'Show critic review'
+    );
+}
+
+function toggleThinkingCriticPanel(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    if (!request || typeof request !== 'object' || !extractThinkingCriticOutput(request)) {
+        return false;
+    }
+    request.thinkingCriticPanelOpen = request.thinkingCriticPanelOpen !== true;
+    if (request.thinkingCriticPanelOpen) {
+        const state = normaliseThinkingCardDisplayState(request.thinkingCardDisplayState);
+        request.thinkingCardDisplayState = {
+            ...state,
+            expanded: true
+        };
+    }
+    refreshThinkingCardProgressUi(request, cardRoot);
+    return true;
+}
+
+function buildThinkingCriticCopyPayload(request) {
+    const viewModel = buildThinkingCriticViewModel(request);
+    if (!viewModel) {
+        return null;
+    }
+    const latestProgress = isPlainObject(request?.latestProgress) ? request.latestProgress : null;
+    return {
+        schema_version: THINKING_CRITIC_OUTPUT_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        request_id: request?.clientRequestId || latestProgress?.request_id || null,
+        turn_id: request?.resultTurnId || null,
+        critic_view: {
+            verdict: viewModel.verdict || null,
+            assessment_summary: viewModel.assessmentSummary || null,
+            recommendations: viewModel.recommendations,
+            blockers: viewModel.blockers,
+            failure_codes: viewModel.failureCodes,
+            unresolved_summary: viewModel.unresolvedSummary || null,
+            source: viewModel.source || null
+        },
+        critic_verdict: viewModel.raw
+    };
+}
+
+async function copyThinkingCriticDetails(button = null, request = getThinkingCardDisplayRequest()) {
+    const payload = buildThinkingCriticCopyPayload(request);
+    if (!payload) {
+        showToast('No critic details are available for this turn.', 'info');
+        return false;
+    }
+    const text = JSON.stringify(payload, null, 2);
+    if (button instanceof HTMLButtonElement) {
+        return copyJsonTextWithButtonFeedback(button, text, {
+            fallbackLabel: THINKING_CRITIC_COPY_BUTTON_LABEL
+        });
+    }
+    return copyTextToClipboard(text);
 }
 
 function normaliseThinkingCardMode(mode) {
@@ -2821,6 +3235,7 @@ function refreshThinkingCardProgressUi(request, cardRoot = null) {
     setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request), request, cardRoot);
     updateThinkingCardMeta(request, request.latestProgress || null, cardRoot);
     updateThinkingCardModeControls(request, cardRoot);
+    syncThinkingCriticControlStateToDom(request, cardRoot);
 }
 
 function createThinkingCardHistorySnapshot(request) {
@@ -2888,6 +3303,7 @@ function createThinkingCardHistorySnapshot(request) {
         : [];
     const timingBreakdown = cloneThinkingTimingBreakdown(request.timingBreakdown);
     const timingSummary = cloneThinkingTimingSummary(request.timingSummary);
+    const criticOutput = extractThinkingCriticOutput(request);
 
     const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
     const completedDisplayState = reduceThinkingCardDisplayState(
@@ -2910,6 +3326,9 @@ function createThinkingCardHistorySnapshot(request) {
         stageDiagnostics,
         timingBreakdown,
         timingSummary,
+        criticOutput: criticOutput ? cloneThinkingCriticObject(criticOutput) : null,
+        thinkingCriticPanelOpen: request.thinkingCriticPanelOpen === true,
+        thinkingCriticPanelId: request.thinkingCriticPanelId || null,
         latestProgress,
         thinkingCardMode: getThinkingCardMode(request),
         expandedThinkingDiagnosticKeys: request.expandedThinkingDiagnosticKeys instanceof Set
@@ -3076,6 +3495,10 @@ function createRetainedThinkingCardWrapper(turnId) {
                 <button class="btn thinking-card-action thinking-card-size-button" type="button"
                     data-thinking-role="size-increase" aria-hidden="false"
                     aria-label="Show more thinking details" title="Show more thinking details">+</button>
+                <button class="btn thinking-card-action thinking-card-critic-button" type="button"
+                    data-thinking-role="critic" aria-hidden="true" aria-expanded="false"
+                    aria-controls="${escapeHtml(detailId)}"
+                    aria-label="Show critic review" title="Show critic review">Critic</button>
                 <button class="btn thinking-card-action" type="button"
                     data-thinking-role="copy" aria-hidden="false"
                     aria-label="Copy diagnostic snapshot" title="Copy diagnostic snapshot">Copy diagnostic snapshot</button>
@@ -3118,6 +3541,7 @@ function renderRetainedThinkingCardForTurn(request, turnId) {
     setLoadingIndicatorDetailHtml(detailHtml, request, wrapper);
     updateThinkingCardMeta(request, request.latestProgress || null, wrapper);
     updateThinkingCardModeControls(request, wrapper);
+    syncThinkingCriticControlStateToDom(request, wrapper);
     syncThinkingCardExpandedStateToDom(request, wrapper);
     return true;
 }
@@ -3130,14 +3554,15 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
     const diagnostics = hasTurnExecutionDiagnostics(debugData)
         ? debugData.turn_execution_diagnostics
         : null;
-    if (!diagnostics) {
+    const criticOutput = extractThinkingCriticOutput(debugData) || extractThinkingCriticOutput(diagnostics);
+    if (!diagnostics && !criticOutput) {
         return null;
     }
 
     const timestampMs = parseIsoTimestampMs(
-        debugData.timestamp || diagnostics.completed_at_utc || diagnostics.started_at_utc
+        debugData.timestamp || diagnostics?.completed_at_utc || diagnostics?.started_at_utc
     );
-    const requestId = normaliseThinkingActivityString(diagnostics.request_id || debugData.request_id);
+    const requestId = normaliseThinkingActivityString(diagnostics?.request_id || debugData.request_id);
     const request = {
         clientRequestId: requestId || null,
         resultTurnId: turnId,
@@ -3155,13 +3580,17 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
         latestProgress: null,
         turnExecutionDiagnostics: diagnostics,
         turn_execution_diagnostics: diagnostics,
+        criticOutput: criticOutput ? cloneThinkingCriticObject(criticOutput) : null,
+        thinkingCriticPanelOpen: false,
         thinkingCardMode: loadStoredThinkingCardMode(),
         thinkingStartedAtMs: Number.isFinite(timestampMs) ? timestampMs : null,
         thinkingFinishedAtMs: Date.now(),
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_finished' })
     };
 
-    syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics);
+    if (diagnostics) {
+        syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics);
+    }
     if (!request.latestProgress || typeof request.latestProgress !== 'object') {
         request.turnOutcome = {
             status: 'completed',
@@ -3858,6 +4287,14 @@ export function __testOnly_normaliseThinkingActivityHistory(diagnosticEvents = [
 
 export function __testOnly_renderThinkingCardBodyHTML(request = null, options = {}) {
     return renderThinkingCardBodyHTML(request, options);
+}
+
+export function __testOnly_buildThinkingCriticViewModel(request = null) {
+    return buildThinkingCriticViewModel(request);
+}
+
+export async function __testOnly_copyThinkingCriticDetails(button = null, request = null) {
+    return copyThinkingCriticDetails(button, request || getThinkingCardDisplayRequest());
 }
 
 export function __testOnly_renderThinkingLlmCallLogEntriesHTML(entries = []) {
@@ -9424,20 +9861,21 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     const mode = getThinkingCardMode(request, options);
     const progressViewModel = buildThinkingCardProgressViewModel(request);
     const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode);
+    const criticHtml = renderThinkingCriticPanelHTML(request);
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const llmCallLogHtml = renderThinkingLlmCallLogSectionHTML(request, mode);
     const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (mode === THINKING_CARD_MODE_DEFAULT && synopsisHtml) {
-        return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
+        return synopsisHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
     if (workflowStageHtml) {
-        return synopsisHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
+        return synopsisHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
     const activityHistoryHtml = renderThinkingActivityHistoryHTML(request, mode);
     if (activityHistoryHtml) {
-        return synopsisHtml + activityHistoryHtml + timingHtml + llmCallLogHtml;
+        return synopsisHtml + criticHtml + activityHistoryHtml + timingHtml + llmCallLogHtml;
     }
 
     const toolHistoryHtml = renderToolHistoryHTML(request, mode);
@@ -9446,7 +9884,7 @@ function renderThinkingCardBodyHTML(request, options = {}) {
         : '';
     const fallbackProgressHtml = renderThinkingLatestProgressSummaryHTML(request);
 
-    return synopsisHtml + timingHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml + llmCallLogHtml;
+    return synopsisHtml + criticHtml + timingHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml + llmCallLogHtml;
 }
 
 function resolveThinkingRequestIdForLlmCallLog(request) {
@@ -27472,6 +27910,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     const abortButton = getThinkingCardAbortButtonEl();
     const retryButton = getThinkingCardRetryButtonEl();
     const copyDiagnosticsButton = getThinkingCardCopyButtonEl();
+    const criticButton = getThinkingCardCriticButtonEl();
     const statusBadge = getThinkingCardStatusBadgeEl();
     const sendButton = document.getElementById('sendButton');
     const metaEl = getThinkingCardMetaEl();
@@ -27566,6 +28005,11 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
             );
         }
     }
+    if (criticButton && !isThinking && !preserveFinishedCard) {
+        criticButton.setAttribute('aria-hidden', 'true');
+        criticButton.setAttribute('aria-expanded', 'false');
+        criticButton.disabled = true;
+    }
 
     [sizeDecreaseButton, sizeIncreaseButton].forEach((button) => {
         if (!(button instanceof HTMLButtonElement)) {
@@ -27582,9 +28026,11 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
 
     if (isThinking || preserveFinishedCard) {
         updateThinkingCardModeControls(request);
+        syncThinkingCriticControlStateToDom(request);
         syncThinkingCardExpandedStateToDom(request);
     } else {
         updateThinkingCardModeControls(null);
+        syncThinkingCriticControlStateToDom(null);
         updateThinkingCardResizeControls(request);
     }
 }
@@ -27997,6 +28443,7 @@ function bindThinkingCardControls(cardRoot = null, options = {}) {
     const abortButton = getThinkingCardAbortButtonEl(rootRef);
     const retryButton = getThinkingCardRetryButtonEl(rootRef);
     const copyDiagnosticsButton = getThinkingCardCopyButtonEl(rootRef);
+    const criticButton = getThinkingCardCriticButtonEl(rootRef);
     const sizeDecreaseButton = getThinkingCardSizeDecreaseButtonEl(rootRef);
     const sizeIncreaseButton = getThinkingCardSizeIncreaseButtonEl(rootRef);
     const modeButtons = getThinkingCardModeButtons(rootRef);
@@ -28014,6 +28461,13 @@ function bindThinkingCardControls(cardRoot = null, options = {}) {
         copyDiagnosticsButton.dataset.bound = '1';
         copyDiagnosticsButton.addEventListener('click', () => {
             void copyActiveThinkingDiagnostics(copyDiagnosticsButton, requestResolver());
+        });
+    }
+
+    if (criticButton && criticButton.dataset.bound !== '1') {
+        criticButton.dataset.bound = '1';
+        criticButton.addEventListener('click', () => {
+            toggleThinkingCriticPanel(requestResolver(), rootRef);
         });
     }
 
@@ -28089,6 +28543,9 @@ function bindThinkingCardControls(cardRoot = null, options = {}) {
             } else if (action === 'llm-call-log-more') {
                 event.preventDefault();
                 void loadThinkingLlmCallLog(request, { append: true });
+            } else if (action === 'critic-copy') {
+                event.preventDefault();
+                void copyThinkingCriticDetails(actionButton, request);
             }
         });
     }
@@ -29004,6 +29461,7 @@ async function handleSendPrompt(options = {}) {
             };
             if (turnExecutionDiagnostics) {
                 syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
+                syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
                 if (isRequestVisible()) {
                     refreshThinkingCardProgressUi(request);
                 }
@@ -29017,7 +29475,11 @@ async function handleSendPrompt(options = {}) {
                     spokenText,
                     displayElements
                 });
+                syncThinkingCriticOutputFromSource(request, enriched);
                 setLlmDebugDataEntry(assistantTurnId, enriched);
+                if (isRequestVisible()) {
+                    refreshThinkingCardProgressUi(request);
+                }
                 console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
                     hasButtonify: !!data.llm_debug?.buttonify,
                     buttonifyOptions: data.llm_debug?.buttonify?.options,
@@ -29069,6 +29531,7 @@ async function handleSendPrompt(options = {}) {
                 : null;
             if (turnExecutionDiagnostics) {
                 syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
+                syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
                 if (isRequestVisible()) {
                     refreshThinkingCardProgressUi(request);
                 }
@@ -29076,7 +29539,11 @@ async function handleSendPrompt(options = {}) {
             // Store LLM debug data if available even on error
             const errorTurnId = `e-${Date.now()}`;
             if (data.llm_debug) {
+                syncThinkingCriticOutputFromSource(request, data.llm_debug);
                 setLlmDebugDataEntry(errorTurnId, data.llm_debug);
+                if (isRequestVisible()) {
+                    refreshThinkingCardProgressUi(request);
+                }
                 console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
             }
             request.resultTurnId = errorTurnId;
@@ -30163,6 +30630,7 @@ function hasLlmDebugPayload(debugData) {
         || (Array.isArray(debugData.aux_llm_calls) && debugData.aux_llm_calls.length > 0)
         || debugData.llm_interaction
         || debugData.context_stats
+        || extractThinkingCriticOutput(debugData)
     );
 }
 
