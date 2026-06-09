@@ -210,3 +210,59 @@ def test_filter_accessible_concept_ids_uses_batch_visibility_semantics(
         )
 
     assert allowed == {"#V#global_note", "#V#owner_note", "#V#team_note"}
+
+
+def test_window_session_organisation_context_controls_visibility(monkeypatch) -> None:
+    mongomock = pytest.importorskip("mongomock")
+    import src.backend.security.access_control as access_control
+    import src.backend.services.window_session_context_service as window_context
+    from src.backend.services.window_session_context_service import (
+        WindowSessionContext,
+        get_window_session_store,
+    )
+    from flask import session
+
+    window_context._window_session_store = None
+    store = get_window_session_store()
+    store.set(
+        WindowSessionContext(
+            window_session_id="ws_sail",
+            user_id="#V#michael_witbrock",
+            organisation_concept_id="university_of_auckland_strong_ai_lab",
+            namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+            role_in_org="member",
+        )
+    )
+
+    client = mongomock.MongoClient()
+    concepts = client.db.concepts
+    concepts.insert_one(
+        {
+            "concept_id": "#V#von_catalyst_dev_vm_operator_manual",
+            "relationships": {
+                "#V#specific_to_organisation": [
+                    "#V#university_of_auckland_strong_ai_lab"
+                ]
+            },
+        }
+    )
+    monkeypatch.setattr(access_control, "get_concepts_collection", lambda: concepts)
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    with app.test_request_context(
+        "/vontology/api/vontology/node_content",
+        headers={"X-Von-Window-Session": "ws_sail"},
+    ):
+        session["user_concept_id"] = "#V#michael_witbrock"
+        session["organisation_concept_id"] = "other_org"
+        assert (
+            access_control.get_effective_organisation_concept_id()
+            == "#V#university_of_auckland_strong_ai_lab"
+        )
+        assert (
+            access_control.describe_concept_access(
+                "#V#von_catalyst_dev_vm_operator_manual"
+            )["accessible"]
+            is True
+        )

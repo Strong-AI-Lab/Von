@@ -1418,6 +1418,39 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
             query = {"_id": ObjectId(identifier)}
             doc = ConceptsRepository.find_one(query)
 
+    if not doc and isinstance(identifier, str) and identifier.startswith("#V#"):
+        try:
+            from ..services.concept_service import (
+                ConceptNotFoundError,
+                get_concept_by_concept_id,
+            )
+
+            service_doc = get_concept_by_concept_id(identifier)
+            if isinstance(service_doc, dict):
+                doc = service_doc
+        except ConceptNotFoundError:
+            try:
+                from ..security.access_control import describe_concept_access
+
+                access = describe_concept_access(identifier)
+                if access.get("exists") is True and access.get("accessible") is False:
+                    return {
+                        "error": (
+                            f"Concept '{identifier}' is not accessible in the current context."
+                        ),
+                        "error_code": "access_denied",
+                        "concept_id": identifier,
+                        "access": access,
+                    }
+            except Exception:
+                pass
+        except Exception as service_err:
+            logger.debug(
+                "Canonical concept service lookup failed for '%s': %s",
+                identifier,
+                service_err,
+            )
+
     if not doc:
         # If not found and it wasn't an ID-based search, try by name as a fallback
         if "path" in query:

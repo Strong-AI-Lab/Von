@@ -2547,6 +2547,20 @@ body {
     background: #f3f4f6 !important;
 }
 
+.vontology-search-results .vontology-search-item[aria-disabled="true"] {
+    cursor: default !important;
+}
+
+.vontology-search-results .vontology-search-item[aria-disabled="true"]:hover,
+.vontology-search-results .vontology-search-item[aria-disabled="true"].active {
+    background: white !important;
+}
+
+.vontology-search-results .vontology-search-item-error .vontology-search-item-name {
+    color: #7f1d1d !important;
+    white-space: normal !important;
+}
+
 .vontology-search-results .vontology-search-item-name {
     color: #111827 !important;
     overflow: hidden !important;
@@ -2581,6 +2595,12 @@ body {
     background: #f3e8ff !important;
     color: #6b21a8 !important;
     border-color: #c084fc !important;
+}
+
+.vontology-search-results .vontology-search-item-kind.status {
+    background: #fee2e2 !important;
+    color: #7f1d1d !important;
+    border-color: #fca5a5 !important;
 }
 
 /* Tab Container - now sits below global header */

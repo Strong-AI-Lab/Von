@@ -1,6 +1,7 @@
 import { fetchConceptList, resetConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { clearContainer, elements, getCurrentUserConceptId } from './domUtils.js';
 import { handleVontologyNodeSelection } from './dynamicTabs.js';
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
 import { createPredicateBadge, getPredicateType } from './predicateUtils.js';
 import { ProgressManager, ProgressPhase } from './progress.js';
 import {
@@ -50,12 +51,14 @@ function vontologyFetch(url, options = {}) {
   // Keep identity context consistent across Vontology endpoints.
   // Access control can fall back to X-User-Concept-ID when session state is absent.
   const userConceptId = getCurrentUserConceptId();
-  if (!userConceptId) {
-    return fetch(url, options);
-  }
-
   const baseHeaders = (options && typeof options === 'object' ? options.headers : null) || {};
-  const mergedHeaders = { ...baseHeaders, 'X-User-Concept-ID': userConceptId };
+  const mergedHeaders = {
+    ...baseHeaders,
+    [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+  };
+  if (userConceptId) {
+    mergedHeaders['X-User-Concept-ID'] = userConceptId;
+  }
   return fetch(url, { ...options, headers: mergedHeaders });
 }
 
@@ -3473,10 +3476,21 @@ export async function performVontologySearch(q) {
               };
               items = [fallbackItem, ...items];
             }
+          } else {
+            let errorPayload = null;
+            try { errorPayload = await nodeRes.json(); } catch (_) { }
+            items = [
+              makeExactIdSearchErrorItem(trimmedQuery, nodeRes.status, errorPayload),
+              ...items
+            ];
           }
         } catch (lookupErr) {
           if (lookupErr?.name === 'AbortError') throw lookupErr;
           console.debug('[vontology search] id lookup failed', lookupErr);
+          items = [
+            makeExactIdSearchErrorItem(trimmedQuery, null, null),
+            ...items
+          ];
         }
       }
     }
@@ -3495,9 +3509,31 @@ export async function performVontologySearch(q) {
   } catch (err) {
     if (err?.name === 'AbortError') return; // expected
     console.warn('[vontology search] error:', err);
-    __vontologySearchState.items = [];
-    renderSearchResults([]);
+    const trimmedQuery = q?.trim() || '';
+    const errorItems = trimmedQuery.startsWith('#V#')
+      ? [makeExactIdSearchErrorItem(trimmedQuery, null, null)]
+      : [];
+    __vontologySearchState.items = errorItems;
+    renderSearchResults(errorItems);
   }
+}
+
+function makeExactIdSearchErrorItem(conceptId, status, payload) {
+  const errorCode = payload?.error_code;
+  let message = `No accessible concept found for ${conceptId}`;
+  if (errorCode === 'access_denied' || status === 403) {
+    message = `Concept exists but is not accessible here: ${conceptId}`;
+  } else if (status && status >= 500) {
+    message = `Could not check concept ID right now: ${conceptId}`;
+  }
+  return {
+    id: conceptId,
+    name: message,
+    kind: 'status',
+    disabled: true,
+    error: true,
+    error_code: errorCode || (status ? `http_${status}` : 'lookup_failed')
+  };
 }
 
 async function copySearchConceptIdToClipboard(conceptId) {
@@ -3538,9 +3574,12 @@ function renderSearchResults(items) {
   list.setAttribute('role', 'listbox');
   items.forEach((it, idx) => {
     const row = document.createElement('div');
-    row.className = 'vontology-search-item';
+    row.className = it.error
+      ? 'vontology-search-item vontology-search-item-error'
+      : 'vontology-search-item';
     row.setAttribute('role', 'option');
     row.dataset.index = String(idx);
+    if (it.disabled) row.setAttribute('aria-disabled', 'true');
     // left: name (with id tooltip)
     const name = document.createElement('span');
     name.className = 'vontology-search-item-name';
@@ -3554,7 +3593,7 @@ function renderSearchResults(items) {
     }
     // right: kind badge (use backend's three-way classification)
     const badgeKind = it.kind; // 'type', 'predicate', or 'individual' from backend
-    const badgeText = it.kind === 'predicate' ? 'Predicate' : (it.kind === 'individual' ? 'Individual' : 'Type');
+    const badgeText = it.kind === 'predicate' ? 'Predicate' : (it.kind === 'individual' ? 'Individual' : (it.kind === 'status' ? 'Status' : 'Type'));
     const kind = document.createElement('span');
     kind.className = `vontology-search-item-kind ${badgeKind}`;
     kind.textContent = badgeText;
@@ -3567,18 +3606,20 @@ function renderSearchResults(items) {
     }
     row.appendChild(kind);
     // interactions
-    row.addEventListener('mouseenter', () => setActiveIndex(idx));
-    row.addEventListener('mouseleave', () => setActiveIndex(-1));
-    row.addEventListener('click', () => selectSearchItem(it));
-    row.addEventListener('contextmenu', (e) => {
-      try {
-        e.preventDefault();
-        e.stopPropagation();
-        copySearchConceptIdToClipboard(it.id);
-      } catch (_) {
-        // no-op
-      }
-    });
+    if (!it.disabled) {
+      row.addEventListener('mouseenter', () => setActiveIndex(idx));
+      row.addEventListener('mouseleave', () => setActiveIndex(-1));
+      row.addEventListener('click', () => selectSearchItem(it));
+      row.addEventListener('contextmenu', (e) => {
+        try {
+          e.preventDefault();
+          e.stopPropagation();
+          copySearchConceptIdToClipboard(it.id);
+        } catch (_) {
+          // no-op
+        }
+      });
+    }
     list.appendChild(row);
   });
   results.appendChild(list);
@@ -3636,6 +3677,7 @@ function moveActive(delta) {
 async function selectSearchItem(item) {
   const __perfStartSearchSel = (typeof window !== 'undefined' && window.performance ? performance.now() : Date.now());
   if (!item) return;
+  if (item.disabled) return;
   const inputEl = elements && elements.vontologySearchInput;
   if (inputEl) {
     try {

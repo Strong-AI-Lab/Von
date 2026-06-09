@@ -41,6 +41,16 @@ def _normalise_concept_id(value: Any) -> Optional[str]:
     return None
 
 
+def _normalise_stored_org_concept_id(value: Any) -> Optional[str]:
+    """Return a concept id for org values stored either as #V# ids or slugs."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    return candidate if candidate.startswith("#") else f"#V#{candidate}"
+
+
 def _specific_allows_user(spec: Any, user_id: Optional[str]) -> bool:
     """Decide whether a specific_to_user value permits the current user."""
     if spec is None:
@@ -379,8 +389,26 @@ def get_effective_organisation_concept_id() -> Optional[str]:
         return manual
     if not has_request_context():
         return None
+    try:
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        if window_session_id:
+            from ..services.window_session_context_service import get_effective_context
+
+            user_for_context = get_effective_user_concept_id() or session.get(
+                "user_concept_id"
+            )
+            effective = get_effective_context(
+                window_session_id,
+                dict(session),
+                user_for_context,
+            )
+            org_id = _normalise_stored_org_concept_id(effective.get("organisation_id"))
+            if org_id:
+                return org_id
+    except Exception:
+        pass
     for key in ("organisation_concept_id", "org_concept_id", "org_id"):
-        candidate = _normalise_concept_id(session.get(key))
+        candidate = _normalise_stored_org_concept_id(session.get(key))
         if candidate:
             return candidate
     return None
@@ -742,7 +770,7 @@ def override_current_user(concept_id: Optional[str]):
 
 @contextmanager
 def override_current_organisation(concept_id: Optional[str]):
-    token = _MANUAL_ORG.set(_normalise_concept_id(concept_id))
+    token = _MANUAL_ORG.set(_normalise_stored_org_concept_id(concept_id))
     eval_token = _EVALUATOR.set(None)
     try:
         yield
@@ -759,7 +787,9 @@ def override_current_actor(
     """Apply one explicit actor scope to access-controlled support lookups."""
 
     user_token = _MANUAL_USER.set(_normalise_concept_id(user_concept_id))
-    org_token = _MANUAL_ORG.set(_normalise_concept_id(organisation_concept_id))
+    org_token = _MANUAL_ORG.set(
+        _normalise_stored_org_concept_id(organisation_concept_id)
+    )
     eval_token = _EVALUATOR.set(None)
     try:
         yield

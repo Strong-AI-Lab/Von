@@ -921,7 +921,10 @@ def get_node_content_route():
                 # Some UI flows (e.g., chat history hydration) may probe many concept IDs that
                 # no longer exist. Returning 200 avoids loud 404s in the browser network log.
                 return jsonify({**data, "not_found": True}), 200
-            status = 404 if "not found" in data["error"].lower() else 400
+            if data.get("error_code") == "access_denied":
+                status = 403
+            else:
+                status = 404 if "not found" in data["error"].lower() else 400
             return jsonify(data), status
 
         concept_stats = None

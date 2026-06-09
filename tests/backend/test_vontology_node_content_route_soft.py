@@ -128,3 +128,56 @@ def test_node_content_soft_returns_200_with_not_found_marker(app_client, monkeyp
     payload = resp.get_json()
     assert payload["error"] == "Concept '#V#missing' not found in MongoDB."
     assert payload["not_found"] is True
+
+
+def test_node_content_returns_403_for_access_denied_exact_concept(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    def _fake_get(_identifier: str):
+        return {
+            "error": "Concept '#V#private' is not accessible in the current context.",
+            "error_code": "access_denied",
+            "concept_id": "#V#private",
+            "access": {"exists": True, "accessible": False},
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.get_vontology_node_content",
+        _fake_get,
+    )
+
+    resp = client.get("/vontology/api/vontology/node_content?identifier=%23V%23private")
+
+    assert resp.status_code == 403
+    payload = resp.get_json()
+    assert payload["error_code"] == "access_denied"
+    assert payload["access"]["exists"] is True
+
+
+def test_concept_route_returns_403_when_exact_concept_exists_but_is_inaccessible(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    from src.backend.services.concept_service import ConceptNotFoundError
+
+    def _raise_not_found(_concept_id: str):
+        raise ConceptNotFoundError("concept with concept_id '#V#private' not found.")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.concept_routes.concept_service.get_concept_by_concept_id",
+        _raise_not_found,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.describe_concept_access",
+        lambda _concept_id: {"exists": True, "accessible": False},
+    )
+
+    resp = client.get("/api/concepts/%23V%23private")
+
+    assert resp.status_code == 403
+    payload = resp.get_json()
+    assert payload["error_code"] == "access_denied"
+    assert payload["access"]["accessible"] is False

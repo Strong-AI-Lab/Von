@@ -385,6 +385,30 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
 
             return jsonify(concept), 200
         except ConceptNotFoundError as e:
+            if concept_id.startswith("#V#"):
+                try:
+                    from ...security.access_control import describe_concept_access
+
+                    access = describe_concept_access(concept_id)
+                    if (
+                        access.get("exists") is True
+                        and access.get("accessible") is False
+                    ):
+                        current_app.logger.info(
+                            "concept access denied (ID: %s): %s", concept_id, access
+                        )
+                        return (
+                            jsonify(
+                                error=(
+                                    f"Concept '{concept_id}' is not accessible in the current context."
+                                ),
+                                error_code="access_denied",
+                                access=access,
+                            ),
+                            403,
+                        )
+                except Exception:
+                    pass
             current_app.logger.info(f"concept not found (ID: {concept_id}): {e}")
             return jsonify(error=str(e)), 404
         except (
