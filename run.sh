@@ -143,6 +143,8 @@ CONCEPT_INDEX_PID_FILE="${RUN_DIR}/concept_index_worker.pid"
 CONCEPT_INDEX_LOG_FILE="${LOGS_DIR}/concept_index_worker_${TS}.log"
 CONCEPT_INDEX_ERR_LOG_FILE="${CONCEPT_INDEX_LOG_FILE}.err"
 TOKEN_FILE="${RUN_DIR}/admin_token.txt"
+WORKFLOW_PURITY_SUCCESS_FILE="${RUN_DIR}/workflow_purity_check_last_success.env"
+WORKFLOW_PURITY_TTL_SECONDS="${VON_WORKFLOW_PURITY_TTL_SECONDS:-86400}"
 BROWSER_SENTINEL_NAME="browser_opened_once"
 if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
     BROWSER_SENTINEL_NAME="browser_opened_once_${PORT}"
@@ -1526,11 +1528,35 @@ start_server() {
     if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
         log "Agent test mode: skipping workflow purity check."
     elif [ -f "$purity_script" ]; then
-        log "Running Workflow Purity Check (warn-only)..."
-        if [ "$launch_mode" = "pdm-fallback" ]; then
-            "$py" run python "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
-        else
-            "$py" "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
+        local purity_skip=0
+        local purity_last_success=""
+        local purity_now=""
+        case "${VON_FORCE_WORKFLOW_PURITY_CHECK:-}" in
+            1|true|TRUE|yes|YES|y|Y|on|ON) log "Workflow purity check forced by VON_FORCE_WORKFLOW_PURITY_CHECK." ;;
+            *)
+                purity_last_success="$(stat -f '%m' "$WORKFLOW_PURITY_SUCCESS_FILE" 2>/dev/null || stat -c '%Y' "$WORKFLOW_PURITY_SUCCESS_FILE" 2>/dev/null || true)"
+                purity_now="$(date +%s 2>/dev/null || true)"
+                if [[ "$purity_last_success" =~ ^[0-9]+$ && "$purity_now" =~ ^[0-9]+$ && "$WORKFLOW_PURITY_TTL_SECONDS" =~ ^[0-9]+$ ]] &&
+                    [ $((purity_now - purity_last_success)) -ge 0 ] &&
+                    [ $((purity_now - purity_last_success)) -lt "$WORKFLOW_PURITY_TTL_SECONDS" ]; then
+                    purity_skip=1
+                    log "Skipping workflow purity check; last successful pass is less than ${WORKFLOW_PURITY_TTL_SECONDS}s old."
+                fi
+                ;;
+        esac
+        if [ "$purity_skip" -eq 0 ]; then
+            local purity_status=0
+            log "Running Workflow Purity Check (warn-only)..."
+            set +e
+            if [ "$launch_mode" = "pdm-fallback" ]; then
+                "$py" run python "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
+                purity_status=${PIPESTATUS[0]}
+            else
+                "$py" "$purity_script" --quiet-on-pass 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done
+                purity_status=${PIPESTATUS[0]}
+            fi
+            set -e
+            [ "$purity_status" -eq 0 ] && : > "$WORKFLOW_PURITY_SUCCESS_FILE" 2>/dev/null || true
         fi
     fi
 

@@ -562,6 +562,10 @@ $WorkflowPurityPidFile = Join-Path $RunDir 'workflow_purity_check.pid'
 $WorkflowPurityResultFile = Join-Path $RunDir 'workflow_purity_check_last_result.json'
 $WorkflowPurityReportedFile = Join-Path $RunDir 'workflow_purity_check_last_reported.txt'
 $WorkflowPurityRunnerScript = Join-Path $RunDir 'workflow_purity_runner.ps1'
+$WorkflowPurityTtlSeconds = 86400
+if ($env:VON_WORKFLOW_PURITY_TTL_SECONDS -match '^[0-9]+$') {
+    $WorkflowPurityTtlSeconds = [int]$env:VON_WORKFLOW_PURITY_TTL_SECONDS
+}
 
 # PID & log paths (port-scoped for isolated launcher instances)
 $PidFile = Join-Path $RunDir "von_${Port}.pid"
@@ -2190,6 +2194,24 @@ function Start-WorkflowPurityCheckNonBlocking {
             }
         }
         Remove-Item $script:WorkflowPurityPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($env:VON_FORCE_WORKFLOW_PURITY_CHECK -match '^(1|true|TRUE|yes|YES|y|Y|on|ON)$') {
+        Write-LauncherLog "Workflow purity check forced by VON_FORCE_WORKFLOW_PURITY_CHECK."
+    }
+    elseif (Test-Path $script:WorkflowPurityResultFile) {
+        try {
+            $previousResult = Get-Content $script:WorkflowPurityResultFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ([int]$previousResult.exit_code -eq 0 -and [string]$previousResult.status -eq 'passed') {
+                $completedAtUtc = [datetime]::Parse([string]$previousResult.completed_at_utc).ToUniversalTime()
+                $ageSeconds = ((Get-Date).ToUniversalTime() - $completedAtUtc).TotalSeconds
+                if ($ageSeconds -ge 0 -and $ageSeconds -lt $script:WorkflowPurityTtlSeconds) {
+                    Write-LauncherLog "Skipping workflow purity check; last successful pass is less than $($script:WorkflowPurityTtlSeconds)s old."
+                    return $false
+                }
+            }
+        }
+        catch { }
     }
 
     $pdm = if (Test-Path (Join-Path $script:Root '.venv\Scripts\pdm.exe')) { Join-Path $script:Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
