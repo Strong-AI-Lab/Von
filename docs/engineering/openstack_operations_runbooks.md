@@ -99,6 +99,9 @@ Primary logs and audits:
    - `curl -fsS http://127.0.0.1:5000/health`
    - `curl -fsS http://127.0.0.1:5000/admin/db/health?probe=rw`
    - `sudo journalctl -u von.service --since "-15 min" --no-pager | grep -Ei 'mongo|database|authentication failed|timed out'`
+   - The `/admin/db/health?probe=rw` response is designed to be safe to paste:
+     Mongo credentials, auth DB, database path, and URI query parameters are
+     redacted from operator-facing output.
 
 ### Rollback
 

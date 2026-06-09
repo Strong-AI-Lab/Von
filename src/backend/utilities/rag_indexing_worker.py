@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 Debug enhancements added:
  - Immediate stdout banner with environment details (unbuffered assurance)
  - Explicit flush after each top-level log batch
- - Startup diagnostics for: PYTHONUNBUFFERED, RAG_EMBEDDING_MODEL, effective mongo URI
+ - Startup diagnostics for: PYTHONUNBUFFERED, RAG_EMBEDDING_MODEL, effective Mongo location
  - Safety catch around get_llm_client() to detect blocking initialisation
  - Per-iteration timing + heartbeat if idle (no pending items) to prove liveness
 These additions are temporary and may be reduced once stability confirmed.
@@ -71,8 +71,12 @@ def startup_diagnostics():
     )
     try:
         hs = health_summary()
+        mongo_location = hs.get("effective_uri_sanitized") or hs.get("effective_uri")
         logger.info(
-            f"Mongo connected={hs.get('connected')} using_fallback={hs.get('using_fallback')} uri={hs.get('effective_uri')}"
+            "Mongo connected=%s using_fallback=%s location=%s",
+            hs.get("connected"),
+            hs.get("using_fallback"),
+            mongo_location,
         )
         # Collection-level counts
         coll = get_interaction_sessions_collection()

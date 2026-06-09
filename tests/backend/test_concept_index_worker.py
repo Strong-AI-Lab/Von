@@ -3,6 +3,7 @@
 Tests the background worker that indexes concepts for semantic search.
 """
 
+import logging
 from unittest.mock import patch, MagicMock
 
 from src.backend.services.concept_embedding_service import (
@@ -198,6 +199,49 @@ class TestConceptIndexWorkerStartupDiagnostics:
         startup_diagnostics()
 
         mock_count.assert_called_once()
+
+    @patch("src.backend.utilities.concept_index_worker.count_concepts_needing_indexing")
+    @patch("src.backend.utilities.concept_index_worker.health_summary")
+    def test_startup_diagnostics_logs_only_sanitized_mongo_location(
+        self,
+        mock_health,
+        mock_count,
+        caplog,
+    ):
+        """startup_diagnostics should not log raw Mongo credentials."""
+        raw_uri = (
+            "mongodb+srv://appuser:s3cr3t-pass@cluster0.example.mongodb.net/"
+            "von_db?authSource=admin&appName=VonSecret&tls=true&retryWrites=true"
+        )
+        safe_uri = "mongodb+srv://cluster0.example.mongodb.net"
+        mock_health.return_value = {
+            "connected": True,
+            "using_fallback": False,
+            "effective_uri": raw_uri,
+            "effective_uri_sanitized": safe_uri,
+        }
+        mock_count.return_value = 42
+
+        from src.backend.utilities.concept_index_worker import startup_diagnostics
+
+        caplog.set_level(logging.INFO, logger="concept_index_worker")
+        startup_diagnostics()
+
+        log_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert safe_uri in log_text
+        for fragment in (
+            "appuser",
+            "s3cr3t-pass",
+            "admin",
+            "authSource",
+            "appName",
+            "VonSecret",
+            "tls=true",
+            "retryWrites",
+            "von_db",
+            raw_uri,
+        ):
+            assert fragment not in log_text
 
 
 class TestConceptsNeedingIndexing:

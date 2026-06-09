@@ -17575,18 +17575,18 @@ def _mongo_cost_guardrails_report(**kwargs):
     """Build a compact, redacted Mongo cost guardrail report."""
 
     from ...db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri
-    from ...server.routes.settings_routes import (
-        _classify_mongo_sanitized_uri,
-        _sanitize_mongo_uri_for_display,
+    from ...db.mongo_uri_redaction import (
+        classify_mongo_connection_location,
+        sanitize_mongo_uri_for_display,
     )
     from ...services.mongo_observability_service import (
         build_mongo_cost_guardrail_report,
     )
 
     try:
-        sanitized_uri = _sanitize_mongo_uri_for_display(get_effective_mongo_uri())
+        sanitized_uri = sanitize_mongo_uri_for_display(get_effective_mongo_uri())
         return build_mongo_cost_guardrail_report(
-            mongo_classification=_classify_mongo_sanitized_uri(sanitized_uri),
+            mongo_classification=classify_mongo_connection_location(sanitized_uri),
             sanitized_uri=sanitized_uri,
             using_fallback=is_using_fallback_uri(),
             local_development=kwargs.get("local_development"),

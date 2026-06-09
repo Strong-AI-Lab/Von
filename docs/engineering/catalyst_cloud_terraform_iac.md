@@ -201,7 +201,9 @@ Operational checks:
 - remember that Atlas Admin API calls use a separate API-key or service-account
   access list: the operator machine running discovery or access-list scans must
   also be on that list.
-- validate post-deploy DB path with `/admin/db/health?probe=rw`.
+- validate post-deploy DB path with `/admin/db/health?probe=rw`; its output is
+  redacted and safe to paste because raw Mongo credentials, database path, and
+  URI query parameters are omitted.
 
 With strict startup enabled, Von fails fast with clear diagnostics when Mongo
 URI policy or startup connectivity/auth/read/write probe checks fail.

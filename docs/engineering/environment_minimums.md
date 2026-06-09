@@ -144,6 +144,8 @@ Recommended progression:
    - keep OAuth unset
    - deploy and verify `/health`, `/admin/db/health?probe=rw`, UI load, and a
      basic chat request
+   - `/admin/db/health?probe=rw` output is redacted and safe to paste; it should
+     not contain raw Mongo credentials, database path, or URI query parameters
 
 2. Harden Mongo once Atlas connectivity is stable.
    - set `bootstrap_mongo_allow_local_fallback=false`

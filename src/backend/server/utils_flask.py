@@ -3448,24 +3448,28 @@ def _build_diagnostics_response(app: Flask):
 
     try:
         from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+        from ..db.mongo_uri_redaction import (
+            build_safe_mongo_connection_location,
+            sanitize_mongo_uri_for_display,
+        )
 
         effective_uri = get_effective_mongo_uri()
-        redacted_uri = effective_uri
-        if "://" in redacted_uri and "@" in redacted_uri:
-            scheme, rest = redacted_uri.split("://", 1)
-            if "@" in rest:
-                creds, hostpart = rest.split("@", 1)
-                if ":" in creds:
-                    user = creds.split(":", 1)[0]
-                    redacted_uri = f"{scheme}://{user}:***@{hostpart}"
-                else:
-                    redacted_uri = f"{scheme}://***@{hostpart}"
+        using_fallback = is_using_fallback_uri()
+        connection_location = build_safe_mongo_connection_location(
+            effective_uri,
+            using_fallback=using_fallback,
+        )
         mongo_diag = {
-            "effective_mongo_uri": redacted_uri,
-            "using_fallback": is_using_fallback_uri(),
+            "effective_mongo_uri": sanitize_mongo_uri_for_display(effective_uri),
+            "effective_mongo_location": connection_location,
+            "using_fallback": using_fallback,
         }
     except Exception:
-        mongo_diag = {"effective_mongo_uri": None, "using_fallback": None}
+        mongo_diag = {
+            "effective_mongo_uri": None,
+            "effective_mongo_location": None,
+            "using_fallback": None,
+        }
 
     session_user = None
     effective_user = None
@@ -3687,22 +3691,16 @@ def _build_db_status_response():
     host_only = None
     try:
         from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+        from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
 
         effective_uri = get_effective_mongo_uri()
         using_fallback = is_using_fallback_uri()
-        if effective_uri:
-            try:
-                after_scheme = (
-                    effective_uri.split("://", 1)[1]
-                    if "://" in effective_uri
-                    else effective_uri
-                )
-                if "@" in after_scheme:
-                    after_scheme = after_scheme.split("@", 1)[1]
-                host_only = after_scheme.split("/", 1)[0]
-            except Exception:
-                host_only = None
-            atlas_detected = "mongodb.net" in effective_uri.lower()
+        connection_location = build_safe_mongo_connection_location(
+            effective_uri,
+            using_fallback=using_fallback,
+        )
+        host_only = connection_location.get("host")
+        atlas_detected = connection_location.get("is_atlas")
     except Exception:
         pass
     return jsonify(

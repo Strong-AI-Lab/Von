@@ -124,6 +124,9 @@ curl -fsS http://127.0.0.1:5000/admin/db/health?probe=rw
 
 - [ ] `/health` succeeds.
 - [ ] `/admin/db/health?probe=rw` succeeds and reports probe success.
+- [ ] The DB health output is safe to paste in tickets or chat: it contains only
+      redacted Mongo connection location metadata, not credentials, auth DB,
+      database path, or URI query parameters.
 
 ### 6.3 System services and timers
 
@@ -196,6 +199,8 @@ If service is unhealthy:
 3. Re-test:
    - `curl -fsS http://127.0.0.1:5000/health`
    - `curl -fsS http://127.0.0.1:5000/admin/db/health?probe=rw`
+   - The DB health response is safe to paste because Mongo credential material
+     and raw URI query/path details are redacted.
 
 If still broken, use:
 - `docs/engineering/openstack_operations_runbooks.md`
@@ -215,6 +220,7 @@ If still broken, use:
 - [ ] HTTPS endpoint is reachable.
 - [ ] `/health` returns healthy.
 - [ ] `/admin/db/health?probe=rw` passes.
+- [ ] Any copied DB health output contains only redacted Mongo location metadata.
 - [ ] `von.service` and `nginx.service` are active.
 - [ ] Monitoring/backup timers are active.
 - [ ] Basic UI + chat test succeeded.

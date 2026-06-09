@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from pymongo.errors import ConnectionFailure
 
 from . import mongo_client as _mc
+from .mongo_uri_redaction import build_safe_mongo_connection_location
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +78,18 @@ def health_summary() -> Dict[str, Any]:
         effective_uri = str(eff_uri_raw) if eff_uri_raw is not None else None
     except Exception:
         effective_uri = None
+    connection_location = build_safe_mongo_connection_location(
+        effective_uri,
+        using_fallback=using_fallback,
+    )
+    effective_uri_sanitized = connection_location.get("sanitized_uri")
     return {
         "connected": connected,
         "using_fallback": using_fallback,
-        "effective_uri": effective_uri,
+        # Backwards-compatible key. This is intentionally sanitized only.
+        "effective_uri": effective_uri_sanitized,
+        "effective_uri_sanitized": effective_uri_sanitized,
+        "effective_mongo_location": connection_location,
         "uptime_seconds": uptime,
         "metrics": metrics,
     }

@@ -98,6 +98,10 @@ from ...db.mongo_client import (
     is_using_fallback_uri,
     assert_destructive_db_operation_allowed,
 )
+from ...db.mongo_uri_redaction import (
+    classify_mongo_connection_location,
+    sanitize_mongo_uri_for_display,
+)
 from ...workflows.write_tool_policy import (
     MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY,
     MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION,
@@ -105,8 +109,6 @@ from ...workflows.write_tool_policy import (
     MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
     MUTATION_AUTHORITY_LEVEL_READ_ONLY,
 )
-import re
-
 # REFACTORING_NOTE: This blueprint is part of the backend model selection refactoring.
 # It provides API endpoints for managing global application settings.
 
@@ -520,42 +522,10 @@ def scan_orphan_concepts():
         return jsonify({"error": "scan_failed", "detail": str(e)}), 500
 
 
-def _sanitize_mongo_uri_for_display(uri: str) -> str:
-    """Return a sanitized Mongo connection location without credentials or query params.
-    Examples:
-      mongodb://user:pass@localhost:27017/von_db?authSource=admin -> mongodb://localhost:27017
-      mongodb+srv://user:pass@cluster0.abcd.mongodb.net/von_db -> mongodb+srv://cluster0.abcd.mongodb.net
-    """
-    try:
-        # Remove credentials segment between scheme and '@'
-        i = uri.find("://")
-        if i != -1:
-            at = uri.find("@", i + 3)
-            if at != -1:
-                uri = uri[: i + 3] + uri[at + 1 :]
-        # Drop query string
-        q = uri.find("?")
-        if q != -1:
-            uri = uri[:q]
-        # Keep only scheme + host(s)[:port], drop trailing path (db name) for location clarity
-        j = uri.find("://")
-        if j != -1:
-            slash = uri.find("/", j + 3)
-            if slash != -1:
-                uri = uri[:slash]
-        return uri
-    except Exception:
-        # Fallback: best-effort removal of credentials
-        if "@" in uri:
-            uri = uri.split("@", 1)[-1]
-        if "?" in uri:
-            uri = uri.split("?", 1)[0]
-        if "://" in uri:
-            scheme = uri.split("://", 1)[0]
-            rest = uri.split("://", 1)[1]
-            host = rest.split("/", 1)[0]
-            return f"{scheme}://{host}"
-        return uri
+def _sanitize_mongo_uri_for_display(uri: str | None) -> str | None:
+    """Compatibility wrapper for older internal callers."""
+
+    return sanitize_mongo_uri_for_display(uri)
 
 
 @settings_bp.route("/db/info", methods=["GET"])
@@ -613,16 +583,7 @@ def get_db_location_info():
             error_message = str(e)
             ping_ok = False
 
-        # Classification heuristics
-        is_local = bool(
-            re.search(
-                r"mongodb://(localhost|127\.0\.0\.1|0\.0\.0\.0)",
-                sanitized_uri,
-                re.IGNORECASE,
-            )
-        )
-        is_srv = sanitized_uri.startswith("mongodb+srv://")
-        classification = "local" if is_local else ("atlas" if is_srv else "remote")
+        classification = _classify_mongo_sanitized_uri(sanitized_uri)
         using_fallback = is_using_fallback_uri()
         public_ip = None
         if using_fallback:
@@ -664,16 +625,8 @@ def get_db_location_info():
         return jsonify({"error": "Failed to retrieve DB info."}), 500
 
 
-def _classify_mongo_sanitized_uri(sanitized_uri: str) -> str:
-    is_local = bool(
-        re.search(
-            r"mongodb://(localhost|127\.0\.0\.1|0\.0\.0\.0)",
-            sanitized_uri,
-            re.IGNORECASE,
-        )
-    )
-    is_srv = sanitized_uri.startswith("mongodb+srv://")
-    return "local" if is_local else ("atlas" if is_srv else "remote")
+def _classify_mongo_sanitized_uri(sanitized_uri: str | None) -> str:
+    return classify_mongo_connection_location(sanitized_uri)
 
 
 @settings_bp.route("/db/guardrails", methods=["GET"])
