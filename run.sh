@@ -790,6 +790,22 @@ else:
 PY
 }
 
+log_von_version() {
+    local target_port="${1:-$PORT}"
+    local payload=""
+    local version=""
+    local saved_port="$PORT"
+    PORT="$target_port"
+    payload="$(get_health_payload || true)"
+    PORT="$saved_port"
+    version="$(health_payload_field "$payload" "version" || true)"
+    if [ -n "$version" ]; then
+        log "Von version: $version"
+    else
+        log "Von version: unavailable (/health did not report version)."
+    fi
+}
+
 agent_test_health_payload_valid() {
     local payload="$1"
     local log_failure="${2:-0}"
@@ -1483,6 +1499,7 @@ start_server() {
             log "Already running (PID=$existing). Use ./run.sh stop or restart."
             write_pidfile "$existing"
             open_browser_if_needed
+            log_von_version "$PORT"
             return 0
         fi
     fi
@@ -1506,6 +1523,7 @@ start_server() {
         log "Port $PORT already in use by PID=$listener; assuming server already running (untracked)."
         write_pidfile "$listener"
         open_browser_if_needed
+        log_von_version "$PORT"
         return 0
     fi
 
@@ -1763,6 +1781,7 @@ start_server() {
         # Start Concept Index worker best-effort (mirrors run.ps1)
         start_concept_index_worker_bg || true
     fi
+    log_von_version "$PORT"
 }
 
 stop_server() {

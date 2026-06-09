@@ -1889,6 +1889,24 @@ function Test-VonHealthEndpoint($Port) {
     return [bool]($probe -and $probe.Healthy)
 }
 
+function Write-VonVersionLog {
+    param([int]$TargetPort = $Port)
+    $probe = Get-VonHealthProbe -Port $TargetPort
+    $version = $null
+    try {
+        if ($probe -and $probe.Payload -and $probe.Payload.version) {
+            $version = [string]$probe.Payload.version
+        }
+    }
+    catch { $version = $null }
+    if ($version) {
+        Write-LauncherLog "Von version: $version"
+    }
+    else {
+        Write-LauncherLog "Von version: unavailable (/health did not report version)."
+    }
+}
+
 function Test-AgentTestHealthProbe {
     param(
         [Parameter(Mandatory = $true)]$Probe,
@@ -2492,6 +2510,7 @@ function Start-VonServer {
         if (-not $script:NoBrowser) {
             Open-VonBrowserIfNeeded -TargetPort $existingPort | Out-Null
         }
+        Write-VonVersionLog -TargetPort $existingPort
         return
     }
     if ($RestartTakeover) {
@@ -2518,6 +2537,7 @@ function Start-VonServer {
             if (-not $script:NoBrowser) {
                 Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
             }
+            Write-VonVersionLog -TargetPort $Port
             return
         }
         elseif ($currentPidInFile -ne $listener.Id) {
@@ -2530,6 +2550,7 @@ function Start-VonServer {
             if (-not $script:NoBrowser) {
                 Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
             }
+            Write-VonVersionLog -TargetPort $Port
             return
         }
     }
@@ -2822,6 +2843,7 @@ print(process.pid)
         try { Invoke-RelationCoverageSummary } catch { Write-LauncherLog "[relation-coverage] ERROR: $($_.Exception.Message)" }
     }
     Invoke-VonStartupBackgroundServices
+    Write-VonVersionLog -TargetPort $Port
 }
 
 function Stop-VonServer {
