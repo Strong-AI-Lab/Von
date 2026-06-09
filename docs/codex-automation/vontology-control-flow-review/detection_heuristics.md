@@ -168,6 +168,11 @@ represented authority before filing Jira work.
   represented fast-path evaluator can be support-only only when policy,
   eligibility, and authority source come from represented metadata and absence
   fails closed or falls through to the selector LLM.
+- Operational diagnostic review services with thresholds, categories, and Jira
+  task text are watch items rather than automatic drift when they are read-only,
+  operator-scoped, and do not feed Von's workflow/prompt/model learning loops.
+  File when those rubrics become recurring workflow policy, user-visible answer
+  semantics, or durable learning/evaluation authority without representation.
 
 ## Recent Examples
 

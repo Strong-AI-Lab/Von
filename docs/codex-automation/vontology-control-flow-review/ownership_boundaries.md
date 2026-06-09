@@ -204,6 +204,10 @@ Python can remain the surface for:
   policy metadata, candidate coverage, and authority provenance, then apply the
   represented decision or fail closed without authoring fallback policy;
 - generic HTTP/request plumbing that passes represented decisions through.
+- read-only operational diagnostics and Jira triage tooling that computes
+  bounded engineering metrics, redacts evidence, and prepares human-review
+  tasks, provided it does not become recurring workflow policy, user-facing Von
+  answer semantics, or prompt/model/workflow learning authority.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
 not normal runtime authority after Vontology authority exists.
