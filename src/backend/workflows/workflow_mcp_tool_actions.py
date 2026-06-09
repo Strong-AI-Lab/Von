@@ -19,7 +19,7 @@ from .action_registry import (
     WorkflowActionResult,
 )
 from .mcp_tool_bridge import (
-    apply_namespace_to_mcp_payload,
+    apply_runtime_defaults_to_mcp_payload,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -361,10 +361,14 @@ def _handle_workflow_mcp_invoke_tool(
                 },
             )
 
-        apply_namespace_to_mcp_payload(
+        apply_runtime_defaults_to_mcp_payload(
             payload,
+            tool_name=resolved_tool_name,
             input_schema=getattr(method_definition, "input_schema", None),
             user_namespace=getattr(request.environment, "user_namespace", None),
+            default_gmail_profile=getattr(
+                request.environment, "default_gmail_profile", None
+            ),
         )
 
         if _runtime_write_policy_missing(

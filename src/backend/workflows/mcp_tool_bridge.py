@@ -7,6 +7,10 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 from .action_registry import WorkflowActionResult
+from ..integrations.internal_mcp.schemas import (
+    coerce_payload_types,
+    normalise_payload_aliases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +112,55 @@ def mcp_input_schema_accepts_namespace(input_schema: Any) -> bool:
     )
 
 
+def _mcp_schema_fields(input_schema: Any) -> set[str]:
+    if input_schema is None:
+        return set()
+
+    fields: set[str] = set()
+    properties = (
+        input_schema.get("properties") if isinstance(input_schema, Mapping) else None
+    )
+    if isinstance(properties, Mapping):
+        fields.update(str(key) for key in properties.keys() if str(key).strip())
+
+    required = (
+        input_schema.get("required")
+        if isinstance(input_schema, Mapping)
+        else getattr(input_schema, "required", None)
+    )
+    optional = (
+        input_schema.get("optional")
+        if isinstance(input_schema, Mapping)
+        else getattr(input_schema, "optional", None)
+    )
+    for value in (required, optional):
+        if isinstance(value, Mapping):
+            fields.update(str(key) for key in value.keys() if str(key).strip())
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            fields.update(str(item) for item in value if str(item).strip())
+    return fields
+
+
+def mcp_input_schema_accepts_field(input_schema: Any, field_name: str) -> bool:
+    """Return whether an MCP input schema can receive ``field_name``."""
+
+    cleaned_field_name = str(field_name or "").strip()
+    if not cleaned_field_name:
+        return False
+    if input_schema is None:
+        return True
+    if bool(getattr(input_schema, "allow_unknown", False)):
+        return True
+    if isinstance(input_schema, Mapping) and (
+        bool(input_schema.get("allow_unknown"))
+        or bool(input_schema.get("additionalProperties"))
+    ):
+        return True
+    return cleaned_field_name in _mcp_schema_fields(input_schema)
+
+
 def mcp_method_accepts_namespace(method_definition: Any) -> bool:
     """Return whether a resolved MCP method can receive ``namespace``."""
 
@@ -118,6 +171,115 @@ def mcp_method_accepts_namespace(method_definition: Any) -> bool:
     return mcp_input_schema_accepts_namespace(
         getattr(method_definition, "input_schema", None)
     )
+
+
+def apply_runtime_defaults_to_mcp_payload(
+    payload: MutableMapping[str, Any],
+    *,
+    tool_name: str,
+    input_schema: Any,
+    user_namespace: str | None,
+    default_gmail_profile: str | None,
+    strip_unknown_fields: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply generic runtime defaults and schema hygiene before MCP dispatch."""
+
+    bindings: list[dict[str, Any]] = []
+    schema_fields = _mcp_schema_fields(input_schema)
+
+    if input_schema is not None:
+        try:
+            _, alias_warnings = normalise_payload_aliases(input_schema, payload)
+        except Exception:
+            alias_warnings = []
+        for warning in alias_warnings:
+            bindings.append(
+                {
+                    "field": "",
+                    "source": "schema_alias",
+                    "value_present": True,
+                    "warning": warning,
+                }
+            )
+
+    if str(tool_name or "").strip().startswith("gmail_") and mcp_input_schema_accepts_field(
+        input_schema, "profile"
+    ):
+        default_profile = (
+            str(default_gmail_profile or "").strip()
+            if isinstance(default_gmail_profile, str)
+            else ""
+        )
+        current_profile = payload.get("profile")
+        current_profile_text = (
+            str(current_profile or "").strip()
+            if isinstance(current_profile, str)
+            else ""
+        )
+        if default_profile and (
+            not current_profile_text
+            or (
+                current_profile_text in {"default", "primary"}
+                and default_profile != current_profile_text
+            )
+        ):
+            payload["profile"] = default_profile
+            bindings.append(
+                {
+                    "field": "profile",
+                    "source": (
+                        "default_gmail_profile_placeholder_replacement"
+                        if current_profile_text in {"default", "primary"}
+                        else "default_gmail_profile"
+                    ),
+                    "value_present": True,
+                }
+            )
+
+    namespace_binding = apply_namespace_to_mcp_payload(
+        payload,
+        input_schema=input_schema,
+        user_namespace=user_namespace,
+    )
+    if namespace_binding is not None:
+        bindings.append(namespace_binding)
+
+    if input_schema is not None:
+        try:
+            _, coercion_warnings = coerce_payload_types(input_schema, payload)
+        except Exception:
+            coercion_warnings = []
+        for warning in coercion_warnings:
+            bindings.append(
+                {
+                    "field": "",
+                    "source": "schema_type_coercion",
+                    "value_present": True,
+                    "warning": warning,
+                }
+            )
+
+    if strip_unknown_fields and input_schema is not None:
+        allow_unknown = bool(getattr(input_schema, "allow_unknown", False))
+        if isinstance(input_schema, Mapping):
+            allow_unknown = allow_unknown or bool(
+                input_schema.get("allow_unknown")
+                or input_schema.get("additionalProperties")
+            )
+        if not allow_unknown and schema_fields:
+            for key in list(payload.keys()):
+                if key in schema_fields:
+                    continue
+                payload.pop(key, None)
+                bindings.append(
+                    {
+                        "field": key,
+                        "source": "removed_for_strict_tool_schema",
+                        "value_present": False,
+                    }
+                )
+
+    return bindings
 
 
 def apply_namespace_to_mcp_payload(
@@ -237,8 +399,10 @@ def _workflow_visible_mcp_payload(
 
 
 __all__ = [
+    "apply_runtime_defaults_to_mcp_payload",
     "apply_namespace_to_mcp_payload",
     "candidate_internal_mcp_tool_names",
+    "mcp_input_schema_accepts_field",
     "mcp_input_schema_accepts_namespace",
     "mcp_method_accepts_namespace",
     "resolve_internal_mcp_tool_name",

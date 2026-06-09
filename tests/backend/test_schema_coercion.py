@@ -329,6 +329,42 @@ def test_preflight_emits_contract_validation_diagnostics() -> None:
     assert diagnostic["contract"]["input_schema"]["additionalProperties"] is False
 
 
+def test_preflight_replaces_gmail_primary_placeholder_with_selected_profile() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    catalogue = {
+        "gmail_list_messages": {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages.",
+            "input_schema": {
+                "required": {"profile": str},
+                "optional": {"max_results": int},
+                "allow_unknown": False,
+                "description": "Gmail list arguments",
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+    tool_calls = orchestrator._extract_tool_calls(
+        (
+            '{"action":"call_tool","tool":"gmail_list_messages",'
+            '"payload":{"profile":"primary","max_results":6}}'
+        )
+    )
+
+    preflight = orchestrator._preflight_tool_calls(
+        tool_calls or [],
+        catalogue,
+        allowed_tool_names=None,
+        user_namespace="#V#test_user",
+        selected_gmail_profile="zhan-gmail",
+    )
+
+    assert preflight.errors == []
+    assert tool_calls is not None
+    assert tool_calls[0]["payload"]["profile"] == "zhan-gmail"
+
+
 def test_tool_call_repair_prompt_receives_selected_contract() -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
     captured: dict[str, str] = {}

@@ -1979,6 +1979,7 @@ def _run_generate_background(
     base_url: str,
     prompt: str,
     model: str | None,
+    gmail_profile: str | None,
     presenter_mode: bool,
     timeout_seconds: float,
     poll_interval_seconds: float,
@@ -1992,6 +1993,9 @@ def _run_generate_background(
     cleaned_model = _safe_text(model)
     if cleaned_model:
         request_payload["model"] = cleaned_model
+    cleaned_gmail_profile = _safe_text(gmail_profile)
+    if cleaned_gmail_profile:
+        request_payload["gmail_profile"] = cleaned_gmail_profile
     if presenter_mode:
         request_payload["presenter_mode"] = True
     model_provider = _infer_provider_from_model_identifier(cleaned_model)
@@ -3297,6 +3301,7 @@ def _run_prompt_replay_arm(
     seed: int | None,
     arm_metadata: Mapping[str, Any] | None,
     presenter_mode: bool,
+    gmail_profile: str | None,
 ) -> dict[str, Any]:
     session = requests.Session()
     session_name = _build_arm_session_name(
@@ -3321,6 +3326,7 @@ def _run_prompt_replay_arm(
         base_url=base_url,
         prompt=_safe_text(prompt_entry.get("prompt")),
         model=requested_model,
+        gmail_profile=gmail_profile,
         presenter_mode=presenter_mode,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -3472,6 +3478,7 @@ def _run_replay_plan(
     base_prompt_id: str | None,
     prompt_variant_ids: Sequence[Any],
     presenter_mode: bool,
+    gmail_profile: str | None,
 ) -> tuple[dict[str, Any], bool]:
     if len(replay_arms) == 1:
         summary = _run_prompt_replay_arm(
@@ -3489,6 +3496,7 @@ def _run_replay_plan(
             seed=seed,
             arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
             presenter_mode=presenter_mode,
+            gmail_profile=gmail_profile,
         )
         should_user_be_happy = bool(
             _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
@@ -3511,6 +3519,7 @@ def _run_replay_plan(
             seed=seed,
             arm_metadata=arm,
             presenter_mode=presenter_mode,
+            gmail_profile=gmail_profile,
         )
         for arm in replay_arms
     ]
@@ -4231,6 +4240,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Send presenter_mode=true to /von/generate to match the browser chat path.",
     )
+    parser.add_argument(
+        "--gmail-profile",
+        default="",
+        help=(
+            "Optional configured Gmail profile alias to send to /von/generate "
+            "for Gmail-backed replay prompts."
+        ),
+    )
     parser.add_argument("--list-prompts", action="store_true")
     parser.add_argument("--list-complexity-classes", action="store_true")
     args = parser.parse_args(argv)
@@ -4287,6 +4304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     base_url = resolve_live_test_base_url(args.base_url)
     requested_model = _safe_text(args.model) or None
+    requested_gmail_profile = _safe_text(args.gmail_profile) or None
     compare_models = [
         cleaned
         for entry in _as_list(args.compare_models)
@@ -4483,6 +4501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_prompt_id=base_prompt_id,
                 prompt_variant_ids=prompt_variant_ids,
                 presenter_mode=bool(args.presenter_mode),
+                gmail_profile=requested_gmail_profile,
             )
         except Exception as exc:
             summary = _build_failed_replay_attempt_summary(
@@ -4515,6 +4534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     base_prompt_id=base_prompt_id,
                     prompt_variant_ids=prompt_variant_ids,
                     presenter_mode=bool(args.presenter_mode),
+                    gmail_profile=requested_gmail_profile,
                 )
                 attempt_summary = {
                     **attempt_summary,

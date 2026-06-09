@@ -26,7 +26,7 @@ from ..engine import WorkflowDefinition
 from ..workflow_registry import LazyWorkflowRegistration, WorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import (
-    apply_namespace_to_mcp_payload,
+    apply_runtime_defaults_to_mcp_payload,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -645,10 +645,16 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             or tool_name
         )
         method_definition = gateway.get_method_definition(resolved_tool_name)
-        apply_namespace_to_mcp_payload(
+        apply_runtime_defaults_to_mcp_payload(
             payload,
+            tool_name=resolved_tool_name,
             input_schema=getattr(method_definition, "input_schema", None),
             user_namespace=getattr(environment, "user_namespace", None),
+            default_gmail_profile=getattr(environment, "default_gmail_profile", None),
+            strip_unknown_fields=(
+                str(getattr(request, "workflow_state_id", "") or "").strip()
+                == "apply_recovery_tool_batch"
+            ),
         )
         blocked_result = enforce_workflow_mcp_write_guardrails(
             request=request,

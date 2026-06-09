@@ -18,6 +18,10 @@ from ..action_registry import (
     WorkflowActionResult,
     WorkflowActionRequest,
 )
+from ..mcp_tool_bridge import (
+    apply_runtime_defaults_to_mcp_payload,
+    resolve_internal_mcp_tool_name,
+)
 from ..subworkflow_contracts import WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
 from ..workflow_selector import build_selector_call_prompt
 from .turn_execution_runtime_support import (
@@ -121,6 +125,51 @@ def _is_disallowed_direct_tool_batch_action(tool_name: str | None) -> bool:
     return any(
         cleaned.startswith(prefix)
         for prefix in _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_PREFIXES
+    )
+
+
+def _prepare_recovery_tool_payload(
+    *,
+    request: WorkflowActionRequest,
+    tool_name: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    gateway = getattr(request.environment, "gateway", None)
+    if gateway is None:
+        return apply_runtime_defaults_to_mcp_payload(
+            payload,
+            tool_name=tool_name,
+            input_schema=None,
+            user_namespace=getattr(request.environment, "user_namespace", None),
+            default_gmail_profile=getattr(
+                request.environment, "default_gmail_profile", None
+            ),
+        )
+
+    try:
+        available_tool_names = tuple(gateway.describe_methods().keys())
+    except Exception:
+        available_tool_names = ()
+    resolved_tool_name = (
+        resolve_internal_mcp_tool_name(
+            tool_name,
+            available_tool_names=available_tool_names,
+        )
+        or tool_name
+    )
+    try:
+        method_definition = gateway.get_method_definition(resolved_tool_name)
+    except Exception:
+        method_definition = None
+    return apply_runtime_defaults_to_mcp_payload(
+        payload,
+        tool_name=resolved_tool_name,
+        input_schema=getattr(method_definition, "input_schema", None),
+        user_namespace=getattr(request.environment, "user_namespace", None),
+        default_gmail_profile=getattr(
+            request.environment, "default_gmail_profile", None
+        ),
+        strip_unknown_fields=True,
     )
 
 
@@ -855,6 +904,11 @@ def _build_turn_execution_execute_tool_batch_handler(
                     }
                 )
                 continue
+            payload_bindings = _prepare_recovery_tool_payload(
+                request=request,
+                tool_name=tool_name or "",
+                payload=payload,
+            )
 
             tool_context = {
                 str(key): value
@@ -892,6 +946,8 @@ def _build_turn_execution_execute_tool_batch_handler(
                 "payload": _bounded_snapshot(payload),
                 "status": "ok" if result.ok else "failed",
             }
+            if payload_bindings:
+                record["payload_bindings"] = _bounded_snapshot(payload_bindings)
             if result.duration_ms is not None:
                 record["duration_ms"] = float(result.duration_ms)
             if result_summary:

@@ -20434,12 +20434,33 @@ class InternalMCPChatOrchestrator:
     ) -> list[dict[str, Any]]:
         bindings: list[dict[str, Any]] = []
         if tool_name.startswith("gmail_"):
-            if not payload.get("profile") and selected_gmail_profile:
+            profile_value = payload.get("profile")
+            profile_text = (
+                str(profile_value or "").strip()
+                if isinstance(profile_value, str)
+                else ""
+            )
+            selected_profile_text = (
+                str(selected_gmail_profile or "").strip()
+                if isinstance(selected_gmail_profile, str)
+                else ""
+            )
+            if selected_profile_text and (
+                not profile_text
+                or (
+                    profile_text in {"default", "primary"}
+                    and selected_profile_text != profile_text
+                )
+            ):
                 payload["profile"] = selected_gmail_profile
                 bindings.append(
                     {
                         "field": "profile",
-                        "source": "selected_gmail_profile",
+                        "source": (
+                            "selected_gmail_profile_placeholder_replacement"
+                            if profile_text in {"default", "primary"}
+                            else "selected_gmail_profile"
+                        ),
                         "value_present": True,
                     }
                 )
