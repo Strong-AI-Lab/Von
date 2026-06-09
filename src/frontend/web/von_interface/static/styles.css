@@ -12738,17 +12738,15 @@ body.settings-body {
 .settings-model-select-row {
     align-items: center;
     gap: 8px;
+    --settings-model-control-height: 40px;
 }
 
 .settings-model-select-row #globalModelSelect {
     box-sizing: border-box;
     flex: 1 1 260px;
+    height: var(--settings-model-control-height);
     margin-bottom: 0;
     min-width: 0;
-}
-
-.settings-model-refresh-button {
-    flex: 0 0 24px;
 }
 
 .inline-form {
@@ -12843,6 +12841,14 @@ body.settings-body {
 /* Expand/collapse icon variants (placeholder if using same SVG) */
 .round-icon-button[data-icon="collapse"] svg {
     transform: rotate(180deg);
+}
+
+.settings-model-select-row .settings-model-refresh-button {
+    border-radius: 4px;
+    flex: 0 0 var(--settings-model-control-height);
+    height: var(--settings-model-control-height);
+    margin-bottom: 0;
+    width: var(--settings-model-control-height);
 }
 
 .text-block-actions {
