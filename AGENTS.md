@@ -219,6 +219,7 @@ Verify all of the following:
 - create or switch to the task branch
 - transition the Jira issue to `In Progress`
 - when creating Jira issues on the user's behalf, assign them to the authenticated Jira user by default unless the user explicitly asks for a different assignee or Jira refuses the assignment
+- when creating Jira Task issues, attach each one to the most appropriate active Epic before finishing creation. Use related issues, sibling tasks, and existing epic summaries/descriptions as evidence. If no appropriate epic exists, create or request the needed epic, or record a clear reason why the task is deliberately unparented.
 - review task age, linked issues, and likely staleness
 - before implementing a Jira task that will make a significant architectural or other significant change, perform and record a bounded staleness/implementability review: confirm the live code path and current line ranges, identify meaningful since-ticket changes, check the present targeted test/validation surface, and update the Jira task wording or linked precondition tasks if the original framing is no longer accurate
 - identify the authoritative KB/workflow/prompt artefacts
@@ -247,6 +248,7 @@ Verify all of the following:
 - verify any required Vontology/workflow/KB state changes were actually
   materialised; repo-side support code alone is not sufficient closure evidence
 - review linked issues and update or transition them as justified
+- verify Jira Task issues created or materially groomed during the work have appropriate Epic parents. When the work involved Jira task creation or backlog grooming, re-query the touched project for Tasks with an empty parent and fix or explicitly justify any remaining unparented tasks.
 - merge to `main`, verify `origin/main` contains the intended commit(s), then close the Jira issue
 - finish branch/worktree hygiene for the completed task: fast-forward any retained local `main` worktree that is meant to track `origin/main`, move the current worktree off the completed task branch, and delete merged local/remote task branches unless there is a clearly recorded reason to keep them
 - complete the reflection pass
