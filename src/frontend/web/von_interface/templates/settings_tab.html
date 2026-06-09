@@ -316,9 +316,21 @@
 
             <!-- Model Selection -->
             <label for="globalModelSelect">Global Ollama Model:</label>
-            <select id="globalModelSelect" name="global_ollama_model">
-                <option value="">Loading models...</option>
-            </select>
+            <div class="inline-form inline-form-tight settings-model-select-row">
+                <select id="globalModelSelect" name="global_ollama_model" class="flex-1">
+                    <option value="">Loading models...</option>
+                </select>
+                <button id="refreshOllamaModelsButton" class="round-icon-button settings-model-refresh-button"
+                    type="button" title="Refresh Ollama model list" aria-label="Refresh Ollama model list">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 6v5h-5"></path>
+                        <path d="M4 18v-5h5"></path>
+                        <path d="M18.2 9A7 7 0 0 0 6.3 7.6L4 10"></path>
+                        <path d="M5.8 15A7 7 0 0 0 17.7 16.4L20 14"></path>
+                    </svg>
+                </button>
+            </div>
             <div class="inline-form inline-form-tight mt-2">
                 <button id="testOllamaModelButton" class="btn-secondary" type="button">Test Selected Model</button>
             </div>

@@ -1,6 +1,7 @@
 /** @jest-environment jsdom */
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
+    getJsonDetailed: jest.fn(),
     postJson: jest.fn(),
     getWindowSessionId: jest.fn(() => 'test-window-session'),
     WINDOW_SESSION_HEADER: 'X-Von-Window-Session',
@@ -14,7 +15,9 @@ describe('settingsPage Ollama model probe', () => {
             <select id="globalModelSelect">
                 <option value="http://localhost:11434:llama3.1:8b" data-host-url="http://localhost:11434" data-model-name="llama3.1:8b" selected>localhost - llama3.1:8b</option>
             </select>
+            <button id="refreshOllamaModelsButton" type="button"></button>
             <div id="ollamaModelStatusMessage" class="status-message"></div>
+            <div id="settingsStatusMessage" class="status-message"></div>
         `;
     });
 
@@ -113,5 +116,34 @@ describe('settingsPage Ollama model probe', () => {
         expect(document.getElementById('ollamaModelStatusMessage').textContent).toContain(
             'llama3.1:8b is selected as the active local Ollama model',
         );
+    });
+
+    test('refreshes the Ollama dropdown through the cache-bypass endpoint', async () => {
+        const { getJsonDetailed } = await import('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getJsonDetailed.mockResolvedValue({
+            data: {
+                success: true,
+                models: [
+                    {
+                        host_url: 'http://localhost:11434',
+                        name: 'llama3.1:8b',
+                        display_name: 'localhost - llama3.1:8b',
+                    },
+                ],
+            },
+        });
+        const {
+            __testOnly_refreshOllamaModelDropdown,
+        } = await import('../../src/frontend/web/von_interface/static/js/settingsPage.js');
+
+        const result = await __testOnly_refreshOllamaModelDropdown();
+
+        expect(getJsonDetailed).toHaveBeenCalledWith('/api/settings/ollama/models?nocache=true');
+        expect(result).toMatchObject({ success: true });
+        expect(document.getElementById('globalModelSelect').value).toBe(
+            'http://localhost:11434:llama3.1:8b',
+        );
+        expect(document.getElementById('refreshOllamaModelsButton').disabled).toBe(false);
+        expect(document.getElementById('refreshOllamaModelsButton').classList.contains('loading')).toBe(false);
     });
 });

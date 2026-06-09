@@ -1145,6 +1145,57 @@ async function testSelectedOllamaModel() {
   return latestOllamaModelProbe;
 }
 
+async function refreshOllamaModelDropdown() {
+  const refreshButton = document.getElementById('refreshOllamaModelsButton');
+  const statusEl = document.getElementById('ollamaModelStatusMessage');
+  const localModelPreference = getEffectiveLocalModelPreference();
+  const currentSelection = resolveOllamaSelection(false);
+  const selectedValue = currentSelection?.value
+    || resolveOllamaDropdownSelectionValue(localModelPreference);
+
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.classList.add('loading');
+  }
+  setInlineStatusMessage(statusEl, 'Refreshing Ollama model list...', null);
+
+  try {
+    const models = await populateModelDropdown(
+      'globalModelSelect',
+      selectedValue,
+      { bypassCache: true },
+    );
+    latestOllamaModelProbe = null;
+
+    const refreshedSelection = resolveOllamaSelection(false);
+    if (refreshedSelection) {
+      setStoredOllamaSelection(refreshedSelection);
+    }
+
+    updateOllamaModelStatusMessage();
+    refreshActiveSettingsConcernGuidance();
+
+    if (models === null) {
+      showStatusMessage('settingsStatusMessage', 'Failed to refresh Ollama model list.', true);
+      return { success: false, models: [] };
+    }
+
+    showStatusMessage(
+      'settingsStatusMessage',
+      models.length
+        ? 'Ollama model list refreshed.'
+        : 'Ollama model list refreshed, but no models were returned.',
+      false,
+    );
+    return { success: true, models };
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.classList.remove('loading');
+    }
+  }
+}
+
 function resolveActiveLlmFromSelections(
   enabledLlms,
   preferredProvider = null,
@@ -2727,6 +2778,10 @@ export async function __testOnly_testSelectedOllamaModel() {
   return testSelectedOllamaModel();
 }
 
+export async function __testOnly_refreshOllamaModelDropdown() {
+  return refreshOllamaModelDropdown();
+}
+
 export function __testOnly_resolveOllamaDropdownSelectionValue(preference) {
   return resolveOllamaDropdownSelectionValue(preference);
 }
@@ -3294,6 +3349,7 @@ if (autoReloadToggle) {
 document.getElementById('addOllamaHostButton')?.addEventListener('click', addOllamaHost);
 document.getElementById('refreshOllamaHostsButton')?.addEventListener('click', refreshOllamaHostsFromEnvironment);
 document.getElementById('loadOllamaModelsButton')?.addEventListener('click', loadOllamaModels);
+document.getElementById('refreshOllamaModelsButton')?.addEventListener('click', refreshOllamaModelDropdown);
 
 // Other event listeners
 document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', verifyOpenAiApiKey);
@@ -4508,17 +4564,7 @@ async function refreshOllamaHostsFromEnvironment() {
 }
 
 async function loadOllamaModels() {
-  try {
-    showStatusMessage('settingsStatusMessage', 'Loading models from all Ollama hosts...');
-
-    // Refresh the model dropdown with latest data
-    await populateModelDropdown('globalModelSelect');
-
-    showStatusMessage('settingsStatusMessage', 'Successfully loaded models from all hosts');
-  } catch (err) {
-    console.error('Error loading Ollama models:', err);
-    showStatusMessage('settingsStatusMessage', 'Error loading models', true);
-  }
+  await refreshOllamaModelDropdown();
 }
 
 // ---------------- Salient inheritance recompute admin actions ----------------

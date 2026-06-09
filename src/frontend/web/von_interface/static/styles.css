@@ -12735,6 +12735,22 @@ body.settings-body {
     margin-bottom: 15px;
 }
 
+.settings-model-select-row {
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-model-select-row #globalModelSelect {
+    box-sizing: border-box;
+    flex: 1 1 260px;
+    margin-bottom: 0;
+    min-width: 0;
+}
+
+.settings-model-refresh-button {
+    flex: 0 0 24px;
+}
+
 .inline-form {
     display: flex;
     align-items: center;

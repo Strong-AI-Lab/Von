@@ -5,6 +5,7 @@ jest.mock('../apiService.js', () => ({
 
 import {
     loadAndRenderOllamaHosts,
+    populateModelDropdown,
     populateOpenAIModelDropdown,
     populatePeopleDropdown,
 } from '../settings.js';
@@ -106,5 +107,32 @@ describe('settings retryable load states', () => {
         expect(hostsList.textContent).toContain('temporarily unavailable');
         expect(hostsList.textContent).not.toContain('No Ollama hosts configured');
         expect(hostsList.querySelector('button')?.textContent).toBe('Retry host load');
+    });
+
+    test('manual Ollama model refresh bypasses the settings route cache', async () => {
+        document.body.innerHTML = '<select id="globalModelSelect"></select>';
+        getJsonDetailed.mockResolvedValueOnce({
+            data: {
+                success: true,
+                models: [
+                    {
+                        host_url: 'http://localhost:11434',
+                        name: 'llama3.1:8b',
+                        display_name: 'localhost - llama3.1:8b',
+                    },
+                ],
+            },
+        });
+
+        await populateModelDropdown(
+            'globalModelSelect',
+            'http://localhost:11434:llama3.1:8b',
+            { bypassCache: true },
+        );
+
+        expect(getJsonDetailed).toHaveBeenCalledWith('/api/settings/ollama/models?nocache=true');
+        expect(document.getElementById('globalModelSelect').value).toBe(
+            'http://localhost:11434:llama3.1:8b',
+        );
     });
 });

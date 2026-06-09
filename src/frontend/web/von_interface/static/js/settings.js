@@ -11,8 +11,11 @@ export async function loadAvailableModels() {
   return data;
 }
 
-export async function loadOllamaModelsFromAllHosts() {
-  const { data } = await getJsonDetailed('/api/settings/ollama/models');
+export async function loadOllamaModelsFromAllHosts(options = {}) {
+  const endpoint = options?.bypassCache
+    ? '/api/settings/ollama/models?nocache=true'
+    : '/api/settings/ollama/models';
+  const { data } = await getJsonDetailed(endpoint);
   return data?.models || [];
 }
 
@@ -198,13 +201,13 @@ function renderRetryablePanelFailure(container, {
   }
 }
 
-export async function populateModelDropdown(selectElementId, selectedModel = null) {
+export async function populateModelDropdown(selectElementId, selectedModel = null, options = {}) {
   const select = document.getElementById(selectElementId);
-  if (!select) return;
+  if (!select) return [];
 
   try {
     // Load models from all hosts with host information
-    const modelsWithHosts = await loadOllamaModelsFromAllHosts();
+    const modelsWithHosts = await loadOllamaModelsFromAllHosts(options);
     select.innerHTML = '<option value="">Select an Ollama Model</option>';
 
     if (modelsWithHosts?.length > 0) {
@@ -236,13 +239,15 @@ export async function populateModelDropdown(selectElementId, selectedModel = nul
       }
     }
     clearSelectRetryState(select);
+    return modelsWithHosts || [];
   } catch (err) {
     console.error('Error populating Ollama model dropdown:', err);
     renderRetryableSelectFailure(select, {
       error: err,
       fallbackMessage: 'Ollama models are temporarily unavailable.',
-      retryAction: () => populateModelDropdown(selectElementId, selectedModel)
+      retryAction: () => populateModelDropdown(selectElementId, selectedModel, options)
     });
+    return null;
   }
 }
 
