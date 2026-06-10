@@ -1033,6 +1033,107 @@ def test_structured_calling_passes_capped_tool_list_to_llm():
     assert "planner_shortlist_cap_applied:16" in selection_logs[0]["warnings"]
 
 
+def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
+    """Structured planning should use the same per-turn timeout as legacy LLM calls."""
+
+    class _CapturingLLM:
+        def _should_use_structured_calling(self) -> bool:
+            return True
+
+        def generate_with_tools(
+            self,
+            prompt: str,
+            available_tools: List[ToolDefinition],
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model: Optional[str] = None,
+            system_message: Optional[str] = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            return LLMResponse(text_response="Direct response", tool_calls=[])
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base.",
+            "input_schema": {"required": {"query": str}, "optional": {}},
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+    gateway.describe_methods.return_value = catalogue
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    captured: dict[str, Any] = {}
+
+    def _capture_heartbeat(**kwargs: Any) -> LLMResponse:
+        captured["timeout_override_sec"] = kwargs.get("timeout_override_sec")
+        captured["attempt_meta"] = dict(kwargs.get("attempt_meta") or {})
+        return kwargs["call"]()
+
+    cast(Any, orch)._invoke_with_llm_heartbeat = _capture_heartbeat
+    cast(Any, orch)._probe_model_candidate_reachability = lambda telemetry: {
+        "reachable": True
+    }
+    llm_client = _CapturingLLM()
+    cast(Any, orch)._stage_model_candidates = lambda **_kwargs: [
+        orchestrator_module._ModelCandidate(
+            provider="openai",
+            model="gpt-4",
+            raw="openai:gpt-4",
+            source="test",
+            host=None,
+        )
+    ]
+    cast(Any, orch)._create_client_for_candidate = (
+        lambda _candidate, **_kwargs: (
+            llm_client,
+            "gpt-4",
+            {
+                "provider": "openai",
+                "model": "gpt-4",
+                "source": "test",
+                "raw": "gpt-4",
+                "host": None,
+            },
+        )
+    )
+
+    llm_response, _, _ = orch._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="Search for the relevant concept.",
+        context=[],
+        tool_definitions=orch._convert_mcp_tools_to_structured_definitions(
+            method_catalogue=catalogue
+        ),
+        default_client=llm_client,
+        default_model="gpt-4",
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=[],
+        record_llm_call=lambda **_kwargs: None,
+        workflow_action_id="tool_calling.plan",
+        method_catalogue=catalogue,
+        required_prompt_tools=["search_knowledge_base"],
+        timeout_override_sec=120.0,
+    )
+
+    assert llm_response.text_response == "Direct response"
+    assert captured["timeout_override_sec"] == 120.0
+    assert captured["attempt_meta"]["timeout_override_sec"] == 120.0
+
+
 def test_structured_calling_forces_single_required_openai_tool():
     """A selected required tool should become provider-level tool_choice."""
 

@@ -7910,6 +7910,9 @@ class InternalMCPChatOrchestrator:
         has_valid_tool_call = False
         tool_call_parse_error: ToolCallParsingError | None = None
         interpretation = None
+        timeout_override_sec = _conversation_turn_llm_timeout_override_sec_from_data(
+            data
+        )
 
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
@@ -7954,6 +7957,7 @@ class InternalMCPChatOrchestrator:
                     required_prompt_tools=required_prompt_tools,
                     context_telemetry=tool_plan_context_telemetry,
                     prefer_default_model=bool(data.get("prefer_default_model")),
+                    timeout_override_sec=timeout_override_sec,
                     workflow_stage_id="tool_plan",
                     workflow_id=(
                         request.workflow_id
@@ -8002,6 +8006,7 @@ class InternalMCPChatOrchestrator:
                 emit_progress=emit_progress_cb,
                 context_telemetry=tool_plan_context_telemetry,
                 prefer_default_model=bool(data.get("prefer_default_model")),
+                timeout_override_sec=timeout_override_sec,
                 workflow_stage_id="tool_plan",
             )
             tool_calls = None
@@ -17552,6 +17557,8 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
+            if timeout_override_sec is not None:
+                attempt_meta["timeout_override_sec"] = timeout_override_sec
 
             if _dead_cache is not None and cache_key in _dead_cache:
                 dead_entry = _dead_cache[cache_key]
@@ -18306,6 +18313,7 @@ class InternalMCPChatOrchestrator:
         required_prompt_tools: Sequence[str] = (),
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
+        timeout_override_sec: float | None = None,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
         turn_model_failures: (
@@ -18409,6 +18417,8 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
+            if timeout_override_sec is not None:
+                attempt_meta["timeout_override_sec"] = timeout_override_sec
 
             if _dead_cache is not None and cache_key in _dead_cache:
                 dead_entry = _dead_cache[cache_key]
@@ -18697,6 +18707,7 @@ class InternalMCPChatOrchestrator:
                     model_name=model_name,
                     emit_progress=emit_progress,
                     attempt_meta=attempt_meta,
+                    timeout_override_sec=timeout_override_sec,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 first_output_at_utc = self._utc_now_iso()

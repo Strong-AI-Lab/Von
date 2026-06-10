@@ -396,6 +396,25 @@ def _derive_execution_signal_completion_blocker(
     ):
         failure_codes.insert(0, normalised_dispatch_terminal_failure_reason)
 
+    if any(code.lower() == "workflow_llm_step_timeout" for code in failure_codes):
+        decision_reason = (
+            dispatch_terminal_failure_detail
+            or "A workflow LLM stage timed out before execution evidence could be verified."
+        )
+        return {
+            "effect_id": "effect_workflow_llm_timeout_1",
+            "effect_type": "workflow_execution",
+            "status": "not_executed",
+            "status_reason": decision_reason,
+            "failure_code": "workflow_llm_step_timeout",
+            "failure_codes": ["workflow_llm_step_timeout"],
+            "decision": "escalation_required",
+            "decision_reason": decision_reason,
+            "repeat_eligible": False,
+            "source": "execution_signals",
+            "workflow_id": dispatch_workflow_id or None,
+        }
+
     effect_type = (
         "workflow_execution"
         if selected_execution_mode == "custom_workflow"

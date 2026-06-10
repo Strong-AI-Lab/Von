@@ -50,6 +50,8 @@ _CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
     {
         "expected_outcome_inference",
         "selector_decision",
+        "tool_plan",
+        "tool_planning",
         "recovery_decision",
     }
 )

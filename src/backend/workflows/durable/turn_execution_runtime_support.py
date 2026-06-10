@@ -279,6 +279,121 @@ def _normalise_string_list(raw_values: Any) -> list[str]:
     return normalised
 
 
+def _text_contains_workflow_llm_timeout(value: Any) -> bool:
+    text = _safe_str(value)
+    return bool(text and "workflow_llm_step_timeout" in text.lower())
+
+
+def _workflow_llm_timeout_blocker_from_turn_data(
+    *,
+    data: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Detect structured workflow-LLM timeouts that make completion unsafe."""
+
+    surfaces: list[Mapping[str, Any]] = [data]
+    if isinstance(record, Mapping):
+        surfaces.append(record)
+    for key in (
+        "completion_report",
+        "selected_workflow_trace",
+        "workflow_routing",
+        "workflow_routing_diagnostics",
+        "orchestrator_result",
+    ):
+        surface = data.get(key)
+        if isinstance(surface, Mapping):
+            surfaces.append(surface)
+
+    timeout_detail: str | None = None
+    timeout_stage: str | None = None
+    for surface in surfaces:
+        envelope = surface.get("llm_step_envelope")
+        if isinstance(envelope, Mapping):
+            completion_reason = (
+                _safe_str(envelope.get("completion_reason")) or ""
+            ).lower()
+            if completion_reason == "timeout" or _text_contains_workflow_llm_timeout(
+                envelope.get("timeout_detail")
+            ):
+                timeout_detail = (
+                    _safe_str(envelope.get("timeout_detail"))
+                    or "workflow_llm_step_timeout"
+                )
+                timeout_stage = (
+                    _safe_str(envelope.get("timeout_stage"))
+                    or _safe_str(envelope.get("stage"))
+                    or timeout_stage
+                )
+                break
+
+        for key in (
+            "error",
+            "failure_code",
+            "failure_reason",
+            "failure_detail",
+            "workflow_failure_detail",
+            "selected_workflow_failure_detail",
+            "llm_step_error",
+            "final_response",
+            "response_text",
+            "current_response",
+        ):
+            value = surface.get(key)
+            if _text_contains_workflow_llm_timeout(value):
+                timeout_detail = _safe_str(value)
+                timeout_stage = timeout_stage or _safe_str(surface.get("stage"))
+                break
+        if timeout_detail:
+            break
+
+    if not timeout_detail:
+        for collection_key in ("aux_llm_calls", "llm_calls", "workflow_events"):
+            collection = data.get(collection_key)
+            if not isinstance(collection, list):
+                continue
+            for item in collection:
+                if not isinstance(item, Mapping):
+                    continue
+                if (
+                    _text_contains_workflow_llm_timeout(item.get("error"))
+                    or _text_contains_workflow_llm_timeout(item.get("failure_code"))
+                    or _text_contains_workflow_llm_timeout(item.get("note"))
+                ):
+                    timeout_detail = (
+                        _safe_str(item.get("error"))
+                        or _safe_str(item.get("failure_code"))
+                        or _safe_str(item.get("note"))
+                    )
+                    timeout_stage = _safe_str(item.get("stage"))
+                    break
+            if timeout_detail:
+                break
+
+    if not timeout_detail:
+        return None
+
+    stage_suffix = f" ({timeout_stage})" if timeout_stage else ""
+    decision_reason = (
+        f"A workflow LLM stage{stage_suffix} timed out before execution evidence "
+        "could be verified."
+    )
+    return {
+        "effect_id": "effect_workflow_llm_timeout_1",
+        "effect_type": "workflow_execution",
+        "status": "not_executed",
+        "status_reason": decision_reason,
+        "failure_code": "workflow_llm_step_timeout",
+        "failure_codes": ["workflow_llm_step_timeout"],
+        "decision": "escalation_required",
+        "decision_reason": decision_reason,
+        "repeat_eligible": False,
+        "source": "workflow_llm_timeout",
+        "timeout_stage": timeout_stage,
+        "timeout_detail": timeout_detail,
+    }
+
+
 def _dedupe_string_sequence(raw_values: Any) -> list[str]:
     if not isinstance(raw_values, Sequence) or isinstance(
         raw_values, (str, bytes, bytearray)
@@ -2977,6 +3092,54 @@ def run_turn_execution_completion_gate(
         summary_raw = critic_payload.get("summary")
         postcondition_summary = summary_raw if isinstance(summary_raw, Mapping) else {}
 
+    workflow_llm_timeout_blocker = _workflow_llm_timeout_blocker_from_turn_data(
+        data=data,
+        record=record,
+    )
+    if workflow_llm_timeout_blocker:
+        execution_signal_blocker = dict(workflow_llm_timeout_blocker)
+        effect_id = _safe_str(workflow_llm_timeout_blocker.get("effect_id"))
+        if effect_id and effect_id not in blocking_effect_ids:
+            blocking_effect_ids.append(effect_id)
+        blocker_failure_codes = _normalise_string_list(
+            workflow_llm_timeout_blocker.get("failure_codes")
+        )
+        blocker_failure_code = _safe_str(
+            workflow_llm_timeout_blocker.get("failure_code")
+        )
+        if blocker_failure_code and blocker_failure_code not in blocker_failure_codes:
+            blocker_failure_codes.append(blocker_failure_code)
+        for code in blocker_failure_codes:
+            if code not in blocking_failure_codes:
+                blocking_failure_codes.append(code)
+        if effect_id and not any(
+            unresolved.get("effect_id") == effect_id
+            for unresolved in unresolved_preconditions
+            if isinstance(unresolved, Mapping)
+        ):
+            unresolved_preconditions.append(
+                {
+                    "effect_id": effect_id,
+                    "effect_type": _safe_str(
+                        workflow_llm_timeout_blocker.get("effect_type")
+                    ),
+                    "status": _safe_str(workflow_llm_timeout_blocker.get("status")),
+                    "status_reason": _safe_str(
+                        workflow_llm_timeout_blocker.get("status_reason")
+                    ),
+                    "failure_codes": blocker_failure_codes,
+                }
+            )
+        if decision == "completed" or not decision:
+            decision = (
+                _safe_str(workflow_llm_timeout_blocker.get("decision"))
+                or "escalation_required"
+            )
+        if not decision_reason:
+            decision_reason = _safe_str(
+                workflow_llm_timeout_blocker.get("decision_reason")
+            ) or ""
+
     if not blocking_failure_codes:
         for unresolved in unresolved_preconditions:
             if not isinstance(unresolved, Mapping):
@@ -3012,6 +3175,10 @@ def run_turn_execution_completion_gate(
     repeat_eligible = bool(
         completion_gate_payload.get("repeat_eligible", repeat_eligible_default)
     )
+    if workflow_llm_timeout_blocker:
+        safe_to_claim_completion = False
+        requires_follow_up = True
+        repeat_eligible = False
     loop_attempts = _coerce_non_negative_int(
         data.get("completion_gate_loop_attempts"),
         default=0,
@@ -3357,6 +3524,11 @@ def run_turn_execution_completion_gate(
             "blocking_effect_ids": list(blocking_effect_ids),
             "blocking_failure_codes": list(blocking_failure_codes),
             "unresolved_preconditions": unresolved_preconditions,
+            "execution_signal_blocker": (
+                dict(execution_signal_blocker)
+                if isinstance(execution_signal_blocker, Mapping)
+                else {}
+            ),
             "postcondition_summary": (
                 dict(postcondition_summary)
                 if isinstance(postcondition_summary, Mapping)

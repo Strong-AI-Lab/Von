@@ -2002,6 +2002,44 @@ def test_build_turn_execution_correctness_summary_marks_submission_failure_false
     assert summary["metric_labels"]["false_success"] is True
 
 
+def test_build_turn_execution_correctness_summary_marks_workflow_llm_timeout_false_success() -> (
+    None
+):
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "decision_reason": "No blocking effect detected.",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={
+            "completion_claim_detected": True,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#conversation_turn_execution_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "workflow_owned",
+        },
+        workflow_routing_diagnostics={
+            "dispatch": {
+                "selected_execution_mode": "custom_workflow",
+                "dispatch_workflow_id": "#V#conversation_turn_execution_workflow",
+                "failure_codes": ["workflow_llm_step_timeout"],
+                "dispatch_terminal_failure_detail": (
+                    "LLM call timed out before workflow execution evidence was available."
+                ),
+            }
+        },
+    )
+
+    assert summary["failure_mode"] == "false_completion_gate_state"
+    assert summary["overall_outcome"] == "false_success"
+    assert summary["metric_labels"]["false_success"] is True
+
+
 def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_false_success() -> (
     None
 ):

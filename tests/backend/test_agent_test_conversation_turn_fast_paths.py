@@ -1053,6 +1053,71 @@ def test_completion_gate_removes_stale_ledger_suffix_when_completion_is_safe(
     )
 
 
+def test_completion_gate_blocks_workflow_llm_timeout_with_zero_required_effects(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM()),
+        data={
+            "final_response": (
+                "workflow_llm_step_timeout:LLM call timed out after 45s "
+                "(stage=planner, model=qwen3:8b)"
+            ),
+            "llm_step_envelope": {
+                "completion_reason": "timeout",
+                "timeout_stage": "tool_calling.plan",
+                "timeout_detail": (
+                    "LLM call timed out after 45s "
+                    "(stage=planner, model=qwen3:8b)"
+                ),
+            },
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "completed",
+                    "safe_to_claim_completion": True,
+                    "requires_follow_up": False,
+                    "evidence_payload": {"required_effect_count": 0},
+                },
+                "required_effects": [],
+                "critic": {"summary": {}},
+            },
+            "aux_llm_calls": [],
+            "invocations": [],
+        },
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate_blocks_workflow_llm_timeout",
+        introspection_auto_apply_env="VON_TEST_AUTO_APPLY",
+    )
+
+    assert result.status == "success"
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert result.outputs["completion_gate_repeat_eligible"] is False
+    assert (
+        "workflow_llm_step_timeout"
+        in result.outputs["completion_gate_blocking_failure_codes"]
+    )
+    assert result.outputs["completion_gate_unresolved_preconditions"] == [
+        {
+            "effect_id": "effect_workflow_llm_timeout_1",
+            "effect_type": "workflow_execution",
+            "status": "not_executed",
+            "status_reason": (
+                "A workflow LLM stage (tool_calling.plan) timed out before "
+                "execution evidence could be verified."
+            ),
+            "failure_codes": ["workflow_llm_step_timeout"],
+        }
+    ]
+    evidence = result.outputs["completion_gate_evidence_payload"]
+    assert evidence["execution_signal_blocker"]["source"] == "workflow_llm_timeout"
+
+
 def test_agent_test_tool_calling_plan_uses_relation_summary(monkeypatch) -> None:
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
