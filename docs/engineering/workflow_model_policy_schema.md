@@ -43,10 +43,34 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
 - `#V#has_fallback_model` (text relation) - Fallback model(s)
 - `#V#has_local_only_constraint` (text relation) - Local-only flag
 - `#V#has_max_fallback_hops` (text relation) - Global constraint
+- `#V#has_runtime_stage_name` (text relation) - Explicit runtime stage name/alias
+  on a stage concept; when absent, the runtime name derives structurally from the
+  `#V#<name>_stage` identifier
 - `#V#uses_prompt` - Links stage → prompt concept
 - `#V#has_capability_tag` - (planned)
 - `#V#has_cost_tier` - (planned)
 - `#V#has_latency_tier` - (planned)
+
+### Fail-closed graph resolution (JVNAUTOSCI-2496)
+
+The graph resolver (`workflow_policy_graph_service.py`) is a support surface:
+it loads represented policy, validates and normalises types, and reports
+provenance (source concept IDs per stage and constraint). It does not supply
+missing policy values:
+
+- a stage configuration without a represented `#V#has_primary_model` does not
+  silently become `active_llm`; the payload is marked `graph_incomplete` with
+  a `missing_primary_model:<config_id>` reason;
+- a policy without a represented `#V#has_max_fallback_hops` does not silently
+  receive `2`; the constraint is omitted and the payload is marked incomplete;
+- stage names resolve from `#V#has_runtime_stage_name` or the stage concept's
+  own identifier, never from a Python stage table.
+
+The orchestrator uses graph policy only when the payload reports
+`graph_complete`; otherwise it records `graph_completeness` and
+`graph_incomplete_reasons` in telemetry and falls back to the represented
+`#V#has_model_policy_json` text relation. Telemetry therefore distinguishes
+`graph_complete`, `graph_incomplete`, and JSON-fallback resolution paths.
 
 ### Current linked prompts
 - `#V#buttonify_stage` → `#V#buttonify_prompt_v1`
