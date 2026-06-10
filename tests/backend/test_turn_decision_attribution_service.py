@@ -211,3 +211,94 @@ def test_unclassified_values_report_unknown_not_guess():
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["selection"]["authority"] == AUTHORITY_UNKNOWN
     assert by_kind["dispatch"]["authority"] == AUTHORITY_UNKNOWN
+
+
+def test_aggregate_reports_mean_score_and_fallback_signatures():
+    from src.backend.services.turn_decision_attribution_service import (
+        TURN_DECISION_ATTRIBUTION_AGGREGATE_SCHEMA_VERSION,
+        aggregate_turn_decision_attributions,
+    )
+
+    clean = build_turn_decision_attribution(
+        diagnostics=_fully_represented_diagnostics(),
+        aux_entries=[_dispatch_preflight_event(override=False)],
+    )
+    fallback_diagnostics = _fully_represented_diagnostics()
+    fallback_diagnostics["workflow_routing"] = {
+        "selected_workflow_id": "#V#paper_workflow",
+        "selector_source": "durable_discovery_fallback",
+        "selection_rationale": "first_routing_match",
+    }
+    rescued = build_turn_decision_attribution(
+        diagnostics=fallback_diagnostics,
+        aux_entries=[_dispatch_preflight_event(override=True)],
+    )
+
+    aggregate = aggregate_turn_decision_attributions([clean, rescued])
+
+    assert (
+        aggregate["schema_version"]
+        == TURN_DECISION_ATTRIBUTION_AGGREGATE_SCHEMA_VERSION
+    )
+    assert aggregate["turn_count"] == 2
+    assert aggregate["scored_turn_count"] == 2
+    mean_score = aggregate["mean_architecture_integrity_score"]
+    assert mean_score is not None and 0.0 < mean_score < 1.0
+
+    kind_counts = aggregate["decision_kind_authority_counts"]
+    assert kind_counts["selection"][AUTHORITY_REPRESENTED] == 1
+    assert kind_counts["selection"][AUTHORITY_PYTHON_FALLBACK] == 1
+    assert kind_counts["dispatch"][AUTHORITY_PYTHON_FALLBACK] == 1
+
+    signatures = aggregate["python_fallback_signatures"]
+    assert any(key.startswith("selection:") for key in signatures)
+    assert any(key.startswith("dispatch:") for key in signatures)
+
+
+def test_aggregate_of_nothing_is_empty_not_error():
+    from src.backend.services.turn_decision_attribution_service import (
+        aggregate_turn_decision_attributions,
+    )
+
+    aggregate = aggregate_turn_decision_attributions([])
+    assert aggregate["turn_count"] == 0
+    assert aggregate["mean_architecture_integrity_score"] is None
+    assert aggregate["python_fallback_signatures"] == {}
+
+
+def test_embedded_debug_shape_is_recognised():
+    """The chat-history embedded shape (workflow_routing_diagnostics,
+    completion_gate_verdict, llm_debug container) attributes equivalently."""
+
+    diagnostics = {
+        "workflow_routing_diagnostics": {
+            "selected_workflow_id": "#V#paper_workflow",
+            "selector_source": "selector_llm_verdict",
+        },
+        "workflow_discovery": {
+            "discovery_payload_origin": (
+                "durable_action_discover_workflows_for_turn"
+            ),
+            "candidate_count": 2,
+        },
+        "llm_debug": {
+            "workflow_model_policy": {
+                "policy_source": "graph",
+                "graph_completeness": "graph_complete",
+                "policy_id": "#V#default_workflow_model_policy",
+            },
+            "completion_gate_verdict": {
+                "verdict_source": "postcondition_critic_workflow",
+                "status": "passed",
+            },
+        },
+    }
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics, aux_entries=[]
+    )
+    breakdown = payload["summary"]["decision_kind_breakdown"]
+    assert breakdown["selection"] == AUTHORITY_REPRESENTED
+    assert breakdown["model_choice"] == AUTHORITY_REPRESENTED
+    assert breakdown["acceptance"] == AUTHORITY_REPRESENTED
+    assert payload["summary"]["architecture_integrity_score"] == 1.0

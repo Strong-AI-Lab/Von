@@ -3,6 +3,17 @@
 Use these as prompts, not mechanical rules. Confirm against current code and
 represented authority before filing Jira work.
 
+## Runtime Attribution Companion
+
+Static scanning now has a runtime counterpart (JVNAUTOSCI-2499): when a local
+DB with recent turn execution records is available, run
+`python scripts/report_turn_decision_attribution.py --limit 50` and record the
+mean `architecture_integrity_score` and the `python_fallback_signatures`
+histogram in the run log. Rising fallback signatures name the live code seam
+(function or selector/rationale marker) to file against; check the signature
+against open seam tasks (for example `JVNAUTOSCI-2365`, `JVNAUTOSCI-2406`)
+before creating duplicates.
+
 ## Strong Signals
 
 - Workflow-purity deltas: update `JVNAUTOSCI-2080` before creating duplicates.

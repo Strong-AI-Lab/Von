@@ -607,7 +607,29 @@ If the answer is acceptable but the live card is dominated by code-mechanics
 detail or fails to communicate the reasoning and information sources in
 user-facing language, that is still a user-visible deficiency worth recording.
 
-### 9.9 Telemetry projection quality
+### 9.9 Decision attribution and architecture-integrity score
+
+Turn diagnostics payloads carry a `decision_attribution` section
+(JVNAUTOSCI-2499): each of the six turn decisions (discovery, selection,
+dispatch, model choice, recovery, acceptance) is attributed to represented
+authority (with source concept ids), `python_fallback` (with the emitting
+function and reason), settings default, or honestly `unknown`/`absent`. The
+`architecture_integrity_score` is the represented fraction of attributable
+decisions.
+
+Use it in two ways during replay review:
+
+- per turn, confirm the turn passed for represented reasons: a correct answer
+  whose attribution shows `python_fallback` on selection or dispatch is an
+  architectural failure even when the output is good (see 3.1);
+- across a replay set, the sampler's multi-arm reports include a
+  `decision_attribution_aggregate`, and
+  `scripts/report_turn_decision_attribution.py` aggregates the score and the
+  Python-fallback signature histogram over recent live turns, which is the
+  before/after measure for routing-authority seam closures such as
+  JVNAUTOSCI-2365.
+
+### 9.10 Telemetry projection quality
 
 Check whether the persisted diagnostics preserve the stages and lineage you
 need.

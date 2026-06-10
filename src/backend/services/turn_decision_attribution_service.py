@@ -194,11 +194,23 @@ def _attribute_discovery(
     )
 
 
+def _routing_mapping(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Read the routing section from either the assembled-diagnostics shape
+    (``workflow_routing``) or the embedded chat-history debug shape
+    (``workflow_routing_diagnostics``)."""
+
+    return (
+        _safe_mapping(diagnostics.get("workflow_routing"))
+        or _safe_mapping(diagnostics.get("workflow_routing_diagnostics"))
+        or {}
+    )
+
+
 def _attribute_selection(
     diagnostics: Mapping[str, Any],
     python_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    routing = _safe_mapping(diagnostics.get("workflow_routing")) or {}
+    routing = _routing_mapping(diagnostics)
     selection = _safe_mapping(diagnostics.get("workflow_selection")) or {}
     selected_workflow_id = _safe_str(
         routing.get("selected_workflow_id")
@@ -357,7 +369,7 @@ def _attribute_recovery(
     diagnostics: Mapping[str, Any],
     python_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    routing = _safe_mapping(diagnostics.get("workflow_routing")) or {}
+    routing = _routing_mapping(diagnostics)
     selection_rationale = _safe_str(routing.get("selection_rationale"))
     marker_hit = selection_rationale in _PYTHON_RECOVERY_MARKERS
     if python_events or marker_hit:
@@ -377,12 +389,16 @@ def _attribute_acceptance(
     diagnostics: Mapping[str, Any],
     python_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    gate = _safe_mapping(diagnostics.get("completion_gate"))
+    gate = _safe_mapping(diagnostics.get("completion_gate")) or _safe_mapping(
+        diagnostics.get("completion_gate_verdict")
+    )
     if gate is None:
         for container_key in ("turn_execution_record", "llm_debug"):
             container = _safe_mapping(diagnostics.get(container_key))
             if container is not None:
-                gate = _safe_mapping(container.get("completion_gate"))
+                gate = _safe_mapping(
+                    container.get("completion_gate")
+                ) or _safe_mapping(container.get("completion_gate_verdict"))
                 if gate is not None:
                     break
     if gate is None:
@@ -473,6 +489,86 @@ def build_turn_decision_attribution(
     }
 
 
+TURN_DECISION_ATTRIBUTION_AGGREGATE_SCHEMA_VERSION = (
+    "turn_decision_attribution_aggregate.v1"
+)
+
+
+def aggregate_turn_decision_attributions(
+    attributions: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Aggregate per-turn attribution payloads across a run set.
+
+    Reports the mean architecture-integrity score over turns that had
+    attributable decisions, per-kind authority counts, and a histogram of the
+    Python-fallback signatures observed (decision kind plus the strongest
+    available provenance marker), so trends can be tied back to specific
+    code seams.
+    """
+
+    turn_count = 0
+    scored_turn_count = 0
+    score_total = 0.0
+    kind_authority_counts: dict[str, dict[str, int]] = {
+        kind: {} for kind in DECISION_KINDS
+    }
+    fallback_signatures: dict[str, int] = {}
+
+    for attribution in attributions or ():
+        if not isinstance(attribution, Mapping):
+            continue
+        turn_count += 1
+        summary = _safe_mapping(attribution.get("summary")) or {}
+        score = summary.get("architecture_integrity_score")
+        if isinstance(score, (int, float)):
+            scored_turn_count += 1
+            score_total += float(score)
+        for decision in attribution.get("decisions") or ():
+            if not isinstance(decision, Mapping):
+                continue
+            kind = _safe_str(decision.get("decision_kind"))
+            authority = _safe_str(decision.get("authority"))
+            if not kind or not authority or kind not in kind_authority_counts:
+                continue
+            counts = kind_authority_counts[kind]
+            counts[authority] = counts.get(authority, 0) + 1
+            if authority != AUTHORITY_PYTHON_FALLBACK:
+                continue
+            marker = None
+            events = decision.get("python_decision_events")
+            if isinstance(events, list) and events:
+                first = _safe_mapping(events[0]) or {}
+                marker = _safe_str(first.get("function")) or _safe_str(
+                    first.get("decision_class")
+                )
+            if marker is None:
+                evidence = _safe_mapping(decision.get("evidence")) or {}
+                marker = (
+                    _safe_str(evidence.get("selector_source"))
+                    or _safe_str(evidence.get("selection_rationale"))
+                    or _safe_str(evidence.get("policy_source"))
+                    or "unattributed"
+                )
+            signature = f"{kind}:{marker}"
+            fallback_signatures[signature] = fallback_signatures.get(signature, 0) + 1
+
+    return {
+        "schema_version": TURN_DECISION_ATTRIBUTION_AGGREGATE_SCHEMA_VERSION,
+        "turn_count": turn_count,
+        "scored_turn_count": scored_turn_count,
+        "mean_architecture_integrity_score": (
+            (score_total / scored_turn_count) if scored_turn_count else None
+        ),
+        "decision_kind_authority_counts": kind_authority_counts,
+        "python_fallback_signatures": dict(
+            sorted(
+                fallback_signatures.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ),
+    }
+
+
 __all__ = [
     "AUTHORITY_ABSENT",
     "AUTHORITY_PYTHON_FALLBACK",
@@ -480,6 +576,8 @@ __all__ = [
     "AUTHORITY_SETTINGS_DEFAULT",
     "AUTHORITY_UNKNOWN",
     "DECISION_KINDS",
+    "TURN_DECISION_ATTRIBUTION_AGGREGATE_SCHEMA_VERSION",
     "TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION",
+    "aggregate_turn_decision_attributions",
     "build_turn_decision_attribution",
 ]

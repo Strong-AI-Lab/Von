@@ -57,6 +57,10 @@ from src.backend.services import (
     replay_arm_planning_service,
     replay_experiment_observation_service,
 )
+from src.backend.services.turn_decision_attribution_service import (
+    aggregate_turn_decision_attributions,
+    build_turn_decision_attribution,
+)
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:31b"
@@ -3189,6 +3193,14 @@ def _build_summary(
         prompt_entry=prompt_entry,
         requested_model=requested_model,
     )
+    attribution_diagnostics = dict(
+        _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
+    )
+    attribution_diagnostics["llm_debug"] = dict(llm_debug_data)
+    summary["decision_attribution"] = build_turn_decision_attribution(
+        diagnostics=attribution_diagnostics,
+        aux_entries=_as_list(llm_debug_data.get("aux_llm_calls")),
+    )
     return summary
 
 
@@ -3456,6 +3468,16 @@ def _build_multi_arm_summary(
     }
     summary["model_portfolio_report"] = _build_model_portfolio_comparison_report(
         arm_summaries=arm_summaries
+    )
+    summary["decision_attribution_aggregate"] = (
+        aggregate_turn_decision_attributions(
+            [
+                _as_mapping(arm_summary.get("decision_attribution"))
+                for arm_summary in arm_summaries
+                if isinstance(arm_summary, Mapping)
+                and isinstance(arm_summary.get("decision_attribution"), Mapping)
+            ]
+        )
     )
     return summary
 
