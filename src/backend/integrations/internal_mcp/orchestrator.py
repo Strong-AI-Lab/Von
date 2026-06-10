@@ -16916,18 +16916,36 @@ class InternalMCPChatOrchestrator:
 
         policy_payload: Mapping[str, Any] | None = None
         policy_source = "none"
+        graph_completeness = "graph_absent"
+        graph_incomplete_reasons: list[str] = []
 
-        # Try graph-based resolution first (JVNAUTOSCI-998)
+        # Try graph-based resolution first (JVNAUTOSCI-998). The resolver does
+        # not invent missing policy values (JVNAUTOSCI-2496): only an
+        # explicitly complete graph payload is usable as policy; an incomplete
+        # graph is recorded in telemetry and resolution falls through to the
+        # represented JSON policy.
         if policy_id:
             try:
                 from src.backend.services.workflow_policy_graph_service import (
+                    GRAPH_POLICY_COMPLETE,
                     resolve_policy_from_graph,
                 )
 
                 graph_policy = resolve_policy_from_graph(policy_id)
                 if graph_policy and isinstance(graph_policy, Mapping):
-                    policy_payload = graph_policy
-                    policy_source = "graph"
+                    completeness = str(graph_policy.get("completeness") or "")
+                    if completeness == GRAPH_POLICY_COMPLETE:
+                        policy_payload = graph_policy
+                        policy_source = "graph"
+                        graph_completeness = completeness
+                    else:
+                        graph_completeness = completeness or "graph_incomplete"
+                        graph_incomplete_reasons = [
+                            str(reason)
+                            for reason in (
+                                graph_policy.get("incomplete_reasons") or []
+                            )
+                        ]
             except Exception:
                 pass  # Fall through to JSON fallback
 
@@ -16990,6 +17008,8 @@ class InternalMCPChatOrchestrator:
             "predicate_id": predicate_id or "",
             "loaded": bool(policy_payload),
             "policy_source": policy_source,
+            "graph_completeness": graph_completeness,
+            "graph_incomplete_reasons": graph_incomplete_reasons,
             "errors": list(errors),
         }
 

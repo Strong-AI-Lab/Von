@@ -28,22 +28,40 @@ PRED_HAS_FALLBACK_MODEL = "#V#has_fallback_model"
 PRED_HAS_LOCAL_ONLY = "#V#has_local_only_constraint"
 PRED_HAS_MAX_FALLBACK_HOPS = "#V#has_max_fallback_hops"
 PRED_HAS_MODEL_POLICY_JSON = "#V#has_model_policy_json"
+PRED_HAS_RUNTIME_STAGE_NAME = "#V#has_runtime_stage_name"
 
-# Stage name to concept_id mapping
-STAGE_CONCEPT_MAP = {
-    "planner": "#V#planner_stage",
-    "tool_call": "#V#tool_call_stage",
-    "tool_recovery": "#V#tool_recovery_stage",
-    "classifier": "#V#classifier_stage",
-    "critic": "#V#critic_stage",
-    "screen_backfill": "#V#screen_backfill_stage",
-    "narration": "#V#narration_stage",
-    "summariser": "#V#summariser_stage",
-    "buttonify": "#V#buttonify_stage",
+GRAPH_POLICY_COMPLETE = "graph_complete"
+GRAPH_POLICY_INCOMPLETE = "graph_incomplete"
+
+_BOOLEAN_TEXT_VALUES = {
+    "true": True,
+    "1": True,
+    "yes": True,
+    "false": False,
+    "0": False,
+    "no": False,
 }
 
-# Reverse mapping for stage name lookup
-CONCEPT_TO_STAGE_MAP = {v: k for k, v in STAGE_CONCEPT_MAP.items()}
+
+def _resolve_stage_name(stage_concept_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the runtime stage name for a stage concept.
+
+    Returns ``(stage_name, source)`` where source is
+    ``represented_runtime_stage_name`` when the stage concept carries an
+    explicit #V#has_runtime_stage_name text relation, or
+    ``derived_from_concept_id`` when the name is derived structurally from the
+    concept's own ``#V#<name>_stage`` identifier. No Python stage table is
+    consulted (JVNAUTOSCI-2496).
+    """
+
+    represented = _get_text_value(stage_concept_id, PRED_HAS_RUNTIME_STAGE_NAME)
+    if represented:
+        return represented, "represented_runtime_stage_name"
+    if stage_concept_id.startswith("#V#") and stage_concept_id.endswith("_stage"):
+        derived = stage_concept_id[3:-6]
+        if derived:
+            return derived, "derived_from_concept_id"
+    return None, None
 
 
 def _get_text_value(concept_id: str, predicate: str) -> Optional[str]:
@@ -100,14 +118,17 @@ def _get_related_concept_ids(concept_id: str, predicate: str) -> List[str]:
 def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, Any]]:
     """Resolve a workflow model policy from Vontology graph representation.
 
-    Returns a policy dict in the same shape as the JSON policy, or None if
-    the graph representation is incomplete.
+    This resolver is a support surface: it loads represented policy, validates
+    and normalises types, and reports provenance. It does not supply missing
+    policy values (JVNAUTOSCI-2496). When required represented values are
+    absent or invalid, the returned payload is explicitly marked
+    ``graph_incomplete`` with per-value reasons, so callers can distinguish
+    fully represented policy from an incomplete graph and fall back to the
+    represented JSON policy path with telemetry-visible cause.
 
-    Args:
-        policy_concept_id: The concept ID of the policy (e.g., #V#default_workflow_model_policy)
-
-    Returns:
-        Policy dict with stages, constraints, etc., or None if not resolvable.
+    Returns ``None`` only when the policy concept itself does not exist
+    (graph absent). Returns a payload with ``completeness`` of
+    ``graph_complete`` or ``graph_incomplete`` otherwise.
     """
     try:
         policy_concept = ConceptsRepository.find_one({"concept_id": policy_concept_id})
@@ -115,11 +136,12 @@ def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, A
             logger.debug(f"Policy concept not found: {policy_concept_id}")
             return None
 
-        # Get stage configurations linked to this policy
+        incomplete_reasons: List[str] = []
+        stage_provenance: Dict[str, Dict[str, Any]] = {}
+
         config_ids = _get_related_concept_ids(policy_concept_id, PRED_HAS_STAGE_CONFIG)
         if not config_ids:
-            logger.debug(f"No stage configurations found for policy: {policy_concept_id}")
-            return None
+            incomplete_reasons.append("no_stage_configurations")
 
         stages: Dict[str, Dict[str, Any]] = {}
         local_only_stages: List[str] = []
@@ -127,64 +149,89 @@ def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, A
         for config_id in config_ids:
             config_concept = ConceptsRepository.find_one({"concept_id": config_id})
             if not config_concept:
+                incomplete_reasons.append(f"stage_configuration_missing:{config_id}")
                 continue
 
-            # Find which stage this config applies to
             stage_ids = _get_related_concept_ids(config_id, PRED_APPLIES_TO_STAGE)
             if not stage_ids:
+                incomplete_reasons.append(f"stage_link_missing:{config_id}")
                 continue
 
             stage_concept_id = stage_ids[0]
-            stage_name = CONCEPT_TO_STAGE_MAP.get(stage_concept_id)
+            stage_name, stage_name_source = _resolve_stage_name(stage_concept_id)
             if not stage_name:
-                # Try to derive from concept_id
-                if stage_concept_id.startswith("#V#") and stage_concept_id.endswith("_stage"):
-                    stage_name = stage_concept_id[3:-6]  # Strip #V# prefix and _stage suffix
-
-            if not stage_name:
-                logger.debug(f"Unknown stage for config {config_id}: {stage_concept_id}")
+                incomplete_reasons.append(
+                    f"stage_name_unresolved:{stage_concept_id}"
+                )
                 continue
 
-            # Get model settings
-            primary = _get_text_value(config_id, PRED_HAS_PRIMARY_MODEL) or "active_llm"
+            primary = _get_text_value(config_id, PRED_HAS_PRIMARY_MODEL)
+            if not primary:
+                incomplete_reasons.append(f"missing_primary_model:{config_id}")
+                continue
+
             fallbacks = _get_text_values(config_id, PRED_HAS_FALLBACK_MODEL)
             local_only_text = _get_text_value(config_id, PRED_HAS_LOCAL_ONLY)
-            local_only = local_only_text and local_only_text.lower() in ("true", "1", "yes")
+            local_only = False
+            local_only_source = None
+            if local_only_text is not None:
+                normalised = _BOOLEAN_TEXT_VALUES.get(local_only_text.lower())
+                if normalised is None:
+                    incomplete_reasons.append(
+                        f"invalid_local_only_value:{config_id}"
+                    )
+                else:
+                    local_only = normalised
+                    local_only_source = config_id
 
             stages[stage_name] = {
                 "primary": primary,
                 "fallback": fallbacks,
                 "constraints": {"local_only": local_only},
             }
+            stage_provenance[stage_name] = {
+                "config_concept_id": config_id,
+                "stage_concept_id": stage_concept_id,
+                "stage_name_source": stage_name_source,
+                "primary_source": config_id,
+                "local_only_source": local_only_source,
+            }
 
             if local_only:
                 local_only_stages.append(stage_name)
 
-        if not stages:
-            logger.debug(f"No valid stages resolved for policy: {policy_concept_id}")
-            return None
-
-        # Get global constraints
-        max_fallback_hops_text = _get_text_value(policy_concept_id, PRED_HAS_MAX_FALLBACK_HOPS)
-        max_fallback_hops = 2  # default
-        if max_fallback_hops_text:
+        constraints: Dict[str, Any] = {"local_only_stages": local_only_stages}
+        max_fallback_hops_text = _get_text_value(
+            policy_concept_id, PRED_HAS_MAX_FALLBACK_HOPS
+        )
+        max_fallback_hops_source = None
+        if max_fallback_hops_text is None:
+            incomplete_reasons.append("missing_max_fallback_hops")
+        else:
             try:
-                max_fallback_hops = int(max_fallback_hops_text)
+                constraints["max_fallback_hops"] = int(max_fallback_hops_text)
+                max_fallback_hops_source = policy_concept_id
             except ValueError:
-                pass
+                incomplete_reasons.append("invalid_max_fallback_hops")
+
+        if not stages and not incomplete_reasons:
+            incomplete_reasons.append("no_valid_stages")
+
+        completeness = (
+            GRAPH_POLICY_COMPLETE
+            if stages and not incomplete_reasons
+            else GRAPH_POLICY_INCOMPLETE
+        )
 
         policy = {
             "policy_id": policy_concept_id,
-            "scope": "global",
-            "inherit_from": None,
             "stages": stages,
-            "constraints": {
-                "local_only_stages": local_only_stages,
-                "max_fallback_hops": max_fallback_hops,
-            },
-            "compatibility": {
-                "single_model_default": True,
-                "notes": "Policy resolved from Vontology graph representation.",
+            "constraints": constraints,
+            "completeness": completeness,
+            "incomplete_reasons": incomplete_reasons,
+            "provenance": {
+                "stages": stage_provenance,
+                "max_fallback_hops_source": max_fallback_hops_source,
             },
             "_source": "graph",
         }
@@ -216,18 +263,27 @@ def compare_policy_json_vs_graph(
 
     # Get graph policy
     graph_policy = resolve_policy_from_graph(policy_concept_id)
+    graph_complete = bool(
+        graph_policy
+        and graph_policy.get("completeness") == GRAPH_POLICY_COMPLETE
+    )
 
     report: Dict[str, Any] = {
         "policy_concept_id": policy_concept_id,
         "json_available": json_policy is not None,
-        "graph_available": graph_policy is not None,
+        "graph_available": graph_complete,
+        "graph_incomplete_reasons": (
+            list(graph_policy.get("incomplete_reasons") or [])
+            if graph_policy
+            else []
+        ),
         "mismatches": [],
         "json_only_stages": [],
         "graph_only_stages": [],
         "matching_stages": [],
     }
 
-    if not json_policy and not graph_policy:
+    if not json_policy and not graph_complete:
         report["status"] = "neither_available"
         return report
 
@@ -235,7 +291,7 @@ def compare_policy_json_vs_graph(
         report["status"] = "json_missing"
         return report
 
-    if not graph_policy:
+    if not graph_complete:
         report["status"] = "graph_incomplete"
         return report
 

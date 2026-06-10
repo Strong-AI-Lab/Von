@@ -2170,3 +2170,79 @@ def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
         and event.get("pending_follow_up_tool_call_count") == 1
         for event in progress_events
     )
+
+
+def test_load_workflow_model_policy_distinguishes_graph_completeness(
+    monkeypatch,
+) -> None:
+    """Telemetry distinguishes graph_complete, graph_incomplete, and JSON
+    fallback resolution paths (JVNAUTOSCI-2496)."""
+
+    import src.backend.services.text_value_service as text_value_service
+    import src.backend.services.workflow_policy_graph_service as graph_service
+
+    json_policy_text = (
+        '{"stages": {"planner": {"primary": "ollama:gemma4:26b"}}}'
+    )
+
+    def _orchestrator_with_concepts() -> InternalMCPChatOrchestrator:
+        orchestrator = _bare_orchestrator()
+        monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
+        monkeypatch.setattr(
+            orchestrator,
+            "_resolve_concept_id_by_name",
+            lambda name, **_kwargs: f"#V#{name}",
+        )
+        return orchestrator
+
+    monkeypatch.setattr(
+        text_value_service,
+        "get_texts_for_concept",
+        lambda *_args, **_kwargs: [{"text": json_policy_text}],
+    )
+
+    complete_payload = {
+        "policy_id": "#V#default_workflow_model_policy",
+        "stages": {"planner": {"primary": "ollama:gemma4:26b"}},
+        "constraints": {"local_only_stages": [], "max_fallback_hops": 2},
+        "completeness": "graph_complete",
+        "incomplete_reasons": [],
+    }
+    monkeypatch.setattr(
+        graph_service,
+        "resolve_policy_from_graph",
+        lambda _policy_id: complete_payload,
+    )
+    orchestrator = _orchestrator_with_concepts()
+    state, telemetry = orchestrator._load_workflow_model_policy(None)
+    assert telemetry["policy_source"] == "graph"
+    assert telemetry["graph_completeness"] == "graph_complete"
+    assert state.policy is complete_payload
+
+    incomplete_payload = dict(complete_payload)
+    incomplete_payload["completeness"] = "graph_incomplete"
+    incomplete_payload["incomplete_reasons"] = ["missing_max_fallback_hops"]
+    monkeypatch.setattr(
+        graph_service,
+        "resolve_policy_from_graph",
+        lambda _policy_id: incomplete_payload,
+    )
+    orchestrator = _orchestrator_with_concepts()
+    state, telemetry = orchestrator._load_workflow_model_policy(None)
+    assert telemetry["policy_source"] == "json"
+    assert telemetry["graph_completeness"] == "graph_incomplete"
+    assert telemetry["graph_incomplete_reasons"] == [
+        "missing_max_fallback_hops"
+    ]
+    assert state.policy is not None
+    assert state.policy["stages"]["planner"]["primary"] == "ollama:gemma4:26b"
+
+    monkeypatch.setattr(
+        graph_service,
+        "resolve_policy_from_graph",
+        lambda _policy_id: None,
+    )
+    orchestrator = _orchestrator_with_concepts()
+    state, telemetry = orchestrator._load_workflow_model_policy(None)
+    assert telemetry["policy_source"] == "json"
+    assert telemetry["graph_completeness"] == "graph_absent"

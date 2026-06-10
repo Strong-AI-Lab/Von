@@ -263,6 +263,19 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
         "banned_import_names": WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES,
     },
     {
+        "name": "workflow_model_policy_graph_authority",
+        "path": "src/backend/services/workflow_policy_graph_service.py",
+        "banned_symbol_names": {
+            "STAGE_CONCEPT_MAP": "retired_model_policy_stage_map_symbol",
+            "CONCEPT_TO_STAGE_MAP": "retired_model_policy_stage_map_symbol",
+        },
+        "forbidden_patterns": {
+            "python_default_active_llm_primary": re.compile(
+                r"""or\s+["']active_llm["']"""
+            ),
+        },
+    },
+    {
         "name": "write_tool_policy_regex_backstop_scope",
         "path": "src/backend/workflows/write_tool_policy.py",
         "banned_symbol_names": WRITE_TOOL_POLICY_RETIRED_SYMBOLS,
