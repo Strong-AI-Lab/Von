@@ -689,6 +689,16 @@ def _query_has_workflow_execute_contract(query: str) -> bool:
     )
 
 
+def _query_may_name_workflow_directly(query_phrase: str) -> bool:
+    """Return True only for exact workflow-artefact identity resolution.
+
+    This guards a registry ID/name scan. It should stay about workflow identity,
+    not task semantics or routing preference.
+    """
+
+    return " workflow " in f" {str(query_phrase or '').strip()} "
+
+
 def _extract_direct_workflow_concept_ids(query: str) -> list[str]:
     seen: set[str] = set()
     concept_ids: list[str] = []
@@ -1040,6 +1050,7 @@ def _workflow_display_name_from_id(workflow_id: str) -> str:
 def _resolve_contract_direct_workflow_candidates(
     query: str,
     *,
+    label_query: str | None = None,
     contract_projection: Mapping[str, Any] | None = None,
     workflow_registry: Any | None,
     limit: int,
@@ -1075,29 +1086,36 @@ def _resolve_contract_direct_workflow_candidates(
             else ()
         )
     )
-    if (
-        not direct_ids
-        and not _query_has_workflow_execute_contract(query)
-        and not contract_requires_workflow_execute
-    ):
+    identity_query = label_query if isinstance(label_query, str) else query
+    query_phrase = f" {_normalise_workflow_phrase(identity_query)} "
+    registry_identity_scan_allowed = bool(
+        workflow_registry is not None
+        and (
+            _query_has_workflow_execute_contract(query)
+            or contract_requires_workflow_execute
+            or _query_may_name_workflow_directly(query_phrase)
+        )
+    )
+    direct_identity_scan_allowed = bool(direct_ids or registry_identity_scan_allowed)
+    if not direct_identity_scan_allowed:
         return []
 
-    query_phrase = f" {_normalise_workflow_phrase(query)} "
     candidate_ids: list[str] = list(direct_ids)
     seen = {item.lower() for item in candidate_ids}
-    for workflow_id in _iter_registry_workflow_ids(workflow_registry):
-        lowered = workflow_id.lower()
-        if lowered in seen:
-            continue
-        workflow_phrase = _normalise_workflow_phrase(workflow_id)
-        if not workflow_phrase:
-            continue
-        if f" {workflow_phrase} " not in query_phrase:
-            continue
-        seen.add(lowered)
-        candidate_ids.append(workflow_id)
-        if len(candidate_ids) >= max(1, int(limit)):
-            break
+    if registry_identity_scan_allowed:
+        for workflow_id in _iter_registry_workflow_ids(workflow_registry):
+            lowered = workflow_id.lower()
+            if lowered in seen:
+                continue
+            workflow_phrase = _normalise_workflow_phrase(workflow_id)
+            if not workflow_phrase:
+                continue
+            if f" {workflow_phrase} " not in query_phrase:
+                continue
+            seen.add(lowered)
+            candidate_ids.append(workflow_id)
+            if len(candidate_ids) >= max(1, int(limit)):
+                break
 
     matches: list[WorkflowMatch] = []
     for workflow_id in candidate_ids[: max(1, int(limit))]:
@@ -1953,6 +1971,7 @@ def discover_workflows(
     direct_resolution_started_at = time.perf_counter()
     direct_matches = _resolve_contract_direct_workflow_candidates(
         search_query,
+        label_query=query,
         contract_projection=contract_projection,
         workflow_registry=workflow_registry,
         limit=max_results * 2,

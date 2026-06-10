@@ -1076,6 +1076,87 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    def test_exact_workflow_display_name_resolves_before_cold_capability_index(
+        self,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.side_effect = AssertionError(
+            "exact workflow label should resolve before cold retrieval"
+        )
+        mock_semantic.side_effect = AssertionError(
+            "semantic search should not run for an exact workflow label"
+        )
+        mock_vontology.side_effect = AssertionError(
+            "vontology search should not run for an exact workflow label"
+        )
+        mock_enrich.side_effect = lambda matches: matches
+        registry = SimpleNamespace(
+            all_workflow_ids=lambda: [
+                "#V#paper_ingestion_testing_workflow",
+                "#V#tool_calling_workflow",
+            ],
+            peek_registration=lambda workflow_id: SimpleNamespace(
+                workflow_id=workflow_id,
+                purpose=(
+                    "Run a represented paper-ingestion testing workflow."
+                    if workflow_id == "#V#paper_ingestion_testing_workflow"
+                    else "Generic tool-calling workflow."
+                ),
+                source="vontology",
+            ),
+        )
+
+        result = discover_workflows(
+            "Run the paper ingestion testing workflow on https://example.test/paper.",
+            max_results=1,
+            timeout_seconds=0.01,
+            workflow_registry=registry,
+            expected_outcome_contract={
+                "selector_guidance": (
+                    "Prefer the represented workflow; use the generic "
+                    "tool-calling workflow only when no specialised workflow "
+                    "is eligible."
+                )
+            },
+        )
+
+        assert result.search_sources == ["contract_direct_workflow_resolution"]
+        assert [match.concept_id for match in result.matches] == [
+            "#V#paper_ingestion_testing_workflow"
+        ]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#paper_ingestion_testing_workflow"
+        ]
+        assert mock_capability.called is False
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 1
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
