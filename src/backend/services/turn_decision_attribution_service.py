@@ -1,0 +1,485 @@
+"""Per-turn decision-attribution projection (JVNAUTOSCI-2499).
+
+This module is a telemetry support surface. It projects already-recorded turn
+telemetry into one uniform decision-attribution shape so that routing, model
+selection, dispatch, recovery, and acceptance decisions can be attributed to
+represented authority (Vontology concepts, workflows, prompts, represented
+policy) or to Python fallback code, per turn and in aggregate.
+
+It makes no decisions of its own and adds no policy: it classifies the
+provenance markers other components already emit, most importantly the
+``annotate_python_decision_event`` envelope
+(``decision_authority_origin == "python"``, ``decision_class``,
+``decision_source``, ``changed_outcome``) from
+``python_decision_authority_service`` and the model-policy resolution
+telemetry (``policy_source``, ``graph_completeness``) from the orchestrator.
+
+The aggregate ``architecture_integrity_score`` is the fraction of attributable
+decisions whose authority was represented rather than Python fallback. Values
+this projection cannot classify are reported as ``unknown`` rather than
+guessed.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping, Sequence
+
+TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION = "turn_decision_attribution.v1"
+
+DECISION_KINDS = (
+    "discovery",
+    "selection",
+    "dispatch",
+    "model_choice",
+    "recovery",
+    "acceptance",
+)
+
+AUTHORITY_REPRESENTED = "represented"
+AUTHORITY_PYTHON_FALLBACK = "python_fallback"
+AUTHORITY_SETTINGS_DEFAULT = "settings_default"
+AUTHORITY_UNKNOWN = "unknown"
+AUTHORITY_ABSENT = "absent"
+
+# Stage names emitted by annotate_python_decision_event callers, mapped to the
+# decision kind they belong to. This is provenance classification of Von's own
+# telemetry enums, not behaviour policy.
+_STAGE_TO_DECISION_KIND = {
+    "workflow_discovery": "discovery",
+    "selector_preparation": "selection",
+    "selector_decision": "selection",
+    "workflow_dispatch": "dispatch",
+    "tool_recovery": "recovery",
+    "turn_recovery": "recovery",
+    "completion_gate": "acceptance",
+}
+
+# Known Python-authored selection provenance markers (see JVNAUTOSCI-2352
+# staleness review and JVNAUTOSCI-2406 for the durable first-match residual).
+_PYTHON_SELECTION_SOURCES = frozenset({"durable_discovery_fallback"})
+_PYTHON_SELECTION_RATIONALES = frozenset({"first_routing_match"})
+
+# Known Python recovery rationale markers (JVNAUTOSCI-2406 evidence and the
+# orchestrator workflow-execute recovery path tracked under JVNAUTOSCI-2365).
+_PYTHON_RECOVERY_MARKERS = frozenset(
+    {
+        "single_specialised_candidate_recovery_from_selector_fallback",
+        "single_specialised_candidate_recovery_from_selector_prompt_unavailable",
+        "workflow_execute_single_candidate_recovery",
+    }
+)
+
+_DISCOVERY_NO_MATCH_ORIGINS = frozenset(
+    {
+        "durable_action_no_match_fallback",
+        "durable_action_skipped_no_query",
+    }
+)
+
+
+def _safe_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _safe_mapping(value: Any) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _python_event_summary(entry: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "decision_class": _safe_str(entry.get("decision_class")),
+        "decision_source": _safe_str(entry.get("decision_source")),
+        "component": _safe_str(entry.get("component")),
+        "function": _safe_str(entry.get("function")),
+        "changed_outcome": bool(entry.get("changed_outcome")),
+    }
+    reason_code = _safe_str(entry.get("reason_code"))
+    if reason_code:
+        summary["reason_code"] = reason_code
+    if entry.get("possible_inappropriate_python_code_use"):
+        summary["possible_inappropriate_python_code_use"] = True
+    return summary
+
+
+def _collect_python_events_by_kind(
+    aux_entries: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    events: dict[str, list[dict[str, Any]]] = {kind: [] for kind in DECISION_KINDS}
+    for entry in aux_entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if _safe_str(entry.get("decision_authority_origin")) != "python":
+            continue
+        stage = _safe_str(entry.get("stage"))
+        kind = _STAGE_TO_DECISION_KIND.get(stage or "")
+        reason_code = _safe_str(entry.get("reason_code")) or ""
+        if kind is None and reason_code in _PYTHON_RECOVERY_MARKERS:
+            kind = "recovery"
+        if kind is None:
+            continue
+        events[kind].append(_python_event_summary(entry))
+    return events
+
+
+def _decision(
+    kind: str,
+    authority: str,
+    *,
+    authority_surface: str | None = None,
+    concept_ids: Sequence[str] | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    python_events: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "decision_kind": kind,
+        "authority": authority,
+    }
+    if authority_surface:
+        record["authority_surface"] = authority_surface
+    cleaned_concepts = [
+        concept for concept in (concept_ids or ()) if _safe_str(concept)
+    ]
+    if cleaned_concepts:
+        record["concept_ids"] = cleaned_concepts
+    if evidence:
+        record["evidence"] = {
+            str(key): value for key, value in evidence.items() if value is not None
+        }
+    if python_events:
+        record["python_decision_events"] = list(python_events)
+    return record
+
+
+def _attribute_discovery(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    discovery = _safe_mapping(diagnostics.get("workflow_discovery"))
+    if discovery is None:
+        return _decision("discovery", AUTHORITY_ABSENT, python_events=python_events)
+    origin = _safe_str(discovery.get("discovery_payload_origin"))
+    candidate_count = discovery.get("candidate_count")
+    if not isinstance(candidate_count, int):
+        candidates = discovery.get("candidates")
+        candidate_count = len(candidates) if isinstance(candidates, list) else None
+    evidence = {
+        "discovery_payload_origin": origin,
+        "query_source": _safe_str(discovery.get("query_source")),
+        "candidate_count": candidate_count,
+        "match_absence_reason": _safe_str(discovery.get("match_absence_reason")),
+    }
+    if (origin in _DISCOVERY_NO_MATCH_ORIGINS) or candidate_count == 0:
+        return _decision(
+            "discovery",
+            AUTHORITY_ABSENT,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if any(event.get("changed_outcome") for event in python_events):
+        return _decision(
+            "discovery",
+            AUTHORITY_PYTHON_FALLBACK,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    return _decision(
+        "discovery",
+        AUTHORITY_REPRESENTED,
+        authority_surface="workflow_discovery_service",
+        evidence=evidence,
+        python_events=python_events,
+    )
+
+
+def _attribute_selection(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    routing = _safe_mapping(diagnostics.get("workflow_routing")) or {}
+    selection = _safe_mapping(diagnostics.get("workflow_selection")) or {}
+    selected_workflow_id = _safe_str(
+        routing.get("selected_workflow_id")
+        or selection.get("selected_workflow_id")
+        or diagnostics.get("selected_workflow_id")
+    )
+    selector_source = _safe_str(
+        routing.get("selector_source") or selection.get("selector_source")
+    )
+    selection_rationale = _safe_str(
+        routing.get("selection_rationale") or selection.get("selection_rationale")
+    )
+    evidence = {
+        "selector_source": selector_source,
+        "selection_rationale": selection_rationale,
+        "selected_workflow_id": selected_workflow_id,
+    }
+    if selected_workflow_id is None:
+        return _decision(
+            "selection",
+            AUTHORITY_ABSENT,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if (
+        (selector_source in _PYTHON_SELECTION_SOURCES)
+        or (selection_rationale in _PYTHON_SELECTION_RATIONALES)
+        or (selection_rationale in _PYTHON_RECOVERY_MARKERS)
+        or any(event.get("changed_outcome") for event in python_events)
+    ):
+        return _decision(
+            "selection",
+            AUTHORITY_PYTHON_FALLBACK,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if selector_source:
+        return _decision(
+            "selection",
+            AUTHORITY_REPRESENTED,
+            authority_surface="workflow_selector",
+            concept_ids=[selected_workflow_id],
+            evidence=evidence,
+            python_events=python_events,
+        )
+    return _decision(
+        "selection",
+        AUTHORITY_UNKNOWN,
+        evidence=evidence,
+        python_events=python_events,
+    )
+
+
+def _attribute_dispatch(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    override_events = [
+        event
+        for event in python_events
+        if event.get("changed_outcome")
+        or _safe_str(event.get("reason_code"))
+        not in (None, "single_surface_contract", "no_external_surface_requirement",
+                "selected_workflow_satisfies_contract", "non_custom_route_selected")
+    ]
+    if override_events:
+        return _decision(
+            "dispatch",
+            AUTHORITY_PYTHON_FALLBACK,
+            evidence={"override_event_count": len(override_events)},
+            python_events=python_events,
+        )
+    if python_events:
+        # The Python preflight ran but left the represented selection standing.
+        return _decision(
+            "dispatch",
+            AUTHORITY_REPRESENTED,
+            authority_surface="turn_expected_outcome_contract",
+            python_events=python_events,
+        )
+    return _decision("dispatch", AUTHORITY_UNKNOWN)
+
+
+def _find_model_policy_telemetry(
+    diagnostics: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    direct = _safe_mapping(diagnostics.get("workflow_model_policy"))
+    if direct is not None:
+        return direct
+    for container_key in ("llm_debug", "selected_workflow_trace"):
+        container = _safe_mapping(diagnostics.get(container_key))
+        if container is None:
+            continue
+        found = _safe_mapping(container.get("workflow_model_policy"))
+        if found is not None:
+            return found
+        metadata = _safe_mapping(container.get("metadata"))
+        if metadata is not None:
+            found = _safe_mapping(metadata.get("workflow_model_policy"))
+            if found is not None:
+                return found
+    return None
+
+
+def _attribute_model_choice(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    telemetry = _find_model_policy_telemetry(diagnostics)
+    if telemetry is None:
+        return _decision(
+            "model_choice", AUTHORITY_UNKNOWN, python_events=python_events
+        )
+    policy_source = _safe_str(telemetry.get("policy_source"))
+    policy_id = _safe_str(telemetry.get("policy_id"))
+    evidence = {
+        "policy_source": policy_source,
+        "graph_completeness": _safe_str(telemetry.get("graph_completeness")),
+        "policy_id": policy_id,
+    }
+    if policy_source == "graph":
+        return _decision(
+            "model_choice",
+            AUTHORITY_REPRESENTED,
+            authority_surface="vontology_model_policy_graph",
+            concept_ids=[policy_id] if policy_id else None,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if policy_source == "json":
+        return _decision(
+            "model_choice",
+            AUTHORITY_REPRESENTED,
+            authority_surface="vontology_model_policy_json_text_relation",
+            concept_ids=[policy_id] if policy_id else None,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if policy_source == "disabled":
+        # Model choice follows the user/org-selected active LLM settings.
+        return _decision(
+            "model_choice",
+            AUTHORITY_SETTINGS_DEFAULT,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    return _decision(
+        "model_choice",
+        AUTHORITY_PYTHON_FALLBACK,
+        evidence=evidence,
+        python_events=python_events,
+    )
+
+
+def _attribute_recovery(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    routing = _safe_mapping(diagnostics.get("workflow_routing")) or {}
+    selection_rationale = _safe_str(routing.get("selection_rationale"))
+    marker_hit = selection_rationale in _PYTHON_RECOVERY_MARKERS
+    if python_events or marker_hit:
+        evidence = (
+            {"selection_rationale": selection_rationale} if marker_hit else None
+        )
+        return _decision(
+            "recovery",
+            AUTHORITY_PYTHON_FALLBACK,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    return _decision("recovery", AUTHORITY_ABSENT)
+
+
+def _attribute_acceptance(
+    diagnostics: Mapping[str, Any],
+    python_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    gate = _safe_mapping(diagnostics.get("completion_gate"))
+    if gate is None:
+        for container_key in ("turn_execution_record", "llm_debug"):
+            container = _safe_mapping(diagnostics.get(container_key))
+            if container is not None:
+                gate = _safe_mapping(container.get("completion_gate"))
+                if gate is not None:
+                    break
+    if gate is None:
+        return _decision(
+            "acceptance", AUTHORITY_ABSENT, python_events=python_events
+        )
+    verdict_source = _safe_str(
+        gate.get("verdict_source") or gate.get("source") or gate.get("gate_source")
+    )
+    evidence = {
+        "verdict_source": verdict_source,
+        "status": _safe_str(gate.get("status") or gate.get("state")),
+    }
+    if any(event.get("changed_outcome") for event in python_events):
+        return _decision(
+            "acceptance",
+            AUTHORITY_PYTHON_FALLBACK,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if verdict_source and (
+        "critic" in verdict_source or "contract" in verdict_source
+    ):
+        return _decision(
+            "acceptance",
+            AUTHORITY_REPRESENTED,
+            authority_surface=verdict_source,
+            evidence=evidence,
+            python_events=python_events,
+        )
+    return _decision(
+        "acceptance",
+        AUTHORITY_UNKNOWN,
+        evidence=evidence,
+        python_events=python_events,
+    )
+
+
+def build_turn_decision_attribution(
+    *,
+    diagnostics: Mapping[str, Any] | None,
+    aux_entries: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Project recorded turn telemetry into per-decision authority attribution."""
+
+    diagnostics_mapping = _safe_mapping(diagnostics) or {}
+    events_by_kind = _collect_python_events_by_kind(aux_entries)
+
+    decisions = [
+        _attribute_discovery(diagnostics_mapping, events_by_kind["discovery"]),
+        _attribute_selection(diagnostics_mapping, events_by_kind["selection"]),
+        _attribute_dispatch(diagnostics_mapping, events_by_kind["dispatch"]),
+        _attribute_model_choice(
+            diagnostics_mapping, events_by_kind["model_choice"]
+        ),
+        _attribute_recovery(diagnostics_mapping, events_by_kind["recovery"]),
+        _attribute_acceptance(diagnostics_mapping, events_by_kind["acceptance"]),
+    ]
+
+    breakdown = {
+        decision["decision_kind"]: decision["authority"] for decision in decisions
+    }
+    represented_count = sum(
+        1 for decision in decisions if decision["authority"] == AUTHORITY_REPRESENTED
+    )
+    python_fallback_count = sum(
+        1
+        for decision in decisions
+        if decision["authority"] == AUTHORITY_PYTHON_FALLBACK
+    )
+    unknown_count = sum(
+        1 for decision in decisions if decision["authority"] == AUTHORITY_UNKNOWN
+    )
+    attributable = represented_count + python_fallback_count
+    score = (represented_count / attributable) if attributable else None
+
+    return {
+        "schema_version": TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION,
+        "decisions": decisions,
+        "summary": {
+            "decision_kind_breakdown": breakdown,
+            "represented_count": represented_count,
+            "python_fallback_count": python_fallback_count,
+            "unknown_count": unknown_count,
+            "attributable_decision_count": attributable,
+            "architecture_integrity_score": score,
+        },
+    }
+
+
+__all__ = [
+    "AUTHORITY_ABSENT",
+    "AUTHORITY_PYTHON_FALLBACK",
+    "AUTHORITY_REPRESENTED",
+    "AUTHORITY_SETTINGS_DEFAULT",
+    "AUTHORITY_UNKNOWN",
+    "DECISION_KINDS",
+    "TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION",
+    "build_turn_decision_attribution",
+]

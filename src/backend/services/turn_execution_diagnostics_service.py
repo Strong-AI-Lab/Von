@@ -13,6 +13,7 @@ from .conversation_scope_binding_service import (
     build_history_location_binding,
 )
 from .debug_payload_store import hydrate_debug_payload_blob_refs
+from .turn_decision_attribution_service import build_turn_decision_attribution
 from .turn_response_surface_service import build_turn_response_surface_reconciliation
 from .turn_execution_record_service import (
     build_workflow_routing_diagnostics,
@@ -1480,6 +1481,14 @@ def get_turn_execution_diagnostics_payload(
             payload.get("derived_organisation_concept_id")
         ),
         payload=payload,
+    )
+    payload["decision_attribution"] = build_turn_decision_attribution(
+        diagnostics=payload,
+        aux_entries=_collect_routing_aux_entries(
+            payload=payload,
+            llm_debug=llm_debug if isinstance(llm_debug, Mapping) else None,
+            turn_record=turn_record if isinstance(turn_record, Mapping) else None,
+        ),
     )
     payload["success"] = True
     return payload
