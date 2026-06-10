@@ -473,7 +473,15 @@ def test_interpretability_payload_includes_progress_contract():
 # ---------------------------------------------------------------------------
 
 
-def _write_exchange_blob(tmp_path, *, prompt, response, model="gpt-5.4-mini"):
+def _write_exchange_blob(
+    tmp_path,
+    *,
+    prompt,
+    response,
+    model="gpt-5.4-mini",
+    extra=None,
+    first_output_at_utc="2026-06-02T14:09:20.365608+00:00",
+):
     """Write an exchange blob against a local store and return its ref."""
 
     import os
@@ -509,7 +517,8 @@ def _write_exchange_blob(tmp_path, *, prompt, response, model="gpt-5.4-mini"):
         response=response,
         prepared_at_utc="2026-06-02T14:09:18.000000+00:00",
         sent_at_utc="2026-06-02T14:09:19.000000+00:00",
-        first_output_at_utc="2026-06-02T14:09:20.365608+00:00",
+        first_output_at_utc=first_output_at_utc,
+        extra=extra,
     )
     assert "error" not in ref, ref
     return ref
@@ -574,6 +583,45 @@ def test_hydrate_llm_exchange_blob_into_entry_surfaces_exact_exchange(tmp_path):
     assert "unavailable_reason" not in entry
     assert entry["prompt_recorded"] is True
     assert entry["response_recorded"] is True
+
+
+def test_hydrate_failed_llm_exchange_blob_surfaces_failure_metadata(tmp_path):
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _hydrate_llm_exchange_blob_into_entry,
+    )
+
+    ref = _write_exchange_blob(
+        tmp_path,
+        prompt="FAILED PROMPT",
+        response=None,
+        extra={
+            "status": "failed",
+            "success": False,
+            "failure": {
+                "error": "LLM timed out after 120s",
+                "error_class": "TimeoutError",
+                "failure_kind": "candidate_error",
+            },
+        },
+        first_output_at_utc=None,
+    )
+    entry = {
+        "call_type": "llm.generate",
+        "stage": "response_finalising",
+        "exchange_blob_ref": dict(ref),
+        "unavailable_reason": "exchange_in_blob_ref",
+    }
+    _hydrate_llm_exchange_blob_into_entry(entry)
+
+    assert entry["prompt"]["text"] == "FAILED PROMPT"
+    assert "response" not in entry
+    assert entry["prompt_recorded"] is True
+    assert entry.get("response_recorded") is not True
+    assert entry["status"] == "failed"
+    assert entry["success"] is False
+    assert entry["error_class"] == "TimeoutError"
+    assert entry["failure_kind"] == "candidate_error"
+    assert entry["unavailable_reason"] == "failed_before_response"
 
 
 def test_hydrate_llm_exchange_blob_into_entry_noop_without_ref():

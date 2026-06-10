@@ -1649,6 +1649,12 @@ def _normalise_llm_exchange_entry(
         entry.get("selected_provider")
     )
     duration_ms = _safe_non_negative_int(entry.get("duration_ms"))
+    status = _safe_str(entry.get("status"))
+    success_raw = entry.get("success")
+    success = success_raw if isinstance(success_raw, bool) else None
+    error = _safe_str(entry.get("error"))
+    error_class = _safe_str(entry.get("error_class"))
+    failure_kind = _safe_str(entry.get("failure_kind"))
 
     exchange_blob_ref = entry.get("exchange_blob_ref")
     exchange_blob_ref_payload = (
@@ -1666,7 +1672,13 @@ def _normalise_llm_exchange_entry(
 
     unavailable_reason = None
     if not prompt_recorded or not response_recorded:
-        if exchange_blob_ref_payload is not None:
+        if (
+            status in {"failed", "cancelled", "error", "timeout"}
+            and prompt_recorded
+            and not response_recorded
+        ):
+            unavailable_reason = "failed_before_response"
+        elif exchange_blob_ref_payload is not None:
             unavailable_reason = "exchange_in_blob_ref"
         elif call_type and call_type.startswith("workflow_model_policy"):
             unavailable_reason = "model_policy_call_without_exchange"
@@ -1683,6 +1695,11 @@ def _normalise_llm_exchange_entry(
         "model": model,
         "provider": provider,
         "duration_ms": duration_ms,
+        "status": status,
+        "success": success,
+        "error": error,
+        "error_class": error_class,
+        "failure_kind": failure_kind,
         "at_utc": exchange_timestamps.get("at_utc"),
         "started_at_utc": exchange_timestamps.get("started_at_utc"),
         "completed_at_utc": exchange_timestamps.get("completed_at_utc"),
@@ -1794,6 +1811,34 @@ def _hydrate_llm_exchange_blob_into_entry(entry: dict[str, Any]) -> None:
     if entry.get("prompt") is not None and entry.get("response") is not None:
         entry.pop("unavailable_reason", None)
         entry["exchange_source"] = "blob_ref_hydrated"
+
+    extra = body.get("extra")
+    if isinstance(extra, Mapping):
+        status = _safe_str(extra.get("status"))
+        if status and not _safe_str(entry.get("status")):
+            entry["status"] = status
+        success = extra.get("success")
+        if isinstance(success, bool) and not isinstance(entry.get("success"), bool):
+            entry["success"] = success
+        failure = extra.get("failure")
+        failure_mapping = failure if isinstance(failure, Mapping) else extra
+        error = _safe_str(failure_mapping.get("error"))
+        if error and not _safe_str(entry.get("error")):
+            entry["error"] = error
+        error_class = _safe_str(failure_mapping.get("error_class"))
+        if error_class and not _safe_str(entry.get("error_class")):
+            entry["error_class"] = error_class
+        failure_kind = _safe_str(failure_mapping.get("failure_kind"))
+        if failure_kind and not _safe_str(entry.get("failure_kind")):
+            entry["failure_kind"] = failure_kind
+
+    status = _safe_str(entry.get("status"))
+    if (
+        status in {"failed", "cancelled", "error", "timeout"}
+        and entry.get("prompt") is not None
+        and entry.get("response") is None
+    ):
+        entry["unavailable_reason"] = "failed_before_response"
 
 
 def _collect_llm_exchange_entries(

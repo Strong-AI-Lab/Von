@@ -199,6 +199,7 @@ Verify all of the following:
 5. When model choice matters, think in terms of a model portfolio: small local models, medium models, frontier models, fine-tunes, and symbolic modules.
 6. Keep model-specific quirks out of durable business logic whenever possible.
 7. Make model differences visible through telemetry, evaluation, policy metadata, and context-lineage diagnostics when context evolves across stages.
+8. For isolated LLM timing, provider comparison, or fix planning with a revised version of a poorly performing prompt, use `scripts/replay_llm_exchange.py` before heavier real-path replay when a single exchange is enough. Treat it as diagnostic evidence only: it may replay a captured exchange or an explicit/override prompt, but it does not execute tools, run workflows, mutate Vontology, or prove that a user-visible turn is fixed.
 
 ## 6. Vontology and representation rules
 

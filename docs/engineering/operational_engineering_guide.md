@@ -210,6 +210,24 @@ Isolated coding-agent replay backend:
 - Do not treat `-Port` alone as isolation. The isolated mode changes launcher
   ownership semantics so an automated run does not globally clean up or adopt
   unrelated local Von processes.
+- For lightweight single-LLM-exchange debugging, use
+  `scripts/replay_llm_exchange.py` instead of starting a full server when the
+  question is only model timing, provider availability, or a proposed prompt
+  revision. It can inspect/replay a logged exchange by `request_id`, replay an
+  `llm_exchange_blob.v1` JSON file, send an explicit prompt, or replace a
+  logged prompt with `--override-prompt-file` while preserving the logged
+  context. This is diagnostic support only: it does not execute tools, run
+  workflows, mutate Vontology, or count as acceptance evidence for a live
+  turn.
+  Examples:
+  - inspect the captured exchange:
+    `./.venv/bin/python scripts/replay_llm_exchange.py --request-id <request_id> --entry 1 --inspect-only`
+  - replay the captured exchange against a selected local model:
+    `./.venv/bin/python scripts/replay_llm_exchange.py --request-id <request_id> --provider ollama --model qwen3:8b --timeout 120`
+  - test a revised prompt body against the captured context:
+    `./.venv/bin/python scripts/replay_llm_exchange.py --request-id <request_id> --override-prompt-file /path/to/revised_prompt.txt --provider ollama --model qwen3:8b --timeout 120`
+  - send a standalone explicit prompt for prompt-fix planning:
+    `./.venv/bin/python scripts/replay_llm_exchange.py --prompt-file /path/to/prompt.txt --provider mock --model diagnostic`
 - In VS Code / VS Code Insiders, the Codex Browser and Chrome plugin bundles
   can be present while the live browser backends are not exposed to the coding
   session. If the Browser/Chrome client lists no browsers or reports

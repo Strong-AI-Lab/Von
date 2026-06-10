@@ -1884,6 +1884,11 @@ def _run_gateway_llm_step_no_tools(
         workflow_stage_id: str | None = None,
         call_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
+        status: str | None = None,
+        success: bool | None = None,
+        error: str | None = None,
+        error_class: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -1907,6 +1912,16 @@ def _run_gateway_llm_step_no_tools(
             entry["call_id"] = call_id.strip()
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+        if isinstance(status, str) and status.strip():
+            entry["status"] = status.strip()
+        if isinstance(success, bool):
+            entry["success"] = success
+        if isinstance(error, str) and error.strip():
+            entry["error"] = error.strip()
+        if isinstance(error_class, str) and error_class.strip():
+            entry["error_class"] = error_class.strip()
+        if isinstance(failure_kind, str) and failure_kind.strip():
+            entry["failure_kind"] = failure_kind.strip()
         stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(
@@ -2248,6 +2263,11 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         workflow_stage_id: str | None = None,
         call_id: str | None = None,
         exchange_blob_ref: Mapping[str, Any] | None = None,
+        status: str | None = None,
+        success: bool | None = None,
+        error: str | None = None,
+        error_class: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": call_type,
@@ -2271,6 +2291,16 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             entry["call_id"] = call_id.strip()
         if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
             entry["exchange_blob_ref"] = dict(exchange_blob_ref)
+        if isinstance(status, str) and status.strip():
+            entry["status"] = status.strip()
+        if isinstance(success, bool):
+            entry["success"] = success
+        if isinstance(error, str) and error.strip():
+            entry["error"] = error.strip()
+        if isinstance(error_class, str) and error_class.strip():
+            entry["error_class"] = error_class.strip()
+        if isinstance(failure_kind, str) and failure_kind.strip():
+            entry["failure_kind"] = failure_kind.strip()
         stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(

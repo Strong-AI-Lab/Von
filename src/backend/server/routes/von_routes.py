@@ -11750,6 +11750,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             exchange_blob_ref: Mapping[str, Any] | None = None,
             prompt: Any = None,
             response: Any = None,
+            status: str | None = None,
+            success: bool | None = None,
+            error: str | None = None,
+            error_class: str | None = None,
+            failure_kind: str | None = None,
         ) -> None:
             payload = {
                 "type": call_type,
@@ -11773,6 +11778,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["prompt"] = prompt
             if response is not None:
                 payload["response"] = response
+            if isinstance(status, str) and status.strip():
+                payload["status"] = status.strip()
+            if isinstance(success, bool):
+                payload["success"] = success
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            if isinstance(error_class, str) and error_class.strip():
+                payload["error_class"] = error_class.strip()
+            if isinstance(failure_kind, str) and failure_kind.strip():
+                payload["failure_kind"] = failure_kind.strip()
             _stamp_llm_call_timestamps(payload, duration_ms=duration_ms)
             llm_interaction["calls"].append(payload)
 

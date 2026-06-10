@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+import pytest
+
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _ModelCandidate,
@@ -30,6 +32,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 class _SuccessfulClient:
     def generate(self, *_args: Any, **_kwargs: Any) -> str:
         return "ok"
+
+
+class _FailingClient:
+    def generate(self, *_args: Any, **_kwargs: Any) -> str:
+        raise TimeoutError("LLM timed out after 120s")
 
 
 def _policy_state() -> _WorkflowModelPolicyState:
@@ -226,7 +233,110 @@ def test_run_llm_with_fallbacks_omits_workflow_stage_id_when_not_provided(
     for event in progress_events:
         assert "workflow_stage_id" not in event or not event.get("workflow_stage_id")
     for payload in recorded_calls:
-        assert (
-            "workflow_stage_id" not in payload
-            or payload.get("workflow_stage_id") in (None, "")
+        assert "workflow_stage_id" not in payload or payload.get(
+            "workflow_stage_id"
+        ) in (None, "")
+
+
+def test_run_llm_with_fallbacks_records_failed_exchange_blob(monkeypatch) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="ollama",
+        model="qwen3:8b",
+        raw="ollama:qwen3:8b",
+        source="policy",
+        host="http://localhost:11434",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        return (
+            _FailingClient(),
+            "qwen3:8b",
+            {
+                "provider": "ollama",
+                "model": "qwen3:8b",
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "host": "http://localhost:11434",
+            },
         )
+
+    captured_blobs: list[dict[str, Any]] = []
+
+    def _capture_llm_exchange_blob(**payload: Any) -> dict[str, Any]:
+        captured_blobs.append(dict(payload))
+        return {
+            "schema_version": "llm_exchange_blob.v1",
+            "backend": "local",
+            "key": "llm_exchanges/failure.json.gz",
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_capture_llm_exchange_blob",
+        _capture_llm_exchange_blob,
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    def _record_llm_call(**payload: Any) -> None:
+        recorded_calls.append(dict(payload))
+
+    with pytest.raises(TimeoutError):
+        orchestrator._run_llm_with_fallbacks(
+            stage="response_finalising",
+            prompt="Captured failing prompt.",
+            context=[{"role": "system", "content": "Captured context."}],
+            default_client=object(),
+            default_model="qwen3:8b",
+            policy_state=_policy_state(),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=[],
+            record_llm_call=_record_llm_call,
+            emit_progress=lambda payload: progress_events.append(dict(payload)),
+            workflow_stage_id="response_finalising",
+        )
+
+    assert recorded_calls, "expected failed LLM call telemetry"
+    failed_call = recorded_calls[0]
+    assert failed_call["status"] == "failed"
+    assert failed_call["success"] is False
+    assert failed_call["error_class"] == "TimeoutError"
+    assert failed_call["failure_kind"] == "candidate_error"
+    assert failed_call["exchange_blob_ref"]["key"] == "llm_exchanges/failure.json.gz"
+
+    assert captured_blobs, "expected failed exchange blob capture"
+    blob_payload = captured_blobs[0]
+    assert blob_payload["prompt"] == "Captured failing prompt."
+    assert blob_payload["context"] == [
+        {"role": "system", "content": "Captured context."}
+    ]
+    assert blob_payload["response"] is None
+    assert blob_payload["extra"]["status"] == "failed"
+    assert blob_payload["extra"]["failure"]["error_class"] == "TimeoutError"
+
+    end_events = [
+        event for event in progress_events if event.get("status") == "llm_call_end"
+    ]
+    assert end_events
+    assert end_events[-1]["success"] is False
+    assert end_events[-1]["error_class"] == "TimeoutError"

@@ -220,6 +220,16 @@ it does not inject raw prompt text or promote a variant. A telemetry-inconsisten
 arm can remain useful comparator evidence, but it is non-promotable until the
 response surfaces, completion gate, and user-visible answer agree.
 
+For earlier fix planning on a poorly performing prompt, use
+`scripts/replay_llm_exchange.py` when you only need to time or compare one LLM
+exchange. It can replay a captured `request_id`, send an explicit draft prompt
+with `--prompt` or `--prompt-file`, or preserve a captured exchange's context
+while replacing only the prompt body with `--override-prompt-file`. That is a
+good way to test whether a proposed prompt revision is promising before
+materialising it as a represented prompt variant. Treat the result as
+diagnostic planning evidence only: it does not run Von workflows, execute tools,
+select represented prompt variants, or prove the user-visible turn is fixed.
+
 ### 5.2 Random Prompt Sampling
 
 Von already has a maintained live prompt bank and replay harness for this:

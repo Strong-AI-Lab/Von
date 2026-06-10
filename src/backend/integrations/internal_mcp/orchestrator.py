@@ -17844,6 +17844,8 @@ class InternalMCPChatOrchestrator:
                 return response, model_name, telemetry
             except CancellationRequested as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                exc_text = str(exc)
+                exc_class = type(exc).__name__
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -17852,8 +17854,8 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "duration_ms": int(duration_ms),
                             "success": False,
-                            "error": str(exc),
-                            "error_class": type(exc).__name__,
+                            "error": exc_text,
+                            "error_class": exc_class,
                             "failure_kind": "cancelled",
                             **_stage_extra,
                             **attempt_meta,
@@ -17879,6 +17881,35 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
+                    status="cancelled",
+                    success=False,
+                    error=exc_text,
+                    error_class=exc_class,
+                    failure_kind="cancelled",
+                    exchange_blob_ref=self._capture_llm_exchange_blob(
+                        stage=stage,
+                        workflow_stage_id=workflow_stage_id,
+                        call_type="llm.generate",
+                        prompt=prompt,
+                        context=context,
+                        response=None,
+                        model_name=model_name,
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        prepared_at_utc=request_prepared_at_utc,
+                        sent_at_utc=request_sent_at_utc,
+                        first_output_at_utc=None,
+                        usage=None,
+                        extra=self._build_llm_failure_exchange_extra(
+                            status="cancelled",
+                            error=exc_text,
+                            error_class=exc_class,
+                            failure_kind="cancelled",
+                        ),
+                    ),
                 )
                 raise
             except Exception as exc:
@@ -17955,6 +17986,35 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
+                    status="failed",
+                    success=False,
+                    error=exc_text,
+                    error_class=exc_class,
+                    failure_kind=_fk,
+                    exchange_blob_ref=self._capture_llm_exchange_blob(
+                        stage=stage,
+                        workflow_stage_id=workflow_stage_id,
+                        call_type="llm.generate",
+                        prompt=prompt,
+                        context=context,
+                        response=None,
+                        model_name=model_name,
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        prepared_at_utc=request_prepared_at_utc,
+                        sent_at_utc=request_sent_at_utc,
+                        first_output_at_utc=None,
+                        usage=None,
+                        extra=self._build_llm_failure_exchange_extra(
+                            status="failed",
+                            error=exc_text,
+                            error_class=exc_class,
+                            failure_kind=_fk,
+                        ),
+                    ),
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -18237,6 +18297,24 @@ class InternalMCPChatOrchestrator:
         return payload
 
     @staticmethod
+    def _build_llm_failure_exchange_extra(
+        *,
+        status: str,
+        error: str,
+        error_class: str,
+        failure_kind: str,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "success": False,
+            "failure": {
+                "error": error,
+                "error_class": error_class,
+                "failure_kind": failure_kind,
+            },
+        }
+
+    @staticmethod
     def _capture_llm_exchange_blob(
         *,
         stage: str,
@@ -18251,6 +18329,7 @@ class InternalMCPChatOrchestrator:
         sent_at_utc: str | None,
         first_output_at_utc: str | None,
         usage: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Persist an LLM exchange to the blob store (JVNAUTOSCI-2144).
 
@@ -18282,6 +18361,7 @@ class InternalMCPChatOrchestrator:
                 sent_at_utc=sent_at_utc,
                 first_output_at_utc=first_output_at_utc,
                 usage=usage,
+                extra=extra,
             )
         except Exception as exc:
             return {
@@ -18967,6 +19047,35 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                     workflow_stage_id=workflow_stage_id,
+                    status="failed",
+                    success=False,
+                    error=exc_text,
+                    error_class=exc_class,
+                    failure_kind=_fk,
+                    exchange_blob_ref=self._capture_llm_exchange_blob(
+                        stage=stage,
+                        workflow_stage_id=workflow_stage_id,
+                        call_type="llm.generate_with_tools",
+                        prompt=prompt,
+                        context=context,
+                        response=None,
+                        model_name=model_name,
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        prepared_at_utc=request_prepared_at_utc,
+                        sent_at_utc=request_sent_at_utc,
+                        first_output_at_utc=None,
+                        usage=None,
+                        extra=self._build_llm_failure_exchange_extra(
+                            status="failed",
+                            error=exc_text,
+                            error_class=exc_class,
+                            failure_kind=_fk,
+                        ),
+                    ),
                 )
                 errors.append(
                     {
@@ -36082,6 +36191,11 @@ class InternalMCPChatOrchestrator:
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
             exchange_blob_ref: Mapping[str, Any] | None = None,
+            status: str | None = None,
+            success: bool | None = None,
+            error: str | None = None,
+            error_class: str | None = None,
+            failure_kind: str | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -36101,6 +36215,16 @@ class InternalMCPChatOrchestrator:
                 payload["candidate"] = dict(candidate)
             if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
                 payload["exchange_blob_ref"] = dict(exchange_blob_ref)
+            if isinstance(status, str) and status.strip():
+                payload["status"] = status.strip()
+            if isinstance(success, bool):
+                payload["success"] = success
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            if isinstance(error_class, str) and error_class.strip():
+                payload["error_class"] = error_class.strip()
+            if isinstance(failure_kind, str) and failure_kind.strip():
+                payload["failure_kind"] = failure_kind.strip()
             llm_calls.append(payload)
 
         def _aggregate_usage_total() -> Mapping[str, int] | None:
@@ -37098,6 +37222,11 @@ class InternalMCPChatOrchestrator:
             candidate: Mapping[str, Any] | None = None,
             workflow_stage_id: str | None = None,
             exchange_blob_ref: Mapping[str, Any] | None = None,
+            status: str | None = None,
+            success: bool | None = None,
+            error: str | None = None,
+            error_class: str | None = None,
+            failure_kind: str | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -37117,6 +37246,16 @@ class InternalMCPChatOrchestrator:
                 payload["candidate"] = dict(candidate)
             if isinstance(exchange_blob_ref, Mapping) and exchange_blob_ref:
                 payload["exchange_blob_ref"] = dict(exchange_blob_ref)
+            if isinstance(status, str) and status.strip():
+                payload["status"] = status.strip()
+            if isinstance(success, bool):
+                payload["success"] = success
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            if isinstance(error_class, str) and error_class.strip():
+                payload["error_class"] = error_class.strip()
+            if isinstance(failure_kind, str) and failure_kind.strip():
+                payload["failure_kind"] = failure_kind.strip()
             llm_calls.append(payload)
 
         def _aggregate_usage_total() -> Mapping[str, int] | None:
