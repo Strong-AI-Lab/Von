@@ -236,3 +236,25 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   mutate indexes, author workflow policy, or feed represented learning loops.
 - No new Jira issues were created and no production code was changed by this
   review run.
+
+## 2026-06-11T02:16:50.3578395+12:00
+
+- Read required repo guidance, security guidance, workflow manual,
+  authority-alignment guidance, current automation memory path, and repo-local
+  review memory.
+- Local `main` was aligned with `origin/main` at `c4bafc33`, but the worktree
+  was already dirty in review-memory files plus response-preservation
+  production/test changes. The scan inspected those dirty changes but did not
+  edit or stage production/test files.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`;
+  all guarded counts were `0` and the gate passed.
+- Created `JVNAUTOSCI-2496` for graph model-policy drift:
+  `workflow_policy_graph_service.py` still hard-codes stage aliases,
+  `active_llm` primary fallback, fallback-hop default `2`, compatibility mode,
+  and local-only parsing while the orchestrator prefers that graph resolver
+  before JSON fallback. Linked it to `JVNAUTOSCI-1913` and `JVNAUTOSCI-2473`.
+- Added fresh dirty-worktree response-preservation evidence to existing
+  `JVNAUTOSCI-2478` instead of filing a duplicate: current changes preserve
+  child/user responses by Python field order and `Execution status:` filtering
+  in selected-workflow/completion-gate surfaces.
+- No production code was changed by this review run.

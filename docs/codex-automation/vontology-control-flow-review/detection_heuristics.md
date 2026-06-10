@@ -173,6 +173,12 @@ represented authority before filing Jira work.
   operator-scoped, and do not feed Von's workflow/prompt/model learning loops.
   File when those rubrics become recurring workflow policy, user-visible answer
   semantics, or durable learning/evaluation authority without representation.
+- Vontology-backed model-policy resolvers are drift candidates when they
+  hard-code workflow-stage maps, runtime stage aliases, primary/fallback model
+  defaults, fallback-hop limits, inheritance/compatibility modes, or boolean
+  policy parsing. Python may load and validate represented graph policy, but
+  missing represented model-policy fields should not silently become complete
+  runtime policy.
 
 ## Recent Examples
 
@@ -233,3 +239,5 @@ represented authority before filing Jira work.
   workflow-execute single-candidate recovery, is authored in the orchestrator.
 - `JVNAUTOSCI-2472` - Python-authored Mongo diagnostics maintenance workflow
   graph and startup publication should move to Vontology-stored VWL.
+- `JVNAUTOSCI-2496` - graph model-policy defaults and stage aliases should move
+  from Python into represented workflow-stage/model-policy authority.
