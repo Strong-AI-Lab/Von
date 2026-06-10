@@ -424,6 +424,12 @@ WORKFLOW_ID_SPECIAL_CASE_OPERATORS = (
     ast.NotIn,
 )
 
+MONOLITH_RATCHET_FILES = (
+    "src/backend/integrations/internal_mcp/orchestrator.py",
+    "src/backend/integrations/internal_mcp/catalogue.py",
+    "src/backend/server/routes/von_routes.py",
+)
+
 SUPERVISED_FAIL_OPEN_CONTRACT = {
     "path": "src/backend/integrations/internal_mcp/orchestrator.py",
     "function": "execute_conversation_turn_supervised",
@@ -1564,6 +1570,30 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
     }
 
 
+def _scan_monolith_line_ratchet(project_root: Path) -> dict[str, Any]:
+    """Measure the line counts of the named monolith files.
+
+    These counters ratchet through the baseline comparison: any growth beyond
+    the checked-in baseline is a regression, and deliberate reductions should
+    be locked in by refreshing the baseline. See JVNAUTOSCI-2497.
+    """
+
+    files: list[dict[str, Any]] = []
+    for relative_path in MONOLITH_RATCHET_FILES:
+        path = project_root / relative_path
+        if not path.exists():
+            files.append({"path": relative_path, "line_count": 0, "exists": False})
+            continue
+        line_count = path.read_text(encoding="utf-8").count("\n")
+        files.append(
+            {"path": relative_path, "line_count": int(line_count), "exists": True}
+        )
+    return {
+        "files": files,
+        "tracked_paths": list(MONOLITH_RATCHET_FILES),
+    }
+
+
 def load_workflow_purity_baseline(
     baseline_path: Path | None = None,
 ) -> dict[str, Any] | None:
@@ -1702,6 +1732,7 @@ def build_workflow_purity_report(
     workflow_id_special_cases = _scan_workflow_id_special_case_branches(repo_root)
     supervised_fail_open_fallbacks = _scan_supervised_fail_open_fallbacks(repo_root)
     core_support_policy_contracts = _scan_core_support_policy_contracts(repo_root)
+    monolith_line_ratchet = _scan_monolith_line_ratchet(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
 
     counters = {
@@ -1746,6 +1777,12 @@ def build_workflow_purity_report(
             source_counts.get("synthesized_launch_contract_count", 0)
         ),
     }
+    for entry in monolith_line_ratchet.get("files", []):
+        stem = Path(str(entry.get("path") or "")).stem
+        if stem:
+            counters[f"monolith_line_count_{stem}"] = int(
+                entry.get("line_count", 0) or 0
+            )
 
     baseline = load_workflow_purity_baseline(baseline_path)
     comparison = compare_workflow_purity_to_baseline(
@@ -1782,6 +1819,7 @@ def build_workflow_purity_report(
             "workflow_id_special_cases": workflow_id_special_cases,
             "supervised_fail_open_fallbacks": supervised_fail_open_fallbacks,
             "support_surface_policy_contracts": core_support_policy_contracts,
+            "monolith_line_ratchet": monolith_line_ratchet,
             "direct_instance_create": direct_create,
             "env_event_binding_authority": env_event_binding,
             "legacy_selector_support": legacy_selector,
@@ -1806,6 +1844,7 @@ __all__ = [
     "ENV_EVENT_BINDING_AUTHORITY_PATTERNS",
     "LEGACY_SELECTOR_CONSTRUCT_PATTERNS",
     "LEGACY_SELECTOR_FILE",
+    "MONOLITH_RATCHET_FILES",
     "REPO_SEED_AUTHORITY_ALLOWED_PATHS",
     "REPO_SEED_AUTHORITY_PATTERNS",
     "SEED_FALLBACK_ORDER_CONTRACTS",

@@ -10,6 +10,7 @@ from src.backend.workflows.workflow_registry import (
 )
 from src.backend.workflows.workflow_purity_report import (
     build_workflow_purity_report,
+    compare_workflow_purity_to_baseline,
 )
 
 
@@ -134,6 +135,9 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                     "python_authored_canonical_workflow_source_count": 2,
                     "python_authored_workflow_prompt_source_count": 2,
                     "python_authored_support_prompt_source_count": 0,
+                    "monolith_line_count_orchestrator": 0,
+                    "monolith_line_count_catalogue": 0,
+                    "monolith_line_count_von_routes": 0,
                     "direct_instance_create_callsite_count": 3,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 1,
@@ -176,6 +180,9 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "supervised_fail_open_fallback_count": 0,
         "support_surface_policy_contract_violation_count": 0,
         "synthesized_launch_contract_count": 0,
+        "monolith_line_count_orchestrator": 0,
+        "monolith_line_count_catalogue": 0,
+        "monolith_line_count_von_routes": 0,
     }
     assert report["details"]["non_vontology_discoverable_workflow_ids"] == [
         "#V#chat_assistant_workflow",
@@ -1452,3 +1459,55 @@ def test_build_workflow_purity_report_detects_file_copy_representation_drift(
     assert "retired_company_file_copy_semantic_helper_symbol" in patterns
     assert "retired_meeting_file_copy_semantic_regex_symbol" in patterns
     assert "retired_meeting_file_copy_semantic_helper_symbol" in patterns
+
+
+def test_build_workflow_purity_report_ratchets_monolith_line_counts(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/integrations/internal_mcp/orchestrator.py",
+        "line_one = 1\nline_two = 2\nline_three = 3\n",
+        root=tmp_path,
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=tmp_path / "missing_baseline.json",
+    )
+
+    counters = report["counters"]
+    assert counters["monolith_line_count_orchestrator"] == 3
+    assert counters["monolith_line_count_catalogue"] == 0
+    assert counters["monolith_line_count_von_routes"] == 0
+
+    ratchet_detail = report["details"]["monolith_line_ratchet"]
+    tracked = {
+        entry["path"]: entry for entry in ratchet_detail["files"]
+    }
+    orchestrator_entry = tracked[
+        "src/backend/integrations/internal_mcp/orchestrator.py"
+    ]
+    assert orchestrator_entry["exists"] is True
+    assert orchestrator_entry["line_count"] == 3
+
+    baseline = {
+        "schema_version": "workflow_purity_baseline.v1",
+        "counters": dict(counters),
+    }
+    grown_counters = dict(counters)
+    grown_counters["monolith_line_count_orchestrator"] = 4
+    comparison = compare_workflow_purity_to_baseline(
+        counters=grown_counters,
+        baseline=baseline,
+    )
+    assert comparison["regression_detected"] is True
+    assert "monolith_line_count_orchestrator" in comparison["increased_counters"]
+
+    shrunk_counters = dict(counters)
+    shrunk_counters["monolith_line_count_orchestrator"] = 2
+    comparison = compare_workflow_purity_to_baseline(
+        counters=shrunk_counters,
+        baseline=baseline,
+    )
+    assert comparison["regression_detected"] is False
