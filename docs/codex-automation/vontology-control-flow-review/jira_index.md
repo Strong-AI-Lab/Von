@@ -117,3 +117,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   transitions, MCP tool inputs, context mappings, and startup publication still
   originate from a Python `WorkflowDefinition`/`source="built_in"`
   registration rather than independently authored Vontology-stored VWL.
+- `JVNAUTOSCI-2496` - graph model-policy resolver stage vocabulary,
+  `active_llm` primary fallback, fallback-hop default, compatibility mode, and
+  local-only parsing semantics live in Python instead of represented
+  workflow-stage/model-policy authority.

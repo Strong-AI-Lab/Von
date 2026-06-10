@@ -104,6 +104,10 @@ predicates, and KB assertions should own durable:
 - Selector fallback and recovery authority, including when a failed/default
   selector result may be recovered to a specialised workflow, which candidate
   is eligible, and what reasoning or recovery explanation is exposed.
+- Model-policy graph authority, including workflow-stage aliases, primary and
+  fallback model defaults, fallback-hop limits, inheritance, compatibility
+  modes, local-only policy semantics, and any defaults used when represented
+  model-policy data is incomplete.
 
 ## Python Support
 
@@ -203,6 +207,10 @@ Python can remain the surface for:
 - generic selector fast-path/recovery evaluators that validate represented
   policy metadata, candidate coverage, and authority provenance, then apply the
   represented decision or fail closed without authoring fallback policy;
+- generic model-policy graph loaders that resolve represented stage/policy
+  metadata, validate and normalise types, preserve source concept provenance,
+  and fail closed or report incomplete authority instead of supplying hidden
+  stage/default policy;
 - generic HTTP/request plumbing that passes represented decisions through.
 - read-only operational diagnostics and Jira triage tooling that computes
   bounded engineering metrics, redacts evidence, and prepares human-review
