@@ -34821,7 +34821,8 @@ class InternalMCPChatOrchestrator:
 
                 projected_continuation_launch_inputs = (
                     project_launch_inputs_from_continuation_context(
-                        continuation_context
+                        continuation_context,
+                        selected_workflow_id=selected_workflow_id,
                     )
                 )
             except Exception:
@@ -43320,7 +43321,8 @@ class InternalMCPChatOrchestrator:
 
                     projected_launch_inputs = (
                         project_launch_inputs_from_continuation_context(
-                            workflow_continuation_payload
+                            workflow_continuation_payload,
+                            selected_workflow_id=effective_workflow_id,
                         )
                     )
                 except Exception:

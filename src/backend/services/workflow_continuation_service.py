@@ -22,47 +22,13 @@ _CONCEPT_ID_PATTERN = re.compile(
 )
 _URL_TARGET_PATTERN = re.compile(r"(?i)^https?://[^\s]+$")
 
-_WORKFLOW_DIVERGENCE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(
-            r"\b(?:do\s+not|don't|dont|stop|avoid)\s+"
-            r"(?:run|use|continue|resume)\b[^.?!]{0,120}\bworkflow\b",
-            flags=re.IGNORECASE,
-        ),
-        "prompt_forbids_workflow_execution",
-    ),
-    (
-        re.compile(
-            r"\b(?:wrong|incorrect)\s+workflow\b",
-            flags=re.IGNORECASE,
-        ),
-        "prompt_rejects_workflow_as_wrong",
-    ),
-    (
-        re.compile(
-            r"\bworkflow\b[^.?!]{0,120}\b(?:isn't|is\s+not|wasn't|was\s+not)\s+"
-            r"the\s+right\s+one\b",
-            flags=re.IGNORECASE,
-        ),
-        "prompt_rejects_workflow_as_wrong",
-    ),
-    (
-        re.compile(
-            r"\b(?:isn't|is\s+not|wasn't|was\s+not)\s+the\s+right\s+workflow\b",
-            flags=re.IGNORECASE,
-        ),
-        "prompt_rejects_workflow_as_wrong",
-    ),
-)
-_MANUAL_CONCEPT_INSPECTION_PATTERN = re.compile(
-    r"\b(?:manually|manual)\s+"
-    r"(?:retrieve|inspect|review|examine|check|fetch|look(?:\s+at)?)\b",
-    flags=re.IGNORECASE,
-)
-_CONCEPT_STRUCTURE_INSPECTION_PATTERN = re.compile(
-    r"\b(?:type|types|relation|relations|predicate|predicates|instance[_\s-]?of|"
-    r"supervisor|supervision|concept)\b",
-    flags=re.IGNORECASE,
+# The instruction that frames continuation context for the selector/planner,
+# including the user's licence to diverge, is represented prompt authority
+# (JVNAUTOSCI-2500). Python no longer detects prompt-level divergence with
+# lexical patterns; the represented selector stage reads the user's message
+# alongside this framing and owns that judgement.
+WORKFLOW_CONTINUATION_FRAMING_PROMPT_CONCEPT_ID = (
+    "#V#workflow_continuation_framing_prompt"
 )
 
 
@@ -145,46 +111,49 @@ def _classify_selected_workflow_executability(
     }
 
 
-def _detect_prompt_level_workflow_divergence(
+def resolve_workflow_continuation_framing_instruction(
     *,
-    prompt: str,
-    continuation_context: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Return explicit workflow-divergence cues from the current prompt, if any.
+    prompt_concept_id: str | None = None,
+    max_chars: int = 4000,
+) -> tuple[str | None, dict[str, Any]]:
+    """Resolve the represented continuation-framing instruction text.
 
-    Continuation remains workflow-state-first, but explicit user instructions to
-    stop, not run, or manually inspect instead of continuing the prior workflow
-    must override stale continuation state.
+    The instruction (including the user's explicit licence to diverge from the
+    prior workflow) is authored as a Vontology prompt concept. When the
+    represented instruction is unavailable, this fails closed: callers inject
+    only the factual continuation summary, never a Python-authored
+    instruction.
     """
 
-    prompt_text = _safe_str(prompt) or ""
-    if not prompt_text or not isinstance(continuation_context, Mapping):
-        return None
+    from .prompt_template_service import PromptTemplateService
 
-    selected_workflow_id = _safe_str(continuation_context.get("selected_workflow_id"))
-    if not selected_workflow_id:
-        return None
-
-    matched_signals: list[str] = []
-    for pattern, signal in _WORKFLOW_DIVERGENCE_PATTERNS:
-        if pattern.search(prompt_text):
-            matched_signals.append(signal)
-
-    if (
-        not matched_signals
-        and _CONCEPT_ID_PATTERN.search(prompt_text)
-        and _MANUAL_CONCEPT_INSPECTION_PATTERN.search(prompt_text)
-        and _CONCEPT_STRUCTURE_INSPECTION_PATTERN.search(prompt_text)
-    ):
-        matched_signals.append("prompt_requests_manual_concept_inspection")
-
-    if not matched_signals:
-        return None
-
-    return {
-        "reason": "prompt_explicitly_diverges_from_selected_workflow",
-        "matched_signals": matched_signals,
+    requested_prompt_id = (
+        _safe_str(prompt_concept_id) or WORKFLOW_CONTINUATION_FRAMING_PROMPT_CONCEPT_ID
+    )
+    diagnostics: dict[str, Any] = {
+        "requested_prompt_concept_id": requested_prompt_id,
+        "loaded_prompt_concept_id": None,
+        "error": None,
     }
+    try:
+        prompt_service = PromptTemplateService(default_max_chars=max(1000, max_chars))
+        loaded_prompt_id, prompt_text = prompt_service.resolve_prompt_text(
+            [requested_prompt_id],
+            fallback=None,
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        diagnostics["error"] = (
+            f"workflow_continuation_framing_prompt_resolve_failed:{exc}"
+        )
+        return None, diagnostics
+
+    instruction = _safe_str(prompt_text)
+    if not instruction:
+        diagnostics["error"] = "workflow_continuation_framing_prompt_missing_or_empty"
+        return None, diagnostics
+    diagnostics["loaded_prompt_concept_id"] = _safe_str(loaded_prompt_id)
+    return instruction, diagnostics
 
 
 def get_session_workflow_continuation_context(
@@ -393,16 +362,23 @@ def assess_prompt_for_workflow_continuation(
     prompt: str | None,
     continuation_context: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Classify whether the current prompt should continue prior workflow state.
+    """Classify whether prior workflow state offers continuation context.
 
     Priority cascade:
     1. Gate checks: empty prompt or no context → not continuation.
     2. No open work in context → not continuation (workflow-state decision).
-    3. Explicit prompt-level rejection / divergence from the prior workflow →
-       do not continue implicitly.
-    4. Workflow-state-authoritative: open work under a specific workflow →
-       continuation applies unless the user explicitly diverges.
-    5. Open work without a specific workflow → do not continue implicitly.
+    3. Workflow-state-authoritative: open work under a specific executable
+       workflow → continuation context applies.
+    4. Open work without a specific workflow → do not continue implicitly.
+
+    This decision is structural, derived only from persisted workflow state.
+    Whether the user's current message *rejects or redirects away from* the
+    prior workflow is a semantic judgement owned by the represented selector
+    and planner stages, which receive the continuation framing (resolved from
+    represented prompt authority) together with the user's message
+    (JVNAUTOSCI-2500). Launch-input projection is additionally gated on the
+    selected workflow actually matching the continuation workflow, so a
+    divergent selection never inherits stale continuation inputs.
 
     Returns a dict with ``applies``, ``reason``, and ``decision_source``
     (one of ``"gate"`` or ``"workflow_state"``).
@@ -449,24 +425,10 @@ def assess_prompt_for_workflow_continuation(
             ),
         }
 
-    prompt_divergence = _detect_prompt_level_workflow_divergence(
-        prompt=prompt_text,
-        continuation_context=continuation_context,
-    )
-    if isinstance(prompt_divergence, Mapping):
-        return {
-            "applies": False,
-            "reason": _safe_str(prompt_divergence.get("reason"))
-            or "prompt_explicitly_diverges_from_selected_workflow",
-            "decision_source": "prompt_override",
-            "matched_signals": _dedupe_strings(
-                prompt_divergence.get("matched_signals")
-            ),
-        }
-
     # Workflow-state-authoritative path: when open work exists under a
-    # specific workflow, the persisted continuation state is authoritative
-    # unless the user explicitly rejects or redirects it.
+    # specific workflow, the persisted continuation state supplies framing
+    # context. The represented selector/planner stages judge whether the
+    # user's message diverges from it.
     has_specific_workflow = bool(selected_workflow_id)
     if has_specific_workflow:
         return {
@@ -628,18 +590,23 @@ def build_workflow_continuation_routing_prompt(
 def build_workflow_continuation_system_message(
     continuation_context: Mapping[str, Any] | None,
 ) -> str | None:
-    """Return a system message for planner/tool-routing context, if available."""
+    """Return a system message for planner/tool-routing context, if available.
+
+    The factual continuation summary is persisted-state evidence and is always
+    included. The framing instruction (how to weigh that state, including the
+    user's licence to diverge) comes from represented prompt authority and is
+    omitted when unavailable rather than substituted from Python.
+    """
 
     if not isinstance(continuation_context, Mapping):
         return None
     summary = build_workflow_continuation_summary_text(continuation_context)
     if not summary:
         return None
-    return (
-        "Use this authoritative session state when deciding continuation, repair, "
-        "or verification work.\n\n"
-        f"{summary}"
-    )
+    instruction, _diagnostics = resolve_workflow_continuation_framing_instruction()
+    if instruction:
+        return f"{instruction}\n\n{summary}"
+    return summary
 
 
 def extract_file_copy_targets_from_continuation_context(
@@ -749,10 +716,29 @@ def extract_url_targets_from_continuation_context(
 
 def project_launch_inputs_from_continuation_context(
     continuation_context: Mapping[str, Any] | None,
+    *,
+    selected_workflow_id: str | None = None,
 ) -> dict[str, Any]:
-    """Project stable launch inputs from authoritative continuation artefacts."""
+    """Project stable launch inputs from authoritative continuation artefacts.
+
+    When ``selected_workflow_id`` is provided, projection only applies if the
+    selection actually continues the continuation context's workflow. A
+    divergent selection (the represented selector chose a different workflow)
+    must not inherit stale continuation targets (JVNAUTOSCI-2500).
+    """
 
     if not isinstance(continuation_context, Mapping):
+        return {}
+
+    selection = _safe_str(selected_workflow_id)
+    continuation_workflow_id = _safe_str(
+        continuation_context.get("selected_workflow_id")
+    )
+    if (
+        selection
+        and continuation_workflow_id
+        and selection.lower() != continuation_workflow_id.lower()
+    ):
         return {}
 
     projected: dict[str, Any] = {}

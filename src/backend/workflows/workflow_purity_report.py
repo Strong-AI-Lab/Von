@@ -263,6 +263,24 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
         "banned_import_names": WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES,
     },
     {
+        "name": "workflow_continuation_authority_surface",
+        "path": "src/backend/services/workflow_continuation_service.py",
+        "banned_symbol_names": {
+            "_WORKFLOW_DIVERGENCE_PATTERNS": (
+                "retired_continuation_divergence_regex_symbol"
+            ),
+            "_MANUAL_CONCEPT_INSPECTION_PATTERN": (
+                "retired_continuation_divergence_regex_symbol"
+            ),
+            "_CONCEPT_STRUCTURE_INSPECTION_PATTERN": (
+                "retired_continuation_divergence_regex_symbol"
+            ),
+            "_detect_prompt_level_workflow_divergence": (
+                "retired_continuation_divergence_helper_symbol"
+            ),
+        },
+    },
+    {
         "name": "workflow_model_policy_graph_authority",
         "path": "src/backend/services/workflow_policy_graph_service.py",
         "banned_symbol_names": {

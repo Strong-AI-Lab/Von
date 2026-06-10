@@ -206,7 +206,12 @@ def test_non_executable_selected_workflow_fails_closed(monkeypatch) -> None:
     assert decision["selected_workflow_executability_reason"] == "draft_not_published"
 
 
-def test_explicit_workflow_rejection_suppresses_authoritative_continuation() -> None:
+def test_divergence_phrasing_no_longer_decided_by_python_regexes() -> None:
+    """Prompt-level divergence is a represented-selector judgement
+    (JVNAUTOSCI-2500): continuation context still applies on workflow state,
+    regardless of how the user phrases rejection, and the selector decides
+    with the framing plus the user's message in context."""
+
     decision = service.assess_prompt_for_workflow_continuation(
         prompt=(
             "The enrichment workflow isn't the right one. Manually retrieve "
@@ -223,10 +228,80 @@ def test_explicit_workflow_rejection_suppresses_authoritative_continuation() -> 
         },
     )
 
-    assert decision["applies"] is False
-    assert decision["reason"] == "prompt_explicitly_diverges_from_selected_workflow"
-    assert decision["decision_source"] == "prompt_override"
-    assert "prompt_forbids_workflow_execution" in decision["matched_signals"]
+    assert decision["applies"] is True
+    assert decision["reason"] == "workflow_state_authoritative"
+    assert decision["decision_source"] == "workflow_state"
+
+
+def test_launch_projection_gated_on_matching_selected_workflow() -> None:
+    """A divergent selection must not inherit stale continuation inputs."""
+
+    continuation_context = {
+        "requires_follow_up": True,
+        "has_unresolved_required_effects": True,
+        "selected_workflow_id": "#V#enrichment_workflow",
+        "unresolved_required_effects": [
+            {
+                "effect_type": "representation_verification",
+                "status": "not_executed",
+                "targets": ["#V#timothy_pistotti"],
+            }
+        ],
+    }
+
+    matching = service.project_launch_inputs_from_continuation_context(
+        continuation_context,
+        selected_workflow_id="#V#enrichment_workflow",
+    )
+    assert matching.get("concept_ids") == ["#V#timothy_pistotti"]
+
+    divergent = service.project_launch_inputs_from_continuation_context(
+        continuation_context,
+        selected_workflow_id="#V#general_tool_calling_workflow",
+    )
+    assert divergent == {}
+
+    unconstrained = service.project_launch_inputs_from_continuation_context(
+        continuation_context,
+    )
+    assert unconstrained.get("concept_ids") == ["#V#timothy_pistotti"]
+
+
+def test_framing_instruction_fails_closed_to_facts_only_summary(monkeypatch) -> None:
+    """Without the represented framing prompt, the system message contains
+    only the factual summary, never a Python-authored instruction."""
+
+    monkeypatch.setattr(
+        service,
+        "resolve_workflow_continuation_framing_instruction",
+        lambda **_kwargs: (None, {"error": "missing"}),
+    )
+    message = service.build_workflow_continuation_system_message(
+        {
+            "session_id": "session-1",
+            "selected_workflow_id": "#V#enrichment_workflow",
+        }
+    )
+    assert message is not None
+    assert message.startswith("ACTIVE WORKFLOW CONTINUATION CONTEXT")
+
+    monkeypatch.setattr(
+        service,
+        "resolve_workflow_continuation_framing_instruction",
+        lambda **_kwargs: (
+            "Authored framing instruction with divergence licence.",
+            {"loaded_prompt_concept_id": "#V#workflow_continuation_framing_prompt"},
+        ),
+    )
+    message = service.build_workflow_continuation_system_message(
+        {
+            "session_id": "session-1",
+            "selected_workflow_id": "#V#enrichment_workflow",
+        }
+    )
+    assert message is not None
+    assert message.startswith("Authored framing instruction")
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in message
 
 
 def test_narrowed_heuristic_no_longer_matches_bare_yet() -> None:

@@ -727,7 +727,8 @@ def _build_turn_execution_execute_selected_handler() -> Any:
 
                 projected_continuation_launch_inputs = (
                     project_launch_inputs_from_continuation_context(
-                        continuation_context
+                        continuation_context,
+                        selected_workflow_id=selected_workflow_id,
                     )
                 )
             except Exception:

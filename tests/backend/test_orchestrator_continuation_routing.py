@@ -721,7 +721,7 @@ def test_selector_routes_failure_follow_up_with_episode_aware_context(
     assert "Active workflow source: conversation_turn" in continuation_context
 
 
-def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
+def test_divergent_selection_keeps_continuation_context_but_not_launch_inputs(
     monkeypatch,
 ):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -769,6 +769,11 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
         conversation_session_id="session-1687",
     )
 
+    # JVNAUTOSCI-2500: divergence is no longer a Python regex decision. The
+    # continuation context still applies on workflow state and is presented to
+    # the represented selector/planner stages, which own the divergence
+    # judgement (here the selector chose the tool workflow). A divergent
+    # selection must not inherit stale continuation launch inputs.
     assert result.workflow_routing is not None
     planner_context = llm.calls[1]["context"] or []
     planner_prompt_context = "\n".join(
@@ -776,7 +781,7 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
         for message in planner_context
         if isinstance(message, dict)
     )
-    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" not in planner_prompt_context
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in planner_prompt_context
     selector_prompt_entry = next(
         (
             entry
@@ -790,7 +795,7 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
     selector_continuation_context = (
         selector_prompt_entry.get("continuation_context", {}).get("text") or ""
     )
-    assert "No active workflow continuation context." in selector_continuation_context
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in selector_continuation_context
 
     continuation_entry = next(
         (
@@ -802,14 +807,29 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
         None,
     )
     assert continuation_entry is not None
-    assert continuation_entry.get("applied") is False
-    assert (
-        continuation_entry.get("reason")
-        == "prompt_explicitly_diverges_from_selected_workflow"
+    assert continuation_entry.get("applied") is True
+    assert continuation_entry.get("reason") == "workflow_state_authoritative"
+
+    # The selector diverged to the tool workflow, so the continuation
+    # context's concept targets must not be projected into its inputs.
+    from src.backend.services.workflow_continuation_service import (
+        project_launch_inputs_from_continuation_context,
     )
-    assert "prompt_forbids_workflow_execution" in (
-        continuation_entry.get("context", {}).get("apply_signals") or []
+
+    divergent_projection = project_launch_inputs_from_continuation_context(
+        {
+            "selected_workflow_id": "#V#enrichment_workflow",
+            "unresolved_required_effects": [
+                {
+                    "effect_type": "concept_verification",
+                    "status": "not_executed",
+                    "targets": ["#V#timothy_pistotti"],
+                }
+            ],
+        },
+        selected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
     )
+    assert divergent_projection == {}
 
 
 def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executable(
