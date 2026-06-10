@@ -260,6 +260,12 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   diagnostics/Jira triage. File only if its thresholds/categories/recommended
   next steps become recurring workflow policy, user-facing Von answer policy,
   or inputs to prompt/model/workflow learning without represented authority.
+- 2026-06-11: dirty response-preservation edits in
+  `turn_execution_runtime_support.py` and `orchestrator.py` were added as fresh
+  evidence to existing `JVNAUTOSCI-2478` rather than filed separately. Update
+  that issue if preservation field order, `Execution status:` filtering, or
+  completion-ledger replacement keeps acting as presenter/selected-workflow
+  evidence policy instead of represented presenter/evidence-contract support.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
