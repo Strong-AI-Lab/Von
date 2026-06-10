@@ -1557,7 +1557,7 @@ def test_build_model_arm_plan_includes_active_arm_and_deduplicates() -> None:
 def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
     summary = sampler._summarise_server_diag(
         {
-            "version": "v20250421_1015_backend+g1c5361c7f89b",
+            "version": "v20260610_0837_backend+g1c5361c7f89b",
             "python_version": "3.13.12",
             "effective_user_concept_id": "#V#michael_witbrock",
             "header_user_concept_id": "#V#michael_witbrock",
@@ -1578,7 +1578,7 @@ def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
         }
     )
 
-    assert summary["server_reported_version"] == "v20250421_1015_backend+g1c5361c7f89b"
+    assert summary["server_reported_version"] == "v20260610_0837_backend+g1c5361c7f89b"
     assert summary["server_reported_python_version"] == "3.13.12"
     assert summary["server_reported_git_branch"] == "jvnautosci-1894-replay-programme"
     assert summary["server_reported_git_commit"] == "abc123def456"
@@ -1598,7 +1598,7 @@ def test_augment_run_environment_with_server_diag_prefers_health_endpoint(
         calls.append(url)
         if url.endswith("/health"):
             return {
-                "version": "v20250421_1015_backend+gabc123",
+                "version": "v20260610_0837_backend+gabc123",
                 "agent_test_instance": True,
                 "version_details": {
                     "git_branch": "main",
