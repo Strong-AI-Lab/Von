@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Audit or migrate legacy visibility predicate storage.
 
-Default mode is read-only. Use ``--apply`` only after reviewing dry-run output.
-The output is intentionally aggregate plus bounded concept-id samples; it does
-not print concept bodies.
+Default mode is read-only. Use ``--apply --approved`` only after reviewing
+dry-run output. The output is intentionally aggregate plus bounded concept-id
+samples; it does not print concept bodies.
 """
 
 from __future__ import annotations
@@ -31,6 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Apply canonical merge/removal. Omit for dry-run.",
+    )
+    parser.add_argument(
+        "--approved",
+        action="store_true",
+        help="Required with --apply to confirm the write to Vontology storage.",
     )
     parser.add_argument(
         "--audit-only",
@@ -63,6 +68,7 @@ def main() -> int:
     else:
         payload = migrate_visibility_predicate_storage(
             dry_run=not args.apply,
+            approved=args.approved,
             sample_limit=args.sample_limit,
             scan_limit=scan_limit,
         )

@@ -247,11 +247,33 @@ def audit_visibility_predicate_storage(
 def migrate_visibility_predicate_storage(
     *,
     dry_run: bool = True,
+    approved: bool = False,
     sample_limit: int = 20,
     scan_limit: int | None = None,
 ) -> dict[str, Any]:
     sample_limit = max(0, int(sample_limit))
     scan_limit_value = max(0, int(scan_limit or 0))
+    if not dry_run and not approved:
+        return {
+            "schema_version": "visibility_predicate_storage_migration.v1",
+            "dry_run": False,
+            "approved": False,
+            "would_update_count": 0,
+            "updated_count": 0,
+            "verified_count": 0,
+            "conflict_count": 0,
+            "sample_changes": [],
+            "errors": [
+                {
+                    "concept_id": "*approval*",
+                    "error": "approved=true is required when dry_run=false",
+                }
+            ],
+            "error_count": 1,
+            "scan_limit": scan_limit_value or None,
+            "sample_limit": sample_limit,
+        }
+
     updated_count = 0
     would_update_count = 0
     verified_count = 0
@@ -332,6 +354,7 @@ def migrate_visibility_predicate_storage(
     return {
         "schema_version": "visibility_predicate_storage_migration.v1",
         "dry_run": bool(dry_run),
+        "approved": bool(approved),
         "would_update_count": would_update_count,
         "updated_count": updated_count,
         "verified_count": verified_count,

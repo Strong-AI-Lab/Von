@@ -79,6 +79,27 @@ def test_migrate_visibility_predicate_storage_dry_run_does_not_update(monkeypatc
     assert writes == []
 
 
+def test_migrate_visibility_predicate_storage_apply_requires_approval(
+    monkeypatch,
+) -> None:
+    writes = []
+
+    monkeypatch.setattr(svc.ConceptsRepository, "find", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(
+        svc.ConceptsRepository,
+        "collection",
+        lambda: writes.append("collection access"),
+    )
+
+    report = svc.migrate_visibility_predicate_storage(dry_run=False)
+
+    assert report["dry_run"] is False
+    assert report["approved"] is False
+    assert report["error_count"] == 1
+    assert "approved=true is required" in report["errors"][0]["error"]
+    assert writes == []
+
+
 def test_migrate_visibility_predicate_storage_apply_updates_and_verifies(monkeypatch) -> None:
     concepts = [
         {
@@ -128,9 +149,10 @@ def test_migrate_visibility_predicate_storage_apply_updates_and_verifies(monkeyp
         lambda query, projection=None: stored.get(query.get("concept_id")),
     )
 
-    report = svc.migrate_visibility_predicate_storage(dry_run=False)
+    report = svc.migrate_visibility_predicate_storage(dry_run=False, approved=True)
 
     assert report["dry_run"] is False
+    assert report["approved"] is True
     assert report["would_update_count"] == 1
     assert report["updated_count"] == 1
     assert report["verified_count"] == 1
