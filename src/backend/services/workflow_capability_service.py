@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..workflows.workflow_definition_identity_service import (
     assess_workflow_id_hygiene,
+    collect_workflow_action_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def _truthy_env_value(value: Any) -> bool:
 
 def _is_agent_test_instance() -> bool:
     return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
 
 # -------------------------------------------------------------------------
 # Retired Python capability overrides.
@@ -217,9 +219,7 @@ def _reset_workflow_capability_backend_namespace(rag_service: Any) -> None:
     namespaces_root = (Path(persistence_dir).resolve() / "namespaces").resolve()
 
     try:
-        common_root = os.path.commonpath(
-            [str(namespace_dir), str(namespaces_root)]
-        )
+        common_root = os.path.commonpath([str(namespace_dir), str(namespaces_root)])
     except ValueError as exc:
         raise RuntimeError(
             f"workflow capability namespace reset path mismatch: {exc}"
@@ -271,7 +271,7 @@ def _entry_manifest_row(entry: "_CapabilityEntry") -> dict[str, Any]:
     }
 
 
-def _entry_from_manifest_row(row: Mapping[str, Any]) -> "_CapabilityEntry" | None:
+def _entry_from_manifest_row(row: Mapping[str, Any]) -> "_CapabilityEntry | None":
     workflow_id = str(row.get("workflow_id") or "").strip()
     doc_id = str(row.get("doc_id") or "").strip()
     text = str(row.get("text") or "").strip()
@@ -309,12 +309,13 @@ def _entries_from_manifest_payload(
 
 def _authoritative_registry_workflow_ids(registry: Any) -> tuple[str, ...]:
     return tuple(
-        row["workflow_id"]
-        for row in _authoritative_registry_fingerprint_rows(registry)
+        row["workflow_id"] for row in _authoritative_registry_fingerprint_rows(registry)
     )
 
 
-def _authoritative_registry_fingerprint_rows(registry: Any) -> tuple[dict[str, str], ...]:
+def _authoritative_registry_fingerprint_rows(
+    registry: Any,
+) -> tuple[dict[str, str], ...]:
     rows_out: list[dict[str, str]] = []
     ids: set[str] = set()
     for method_name, attr_name in (
@@ -326,9 +327,15 @@ def _authoritative_registry_fingerprint_rows(registry: Any) -> tuple[dict[str, s
         if not callable(method) or not isinstance(rows, Mapping):
             continue
         try:
-            workflow_ids = list(method())
+            raw_workflow_ids = method()
         except Exception:
             continue
+        if not isinstance(raw_workflow_ids, Sequence) or isinstance(
+            raw_workflow_ids,
+            (str, bytes, bytearray),
+        ):
+            continue
+        workflow_ids = list(raw_workflow_ids)
         for raw_workflow_id in workflow_ids:
             workflow_id = str(raw_workflow_id or "").strip()
             if not workflow_id:
@@ -403,9 +410,7 @@ def _workflow_capability_manifest_path(rag_service: Any) -> Path | None:
     if isinstance(persistence_dir, str) and persistence_dir.strip():
         namespaces_root = (Path(persistence_dir).resolve() / "namespaces").resolve()
         try:
-            common_root = os.path.commonpath(
-                [str(namespace_dir), str(namespaces_root)]
-            )
+            common_root = os.path.commonpath([str(namespace_dir), str(namespaces_root)])
         except ValueError as exc:
             raise RuntimeError(
                 f"workflow capability manifest path mismatch: {exc}"
@@ -611,9 +616,7 @@ class WorkflowCapabilityIndex:
     ) -> None:
         rag_service = _get_workflow_capability_rag_service()
         _reset_workflow_capability_backend_namespace(rag_service)
-        payload = [
-            self._entry_to_document(entry) for entry in pending_entries.values()
-        ]
+        payload = [self._entry_to_document(entry) for entry in pending_entries.values()]
         if payload:
             success_count, failure_count = rag_service.upsert_documents(
                 payload,
@@ -658,7 +661,9 @@ class WorkflowCapabilityIndex:
             raise ValueError("workflow capability text must not be empty")
         merged_metadata = dict(metadata or {})
         merged_metadata.setdefault("name", _workflow_id_to_name(workflow_id))
-        merged_metadata.setdefault("summary_text", clean_text.split("\n\n", 1)[0].strip())
+        merged_metadata.setdefault(
+            "summary_text", clean_text.split("\n\n", 1)[0].strip()
+        )
         entry = _CapabilityEntry(
             workflow_id=workflow_id,
             doc_id=_build_workflow_capability_document_id(workflow_id),
@@ -719,6 +724,52 @@ class WorkflowCapabilityIndex:
                     skipped_missing_purpose += 1
                 return
 
+            routing_profile = None
+            routing_profile_source = ""
+            publication_lifecycle = None
+            publication_lifecycle_source = ""
+            compact_executability = None
+            workflow_action_ids: list[str] | None = None
+            required_tools: list[str] | None = None
+            if isinstance(routing_metadata, Mapping):
+                raw_routing_profile = routing_metadata.get("routing_profile")
+                if isinstance(raw_routing_profile, Mapping):
+                    routing_profile = dict(raw_routing_profile)
+                routing_profile_source = str(
+                    routing_metadata.get("routing_profile_source") or ""
+                ).strip()
+
+                raw_publication_lifecycle = routing_metadata.get(
+                    "publication_lifecycle"
+                )
+                if isinstance(raw_publication_lifecycle, Mapping):
+                    publication_lifecycle = dict(raw_publication_lifecycle)
+                publication_lifecycle_source = str(
+                    routing_metadata.get("publication_lifecycle_source") or ""
+                ).strip()
+
+                raw_compact_executability = routing_metadata.get(
+                    "compact_executability"
+                )
+                if isinstance(raw_compact_executability, Mapping):
+                    compact_executability = dict(raw_compact_executability)
+
+                raw_workflow_action_ids = routing_metadata.get("workflow_action_ids")
+                if isinstance(raw_workflow_action_ids, Sequence) and not isinstance(
+                    raw_workflow_action_ids,
+                    (str, bytes, bytearray),
+                ):
+                    workflow_action_ids = _dedupe_capability_strings(
+                        raw_workflow_action_ids
+                    )
+
+                raw_required_tools = routing_metadata.get("required_tools")
+                if isinstance(raw_required_tools, Sequence) and not isinstance(
+                    raw_required_tools,
+                    (str, bytes, bytearray),
+                ):
+                    required_tools = _dedupe_capability_strings(raw_required_tools)
+
             pending_entries[workflow_id] = _CapabilityEntry(
                 workflow_id=workflow_id,
                 doc_id=_build_workflow_capability_document_id(workflow_id),
@@ -737,42 +788,13 @@ class WorkflowCapabilityIndex:
                             source=source,
                         )
                     ),
-                    "routing_profile": (
-                        dict(routing_metadata.get("routing_profile"))
-                        if isinstance(routing_metadata, Mapping)
-                        and isinstance(routing_metadata.get("routing_profile"), Mapping)
-                        else None
-                    ),
-                    "routing_profile_source": (
-                        str(routing_metadata.get("routing_profile_source") or "").strip()
-                        if isinstance(routing_metadata, Mapping)
-                        else ""
-                    ),
-                    "publication_lifecycle": (
-                        dict(routing_metadata.get("publication_lifecycle"))
-                        if isinstance(routing_metadata, Mapping)
-                        and isinstance(
-                            routing_metadata.get("publication_lifecycle"),
-                            Mapping,
-                        )
-                        else None
-                    ),
-                    "publication_lifecycle_source": (
-                        str(
-                            routing_metadata.get("publication_lifecycle_source") or ""
-                        ).strip()
-                        if isinstance(routing_metadata, Mapping)
-                        else ""
-                    ),
-                    "compact_executability": (
-                        dict(routing_metadata.get("compact_executability"))
-                        if isinstance(routing_metadata, Mapping)
-                        and isinstance(
-                            routing_metadata.get("compact_executability"),
-                            Mapping,
-                        )
-                        else None
-                    ),
+                    "routing_profile": routing_profile,
+                    "routing_profile_source": routing_profile_source,
+                    "publication_lifecycle": publication_lifecycle,
+                    "publication_lifecycle_source": publication_lifecycle_source,
+                    "compact_executability": compact_executability,
+                    "workflow_action_ids": workflow_action_ids,
+                    "required_tools": required_tools,
                 },
             )
 
@@ -789,6 +811,10 @@ class WorkflowCapabilityIndex:
                     and isinstance(getattr(reg.definition, "metadata", None), Mapping)
                     else None
                 )
+                definition_metadata = _workflow_definition_capability_metadata(
+                    getattr(reg, "definition", None) if reg is not None else None,
+                    base_metadata=definition_metadata,
+                )
                 candidate_rows.append(
                     (workflow_id, purpose, source, definition_metadata)
                 )
@@ -803,14 +829,25 @@ class WorkflowCapabilityIndex:
             source = lazy.source if lazy else None
             if workflow_id:
                 definition_metadata = None
-                resolved_registration = getattr(lazy, "_resolved", None) if lazy else None
+                resolved_registration = (
+                    getattr(lazy, "_resolved", None) if lazy else None
+                )
                 resolved_definition = (
                     getattr(resolved_registration, "definition", None)
                     if resolved_registration is not None
                     else None
                 )
-                if isinstance(getattr(resolved_definition, "metadata", None), Mapping):
-                    definition_metadata = dict(resolved_definition.metadata)
+                resolved_definition_metadata = getattr(
+                    resolved_definition,
+                    "metadata",
+                    None,
+                )
+                if isinstance(resolved_definition_metadata, Mapping):
+                    definition_metadata = dict(resolved_definition_metadata)
+                definition_metadata = _workflow_definition_capability_metadata(
+                    resolved_definition,
+                    base_metadata=definition_metadata,
+                )
                 candidate_rows.append(
                     (workflow_id, purpose, source, definition_metadata)
                 )
@@ -832,8 +869,7 @@ class WorkflowCapabilityIndex:
 
         for workflow_id, purpose, source, definition_metadata in candidate_rows:
             routing_metadata = (
-                authoritative_routing_metadata.get(workflow_id)
-                or definition_metadata
+                authoritative_routing_metadata.get(workflow_id) or definition_metadata
             )
             _index_candidate(
                 workflow_id=workflow_id,
@@ -950,7 +986,10 @@ class WorkflowCapabilityIndex:
         if not isinstance(manifest, dict):
             return False
 
-        if manifest.get("schema_version") != _WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION:
+        if (
+            manifest.get("schema_version")
+            != _WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION
+        ):
             _set_workflow_capability_manifest_state(
                 status="schema_mismatch",
                 detail="Workflow capability manifest schema is unsupported.",
@@ -998,7 +1037,9 @@ class WorkflowCapabilityIndex:
             )
             return False
 
-        manifest_workflow_ids = tuple(sorted(str(item) for item in manifest_entries.keys()))
+        manifest_workflow_ids = tuple(
+            sorted(str(item) for item in manifest_entries.keys())
+        )
         registry_workflow_ids = _authoritative_registry_workflow_ids(registry)
         current_registry_fingerprint = _authoritative_registry_fingerprint_digest(
             registry
@@ -1104,8 +1145,8 @@ class WorkflowCapabilityIndex:
 
         entry_lookup = {entry.workflow_id: entry for entry in entries}
         rag_service = _get_workflow_capability_rag_service()
-        retrieval_candidate_limit = _compute_workflow_capability_retrieval_candidate_limit(
-            max_results
+        retrieval_candidate_limit = (
+            _compute_workflow_capability_retrieval_candidate_limit(max_results)
         )
         rag_results = rag_service.query(
             query_text=clean_query,
@@ -1174,6 +1215,7 @@ class WorkflowCapabilityIndex:
 # Helpers
 # -------------------------------------------------------------------------
 
+
 def _workflow_id_to_name(workflow_id: str) -> str:
     """Derive a human-readable name from a workflow ID."""
     clean = workflow_id
@@ -1222,10 +1264,105 @@ def _capability_discovery_exemplar_text(
             if isinstance(item, str) and str(item).strip()
         ]
         if example_lines:
-            capability_parts.append(
-                "Example requests: " + " | ".join(example_lines)
-            )
+            capability_parts.append("Example requests: " + " | ".join(example_lines))
     return capability_parts
+
+
+def _capability_string_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, Mapping):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_capability_string_values(item))
+        return values
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        values = []
+        for item in value:
+            values.extend(_capability_string_values(item))
+        return values
+    return []
+
+
+def _dedupe_capability_strings(values: Sequence[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(text)
+    return ordered
+
+
+def _workflow_definition_capability_metadata(
+    definition: Any | None,
+    *,
+    base_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metadata = dict(base_metadata) if isinstance(base_metadata, Mapping) else {}
+    if definition is None:
+        return metadata or None
+    action_ids = _dedupe_capability_strings(collect_workflow_action_ids(definition))
+    if action_ids:
+        metadata.setdefault("workflow_action_ids", action_ids)
+    return metadata or None
+
+
+def _capability_metadata_contract_text(
+    routing_metadata: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(routing_metadata, Mapping):
+        return []
+
+    fields: tuple[tuple[tuple[str, ...], str], ...] = (
+        (
+            (
+                "required_tools",
+                "required_tool_ids",
+                "turn_expected_required_tools",
+                "invoked_tools",
+                "tool_names",
+            ),
+            "Required tools",
+        ),
+        (
+            (
+                "workflow_action_ids",
+                "action_ids",
+                "required_actions",
+                "required_action_ids",
+                "required_workflow_actions",
+                "invokes_actions",
+                "invoked_actions",
+            ),
+            "Workflow actions",
+        ),
+        (
+            ("postconditions", "required_postconditions", "required_effects"),
+            "Postconditions",
+        ),
+        (
+            ("target_type_ids", "target_types", "requested_type_ids"),
+            "Target type IDs",
+        ),
+    )
+    parts: list[str] = []
+    for field_names, label in fields:
+        values: list[str] = []
+        for field_name in field_names:
+            values.extend(_capability_string_values(routing_metadata.get(field_name)))
+        values = _dedupe_capability_strings(values)
+        if values:
+            parts.append(f"{label}: {', '.join(values[:12])}")
+    return parts
 
 
 def _authoritative_discovery_exemplar_source(
@@ -1236,9 +1373,8 @@ def _authoritative_discovery_exemplar_source(
     source_text = str(discovery_exemplars_source or "").strip()
     if source_text.startswith("text_relation:"):
         return True
-    return (
-        source_token == "repo_seed_agent_test"
-        and source_text.startswith("repo_seed_text_relation:")
+    return source_token == "repo_seed_agent_test" and source_text.startswith(
+        "repo_seed_text_relation:"
     )
 
 
@@ -1251,12 +1387,9 @@ def _capability_text_reason_is_authoritative(
     if reason_text.startswith("text_relation:"):
         return True
     source_token = str(source or "").strip().lower()
-    return (
-        source_token == "repo_seed_agent_test"
-        and (
-            reason_text == "authoritative_registration_purpose"
-            or "repo_seed_text_relation:" in reason_text
-        )
+    return source_token == "repo_seed_agent_test" and (
+        reason_text == "authoritative_registration_purpose"
+        or "repo_seed_text_relation:" in reason_text
     )
 
 
@@ -1278,7 +1411,9 @@ def _resolve_authoritative_capability_text(
     discovery_exemplars: Mapping[str, Any] | None = None
     discovery_exemplars_source = ""
     if isinstance(routing_metadata, Mapping):
-        relation_text = _normalise_capability_text(routing_metadata.get("description_text"))
+        relation_text = _normalise_capability_text(
+            routing_metadata.get("description_text")
+        )
         relation_source = str(routing_metadata.get("description_source") or "").strip()
         raw_exemplars = routing_metadata.get("discovery_exemplars")
         if isinstance(raw_exemplars, Mapping):
@@ -1308,6 +1443,7 @@ def _resolve_authoritative_capability_text(
             discovery_exemplars_source = ""
 
     exemplar_parts = _capability_discovery_exemplar_text(discovery_exemplars)
+    metadata_contract_parts = _capability_metadata_contract_text(routing_metadata)
     exemplar_source_is_authoritative = _authoritative_discovery_exemplar_source(
         source_token=source_token,
         discovery_exemplars_source=discovery_exemplars_source,
@@ -1315,6 +1451,7 @@ def _resolve_authoritative_capability_text(
 
     if relation_text and relation_source.startswith("text_relation:"):
         capability_parts = [relation_text]
+        capability_parts.extend(metadata_contract_parts)
         if exemplar_source_is_authoritative:
             capability_parts.extend(exemplar_parts)
         source_parts = [relation_source]
@@ -1330,9 +1467,14 @@ def _resolve_authoritative_capability_text(
         source = "authoritative_registration_purpose"
         if isinstance(discovery_exemplars_source, str) and discovery_exemplars_source:
             source = f"{source}+{discovery_exemplars_source}"
-        return "\n\n".join([purpose_text, *exemplar_parts]), source
+        return (
+            "\n\n".join([purpose_text, *metadata_contract_parts, *exemplar_parts]),
+            source,
+        )
 
-    return purpose_text, "authoritative_registration_purpose"
+    return "\n\n".join([purpose_text, *metadata_contract_parts]), (
+        "authoritative_registration_purpose"
+    )
 
 
 def build_workflow_capability_text(
@@ -1406,7 +1548,8 @@ def _workflow_capability_rebuild_recently_attempted(
         last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
     return (
         last_attempt > 0.0
-        and (now_monotonic - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
+        and (now_monotonic - last_attempt)
+        < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
     )
 
 
@@ -1492,9 +1635,9 @@ def _record_workflow_capability_auto_rebuild_state(
     now_utc = _utc_now_iso()
     with _INDEX_STATE_LOCK:
         if mark_attempt:
-            _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = int(
-                _INDEX_REBUILD_STATE.get("auto_rebuild_attempt_count", 0) or 0
-            ) + 1
+            _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = (
+                int(_INDEX_REBUILD_STATE.get("auto_rebuild_attempt_count", 0) or 0) + 1
+            )
             _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_at_utc"] = now_utc
             if attempt_monotonic is not None:
                 _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_monotonic"] = float(
@@ -1608,8 +1751,7 @@ def _maybe_start_workflow_capability_index_auto_rebuild(
             _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = namespace_detail
             return event
         last_attempt = float(
-            _INDEX_REBUILD_STATE.get("auto_rebuild_last_attempt_monotonic", 0.0)
-            or 0.0
+            _INDEX_REBUILD_STATE.get("auto_rebuild_last_attempt_monotonic", 0.0) or 0.0
         )
         if (
             last_attempt > 0.0
@@ -1857,8 +1999,12 @@ def get_workflow_capability_index_runtime_state(
             "backend": "llamaindex",
             "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
             "size": int(index.size),
-            "ready": bool(index.size > 0 and namespace_compatible and query_surface_ready),
-            "build_in_progress": bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)),
+            "ready": bool(
+                index.size > 0 and namespace_compatible and query_surface_ready
+            ),
+            "build_in_progress": bool(
+                _INDEX_REBUILD_STATE.get("build_in_progress", False)
+            ),
             "last_error": _INDEX_REBUILD_STATE.get("last_error"),
             "last_mode": _INDEX_REBUILD_STATE.get("last_mode"),
             "last_attempt_monotonic": float(
@@ -1960,7 +2106,10 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
     elif build_in_progress:
         auto_rebuild_status = str(auto_rebuild_state.get("last_status") or "").strip()
         last_mode = str(runtime_state.get("last_mode") or "").strip()
-        if last_mode == "auto_rebuild" and auto_rebuild_status in {"starting", "started"}:
+        if last_mode == "auto_rebuild" and auto_rebuild_status in {
+            "starting",
+            "started",
+        }:
             status = "rebuilding"
             warning_level = "warning"
             summary = "Workflow capability index rebuilding."
@@ -2026,9 +2175,7 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         status = "not_ready"
         warning_level = "warning"
         summary = "Workflow capability index not ready."
-        detail = (
-            "No authoritative workflow capability snapshot has been built yet."
-        )
+        detail = "No authoritative workflow capability snapshot has been built yet."
 
     with _INDEX_STATE_LOCK:
         startup_report = _INDEX_REBUILD_STATE.get("startup_last_report")
@@ -2155,6 +2302,7 @@ def _perform_workflow_capability_index_build(
         from ..workflows.durable.registry_factory import (
             get_shared_workflow_registry_read_only,
         )
+
         registry = (
             workflow_registry
             if workflow_registry is not None
@@ -2294,7 +2442,9 @@ def _start_background_workflow_capability_index_build(
                 mark_finished=True,
             )
         _INDEX_REBUILD_COMPLETED.set()
-        logger.warning("workflow_capability_index_background_thread_start_failed: %s", exc)
+        logger.warning(
+            "workflow_capability_index_background_thread_start_failed: %s", exc
+        )
         return False
 
 
@@ -2336,12 +2486,20 @@ def ensure_workflow_capability_index_populated(
     if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
         return index
 
-    if bool(get_workflow_capability_index_runtime_state().get("build_in_progress", False)):
-        wait_seconds = None if max_wait_seconds is None else max(0.0, float(max_wait_seconds))
+    if bool(
+        get_workflow_capability_index_runtime_state().get("build_in_progress", False)
+    ):
+        wait_seconds = (
+            None if max_wait_seconds is None else max(0.0, float(max_wait_seconds))
+        )
         _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
         index = get_workflow_capability_index()
         runtime_state = get_workflow_capability_index_runtime_state()
-        if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
+        if (
+            index.size > 0
+            and bool(runtime_state.get("ready", False))
+            and not force_refresh
+        ):
             return index
 
     now = time.monotonic()
@@ -2354,7 +2512,11 @@ def ensure_workflow_capability_index_populated(
     with _INDEX_REBUILD_LOCK:
         index = get_workflow_capability_index()
         runtime_state = get_workflow_capability_index_runtime_state()
-        if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
+        if (
+            index.size > 0
+            and bool(runtime_state.get("ready", False))
+            and not force_refresh
+        ):
             return index
         try:
             return _perform_workflow_capability_index_build(

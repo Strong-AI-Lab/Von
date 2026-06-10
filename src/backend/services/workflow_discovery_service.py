@@ -89,6 +89,23 @@ EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous
 EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = "workflow_step_completely_vacuous"
 ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = "missing_authoritative_purpose"
 ROUTING_EXCLUSION_EXPLICITLY_DISABLED = "routing_explicitly_disabled"
+ROUTING_READINESS_WORKFLOW_ABSENT = "workflow_absent"
+ROUTING_READINESS_WORKFLOW_PRESENT_NOT_INDEXED = "workflow_present_not_indexed"
+ROUTING_READINESS_WORKFLOW_PRESENT_LAZY_DEFINITION = "workflow_present_lazy_definition"
+ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT = (
+    "workflow_present_missing_authoritative_routing_text"
+)
+ROUTING_READINESS_WORKFLOW_PRESENT_NOT_EXECUTABLE = "workflow_present_not_executable"
+ROUTING_READINESS_WORKFLOW_PRESENT_NOT_ROUTING_ELIGIBLE = (
+    "workflow_present_not_routing_eligible"
+)
+ROUTING_READINESS_WORKFLOW_PRESENT_CAPABILITY_INDEX_PENDING = (
+    "workflow_present_capability_index_pending"
+)
+DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES = (
+    "workflow_discovery_budget_exhausted_no_candidates"
+)
+CONTRACT_PROJECTION_SCHEMA_VERSION = "workflow_discovery_contract_projection.v1"
 
 _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_EXECUTABLE_NOW: 2,
@@ -230,6 +247,8 @@ class WorkflowMatch:
     routing_exclusion_reason: Optional[str] = None
     routing_profile: Optional[Dict[str, Any]] = None
     routing_index_metadata: Optional[Dict[str, Any]] = None
+    routing_readiness_status: Optional[str] = None
+    routing_readiness_detail: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -256,6 +275,8 @@ class WorkflowMatch:
                 if isinstance(self.routing_index_metadata, dict)
                 else None
             ),
+            "routing_readiness_status": self.routing_readiness_status,
+            "routing_readiness_detail": self.routing_readiness_detail,
         }
 
 
@@ -278,6 +299,9 @@ class WorkflowDiscoveryResult:
     budget_exhaustion_stage: Optional[str] = None
     budget_exhaustion_detail: Optional[str] = None
     stage_timings: List[Dict[str, Any]] = field(default_factory=list)
+    contract_projection: Optional[Dict[str, Any]] = None
+    routing_readiness_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    blocker_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -312,6 +336,17 @@ class WorkflowDiscoveryResult:
             "budget_exhaustion_detail": self.budget_exhaustion_detail,
             "stage_timings": list(self.stage_timings),
             "stage_timing_count": len(self.stage_timings),
+            "contract_projection": (
+                dict(self.contract_projection)
+                if isinstance(self.contract_projection, dict)
+                else None
+            ),
+            "routing_readiness_diagnostics": (
+                list(self.routing_readiness_diagnostics)
+                if self.routing_readiness_diagnostics
+                else None
+            ),
+            "blocker_reason": self.blocker_reason,
             "errors": self.errors if self.errors else None,
         }
 
@@ -667,6 +702,254 @@ def _extract_direct_workflow_concept_ids(query: str) -> list[str]:
     return concept_ids
 
 
+def _dedupe_text_values(values: Sequence[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(text)
+    return ordered
+
+
+def _iter_contract_scalar_text(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, Mapping):
+        texts: list[str] = []
+        for item in value.values():
+            texts.extend(_iter_contract_scalar_text(item))
+        return texts
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        texts = []
+        for item in value:
+            texts.extend(_iter_contract_scalar_text(item))
+        return texts
+    return []
+
+
+def _contract_state_field_payload(
+    expected_outcome_contract: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    if not isinstance(expected_outcome_contract, Mapping):
+        return {}
+    if isinstance(expected_outcome_contract.get("fields"), Mapping):
+        return expected_outcome_contract.get("fields") or {}
+    return expected_outcome_contract
+
+
+def _contract_sequence_values(
+    *,
+    expected_outcome_contract: Mapping[str, Any],
+    field_payload: Mapping[str, Any],
+    field_names: Sequence[str],
+) -> list[str]:
+    values: list[Any] = []
+    for source in (expected_outcome_contract, field_payload):
+        for field_name in field_names:
+            if field_name in source:
+                raw_value = source.get(field_name)
+                if isinstance(raw_value, Sequence) and not isinstance(
+                    raw_value,
+                    (str, bytes, bytearray),
+                ):
+                    values.extend(raw_value)
+                else:
+                    values.append(raw_value)
+    return _dedupe_text_values(values)
+
+
+def _extract_contract_workflow_concept_ids(
+    expected_outcome_contract: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(expected_outcome_contract, Mapping):
+        return []
+
+    direct_field_names = (
+        "workflow_id",
+        "workflow_ids",
+        "workflow_concept_id",
+        "workflow_concept_ids",
+        "target_workflow_id",
+        "target_workflow_ids",
+        "preferred_workflow_id",
+        "preferred_workflow_ids",
+        "selected_workflow_id",
+        "selected_workflow_ids",
+        "workflow_execute_target",
+        "workflow_execute_targets",
+    )
+    field_payload = _contract_state_field_payload(expected_outcome_contract)
+    ordered: list[str] = []
+    ordered.extend(
+        _contract_sequence_values(
+            expected_outcome_contract=expected_outcome_contract,
+            field_payload=field_payload,
+            field_names=direct_field_names,
+        )
+    )
+    for text in _iter_contract_scalar_text(expected_outcome_contract):
+        ordered.extend(_extract_direct_workflow_concept_ids(text))
+    return _dedupe_text_values(ordered)
+
+
+def _build_expected_outcome_contract_projection(
+    expected_outcome_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project represented turn-contract fields into discovery support telemetry."""
+
+    if not isinstance(expected_outcome_contract, Mapping):
+        return {
+            "schema_version": CONTRACT_PROJECTION_SCHEMA_VERSION,
+            "fields_used": [],
+            "text": "",
+            "workflow_concept_ids": [],
+            "required_tools": [],
+            "required_actions": [],
+            "target_concept_ids": [],
+            "target_type_ids": [],
+        }
+
+    field_payload = _contract_state_field_payload(expected_outcome_contract)
+    lines: list[str] = []
+    fields_used: list[str] = []
+
+    labelled_text_fields: tuple[tuple[str, str], ...] = (
+        ("selector_guidance", "Routing guidance"),
+        ("grounding_requirement", "Grounding requirement"),
+        ("summary", "Success target"),
+        ("precision_policy", "Precision policy"),
+        ("answering_guidance", "Answering guidance"),
+        ("reasoning", "Contract reasoning"),
+    )
+    context_aliases: dict[str, tuple[str, ...]] = {
+        "summary": ("turn_expected_outcome_summary",),
+        "grounding_requirement": ("turn_expected_grounding_requirement",),
+        "precision_policy": ("turn_expected_precision_policy",),
+        "selector_guidance": ("turn_selector_guidance",),
+        "answering_guidance": ("turn_answering_guidance",),
+        "reasoning": ("turn_expected_outcome_reasoning",),
+    }
+
+    for field_name, label in labelled_text_fields:
+        value = field_payload.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            for alias in context_aliases.get(field_name, ()):
+                value = field_payload.get(alias)
+                if isinstance(value, str) and value.strip():
+                    break
+        if isinstance(value, str) and value.strip():
+            lines.append(f"- {label}: {value.strip()}")
+            fields_used.append(field_name)
+
+    required_tools = _contract_sequence_values(
+        expected_outcome_contract=expected_outcome_contract,
+        field_payload=field_payload,
+        field_names=("required_tools", "turn_expected_required_tools"),
+    )
+    if required_tools:
+        lines.append("- Required tools: " + ", ".join(required_tools))
+        fields_used.append("required_tools")
+
+    required_actions = _contract_sequence_values(
+        expected_outcome_contract=expected_outcome_contract,
+        field_payload=field_payload,
+        field_names=(
+            "required_actions",
+            "required_action_ids",
+            "required_workflow_actions",
+            "required_workflow_action_ids",
+            "required_obligations",
+            "postconditions",
+        ),
+    )
+    if required_actions:
+        lines.append("- Required workflow actions: " + ", ".join(required_actions))
+        fields_used.append("required_actions")
+
+    target_concept_ids = _contract_sequence_values(
+        expected_outcome_contract=expected_outcome_contract,
+        field_payload=field_payload,
+        field_names=(
+            "target_concept_ids",
+            "turn_expected_target_concept_ids",
+            "target_concept_id",
+            "target_concepts",
+        ),
+    )
+    if target_concept_ids:
+        lines.append("- Target concept IDs: " + ", ".join(target_concept_ids))
+        fields_used.append("target_concept_ids")
+
+    target_type_ids = _contract_sequence_values(
+        expected_outcome_contract=expected_outcome_contract,
+        field_payload=field_payload,
+        field_names=(
+            "target_type_ids",
+            "turn_expected_target_type_ids",
+            "target_type_id",
+            "target_types",
+            "requested_type_ids",
+        ),
+    )
+    if target_type_ids:
+        lines.append("- Target type IDs: " + ", ".join(target_type_ids))
+        fields_used.append("target_type_ids")
+
+    workflow_concept_ids = _extract_contract_workflow_concept_ids(
+        expected_outcome_contract
+    )
+    if workflow_concept_ids:
+        lines.append("- Workflow concept IDs: " + ", ".join(workflow_concept_ids))
+        fields_used.append("workflow_concept_ids")
+
+    text = ""
+    if lines:
+        text = "\n".join(["Turn-intent routing guidance:", *lines])
+
+    return {
+        "schema_version": CONTRACT_PROJECTION_SCHEMA_VERSION,
+        "fields_used": _dedupe_text_values(fields_used),
+        "text": text,
+        "workflow_concept_ids": workflow_concept_ids,
+        "required_tools": required_tools,
+        "required_actions": required_actions,
+        "target_concept_ids": target_concept_ids,
+        "target_type_ids": target_type_ids,
+    }
+
+
+def _apply_contract_projection_to_query(
+    query: str,
+    *,
+    projection: Mapping[str, Any] | None,
+) -> str:
+    projection_text = (
+        str(projection.get("text") or "").strip()
+        if isinstance(projection, Mapping)
+        else ""
+    )
+    clean_query = str(query or "").strip()
+    if not projection_text:
+        return clean_query
+    if projection_text in clean_query:
+        return clean_query
+    if "Turn-intent routing guidance:" in clean_query:
+        return "\n".join([clean_query, *projection_text.splitlines()[1:]]).strip()
+    if not clean_query:
+        return projection_text
+    return f"{clean_query}\n\n{projection_text}"
+
+
 def _iter_registry_workflow_ids(workflow_registry: Any | None) -> list[str]:
     registry = workflow_registry
     if registry is None:
@@ -757,6 +1040,7 @@ def _workflow_display_name_from_id(workflow_id: str) -> str:
 def _resolve_contract_direct_workflow_candidates(
     query: str,
     *,
+    contract_projection: Mapping[str, Any] | None = None,
     workflow_registry: Any | None,
     limit: int,
 ) -> list[WorkflowMatch]:
@@ -769,8 +1053,33 @@ def _resolve_contract_direct_workflow_candidates(
     """
 
     direct_ids = _extract_direct_workflow_concept_ids(query)
+    if isinstance(contract_projection, Mapping):
+        raw_workflow_ids = contract_projection.get("workflow_concept_ids")
+        if isinstance(raw_workflow_ids, Sequence) and not isinstance(
+            raw_workflow_ids,
+            (str, bytes, bytearray),
+        ):
+            direct_ids = _dedupe_text_values([*direct_ids, *raw_workflow_ids])
     direct_lookup = {item.lower(): item for item in direct_ids}
-    if not direct_ids and not _query_has_workflow_execute_contract(query):
+    required_tools = (
+        contract_projection.get("required_tools")
+        if isinstance(contract_projection, Mapping)
+        else ()
+    )
+    contract_requires_workflow_execute = any(
+        str(item or "").strip().lower() == "workflow_execute"
+        for item in (
+            required_tools
+            if isinstance(required_tools, Sequence)
+            and not isinstance(required_tools, (str, bytes, bytearray))
+            else ()
+        )
+    )
+    if (
+        not direct_ids
+        and not _query_has_workflow_execute_contract(query)
+        and not contract_requires_workflow_execute
+    ):
         return []
 
     query_phrase = f" {_normalise_workflow_phrase(query)} "
@@ -807,6 +1116,36 @@ def _resolve_contract_direct_workflow_candidates(
             )
         )
     return matches
+
+
+def _derive_candidate_routing_readiness_status(
+    match: WorkflowMatch,
+) -> tuple[str, str | None]:
+    if not match.is_executable:
+        detail = str(match.executability_detail or "").strip() or None
+        if detail and (
+            "lazy" in detail.lower() or "definition_loaded=false" in detail.lower()
+        ):
+            return ROUTING_READINESS_WORKFLOW_PRESENT_LAZY_DEFINITION, detail
+        return ROUTING_READINESS_WORKFLOW_PRESENT_NOT_EXECUTABLE, (
+            str(match.executability_reason or "").strip() or detail
+        )
+    if (
+        match.routing_exclusion_reason
+        == ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE
+    ):
+        return (
+            ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT,
+            match.routing_exclusion_reason,
+        )
+    if match.routing_exclusion_reason:
+        return (
+            ROUTING_READINESS_WORKFLOW_PRESENT_NOT_ROUTING_ELIGIBLE,
+            match.routing_exclusion_reason,
+        )
+    if match.routing_eligible:
+        return "workflow_present_routing_ready", None
+    return ROUTING_READINESS_WORKFLOW_PRESENT_NOT_ROUTING_ELIGIBLE, None
 
 
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
@@ -1287,6 +1626,11 @@ def _annotate_and_rank_candidates(
             match.routing_exclusion_reason = None
         if isinstance(routing_profile, dict):
             match.routing_profile = routing_profile
+        readiness_status, readiness_detail = _derive_candidate_routing_readiness_status(
+            match
+        )
+        match.routing_readiness_status = readiness_status
+        match.routing_readiness_detail = readiness_detail
         match.confidence_score = _compute_candidate_confidence(match)
         annotated.append(match)
 
@@ -1434,6 +1778,7 @@ def discover_workflows(
     timeout_seconds: float = SEARCH_TIMEOUT_SECONDS,
     allow_non_executable: bool = False,
     workflow_registry: Any | None = None,
+    expected_outcome_contract: Mapping[str, Any] | None = None,
 ) -> WorkflowDiscoveryResult:
     """Discover workflows relevant to user input.
 
@@ -1480,13 +1825,23 @@ def discover_workflows(
     errors: List[str] = []
     search_sources: List[str] = []
     stage_timings: List[Dict[str, Any]] = []
+    contract_projection = _build_expected_outcome_contract_projection(
+        expected_outcome_contract
+    )
     budget_exhausted = False
     budget_exhaustion_stage: str | None = None
     budget_exhaustion_detail: str | None = None
     file_context_started_at = time.perf_counter()
     file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)
     errors.extend(context_errors)
-    search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
+    contract_enriched_query = _apply_contract_projection_to_query(
+        query,
+        projection=contract_projection,
+    )
+    search_query = _augment_query_with_file_copy_context(
+        contract_enriched_query,
+        file_copy_contexts,
+    )
     _record_discovery_stage_timing(
         stage_timings,
         stage="file_copy_context",
@@ -1521,6 +1876,23 @@ def discover_workflows(
         )
 
         executable_match_count = _count_executable_matches(ranked_matches)
+        routing_readiness_diagnostics = [
+            {
+                "workflow_id": match.concept_id,
+                "status": match.routing_readiness_status,
+                "detail": match.routing_readiness_detail,
+                "match_source": match.match_source,
+                "routing_exclusion_reason": match.routing_exclusion_reason,
+                "executability_reason": match.executability_reason,
+            }
+            for match in ranked_matches
+            if match.routing_readiness_status
+        ]
+        blocker_reason = (
+            DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES
+            if budget_exhausted and not ranked_matches
+            else match_absence_reason
+        )
         try:
             from ..workflows.workflow_baseline_telemetry import (
                 record_workflow_discovery_observation,
@@ -1570,120 +1942,139 @@ def discover_workflows(
             budget_exhaustion_stage=budget_exhaustion_stage,
             budget_exhaustion_detail=budget_exhaustion_detail,
             stage_timings=stage_timings,
+            contract_projection=contract_projection,
+            routing_readiness_diagnostics=routing_readiness_diagnostics,
+            blocker_reason=blocker_reason,
         )
+
+    # Cheap exact-ID / represented-contract resolution runs before retrieval so
+    # a structured workflow contract is not hidden by a cold capability index or
+    # a later semantic-search budget cutoff.
+    direct_resolution_started_at = time.perf_counter()
+    direct_matches = _resolve_contract_direct_workflow_candidates(
+        search_query,
+        contract_projection=contract_projection,
+        workflow_registry=workflow_registry,
+        limit=max_results * 2,
+    )
+    direct_matches_sufficient = _has_enough_capability_matches(
+        direct_matches,
+        threshold=relevance_threshold,
+        max_results=max_results,
+    )
+    if direct_matches:
+        search_sources.append("contract_direct_workflow_resolution")
+        all_matches.extend(direct_matches)
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="contract_direct_workflow_resolution",
+        started_at=direct_resolution_started_at,
+        status="completed",
+        match_count=len(direct_matches),
+        sufficient=direct_matches_sufficient,
+        field_count=len(contract_projection.get("fields_used") or []),
+        workflow_concept_id_count=len(
+            contract_projection.get("workflow_concept_ids") or []
+        ),
+    )
 
     # JVNAUTOSCI-1424 Phase 2: Search the dedicated capability index FIRST.
     # This covers all registered workflows (built-in + Vontology) with rich
     # capability descriptions.  Built-in workflows like chat_assistant and
     # tool_calling are discoverable on equal footing with Vontology workflows.
     capability_index_state: Mapping[str, Any] = {}
-    try:
-        search_sources.append("capability_index")
-        capability_started_at = time.perf_counter()
-        capability_timeout_remaining = _remaining_search_timeout_seconds(
-            started_at=start_time,
-            timeout_seconds=effective_timeout_seconds,
-        )
-        if capability_timeout_remaining <= 0.0:
-            raise TimeoutError(
-                "Discovery timeout budget was exhausted before "
-                "capability_index_search could start "
-                f"(budget={effective_timeout_seconds:.3f}s)."
-            )
-        capability_matches = _search_workflow_capabilities(
-            search_query,
-            limit=max_results * 3,
-            max_wait_seconds=min(
-                capability_index_wait_seconds,
-                capability_timeout_remaining,
-            ),
-            workflow_registry=workflow_registry,
-        )
-        capability_index_state = _get_latency_sensitive_capability_index_runtime_state()
-        capability_elapsed = time.perf_counter() - capability_started_at
-        all_matches.extend(capability_matches)
-        capability_matches_sufficient = _has_enough_capability_matches(
-            capability_matches,
-            threshold=relevance_threshold,
-            max_results=max_results,
-        )
+    capability_matches_sufficient = direct_matches_sufficient
+    if direct_matches_sufficient:
         _record_discovery_stage_timing(
             stage_timings,
             stage="capability_index_search",
-            started_at=capability_started_at,
-            status="completed",
-            match_count=len(capability_matches),
-            sufficient=capability_matches_sufficient,
-            runtime_ready=bool(capability_index_state.get("ready")),
-            build_in_progress=bool(capability_index_state.get("build_in_progress")),
+            started_at=time.perf_counter(),
+            status="skipped_contract_direct_sufficient",
         )
-        if capability_elapsed > capability_timeout_remaining:
-            _record_budget_exhaustion(
-                "capability_index_search",
-                (
-                    "capability_index_search exceeded remaining discovery budget "
-                    f"(elapsed={capability_elapsed:.3f}s, "
-                    f"budget={capability_timeout_remaining:.3f}s)."
-                ),
+    else:
+        try:
+            search_sources.append("capability_index")
+            capability_started_at = time.perf_counter()
+            capability_timeout_remaining = _remaining_search_timeout_seconds(
+                started_at=start_time,
+                timeout_seconds=effective_timeout_seconds,
             )
-        if not capability_matches:
-            capability_unavailability_errors = (
-                _derive_capability_index_unavailability_errors(
-                    runtime_state=capability_index_state,
-                    wait_seconds=min(
-                        capability_index_wait_seconds,
-                        capability_timeout_remaining,
+            if capability_timeout_remaining <= 0.0:
+                raise TimeoutError(
+                    "Discovery timeout budget was exhausted before "
+                    "capability_index_search could start "
+                    f"(budget={effective_timeout_seconds:.3f}s)."
+                )
+            capability_matches = _search_workflow_capabilities(
+                search_query,
+                limit=max_results * 3,
+                max_wait_seconds=min(
+                    capability_index_wait_seconds,
+                    capability_timeout_remaining,
+                ),
+                workflow_registry=workflow_registry,
+            )
+            capability_index_state = (
+                _get_latency_sensitive_capability_index_runtime_state()
+            )
+            capability_elapsed = time.perf_counter() - capability_started_at
+            all_matches.extend(capability_matches)
+            capability_matches_sufficient = _has_enough_capability_matches(
+                capability_matches,
+                threshold=relevance_threshold,
+                max_results=max_results,
+            )
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="capability_index_search",
+                started_at=capability_started_at,
+                status="completed",
+                match_count=len(capability_matches),
+                sufficient=capability_matches_sufficient,
+                runtime_ready=bool(capability_index_state.get("ready")),
+                build_in_progress=bool(capability_index_state.get("build_in_progress")),
+            )
+            if capability_elapsed > capability_timeout_remaining:
+                _record_budget_exhaustion(
+                    "capability_index_search",
+                    (
+                        "capability_index_search exceeded remaining discovery budget "
+                        f"(elapsed={capability_elapsed:.3f}s, "
+                        f"budget={capability_timeout_remaining:.3f}s)."
                     ),
                 )
-            )
-            errors.extend(capability_unavailability_errors)
-            if capability_unavailability_errors:
-                direct_resolution_started_at = time.perf_counter()
-                direct_matches = _resolve_contract_direct_workflow_candidates(
-                    search_query,
-                    workflow_registry=workflow_registry,
-                    limit=max_results * 2,
+            if not capability_matches:
+                capability_unavailability_errors = (
+                    _derive_capability_index_unavailability_errors(
+                        runtime_state=capability_index_state,
+                        wait_seconds=min(
+                            capability_index_wait_seconds,
+                            capability_timeout_remaining,
+                        ),
+                    )
                 )
-                if direct_matches:
-                    search_sources.append("contract_direct_workflow_resolution")
-                    all_matches.extend(direct_matches)
-                    capability_matches_sufficient = _has_enough_capability_matches(
-                        direct_matches,
-                        threshold=relevance_threshold,
-                        max_results=max_results,
-                    )
+                errors.extend(capability_unavailability_errors)
+                if capability_unavailability_errors:
                     _record_discovery_stage_timing(
                         stage_timings,
-                        stage="contract_direct_workflow_resolution",
-                        started_at=direct_resolution_started_at,
+                        stage="capability_index_unavailable",
+                        started_at=capability_started_at,
                         status="completed",
-                        match_count=len(direct_matches),
-                        sufficient=capability_matches_sufficient,
-                        reason="capability_index_unavailable",
+                        errors=capability_unavailability_errors,
                     )
-                else:
-                    _record_discovery_stage_timing(
-                        stage_timings,
-                        stage="contract_direct_workflow_resolution",
-                        started_at=direct_resolution_started_at,
-                        status="completed",
-                        match_count=0,
-                        sufficient=False,
-                        reason="capability_index_unavailable",
-                    )
-    except Exception as e:
-        capability_matches_sufficient = False
-        errors.append(f"capability_index_error: {e}")
-        if _is_discovery_budget_timeout(e):
-            _record_budget_exhaustion("capability_index_search", str(e))
-        _record_discovery_stage_timing(
-            stage_timings,
-            stage="capability_index_search",
-            started_at=locals().get("capability_started_at", start_time),
-            status="error",
-            error=type(e).__name__,
-        )
-        logger.warning("Workflow capability index search failed: %s", e)
+        except Exception as e:
+            capability_matches_sufficient = False
+            errors.append(f"capability_index_error: {e}")
+            if _is_discovery_budget_timeout(e):
+                _record_budget_exhaustion("capability_index_search", str(e))
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="capability_index_search",
+                started_at=locals().get("capability_started_at", start_time),
+                status="error",
+                error=type(e).__name__,
+            )
+            logger.warning("Workflow capability index search failed: %s", e)
 
     # Secondary authoritative search sources fill gaps the capability index misses.
     semantic_budget_remaining = _remaining_search_timeout_seconds(
@@ -1700,8 +2091,7 @@ def discover_workflows(
         )
     elif (
         not capability_matches_sufficient
-        and semantic_budget_remaining
-        < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
+        and semantic_budget_remaining < DISCOVERY_UNBOUNDED_SECONDARY_MIN_BUDGET_SECONDS
     ):
         _record_budget_exhaustion(
             "semantic_search",
@@ -1908,6 +2298,7 @@ def discover_workflows_for_turn(
     timeout_seconds: float | str | None = None,
     allow_non_executable: Optional[bool] = None,
     workflow_registry: Any | None = None,
+    expected_outcome_contract: Mapping[str, Any] | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Convenience wrapper for workflow discovery during conversation turns.
 
@@ -1945,6 +2336,7 @@ def discover_workflows_for_turn(
             timeout_seconds=effective_timeout_seconds,
             allow_non_executable=effective_allow_non_executable,
             workflow_registry=workflow_registry,
+            expected_outcome_contract=expected_outcome_contract,
         )
         payload = result.to_dict()
         # Self-describing telemetry: every discovery payload records where it

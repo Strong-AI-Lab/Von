@@ -19,6 +19,7 @@ from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_RELEVANCE_THRESHOLD,
     DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION,
+    DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES,
     EXECUTABILITY_DRAFT_NOT_PUBLISHED,
     EXECUTABILITY_EXECUTABLE_NOW,
     EXECUTABILITY_GRAPH_INCOMPLETE,
@@ -27,6 +28,7 @@ from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE,
     ROUTING_EXCLUSION_EXPLICITLY_DISABLED,
+    ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
@@ -35,6 +37,7 @@ from src.backend.services.workflow_discovery_service import (
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
     _enrich_workflow_matches,
+    _build_expected_outcome_contract_projection,
     _get_workflow_description,
     _get_workflow_name,
     _is_executable_workflow_concept,
@@ -533,8 +536,8 @@ class TestDiscoverWorkflows:
             )
 
         mock_classify.side_effect = _classify
-        mock_has_authoritative_text.side_effect = (
-            lambda concept_id: concept_id == "#V#wf_exec"
+        mock_has_authoritative_text.side_effect = lambda concept_id: (
+            concept_id == "#V#wf_exec"
         )
 
         with patch(
@@ -593,6 +596,115 @@ class TestDiscoverWorkflows:
 
         assert len(result.matches) == 2
         assert len(result.routing_matches or []) == 2
+
+    def test_contract_projection_uses_structured_fields_without_domain_policy(
+        self,
+    ) -> None:
+        projection = _build_expected_outcome_contract_projection(
+            {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Create a represented metadata record.",
+                    "grounding_requirement": "Use authoritative represented evidence.",
+                    "selector_guidance": (
+                        "Prefer the exact workflow named in the contract."
+                    ),
+                },
+                "required_tools": ["workflow_execute"],
+                "required_actions": ["metadata.verify_representation"],
+                "target_workflow_id": "#V#generic_metadata_representation_workflow",
+                "target_type_ids": ["#V#metadata_record"],
+            }
+        )
+
+        assert projection["schema_version"].endswith(".v1")
+        assert "summary" in projection["fields_used"]
+        assert "required_tools" in projection["fields_used"]
+        assert "required_actions" in projection["fields_used"]
+        assert projection["workflow_concept_ids"] == [
+            "#V#generic_metadata_representation_workflow"
+        ]
+        assert "metadata.verify_representation" in projection["text"]
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    def test_structured_contract_exact_workflow_id_promotes_candidate_before_slow_search(
+        self,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.side_effect = AssertionError(
+            "exact represented workflow contract should resolve before retrieval"
+        )
+        mock_semantic.side_effect = AssertionError(
+            "semantic search should not run for exact represented workflow contract"
+        )
+        mock_vontology.side_effect = AssertionError(
+            "vontology search should not run for exact represented workflow contract"
+        )
+        mock_enrich.side_effect = lambda matches: matches
+        registry = SimpleNamespace(
+            all_workflow_ids=lambda: ["#V#generic_metadata_representation_workflow"],
+            peek_registration=lambda workflow_id: SimpleNamespace(
+                workflow_id=workflow_id,
+                purpose="Represent metadata records through an authored workflow.",
+                source="vontology",
+            ),
+        )
+
+        result = discover_workflows(
+            "Represent metadata for #V#benchmark_report.",
+            max_results=1,
+            timeout_seconds=0.01,
+            workflow_registry=registry,
+            expected_outcome_contract={
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Represent metadata for the target concept.",
+                },
+                "required_tools": ["workflow_execute"],
+                "target_workflow_id": "#V#generic_metadata_representation_workflow",
+                "target_type_ids": ["#V#metadata_record"],
+            },
+        )
+
+        assert result.search_sources == ["contract_direct_workflow_resolution"]
+        assert [match.concept_id for match in result.matches] == [
+            "#V#generic_metadata_representation_workflow"
+        ]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#generic_metadata_representation_workflow"
+        ]
+        assert result.contract_projection is not None
+        assert result.contract_projection["workflow_concept_ids"] == [
+            "#V#generic_metadata_representation_workflow"
+        ]
+        assert result.routing_readiness_diagnostics[0]["status"] == (
+            "workflow_present_routing_ready"
+        )
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 1
+            for timing in result.stage_timings
+        )
 
 
 class TestDiscoverWorkflowsForTurn:
@@ -760,6 +872,12 @@ class TestDiscoverWorkflowsForTurn:
             result.matches[0].routing_exclusion_reason
             == ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE
         )
+        assert result.matches[0].routing_readiness_status == (
+            ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT
+        )
+        assert result.routing_readiness_diagnostics[0]["status"] == (
+            ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT
+        )
         assert result.routing_matches == []
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
@@ -902,7 +1020,7 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_capability_index_build_in_progress_resolves_workflow_execute_contract_from_registry(
+    def test_workflow_execute_contract_resolves_from_registry_before_capability_index(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
@@ -940,17 +1058,14 @@ class TestDiscoverWorkflowsForTurn:
             workflow_registry=registry,
         )
 
-        assert result.search_sources == [
-            "capability_index",
-            "contract_direct_workflow_resolution",
-        ]
+        assert result.search_sources == ["contract_direct_workflow_resolution"]
         assert [match.concept_id for match in result.matches] == [
             "#V#arxiv_paper_representation_workflow"
         ]
         assert [match.concept_id for match in result.routing_matches or []] == [
             "#V#arxiv_paper_representation_workflow"
         ]
-        assert "capability_index_build_in_progress" in result.errors
+        assert mock_capability.called is False
         assert mock_semantic.called is False
         assert mock_vontology.called is False
         assert any(
@@ -1146,6 +1261,7 @@ class TestDiscoverWorkflowsForTurn:
         assert result.budget_exhausted is True
         assert result.budget_exhaustion_stage == "semantic_search"
         assert "skipped semantic_search" in str(result.budget_exhaustion_detail)
+        assert result.blocker_reason == DISCOVERY_BLOCKER_BUDGET_EXHAUSTED_NO_CANDIDATES
         assert result.search_time_ms < 100.0
         assert result.timeout_budget_seconds == 0.06
         assert mock_semantic.called is False
@@ -1273,7 +1389,9 @@ class TestDiscoverWorkflowsForTurn:
         monkeypatch.setattr(
             "src.backend.services.workflow_discovery_service._classify_workflow_candidate_executability",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("compact routing index should avoid definition hydration")
+                AssertionError(
+                    "compact routing index should avoid definition hydration"
+                )
             ),
         )
         monkeypatch.setattr(

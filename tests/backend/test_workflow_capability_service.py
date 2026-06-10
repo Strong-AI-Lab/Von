@@ -83,7 +83,9 @@ class _FakeWorkflowRetrievalBackend:
             }
         return (len(docs_list), 0)
 
-    def get_namespace_runtime_state(self, namespace: str | None = None) -> dict[str, Any]:
+    def get_namespace_runtime_state(
+        self, namespace: str | None = None
+    ) -> dict[str, Any]:
         namespace_key = str(namespace or "")
         if self.namespace_runtime_state_override is not None:
             return {
@@ -123,12 +125,15 @@ class _FakeWorkflowRetrievalBackend:
         scored_rows: list[dict[str, Any]] = []
         for doc in self.docs_by_namespace.get(namespace_key, {}).values():
             metadata = dict(doc.get("metadata") or {})
-            requested_type = str(
-                (permissions_context or {}).get("type") or ""
-            ).strip()
-            if requested_type and str(metadata.get("type") or "").strip() != requested_type:
+            requested_type = str((permissions_context or {}).get("type") or "").strip()
+            if (
+                requested_type
+                and str(metadata.get("type") or "").strip() != requested_type
+            ):
                 continue
-            text_tokens = set(self._TOKEN_RE.findall(str(doc.get("text") or "").lower()))
+            text_tokens = set(
+                self._TOKEN_RE.findall(str(doc.get("text") or "").lower())
+            )
             overlap = len(query_tokens & text_tokens)
             if overlap <= 0:
                 continue
@@ -287,7 +292,9 @@ class TestWorkflowCapabilityIndex:
 
         assert _fake_retrieval_backend.queries
         assert _fake_retrieval_backend.queries[-1]["query_text"] == query_text
-        assert _fake_retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
+        assert (
+            _fake_retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
+        )
         permissions_context = _fake_retrieval_backend.queries[-1]["permissions_context"]
         assert permissions_context["type"] == "workflow_capability"
         assert permissions_context["retrieval_candidate_limit"] >= 10
@@ -345,6 +352,52 @@ class TestIndexFromRegistry:
         assert count > 0
         results = index.search("tool calling pipeline")
         assert any(r.workflow_id == "#V#tool_calling_workflow" for r in results)
+
+    def test_indexes_workflow_action_ids_from_authoritative_definition_metadata(self):
+        from src.backend.workflows import (
+            WorkflowActionInvocation,
+            WorkflowDefinition,
+            WorkflowRegistry,
+            WorkflowStateSpec,
+        )
+        from src.backend.workflows.workflow_registry import WorkflowRegistration
+
+        registry = WorkflowRegistry()
+        definition = WorkflowDefinition(
+            workflow_id="#V#generic_metadata_representation_workflow",
+            initial_state="verify",
+            states={
+                "verify": WorkflowStateSpec(
+                    state_id="verify",
+                    actions=(
+                        WorkflowActionInvocation(
+                            action_id="metadata.verify_representation"
+                        ),
+                    ),
+                    terminal=True,
+                )
+            },
+            purpose="Represent metadata records through an authored workflow.",
+        )
+        registry.register(
+            WorkflowRegistration(
+                workflow_id="#V#generic_metadata_representation_workflow",
+                definition=definition,
+                purpose=definition.purpose,
+                source="repo_seed_agent_test",
+            )
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+        results = index.search("metadata.verify_representation", max_results=1)
+
+        assert count == 1
+        assert results
+        assert results[0].workflow_id == "#V#generic_metadata_representation_workflow"
+        assert results[0].metadata["workflow_action_ids"] == [
+            "metadata.verify_representation"
+        ]
 
     def test_indexes_lazy_registrations(self):
         from src.backend.workflows import WorkflowRegistry
@@ -485,9 +538,7 @@ class TestIndexFromRegistry:
         count = index.index_from_registry(registry)
 
         assert count == 1
-        capability_text = index._entries[
-            "#V#workflow_repair_or_create_workflow"
-        ].text
+        capability_text = index._entries["#V#workflow_repair_or_create_workflow"].text
         assert "Keywords: workflow creation, workflow repair" in capability_text
         assert (
             "Example requests: Create a workflow from this description request."
@@ -619,13 +670,17 @@ class TestIndexFromRegistry:
         monkeypatch.setattr(
             "src.backend.workflows.vontology_loader.resolve_workflow_description",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("batch metadata should avoid per-workflow description fetches")
+                AssertionError(
+                    "batch metadata should avoid per-workflow description fetches"
+                )
             ),
         )
         monkeypatch.setattr(
             "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("batch metadata should avoid per-workflow exemplar fetches")
+                AssertionError(
+                    "batch metadata should avoid per-workflow exemplar fetches"
+                )
             ),
         )
 
@@ -778,7 +833,9 @@ class TestPurposeDrivenCapabilities:
 
 class TestHelpers:
     def test_workflow_id_to_name(self):
-        assert _workflow_id_to_name("#V#tool_calling_workflow") == "Tool Calling Workflow"
+        assert (
+            _workflow_id_to_name("#V#tool_calling_workflow") == "Tool Calling Workflow"
+        )
         assert _workflow_id_to_name("some_workflow") == "Some Workflow"
 
     def test_build_capability_text_uses_purpose(self):
@@ -837,9 +894,7 @@ def test_search_workflow_capabilities_populates_empty_index_from_registry(
         min_score=0.01,
     )
 
-    assert any(
-        result.workflow_id == "#V#tool_calling_workflow" for result in results
-    )
+    assert any(result.workflow_id == "#V#tool_calling_workflow" for result in results)
 
 
 def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
@@ -1082,7 +1137,9 @@ def test_startup_check_warms_query_surface_for_ready_namespace(
         lambda **_kwargs: capability_service.get_workflow_capability_index(),
     )
 
-    def _fake_warm(index_arg: Any, *, timeout_seconds: float | None = None, mode: str = "warm") -> None:
+    def _fake_warm(
+        index_arg: Any, *, timeout_seconds: float | None = None, mode: str = "warm"
+    ) -> None:
         assert index_arg is index
         assert mode == "startup"
         warm_calls.append(timeout_seconds)
@@ -1118,7 +1175,9 @@ def test_readiness_report_starts_background_initialisation_for_persisted_namespa
         "compatible": True,
         "status": "compatible",
         "detail": "Fake persisted workflow capability namespace is compatible.",
-        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "current_embedding_signature": dict(
+            _fake_retrieval_backend.embedding_signature
+        ),
         "stored_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
     }
     started: list[dict[str, Any]] = []
@@ -1215,8 +1274,9 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
 
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
-        lambda **kwargs: invalidations.append(kwargs.get("reason"))
-        or {"success": True},
+        lambda **kwargs: (
+            invalidations.append(kwargs.get("reason")) or {"success": True}
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
@@ -1247,8 +1307,9 @@ def test_workflow_graph_relationship_change_invalidates_projection(
 
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
-        lambda **kwargs: invalidations.append(kwargs.get("reason"))
-        or {"success": True},
+        lambda **kwargs: (
+            invalidations.append(kwargs.get("reason")) or {"success": True}
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
@@ -1283,7 +1344,9 @@ def test_readiness_report_starts_auto_rebuild_for_embedding_signature_mismatch(
         "compatible": False,
         "status": "embedding_signature_mismatch",
         "detail": "Persisted index embeddings were built with a different embedding signature.",
-        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "current_embedding_signature": dict(
+            _fake_retrieval_backend.embedding_signature
+        ),
         "stored_embedding_signature": None,
     }
     started: list[dict[str, Any]] = []
@@ -1337,7 +1400,9 @@ def test_readiness_report_throttles_repeated_auto_rebuild_status_calls(
         "compatible": False,
         "status": "embedding_signature_mismatch",
         "detail": "Persisted index embeddings were built with a different embedding signature.",
-        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "current_embedding_signature": dict(
+            _fake_retrieval_backend.embedding_signature
+        ),
         "stored_embedding_signature": None,
     }
     started: list[str] = []
@@ -1374,7 +1439,9 @@ def test_readiness_report_does_not_auto_rebuild_without_runtime_embedder(
         "compatible": False,
         "status": "embedding_signature_mismatch",
         "detail": "Persisted index embeddings were built with a different embedding signature.",
-        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "current_embedding_signature": dict(
+            _fake_retrieval_backend.embedding_signature
+        ),
         "stored_embedding_signature": None,
     }
 
@@ -1407,7 +1474,9 @@ def test_readiness_report_does_not_auto_rebuild_while_build_in_progress(
         "compatible": False,
         "status": "embedding_signature_mismatch",
         "detail": "Persisted index embeddings were built with a different embedding signature.",
-        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "current_embedding_signature": dict(
+            _fake_retrieval_backend.embedding_signature
+        ),
         "stored_embedding_signature": None,
     }
     capability_service._set_workflow_capability_rebuild_state(
@@ -1427,4 +1496,6 @@ def test_readiness_report_does_not_auto_rebuild_while_build_in_progress(
     assert readiness["status"] == "building"
     assert readiness["auto_rebuild"]["attempt_count"] == 0
     assert readiness["auto_rebuild"]["last_status"] == "skipped"
-    assert readiness["auto_rebuild"]["skipped_reason_this_report"] == "build_in_progress"
+    assert (
+        readiness["auto_rebuild"]["skipped_reason_this_report"] == "build_in_progress"
+    )

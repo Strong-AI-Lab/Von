@@ -19,7 +19,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-
 _CACHE_SCHEMA_VERSION = "turn_workflow_discovery_memo.v1"
 _DEFAULT_TTL_SECONDS = 900.0
 _DEFAULT_MAX_ENTRIES = 256
@@ -133,6 +132,8 @@ def _registry_fingerprint(workflow_registry: Any | None) -> str | None:
 def _candidate_count(payload: Mapping[str, Any]) -> int:
     for key in ("candidate_count", "match_count"):
         raw_value = payload.get(key)
+        if raw_value is None:
+            continue
         try:
             parsed = int(raw_value)
         except (TypeError, ValueError):
@@ -321,6 +322,11 @@ def discover_workflows_for_turn_memoized(
         timeout_seconds=timeout_seconds,
         allow_non_executable=allow_non_executable,
         workflow_registry=workflow_registry,
+        expected_outcome_contract=(
+            expected_outcome_contract
+            if isinstance(expected_outcome_contract, Mapping)
+            else None
+        ),
     )
     uncached_elapsed_ms = (time.perf_counter() - uncached_started) * 1000.0
     if not isinstance(raw_result, Mapping):
@@ -330,8 +336,20 @@ def discover_workflows_for_turn_memoized(
     clean_user_input = _safe_text(user_input)
     clean_discovery_input = _safe_text(discovery_input)
     if clean_user_input and clean_discovery_input != clean_user_input:
-        payload["ranking_query_input"] = clean_discovery_input
-        payload["ranking_query_input_source"] = "requested_query"
+        payload["ranking_query_input"] = (
+            _safe_text(payload.get("query")) or clean_discovery_input
+        )
+        contract_projection = payload.get("contract_projection")
+        contract_fields_used = (
+            contract_projection.get("fields_used")
+            if isinstance(contract_projection, Mapping)
+            else ()
+        )
+        payload["ranking_query_input_source"] = (
+            "expected_outcome_contract"
+            if isinstance(contract_fields_used, list) and contract_fields_used
+            else "requested_query"
+        )
         payload["query"] = clean_user_input
     candidate_count = _candidate_count(payload)
     with _CACHE_LOCK:

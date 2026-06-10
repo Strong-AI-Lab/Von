@@ -74,9 +74,10 @@ def test_turn_workflow_discovery_memo_reuses_same_turn_query(
     assert first["workflow_discovery_cache"]["cache_hit"] is False
     assert second["workflow_discovery_cache"]["cache_hit"] is True
     assert second["workflow_discovery_cache"]["candidate_count"] == 1
-    assert second["workflow_discovery_cache"]["cache_key_digest"] == first[
-        "workflow_discovery_cache"
-    ]["cache_key_digest"]
+    assert (
+        second["workflow_discovery_cache"]["cache_key_digest"]
+        == first["workflow_discovery_cache"]["cache_key_digest"]
+    )
 
 
 def test_turn_workflow_discovery_memo_separates_namespace(
@@ -155,8 +156,7 @@ def test_turn_workflow_discovery_memo_ranks_with_requested_query(
     calls: list[str] = []
     raw_query = "Represent this paper: https://arxiv.org/abs/2106.03245"
     enriched_query = (
-        raw_query
-        + "\n\nTurn-intent routing guidance:\n"
+        raw_query + "\n\nTurn-intent routing guidance:\n"
         "- Routing guidance: Prefer the most specific represented workflow.\n"
         "- Required tools: get_paper_metadata"
     )
@@ -188,6 +188,61 @@ def test_turn_workflow_discovery_memo_ranks_with_requested_query(
     assert result["ranking_query_input_source"] == "requested_query"
     assert result["matches"][0]["concept_id"] == (
         "#V#arxiv_paper_representation_workflow"
+    )
+
+
+def test_turn_workflow_discovery_memo_passes_structured_contract_to_discovery(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda *, latency_sensitive=False: _runtime_state("v1"),
+    )
+    captured_kwargs: dict[str, Any] = {}
+    raw_query = "Represent metadata for #V#benchmark_report."
+    enriched_query = (
+        raw_query
+        + "\n\nTurn-intent routing guidance:\n- Required tools: workflow_execute"
+    )
+    contract = {
+        "schema_version": "turn_expected_outcome_contract.v1",
+        "fields": {"summary": "Represent metadata for the benchmark report."},
+        "required_tools": ["workflow_execute"],
+        "target_workflow_id": "#V#generic_metadata_representation_workflow",
+    }
+
+    def _discover(user_input: str, **kwargs: Any) -> dict[str, Any]:
+        captured_kwargs.update(kwargs)
+        return {
+            "query": (
+                user_input + "\n\nTurn-intent routing guidance:\n"
+                "- Workflow concept IDs: #V#generic_metadata_representation_workflow"
+            ),
+            "requested_query": raw_query,
+            "matches": [],
+            "candidates": [],
+            "candidate_count": 0,
+            "match_count": 0,
+            "contract_projection": {
+                "schema_version": "workflow_discovery_contract_projection.v1",
+                "fields_used": ["summary", "required_tools", "workflow_concept_ids"],
+            },
+        }
+
+    result = discover_workflows_for_turn_memoized(
+        enriched_query,
+        namespace="#V#user@org",
+        turn_scope="turn-contract",
+        requested_query=raw_query,
+        expected_outcome_contract=contract,
+        discovery_func=_discover,
+    )
+
+    assert captured_kwargs["expected_outcome_contract"] == contract
+    assert result is not None
+    assert result["ranking_query_input_source"] == "expected_outcome_contract"
+    assert (
+        "#V#generic_metadata_representation_workflow" in result["ranking_query_input"]
     )
 
 
