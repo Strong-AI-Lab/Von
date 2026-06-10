@@ -193,9 +193,11 @@ def _compact_workflow_execution_payload(
         "launch_mode",
         "await_terminal",
         "timeout_seconds",
+        "configured_timeout_seconds",
         "poll_interval_seconds",
         "poll_count",
         "timed_out",
+        "early_timeout_reason",
         "current_status",
         "current_state",
         "execution_state",
@@ -380,6 +382,18 @@ def _build_execution_quality_signals(
         or quality_signals["mutation_guardrail_blocked_count"] > 0
     )
     return quality_signals
+
+
+def _get_durable_runtime_status() -> Mapping[str, Any] | None:
+    try:
+        return get_durable_system_status(include_counts=False)
+    except TypeError:
+        try:
+            return get_durable_system_status()
+        except Exception:
+            return None
+    except Exception:
+        return None
 
 
 _OMIT_WORKFLOW_OUTPUT_VALUE = object()
@@ -939,14 +953,24 @@ def _handle_experiment_execute_target_workflow(
     if not await_terminal:
         return WorkflowActionResult(status="success", outputs=payload)
 
+    configured_timeout_seconds = timeout_seconds
+    durable_system_status: Mapping[str, Any] | None = None
+    early_timeout_reason: str | None = None
+    durable_system_status = _get_durable_runtime_status()
+    if (
+        isinstance(durable_system_status, Mapping)
+        and durable_system_status.get("worker_running") is False
+    ):
+        timeout_seconds = 0.0
+        early_timeout_reason = "durable_worker_not_running"
+
     wait_result = await_workflow_terminal_state(
         manager,
         instance_id,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
-    durable_system_status: Mapping[str, Any] | None = None
-    if wait_result.timed_out:
+    if wait_result.timed_out and durable_system_status is None:
         try:
             durable_system_status = get_durable_system_status()
         except Exception:
@@ -965,6 +989,9 @@ def _handle_experiment_execute_target_workflow(
     workflow_execution = _compact_workflow_execution_payload(
         payload.get("workflow_execution")
     )
+    if early_timeout_reason:
+        workflow_execution["configured_timeout_seconds"] = configured_timeout_seconds
+        workflow_execution["early_timeout_reason"] = early_timeout_reason
     payload["workflow_execution"] = workflow_execution
     payload.pop("workflow_instance", None)
     trace_summary = _build_trace_summary(workflow_execution.get("execution_trace_id"))

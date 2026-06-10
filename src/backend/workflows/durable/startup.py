@@ -237,8 +237,13 @@ def recover_orphaned_instances(
     return count
 
 
-def get_system_status() -> dict[str, Any]:
+def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
     """Get the status of the durable workflow system.
+
+    Args:
+        include_counts: Whether to include workflow instance and schedule counts.
+            Set to False for latency-sensitive runtime checks that only need
+            process state.
 
     Returns:
         Dict with status information.
@@ -259,7 +264,7 @@ def get_system_status() -> dict[str, Any]:
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    if db is not None:
+    if db is not None and include_counts:
         try:
             instances_coll = db[WORKFLOW_INSTANCES_COLLECTION]
             schedules_coll = db[WORKFLOW_SCHEDULES_COLLECTION]
