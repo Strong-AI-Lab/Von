@@ -72,6 +72,7 @@ from .execution_observability import (
     build_workflow_execution_trace_summary,
     build_workflow_execution_response,
 )
+from .startup import get_system_status as get_durable_system_status
 
 
 def _safe_str(value: Any) -> str:
@@ -197,14 +198,27 @@ def _compact_workflow_execution_payload(
         "timed_out",
         "current_status",
         "current_state",
+        "execution_state",
         "final_status",
+        "failure_code",
+        "failure_family",
+        "failure_reason",
         "error",
+        "error_code",
         "error_step",
         "execution_trace_id",
         "step_result_envelope_count",
     ):
         if key in raw:
             compact[key] = raw.get(key)
+
+    queue_diagnostic = raw.get("queue_diagnostic")
+    if isinstance(queue_diagnostic, Mapping):
+        compact["queue_diagnostic"] = dict(queue_diagnostic)
+
+    durable_system_status = raw.get("durable_system_status")
+    if isinstance(durable_system_status, Mapping):
+        compact["durable_system_status"] = dict(durable_system_status)
 
     outputs = raw.get("outputs")
     compact_outputs = _compact_workflow_execution_outputs(outputs)
@@ -931,6 +945,12 @@ def _handle_experiment_execute_target_workflow(
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
+    durable_system_status: Mapping[str, Any] | None = None
+    if wait_result.timed_out:
+        try:
+            durable_system_status = get_durable_system_status()
+        except Exception:
+            durable_system_status = None
     payload = build_workflow_execution_response(
         submission,
         workflow_inputs=workflow_inputs,
@@ -940,6 +960,7 @@ def _handle_experiment_execute_target_workflow(
         poll_interval_seconds=poll_interval_seconds,
         poll_count=wait_result.poll_count,
         timed_out=wait_result.timed_out,
+        durable_system_status=durable_system_status,
     )
     workflow_execution = _compact_workflow_execution_payload(
         payload.get("workflow_execution")

@@ -798,6 +798,102 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
     assert observation["quality_signals"]["requires_follow_up"] is False
 
 
+def test_execute_target_workflow_action_projects_pending_child_worker_blocker(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    manager = _StubWorkflowManager(
+        instances_by_id={
+            "#V#wf_instance_testing": _StubWorkflowInstance(
+                instance_id="#V#wf_instance_testing",
+                workflow_id="#V#arxiv_paper_representation_workflow",
+                status=WorkflowInstanceStatus.PENDING,
+                current_state="queued",
+                workflow_data={},
+            )
+        }
+    )
+    recorded: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    _patch_submit_verified_instance_success(monkeypatch, manager)
+    monkeypatch.setattr(
+        mod,
+        "get_durable_system_status",
+        lambda: {
+            "database_connected": True,
+            "worker_running": False,
+            "scheduler_running": False,
+            "instances": {"pending": 1, "running": 0},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "record_experiment_observation",
+        lambda **kwargs: recorded.update(kwargs)
+        or {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observations": list(kwargs["observations"]),
+        },
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+            inputs={
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "workflow_inputs": {"arxiv_id": "2412.11521"},
+                "run_id": "#V#run_pending_child",
+                "await_terminal": True,
+                "timeout_seconds": 0,
+                "poll_interval_seconds": 0,
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert result.outputs["success"] is False
+    assert result.outputs["error_code"] == "workflow_worker_unavailable"
+    execution = result.outputs["workflow_execution"]
+    assert execution["current_status"] == "pending"
+    assert execution["execution_state"] == "not_started"
+    assert execution["failure_family"] == "workflow_instance_never_started"
+    assert execution["failure_code"] == "workflow_worker_unavailable"
+    assert execution["queue_diagnostic"] == {
+        "authority_surface": "durable_system_status",
+        "worker_running": False,
+        "pending_instance_count": 1,
+        "running_instance_count": 0,
+    }
+    assert execution["durable_system_status"]["worker_running"] is False
+    assert result.outputs["quality_signals"]["requires_follow_up"] is True
+
+    observation = recorded["observations"][0]
+    assert observation["verdict"] == "inconclusive"
+    assert observation["observed_outcome"] == "pending"
+    assert observation["workflow_execution"]["failure_code"] == (
+        "workflow_worker_unavailable"
+    )
+    assert observation["workflow_execution"]["durable_system_status"][
+        "worker_running"
+    ] is False
+    assert observation["quality_signals"]["timed_out"] is True
+
+
 def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_records_observation(
     monkeypatch,
 ):
