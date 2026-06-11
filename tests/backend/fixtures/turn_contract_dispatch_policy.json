@@ -1,0 +1,65 @@
+{
+  "schema": "turn_contract_dispatch_policy.v1",
+  "description": "Test fixture mirroring the authored #V#turn_contract_dispatch_policy ladder (JVNAUTOSCI-2365). The live authority is the Vontology concept; this fixture exists only so real-path tests can exercise the represented evaluation without a live KB.",
+  "rules": [
+    {
+      "rule_id": "no_contract_requirements",
+      "when": {"has_required_tools": false},
+      "decision": "allow_selected",
+      "status": "no_contract_requirements",
+      "can_satisfy_contract": null,
+      "reasoning": "The turn contract did not add any required tools for dispatch preflight verification."
+    },
+    {
+      "rule_id": "direct_response_requires_tool_pipeline",
+      "when": {
+        "selected_prefers_direct_response": true,
+        "selected_uses_tool_pipeline_contract": false
+      },
+      "decision": "override_to_general_tool_workflow",
+      "status": "direct_response_route_requires_tool_pipeline",
+      "override_reason": "direct_response_route_cannot_satisfy_required_turn_tools",
+      "reasoning": "The selected direct-response route cannot itself satisfy contract-required tool obligations, so dispatch must use the general tool workflow before the turn can finalise."
+    },
+    {
+      "rule_id": "single_surface_contract",
+      "when": {"max_required_surface_families": 1},
+      "decision": "allow_selected",
+      "status": "single_surface_contract",
+      "can_satisfy_contract": true,
+      "reasoning": "The turn contract stayed within a single retrieval surface, so no multi-surface dispatch override was required."
+    },
+    {
+      "rule_id": "no_external_surface_requirement",
+      "when": {"has_external_surface_families": false},
+      "decision": "allow_selected",
+      "status": "no_external_surface_requirement",
+      "can_satisfy_contract": true,
+      "reasoning": "The turn contract required multiple surfaces, but none were external multi-surface evidence families that require the general tool workflow."
+    },
+    {
+      "rule_id": "selected_workflow_satisfies_contract",
+      "when": {"selected_uses_tool_pipeline_contract": true},
+      "decision": "allow_selected",
+      "status": "selected_workflow_satisfies_contract",
+      "can_satisfy_contract": true,
+      "reasoning": "The selected workflow already advertises the tool-pipeline contract needed to satisfy the turn's multi-surface evidence requirements."
+    },
+    {
+      "rule_id": "non_custom_route_selected",
+      "when": {"selector_requests_custom_workflow": false},
+      "decision": "allow_selected",
+      "status": "non_custom_route_selected",
+      "can_satisfy_contract": null,
+      "reasoning": "Dispatch preflight did not have a selected custom workflow to verify against the multi-surface evidence contract."
+    },
+    {
+      "rule_id": "multi_surface_override",
+      "when": {},
+      "decision": "override_to_general_tool_workflow",
+      "status": "override_required",
+      "override_reason": "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract",
+      "reasoning": "The selected custom workflow did not advertise tool-pipeline execution, but the turn contract required retrieval across multiple evidence surfaces including external ones, so the general tool workflow must be selected instead."
+    }
+  ]
+}

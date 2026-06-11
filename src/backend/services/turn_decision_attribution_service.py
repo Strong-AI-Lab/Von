@@ -268,12 +268,37 @@ def _attribute_dispatch(
     diagnostics: Mapping[str, Any],
     python_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    # Dispatch preflight decisions resolved from the represented dispatch
+    # policy (JVNAUTOSCI-2365) self-identify via decision_source.
+    represented_policy_events = [
+        event
+        for event in python_events
+        if _safe_str(event.get("decision_source")) == "represented_dispatch_policy"
+    ]
+    if represented_policy_events and len(represented_policy_events) == len(
+        [e for e in python_events if _safe_str(e.get("decision_class"))
+         == "workflow_dispatch_turn_contract_check"]
+    ):
+        other_overrides = [
+            event
+            for event in python_events
+            if event not in represented_policy_events
+            and event.get("changed_outcome")
+        ]
+        if not other_overrides:
+            return _decision(
+                "dispatch",
+                AUTHORITY_REPRESENTED,
+                authority_surface="turn_contract_dispatch_policy",
+                python_events=python_events,
+            )
     override_events = [
         event
         for event in python_events
         if event.get("changed_outcome")
         or _safe_str(event.get("reason_code"))
-        not in (None, "single_surface_contract", "no_external_surface_requirement",
+        not in (None, "no_contract_requirements", "single_surface_contract",
+                "no_external_surface_requirement",
                 "selected_workflow_satisfies_contract", "non_custom_route_selected")
     ]
     if override_events:

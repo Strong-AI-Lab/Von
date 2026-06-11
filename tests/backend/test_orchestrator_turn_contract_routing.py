@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from tests.backend.test_orchestrator_workflow_selector_routing import *  # noqa: F401,F403
 from tests.backend.test_orchestrator_workflow_selector_routing import (
     _CapturingLLM,
@@ -12,6 +17,36 @@ from tests.backend.test_orchestrator_workflow_selector_routing import (
     _register_terminal_custom_workflow,
     _stub_execute_workflow_result,
 )
+
+_DISPATCH_POLICY_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "turn_contract_dispatch_policy.json"
+)
+
+
+@pytest.fixture(autouse=True)
+def _represented_dispatch_policy(monkeypatch):
+    """Serve the canonical dispatch-policy fixture as the represented authority.
+
+    The live authority is the #V#turn_contract_dispatch_policy concept
+    (JVNAUTOSCI-2365); these real-path tests resolve the same authored rules
+    from the checked-in fixture instead of a live KB.
+    """
+
+    payload = json.loads(_DISPATCH_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    def _fixture_rows(concept_id, predicate=None, limit=1):
+        if (
+            concept_id == "#V#turn_contract_dispatch_policy"
+            and predicate == "hasContent"
+        ):
+            return [{"text": json.dumps(payload)}]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_contract_dispatch_policy_service."
+        "get_texts_for_concept",
+        _fixture_rows,
+    )
 
 
 def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_pipeline(

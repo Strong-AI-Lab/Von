@@ -457,6 +457,9 @@ class _TurnContractDispatchPreflightResult:
     override_reason: str | None = None
     reasoning: str | None = None
     turn_expected_outcome_contract: Mapping[str, Any] | None = None
+    dispatch_policy_source: str | None = None
+    dispatch_policy_rule_id: str | None = None
+    dispatch_policy_diagnostics: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -519,87 +522,85 @@ class _CustomWorkflowDispatchSupport:
             "external_surface_families": external_surface_families_tuple,
             "turn_expected_outcome_contract": contract_payload,
         }
-        if not required_tools_tuple:
+        # The override decision ladder is represented policy
+        # (JVNAUTOSCI-2365): rules resolve from
+        # #V#turn_contract_dispatch_policy and Python only extracts the
+        # structural facts and walks the represented rules. When the
+        # represented policy is unavailable or invalid, dispatch fails closed
+        # (no Python-invented override) and the represented completion gate
+        # remains the safety net for unsatisfied contracts.
+        from ...services.turn_contract_dispatch_policy_service import (
+            DECISION_OVERRIDE_TO_GENERAL_TOOL_WORKFLOW,
+            evaluate_turn_contract_dispatch_rules,
+            resolve_turn_contract_dispatch_policy,
+        )
+
+        facts = {
+            "has_required_tools": bool(required_tools_tuple),
+            "selected_prefers_direct_response": bool(
+                state.selected_prefers_direct_response
+            ),
+            "selected_uses_tool_pipeline_contract": bool(
+                state.selected_uses_tool_pipeline_contract
+            ),
+            "has_external_surface_families": bool(external_surface_families_tuple),
+            "selector_requests_custom_workflow": bool(
+                state.selector_requests_custom_workflow
+            ),
+            "required_surface_family_count": len(required_surface_families_tuple),
+        }
+
+        rules, policy_diagnostics = resolve_turn_contract_dispatch_policy()
+        if rules is None:
             return _TurnContractDispatchPreflightResult(
-                status="no_contract_requirements",
+                status="dispatch_policy_unavailable",
                 selected_workflow_can_satisfy_contract=None,
                 reasoning=(
-                    "The turn contract did not add any required tools for dispatch "
-                    "preflight verification."
+                    "The represented turn-contract dispatch policy was "
+                    "unavailable or invalid "
+                    f"({policy_diagnostics.get('error')}), so dispatch applied "
+                    "no override and left contract satisfaction to the "
+                    "completion gate."
                 ),
+                dispatch_policy_source="unavailable_fail_closed",
+                dispatch_policy_diagnostics=dict(policy_diagnostics),
                 **common_kwargs,
             )
-        if (
-            state.selected_prefers_direct_response
-            and not state.selected_uses_tool_pipeline_contract
-        ):
+
+        outcome = evaluate_turn_contract_dispatch_rules(rules, facts)
+        if outcome is None:
             return _TurnContractDispatchPreflightResult(
-                status="direct_response_route_requires_tool_pipeline",
-                selected_workflow_can_satisfy_contract=False,
-                override_reason=(
-                    "direct_response_route_cannot_satisfy_required_turn_tools"
-                ),
-                reasoning=(
-                    "The selected direct-response route cannot itself satisfy "
-                    "contract-required tool obligations, so dispatch must use the "
-                    "general tool workflow before the turn can finalise."
-                ),
-                **common_kwargs,
-            )
-        if len(required_surface_families_tuple) < 2:
-            return _TurnContractDispatchPreflightResult(
-                status="single_surface_contract",
-                selected_workflow_can_satisfy_contract=True,
-                reasoning=(
-                    "The turn contract stayed within a single retrieval surface, so "
-                    "no multi-surface dispatch override was required."
-                ),
-                **common_kwargs,
-            )
-        if not external_surface_families_tuple:
-            return _TurnContractDispatchPreflightResult(
-                status="no_external_surface_requirement",
-                selected_workflow_can_satisfy_contract=True,
-                reasoning=(
-                    "The turn contract required multiple surfaces, but none were "
-                    "external multi-surface evidence families that require the "
-                    "general tool workflow."
-                ),
-                **common_kwargs,
-            )
-        if state.selected_uses_tool_pipeline_contract:
-            return _TurnContractDispatchPreflightResult(
-                status="selected_workflow_satisfies_contract",
-                selected_workflow_can_satisfy_contract=True,
-                reasoning=(
-                    "The selected workflow already advertises the tool-pipeline "
-                    "contract needed to satisfy the turn's multi-surface evidence "
-                    "requirements."
-                ),
-                **common_kwargs,
-            )
-        if not state.selector_requests_custom_workflow:
-            return _TurnContractDispatchPreflightResult(
-                status="non_custom_route_selected",
+                status="dispatch_policy_no_rule_matched",
                 selected_workflow_can_satisfy_contract=None,
                 reasoning=(
-                    "Dispatch preflight did not have a selected custom workflow to "
-                    "verify against the multi-surface evidence contract."
+                    "No represented dispatch-policy rule matched the turn's "
+                    "structural facts, so dispatch applied no override."
                 ),
+                dispatch_policy_source="represented",
+                dispatch_policy_diagnostics=dict(policy_diagnostics),
                 **common_kwargs,
             )
+
+        is_override = (
+            outcome.get("decision") == DECISION_OVERRIDE_TO_GENERAL_TOOL_WORKFLOW
+        )
+        can_satisfy = outcome.get("can_satisfy_contract")
+        if is_override:
+            can_satisfy = False
         return _TurnContractDispatchPreflightResult(
-            status="override_required",
-            selected_workflow_can_satisfy_contract=False,
+            status=str(outcome.get("status")),
+            selected_workflow_can_satisfy_contract=can_satisfy,
             override_reason=(
-                "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+                str(outcome.get("override_reason")) if is_override else None
             ),
             reasoning=(
-                "The selected custom workflow did not advertise tool-pipeline "
-                "execution, but the turn contract required retrieval across "
-                "multiple evidence surfaces including external ones, so the "
-                "general tool workflow must be selected instead."
+                str(outcome.get("reasoning"))
+                if outcome.get("reasoning")
+                else None
             ),
+            dispatch_policy_source="represented",
+            dispatch_policy_rule_id=str(outcome.get("rule_id") or "") or None,
+            dispatch_policy_diagnostics=dict(policy_diagnostics),
             **common_kwargs,
         )
 
@@ -619,7 +620,13 @@ class _CustomWorkflowDispatchSupport:
             "external_surface_families": list(result.external_surface_families),
             "override_reason": result.override_reason,
             "reasoning": result.reasoning,
+            "dispatch_policy_source": result.dispatch_policy_source,
+            "dispatch_policy_rule_id": result.dispatch_policy_rule_id,
         }
+        if isinstance(result.dispatch_policy_diagnostics, Mapping):
+            payload["dispatch_policy_diagnostics"] = dict(
+                result.dispatch_policy_diagnostics
+            )
         if isinstance(result.turn_expected_outcome_contract, Mapping):
             payload["turn_expected_outcome_contract"] = dict(
                 result.turn_expected_outcome_contract
@@ -631,7 +638,11 @@ class _CustomWorkflowDispatchSupport:
                 component="internal_mcp_orchestrator",
                 function="record_turn_contract_dispatch_preflight",
                 decision_class="workflow_dispatch_turn_contract_check",
-                decision_source="turn_expected_outcome_contract",
+                decision_source=(
+                    "represented_dispatch_policy"
+                    if result.dispatch_policy_source == "represented"
+                    else "dispatch_policy_unavailable_fail_closed"
+                ),
                 changed_outcome=False,
                 reason_code=result.override_reason or result.status,
                 possible_inappropriate_python_code_use=False,
