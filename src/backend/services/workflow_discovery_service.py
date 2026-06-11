@@ -2308,6 +2308,205 @@ def discover_workflows(
     )
 
 
+SELECTOR_FAST_PATH_POLICY_CONCEPT_ID = "#V#selector_fast_path_policy"
+SELECTOR_FAST_PATH_POLICY_SCHEMA = "selector_fast_path_policy.v1"
+_SELECTOR_FAST_PATH_SUPPORTED_RULES = frozenset(
+    {
+        "single_unique_executable_candidate",
+        "unique_executable_candidate",
+        "unique_candidate_covers_contract",
+    }
+)
+
+
+def _resolve_selector_fast_path_policy() -> tuple[
+    Optional[Dict[str, Any]], Dict[str, Any]
+]:
+    """Resolve the represented selector fast-path policy (JVNAUTOSCI-2406).
+
+    The policy is authored on the Vontology concept
+    ``#V#selector_fast_path_policy`` as ``hasContent`` JSON. Python validates
+    schema and rule vocabulary and fails closed: absence or invalidity means
+    no fast-path policy is stamped and the selector LLM remains the routing
+    authority.
+    """
+
+    import json as _json
+
+    diagnostics: Dict[str, Any] = {
+        "policy_concept_id": SELECTOR_FAST_PATH_POLICY_CONCEPT_ID,
+        "status": "policy_unavailable",
+        "error": None,
+    }
+    try:
+        from .text_value_service import get_texts_for_concept
+
+        rows = get_texts_for_concept(
+            SELECTOR_FAST_PATH_POLICY_CONCEPT_ID, predicate="hasContent", limit=1
+        )
+    except Exception as exc:
+        diagnostics["error"] = f"selector_fast_path_policy_lookup_failed:{exc}"
+        return None, diagnostics
+
+    raw_text = None
+    if rows and isinstance(rows[0], Mapping):
+        raw_text = rows[0].get("text")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        diagnostics["error"] = "selector_fast_path_policy_content_missing"
+        return None, diagnostics
+
+    try:
+        payload = _json.loads(raw_text)
+    except Exception as exc:
+        diagnostics["error"] = f"selector_fast_path_policy_json_invalid:{exc}"
+        diagnostics["status"] = "policy_invalid"
+        return None, diagnostics
+    if not isinstance(payload, Mapping):
+        diagnostics["error"] = "selector_fast_path_policy_payload_not_object"
+        diagnostics["status"] = "policy_invalid"
+        return None, diagnostics
+
+    schema = str(payload.get("schema") or payload.get("schema_version") or "").strip()
+    if schema != SELECTOR_FAST_PATH_POLICY_SCHEMA:
+        diagnostics["error"] = "selector_fast_path_policy_schema_invalid"
+        diagnostics["schema"] = schema or None
+        diagnostics["status"] = "policy_invalid"
+        return None, diagnostics
+
+    if payload.get("enabled") is not True:
+        diagnostics["error"] = "selector_fast_path_policy_disabled"
+        diagnostics["status"] = "policy_disabled"
+        return None, diagnostics
+
+    rule = str(payload.get("rule") or payload.get("rule_id") or "").strip()
+    if rule not in _SELECTOR_FAST_PATH_SUPPORTED_RULES:
+        diagnostics["error"] = "selector_fast_path_policy_rule_unsupported"
+        diagnostics["rule"] = rule or None
+        diagnostics["status"] = "policy_invalid"
+        return None, diagnostics
+
+    policy = {
+        "enabled": True,
+        "rule": rule,
+        "require_contract_coverage": bool(
+            payload.get("require_contract_coverage", True)
+        ),
+        "treat_missing_required_actions_as_covered": bool(
+            payload.get("treat_missing_required_actions_as_covered", False)
+        ),
+        "authority_concept_id": SELECTOR_FAST_PATH_POLICY_CONCEPT_ID,
+        "authority_source": "text_relation:hasContent",
+    }
+    diagnostics["status"] = "policy_resolved"
+    diagnostics["rule"] = rule
+    return policy, diagnostics
+
+
+def _annotate_selector_fast_path_coverage(
+    payload: Dict[str, Any],
+    *,
+    policy: Mapping[str, Any],
+) -> None:
+    """Annotate candidate dicts with structural contract-coverage flags.
+
+    Coverage is a structural subset comparison between the turn contract's
+    represented required tools/actions (from the discovery contract
+    projection) and each candidate's represented capability metadata
+    (``routing_index_metadata.required_tools`` / ``workflow_action_ids``).
+    Candidates without represented capability metadata are left unannotated,
+    which the selector fast path treats as not covered (fail closed).
+    """
+
+    projection = payload.get("contract_projection")
+    projection = projection if isinstance(projection, Mapping) else {}
+    contract_tools = {
+        str(item).strip()
+        for item in (projection.get("required_tools") or [])
+        if isinstance(item, str) and str(item).strip()
+    }
+    contract_actions = {
+        str(item).strip()
+        for item in (projection.get("required_actions") or [])
+        if isinstance(item, str) and str(item).strip()
+    }
+    if not contract_tools:
+        payload["selector_fast_path_coverage_status"] = (
+            "no_contract_required_tools"
+        )
+        return
+
+    actions_covered_by_absence = bool(
+        not contract_actions
+        and policy.get("treat_missing_required_actions_as_covered") is True
+    )
+
+    def _annotate(entry: Any) -> None:
+        if not isinstance(entry, dict):
+            return
+        metadata = entry.get("routing_index_metadata")
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        declared_tools_raw = metadata.get("required_tools")
+        if not isinstance(declared_tools_raw, (list, tuple)):
+            return
+        declared_tools = {
+            str(item).strip()
+            for item in declared_tools_raw
+            if isinstance(item, str) and str(item).strip()
+        }
+        covers_tools = contract_tools.issubset(declared_tools)
+        entry["covers_expected_tool_set"] = covers_tools
+
+        coverage_provenance: Dict[str, Any] = {
+            "policy_concept_id": policy.get("authority_concept_id"),
+            "tool_coverage_source": "routing_index_metadata.required_tools",
+            "contract_required_tools": sorted(contract_tools),
+            "candidate_declared_tools": sorted(declared_tools),
+        }
+
+        declared_actions_raw = metadata.get("workflow_action_ids")
+        if contract_actions:
+            if isinstance(declared_actions_raw, (list, tuple)):
+                declared_actions = {
+                    str(item).strip()
+                    for item in declared_actions_raw
+                    if isinstance(item, str) and str(item).strip()
+                }
+                entry["covers_success_contract"] = contract_actions.issubset(
+                    declared_actions
+                )
+                coverage_provenance["action_coverage_source"] = (
+                    "routing_index_metadata.workflow_action_ids"
+                )
+                coverage_provenance["contract_required_actions"] = sorted(
+                    contract_actions
+                )
+        elif actions_covered_by_absence:
+            entry["covers_success_contract"] = True
+            coverage_provenance["action_coverage_source"] = (
+                "represented_policy:treat_missing_required_actions_as_covered"
+            )
+        entry["selector_fast_path_coverage"] = coverage_provenance
+
+    for key in ("matches", "routing_matches", "candidates"):
+        entries = payload.get(key)
+        if isinstance(entries, list):
+            for entry in entries:
+                _annotate(entry)
+    payload["selector_fast_path_coverage_status"] = "annotated"
+
+
+def _attach_selector_fast_path_metadata(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    policy, diagnostics = _resolve_selector_fast_path_policy()
+    payload["selector_fast_path_policy_diagnostics"] = diagnostics
+    if policy is None:
+        return payload
+    payload["selector_fast_path_policy"] = policy
+    _annotate_selector_fast_path_coverage(payload, policy=policy)
+    return payload
+
+
 def discover_workflows_for_turn(
     user_input: str,
     *,
@@ -2361,6 +2560,11 @@ def discover_workflows_for_turn(
         # Self-describing telemetry: every discovery payload records where it
         # came from so downstream diagnostics can explain empty results.
         payload.setdefault("discovery_payload_origin", "discover_workflows_for_turn")
+        # Represented selector fast-path metadata (JVNAUTOSCI-2406): stamp the
+        # Vontology-authored policy and structural contract-coverage flags so
+        # the selector's represented fast path can apply; absence fails closed
+        # to the selector LLM.
+        payload = _attach_selector_fast_path_metadata(payload)
         return payload
 
     except Exception as e:
