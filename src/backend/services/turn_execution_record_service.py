@@ -9516,6 +9516,110 @@ def _turn_execution_update_one(
         )
 
 
+def persist_failed_turn_execution_record(
+    *,
+    request_id: Any,
+    terminal_status: str,
+    error_text: Any = None,
+    error_class: Any = None,
+    session_id: Any = None,
+    namespace: Any = None,
+    user_id: Any = None,
+    org_id: Any = None,
+    prompt_text: Any = None,
+    llm_debug_info: Mapping[str, Any] | None = None,
+    progress_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a turn execution record for a turn that did not complete.
+
+    JVNAUTOSCI-2502: records were previously written only through
+    assistant-message chat persistence, so failed or cancelled turns left no
+    record at all — exactly the turns that most need diagnostics. This
+    best-effort path builds a record from whatever in-flight debug state
+    exists and stamps an explicit terminal-failure envelope.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    if not clean_request_id:
+        return {"updated": False, "reason": "missing_request_id"}
+    clean_terminal_status = (
+        _safe_str(terminal_status) or "failed"
+    ).lower()
+
+    debug = llm_debug_info if isinstance(llm_debug_info, Mapping) else {}
+
+    def _debug_mapping(key: str) -> Mapping[str, Any] | None:
+        value = debug.get(key)
+        return value if isinstance(value, Mapping) else None
+
+    def _debug_list(key: str) -> list[Any] | None:
+        value = debug.get(key)
+        return list(value) if isinstance(value, list) else None
+
+    try:
+        record = build_turn_execution_record(
+            request_id=clean_request_id,
+            session_id=session_id,
+            namespace=namespace,
+            user_id=user_id,
+            org_id=org_id,
+            prompt_text=prompt_text,
+            response_text=None,
+            interaction_timestamp_utc=debug.get("interaction_timestamp_utc"),
+            workflow_discovery=_debug_mapping("workflow_discovery"),
+            workflow_routing=_debug_mapping("workflow_routing"),
+            turn_execution_diagnostics=_debug_mapping(
+                "turn_execution_diagnostics"
+            ),
+            aux_llm_calls=_debug_list("aux_llm_calls"),
+            llm_calls=_debug_list("llm_calls"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to build terminal-failure turn record for request_id=%s: %s",
+            clean_request_id,
+            exc,
+        )
+        record = {
+            "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+            "request_id": clean_request_id,
+        }
+    if not isinstance(record, dict):
+        record = {
+            "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+            "request_id": clean_request_id,
+        }
+
+    record["execution_terminal_status"] = clean_terminal_status
+    record["terminal_failure"] = {
+        "schema_version": "turn_terminal_failure.v1",
+        "terminal_status": clean_terminal_status,
+        "error": _safe_str(error_text),
+        "error_class": _safe_str(error_class),
+        "progress_snapshot": (
+            dict(progress_snapshot)
+            if isinstance(progress_snapshot, Mapping)
+            else None
+        ),
+        "recorded_at_utc": _iso_utc(_now_utc()),
+    }
+
+    outcome = upsert_turn_execution_record_projection(
+        record=record,
+        user_id=_safe_str(user_id),
+        session_id=_safe_str(session_id),
+        namespace=_safe_str(namespace),
+        org_id=_safe_str(org_id),
+    )
+    if isinstance(outcome, dict) and outcome.get("updated"):
+        logger.info(
+            "Persisted terminal-failure turn record request_id=%s status=%s",
+            clean_request_id,
+            clean_terminal_status,
+        )
+    return outcome
+
+
 def upsert_turn_execution_record_projection(
     *,
     record: Mapping[str, Any],

@@ -10034,6 +10034,56 @@ def _submit_generate_background_request(
     )
 
 
+def _persist_terminal_failure_turn_record_best_effort(
+    *,
+    local_vars: Mapping[str, Any],
+    terminal_status: str,
+    error_text: str | None,
+    error_class: str | None,
+    llm_debug_info_override: dict[str, Any] | None = None,
+    progress_snapshot: Mapping[str, Any] | None = None,
+) -> None:
+    """Persist a turn record for a failed/cancelled generate turn.
+
+    JVNAUTOSCI-2502: failed turns previously persisted nothing, so the turns
+    that most need diagnostics were invisible to telemetry. Reads the generate
+    route's locals defensively because failure can occur at any stage.
+    """
+
+    try:
+        request_id = local_vars.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            return
+        debug_payload = llm_debug_info_override
+        if debug_payload is None:
+            raw_debug = local_vars.get("llm_debug_info")
+            debug_payload = raw_debug if isinstance(raw_debug, dict) else None
+        from ...services.turn_execution_record_service import (
+            persist_failed_turn_execution_record,
+        )
+
+        persist_failed_turn_execution_record(
+            request_id=request_id,
+            terminal_status=terminal_status,
+            error_text=error_text,
+            error_class=error_class,
+            session_id=local_vars.get("session_id"),
+            namespace=local_vars.get("user_namespace"),
+            user_id=local_vars.get("user_concept_id"),
+            org_id=local_vars.get("org_concept_id"),
+            prompt_text=local_vars.get("prompt_text"),
+            llm_debug_info=debug_payload,
+            progress_snapshot=progress_snapshot,
+        )
+    except Exception as exc:
+        try:
+            current_app.logger.warning(
+                "Terminal-failure turn record persistence failed: %s", exc
+            )
+        except Exception:
+            pass
+
+
 @von_bp.route("/generate", methods=["POST"])
 def generate():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""
@@ -14172,6 +14222,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
             except Exception:
                 pass
+        _persist_terminal_failure_turn_record_best_effort(
+            local_vars=locals(),
+            terminal_status="cancelled",
+            error_text="generate_task_cancelled",
+            error_class="CancellationRequested",
+        )
         raise
     except Exception as e:
         print(f"Error during generation: {e}")  # Log error server-side
@@ -14264,6 +14320,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             build_turn_execution_diagnostics_fn=_build_turn_execution_diagnostics,
             finalise_llm_debug_info_fn=_finalise_llm_debug_info,
+        )
+        _persist_terminal_failure_turn_record_best_effort(
+            local_vars=locals(),
+            terminal_status="failed",
+            error_text=str(e),
+            error_class=type(e).__name__,
+            llm_debug_info_override=(
+                error_debug_info if isinstance(error_debug_info, dict) else None
+            ),
+            progress_snapshot=(
+                error_tool_progress_snapshot
+                if isinstance(error_tool_progress_snapshot, Mapping)
+                else None
+            ),
         )
         _finalise_generate_conversation_turn_instance(
             state=(

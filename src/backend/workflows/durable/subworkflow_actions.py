@@ -8,6 +8,7 @@ JVNAUTOSCI-1310:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Callable, Dict, Mapping, Sequence
 
@@ -84,12 +85,15 @@ _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
     "max_transitions",
 }
 _INVOCATION_CHAIN_KEY = "__workflow_invocation_chain"
+_INVOCATION_LEDGER_KEY = "__workflow_subworkflow_invocation_ledger"
 _MAX_SUBWORKFLOW_DEPTH_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH"
 _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT = 8
 _MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
 _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
+logger = logging.getLogger(__name__)
+
 _AGENT_TEST_LOCAL_PROVIDER_NAME = "ollama"
 _AGENT_TEST_EXTERNAL_PROVIDER_NAMES: frozenset[str] = frozenset(
     {"openai", "anthropic", "gemini", "azure_openai"}
@@ -201,6 +205,15 @@ def _build_agent_test_workflow_experience_context_result(
 ) -> WorkflowActionResult:
     child_chain = [*invocation_chain, child_workflow_id]
     request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+    _note_subworkflow_invocation(
+        request.data,
+        child_workflow_id=child_workflow_id,
+        parent_workflow_id=parent_workflow_id,
+        parent_state_id=parent_state_id,
+        invocation_index=invocation_count + 1,
+        invocation_limit=invocation_limit,
+        route="agent_test_workflow_experience_context",
+    )
     profile_concept_id = _agent_test_workflow_experience_profile_concept_id(
         inputs=inputs,
         parent_context=request.data,
@@ -415,6 +428,15 @@ def _build_agent_test_postcondition_critic_result(
 
     child_chain = [*invocation_chain, child_workflow_id]
     request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+    _note_subworkflow_invocation(
+        request.data,
+        child_workflow_id=child_workflow_id,
+        parent_workflow_id=parent_workflow_id,
+        parent_state_id=parent_state_id,
+        invocation_index=invocation_count + 1,
+        invocation_limit=invocation_limit,
+        route="agent_test_postcondition_critic",
+    )
     critic_result = run_turn_execution_critic(
         request,
         annotation_component="workflow_subworkflow_agent_test",
@@ -507,6 +529,113 @@ def _coerce_invocation_limit() -> int:
     except (TypeError, ValueError):
         return _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT
     return max(1, min(512, parsed))
+
+
+SUBWORKFLOW_RESOURCE_EXHAUSTION_ERROR_PREFIXES: tuple[str, ...] = (
+    "subworkflow_invocation_budget_exceeded",
+    "subworkflow_invocation_depth_exceeded",
+)
+
+
+def is_subworkflow_resource_exhaustion_error(error: Any) -> bool:
+    """Structurally classify our own budget/depth error codes.
+
+    Retries share the monotonic per-turn invocation counter, so an execution
+    that failed on resource exhaustion cannot succeed on retry.
+    """
+
+    return str(error or "").strip().startswith(
+        SUBWORKFLOW_RESOURCE_EXHAUSTION_ERROR_PREFIXES
+    )
+
+
+def get_subworkflow_invocation_budget_state(request_data: Any) -> dict[str, Any]:
+    limit = _coerce_invocation_limit()
+    try:
+        count = int(request_data.get("__workflow_subworkflow_invocation_count", 0))
+    except (AttributeError, TypeError, ValueError):
+        count = 0
+    return {
+        "invocation_count": count,
+        "invocation_limit": limit,
+        "remaining": max(0, limit - count),
+        "exhausted": count >= limit,
+    }
+
+
+def summarise_subworkflow_invocation_ledger(request_data: Any) -> dict[str, Any]:
+    return _summarise_subworkflow_invocation_ledger(request_data)
+
+
+def _note_subworkflow_invocation(
+    request_data: Any,
+    *,
+    child_workflow_id: str,
+    parent_workflow_id: str | None,
+    parent_state_id: str | None,
+    invocation_index: int,
+    invocation_limit: int,
+    route: str,
+) -> None:
+    """Record a subworkflow invocation in the per-turn ledger and the log.
+
+    The ledger is the diagnosable trail for subworkflow budget exhaustion:
+    when the budget is exceeded, the failure names what consumed it instead
+    of leaving an opaque counter (JVNAUTOSCI-2502).
+    """
+
+    entry = {
+        "index": invocation_index,
+        "child_workflow_id": child_workflow_id,
+        "parent_workflow_id": parent_workflow_id or None,
+        "parent_state_id": parent_state_id or None,
+        "route": route,
+    }
+    try:
+        ledger = request_data.get(_INVOCATION_LEDGER_KEY)
+        if not isinstance(ledger, list):
+            ledger = []
+            request_data[_INVOCATION_LEDGER_KEY] = ledger
+        ledger.append(entry)
+    except Exception:
+        pass
+    logger.info(
+        "[subworkflow] invocation %d/%d parent=%s state=%s child=%s route=%s",
+        invocation_index,
+        invocation_limit,
+        parent_workflow_id or "-",
+        parent_state_id or "-",
+        child_workflow_id,
+        route,
+    )
+
+
+def _summarise_subworkflow_invocation_ledger(request_data: Any) -> dict[str, Any]:
+    ledger = None
+    try:
+        ledger = request_data.get(_INVOCATION_LEDGER_KEY)
+    except Exception:
+        ledger = None
+    entries = ledger if isinstance(ledger, list) else []
+    per_child: Dict[str, int] = {}
+    per_parent_state: Dict[str, int] = {}
+    for raw in entries:
+        if not isinstance(raw, Mapping):
+            continue
+        child = str(raw.get("child_workflow_id") or "").strip() or "unknown"
+        per_child[child] = per_child.get(child, 0) + 1
+        state = str(raw.get("parent_state_id") or "").strip() or "unknown"
+        per_parent_state[state] = per_parent_state.get(state, 0) + 1
+    return {
+        "schema_version": "subworkflow_invocation_ledger_summary.v1",
+        "total_invocations": len(entries),
+        "per_child_workflow": dict(
+            sorted(per_child.items(), key=lambda item: -item[1])
+        ),
+        "per_parent_state": dict(
+            sorted(per_parent_state.items(), key=lambda item: -item[1])
+        ),
+    }
 
 
 def _coerce_max_transitions(value: Any) -> int:
@@ -679,12 +808,27 @@ def _build_subworkflow_handler(
         except (TypeError, ValueError):
             invocation_count = 0
         if invocation_count >= invocation_limit:
+            ledger_summary = _summarise_subworkflow_invocation_ledger(request.data)
+            logger.warning(
+                "[subworkflow] invocation budget exceeded: child=%s parent=%s "
+                "state=%s limit=%d ledger=%s",
+                child_workflow_id,
+                parent_workflow_id or "-",
+                parent_state_id or "-",
+                invocation_limit,
+                ledger_summary,
+            )
             return WorkflowActionResult(
                 status="failed",
                 error=(
                     "subworkflow_invocation_budget_exceeded:"
                     f"max_invocations={invocation_limit}"
                 ),
+                outputs={
+                    "subworkflow_invocation_ledger_summary": ledger_summary,
+                    "subworkflow_budget_exhausted": True,
+                    "denied_child_workflow_id": child_workflow_id,
+                },
             )
 
         if (
@@ -766,6 +910,15 @@ def _build_subworkflow_handler(
         )
         child_inputs["__workflow_subworkflow_invocation_count"] = invocation_count + 1
         request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+        _note_subworkflow_invocation(
+            request.data,
+            child_workflow_id=child_workflow_id,
+            parent_workflow_id=parent_workflow_id,
+            parent_state_id=parent_state_id,
+            invocation_index=invocation_count + 1,
+            invocation_limit=invocation_limit,
+            route="workflow_invoke_subworkflow",
+        )
         child_trace = WorkflowExecutionTrace(
             workflow_id=child_workflow_id,
             user_namespace=request.environment.user_namespace,
