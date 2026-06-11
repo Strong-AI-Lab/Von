@@ -710,6 +710,61 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             )
             return WorkflowActionResult(outputs=outputs)
 
+        from .subworkflow_actions import (
+            get_subworkflow_invocation_budget_state,
+            is_subworkflow_resource_exhaustion_error,
+            summarise_subworkflow_invocation_ledger,
+        )
+
+        budget_state = get_subworkflow_invocation_budget_state(request.data)
+        if budget_state.get("exhausted"):
+            # The per-turn subworkflow budget is monotonic, so launching the
+            # selected workflow again cannot succeed; fail fast with the
+            # ledger naming what consumed the budget (JVNAUTOSCI-2502).
+            outputs = build_turn_execution_selected_workflow_outputs(
+                selected_workflow_id=selected_workflow_id,
+                child_completed=False,
+                final_state="subworkflow_budget_exhausted",
+                failure_detail=(
+                    "subworkflow_invocation_budget_exceeded:pre_execution_guard:"
+                    f"max_invocations={budget_state.get('invocation_limit')}"
+                ),
+                child_outputs={},
+                child_result_snapshot={},
+                selected_workflow_trace=request.data.get("selected_workflow_trace"),
+                turn_expected_outcome_contract=(
+                    request.data.get("turn_expected_outcome_contract_state")
+                    or request.data.get("turn_expected_outcome_contract")
+                ),
+                workflow_routing=request.data.get("workflow_routing"),
+                workflow_discovery=(
+                    request.data.get("workflow_discovery_result")
+                    if isinstance(
+                        request.data.get("workflow_discovery_result"), Mapping
+                    )
+                    else request.data.get("workflow_discovery")
+                ),
+                parent_aux_llm_calls=(
+                    request.data.get("aux_llm_calls")
+                    if isinstance(request.data.get("aux_llm_calls"), list)
+                    else None
+                ),
+                parent_llm_calls=(
+                    request.data.get("llm_calls")
+                    if isinstance(request.data.get("llm_calls"), list)
+                    else None
+                ),
+            )
+            outputs["subworkflow_invocation_budget_state"] = budget_state
+            outputs["subworkflow_invocation_ledger_summary"] = (
+                summarise_subworkflow_invocation_ledger(request.data)
+            )
+            outputs["turn_recovery_retry_viable"] = False
+            outputs["turn_recovery_retry_block_reason"] = (
+                "subworkflow_budget_exhausted"
+            )
+            return WorkflowActionResult(outputs=outputs)
+
         request_data = {
             str(key): value
             for key, value in request.data.items()
@@ -804,6 +859,16 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             )
             child_final_state = "subworkflow_invocation_failed"
 
+        retry_block_reason: str | None = None
+        if child_error and is_subworkflow_resource_exhaustion_error(child_error):
+            retry_block_reason = "subworkflow_resource_exhausted"
+        else:
+            post_budget_state = get_subworkflow_invocation_budget_state(
+                request.data
+            )
+            if not child_completed and post_budget_state.get("exhausted"):
+                retry_block_reason = "subworkflow_budget_exhausted"
+
         outputs = build_turn_execution_selected_workflow_outputs(
             selected_workflow_id=selected_workflow_id,
             child_completed=child_completed,
@@ -833,6 +898,16 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 else None
             ),
         )
+        outputs["subworkflow_invocation_budget_state"] = (
+            get_subworkflow_invocation_budget_state(request.data)
+        )
+        if retry_block_reason:
+            outputs["turn_recovery_retry_viable"] = False
+            outputs["turn_recovery_retry_block_reason"] = retry_block_reason
+            outputs["subworkflow_invocation_ledger_summary"] = (
+                summarise_subworkflow_invocation_ledger(request.data)
+            )
+
         raw_existing_invocations = request.data.get("invocations")
         existing_invocations = (
             list(raw_existing_invocations)
@@ -1013,6 +1088,29 @@ def _build_turn_execution_execute_tool_batch_handler(
 
 def _build_turn_execution_prepare_recovery_retry_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        if request.data.get("turn_recovery_retry_viable") is False:
+            # Structural execution contract: the prior failure was resource
+            # exhaustion, so a retry shares the exhausted budget and cannot
+            # succeed. Fail the retry preparation so the represented
+            # transitions terminate the turn promptly (JVNAUTOSCI-2502).
+            block_reason = (
+                _coerce_non_empty_text(
+                    request.data.get("turn_recovery_retry_block_reason")
+                )
+                or "retry_not_viable"
+            )
+            return WorkflowActionResult(
+                status="failed",
+                error=f"turn_recovery_retry_not_viable:{block_reason}",
+                outputs={
+                    "turn_recovery_retry_blocked": True,
+                    "turn_recovery_retry_block_reason": block_reason,
+                    "subworkflow_invocation_ledger_summary": request.data.get(
+                        "subworkflow_invocation_ledger_summary"
+                    ),
+                },
+            )
+
         target_workflow_id = _coerce_non_empty_text(
             request.data.get("turn_next_action_target_workflow_id")
             or request.data.get("selected_workflow_id")
@@ -1088,10 +1186,18 @@ def _build_turn_execution_prepare_recovery_retry_handler() -> Any:
             request.data.get("selected_workflow_user_response")
         )
 
+        try:
+            recovery_attempt_count = (
+                int(request.data.get("turn_recovery_attempt_count") or 0) + 1
+            )
+        except (TypeError, ValueError):
+            recovery_attempt_count = 1
+
         outputs: dict[str, Any] = {
             "selected_workflow_id": target_workflow_id,
             "workflow_continuation_launch_inputs": dict(launch_inputs),
             "turn_recovery_attempted": True,
+            "turn_recovery_attempt_count": recovery_attempt_count,
             "turn_recovery_last_decision": (
                 _coerce_non_empty_text(request.data.get("turn_next_action_type"))
                 or "retry_execution"

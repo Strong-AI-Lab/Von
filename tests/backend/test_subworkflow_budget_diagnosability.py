@@ -1,0 +1,242 @@
+"""Tests for subworkflow budget diagnosability and non-retryable exhaustion
+(JVNAUTOSCI-2502).
+
+A turn that exhausts its subworkflow invocation budget must (a) leave a
+ledger naming what consumed the budget, (b) refuse recovery retries that
+share the exhausted monotonic counter, and (c) fail fast instead of
+re-invoking the selected workflow.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
+from src.backend.workflows.durable.subworkflow_actions import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    get_subworkflow_invocation_budget_state,
+    is_subworkflow_resource_exhaustion_error,
+    register_subworkflow_actions,
+)
+from src.backend.workflows.durable.turn_execution_actions import (
+    _build_turn_execution_execute_selected_handler,
+    _build_turn_execution_prepare_recovery_retry_handler,
+)
+
+
+def _request(data: dict, *, inputs: dict | None = None) -> WorkflowActionRequest:
+    return WorkflowActionRequest(
+        action_id="test_action",
+        inputs=inputs or {},
+        environment=WorkflowEnvironment(llm_client=None),
+        data=data,
+        workflow_id="#V#conversation_turn_execution_workflow",
+        workflow_state_id="execution",
+    )
+
+
+def test_resource_exhaustion_error_classification():
+    assert is_subworkflow_resource_exhaustion_error(
+        "subworkflow_invocation_budget_exceeded:max_invocations=64"
+    )
+    assert is_subworkflow_resource_exhaustion_error(
+        "subworkflow_invocation_depth_exceeded:max_depth=8"
+    )
+    assert not is_subworkflow_resource_exhaustion_error("workflow_llm_step_timeout")
+    assert not is_subworkflow_resource_exhaustion_error(None)
+    assert not is_subworkflow_resource_exhaustion_error("")
+
+
+def test_budget_state_reports_exhaustion(monkeypatch):
+    monkeypatch.setenv("VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS", "3")
+    state = get_subworkflow_invocation_budget_state(
+        {"__workflow_subworkflow_invocation_count": 2}
+    )
+    assert state["invocation_count"] == 2
+    assert state["invocation_limit"] == 3
+    assert state["remaining"] == 1
+    assert state["exhausted"] is False
+
+    state = get_subworkflow_invocation_budget_state(
+        {"__workflow_subworkflow_invocation_count": 3}
+    )
+    assert state["exhausted"] is True
+    assert state["remaining"] == 0
+
+
+def test_budget_exceeded_failure_carries_ledger_summary(monkeypatch):
+    registry = ActionRegistry()
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda _workflow_id: None,
+    )
+    monkeypatch.setenv("VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS", "2")
+
+    context: dict[str, object] = {
+        "__workflow_subworkflow_invocation_count": 2,
+        "__workflow_subworkflow_invocation_ledger": [
+            {
+                "index": 1,
+                "child_workflow_id": "#V#noisy_child",
+                "parent_state_id": "execution",
+                "route": "workflow_invoke_subworkflow",
+            },
+            {
+                "index": 2,
+                "child_workflow_id": "#V#noisy_child",
+                "parent_state_id": "execution",
+                "route": "workflow_invoke_subworkflow",
+            },
+        ],
+    }
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#another_child",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "execution",
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "failed"
+    assert "subworkflow_invocation_budget_exceeded" in str(execution.error or "")
+    summary = execution.outputs["subworkflow_invocation_ledger_summary"]
+    assert summary["total_invocations"] == 2
+    assert summary["per_child_workflow"] == {"#V#noisy_child": 2}
+    assert summary["per_parent_state"] == {"execution": 2}
+    assert execution.outputs["subworkflow_budget_exhausted"] is True
+    assert execution.outputs["denied_child_workflow_id"] == "#V#another_child"
+
+
+def test_recovery_retry_blocked_when_not_viable():
+    handler = _build_turn_execution_prepare_recovery_retry_handler()
+    result = handler(
+        _request(
+            {
+                "turn_recovery_retry_viable": False,
+                "turn_recovery_retry_block_reason": "subworkflow_resource_exhausted",
+                "selected_workflow_id": "#V#general_mail_review_workflow",
+            }
+        )
+    )
+    assert result.status == "failed"
+    assert result.error == (
+        "turn_recovery_retry_not_viable:subworkflow_resource_exhausted"
+    )
+    assert result.outputs["turn_recovery_retry_blocked"] is True
+
+
+def test_recovery_retry_counts_attempts():
+    handler = _build_turn_execution_prepare_recovery_retry_handler()
+    result = handler(
+        _request(
+            {
+                "selected_workflow_id": "#V#general_mail_review_workflow",
+                "turn_recovery_attempt_count": 2,
+            }
+        )
+    )
+    assert result.status == "success"
+    assert result.outputs["turn_recovery_attempt_count"] == 3
+
+
+def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
+    from src.backend.services import turn_execution_record_service as service
+
+    captured: dict = {}
+
+    def _fake_upsert(*, record, user_id=None, session_id=None, namespace=None, org_id=None):
+        captured["record"] = record
+        return {"updated": True, "inserted": True, "request_id": record.get("request_id")}
+
+    with patch.object(
+        service, "upsert_turn_execution_record_projection", _fake_upsert
+    ):
+        outcome = service.persist_failed_turn_execution_record(
+            request_id="req-2502-test",
+            terminal_status="cancelled",
+            error_text="generate_task_cancelled",
+            error_class="CancellationRequested",
+            session_id="session-1",
+            namespace="#V#test_ns",
+            user_id="#V#test_user",
+            prompt_text="Show me the last 5 email messages",
+            llm_debug_info={
+                "aux_llm_calls": [{"type": "workflow_continuation_decision"}],
+            },
+            progress_snapshot={"phase": "recovery_decision"},
+        )
+
+    assert outcome["updated"] is True
+    record = captured["record"]
+    assert record["request_id"] == "req-2502-test"
+    assert record["execution_terminal_status"] == "cancelled"
+    failure = record["terminal_failure"]
+    assert failure["terminal_status"] == "cancelled"
+    assert failure["error"] == "generate_task_cancelled"
+    assert failure["error_class"] == "CancellationRequested"
+    assert failure["progress_snapshot"] == {"phase": "recovery_decision"}
+
+
+def test_persist_failed_turn_execution_record_requires_request_id():
+    from src.backend.services import turn_execution_record_service as service
+
+    outcome = service.persist_failed_turn_execution_record(
+        request_id="",
+        terminal_status="failed",
+    )
+    assert outcome == {"updated": False, "reason": "missing_request_id"}
+
+
+def test_execute_selected_fails_fast_when_budget_exhausted(monkeypatch):
+    monkeypatch.setenv("VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS", "2")
+    handler = _build_turn_execution_execute_selected_handler()
+    data = {
+        "selected_workflow_id": "#V#general_mail_review_workflow",
+        "__workflow_subworkflow_invocation_count": 2,
+        "__workflow_subworkflow_invocation_ledger": [
+            {
+                "index": 1,
+                "child_workflow_id": "#V#workflow_experience_context_prelude",
+                "parent_state_id": "workflow_experience_context_prelude",
+                "route": "workflow_invoke_subworkflow",
+            },
+            {
+                "index": 2,
+                "child_workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+                "parent_state_id": "critic",
+                "route": "workflow_invoke_subworkflow",
+            },
+        ],
+    }
+
+    registry_path = (
+        "src.backend.workflows.durable.registry_factory"
+        ".get_shared_durable_action_registry"
+    )
+    with patch(registry_path) as mocked_registry:
+        result = handler(_request(data))
+
+    # The selected workflow must never be invoked once the budget is gone.
+    mocked_registry.assert_not_called()
+    assert result.outputs["turn_recovery_retry_viable"] is False
+    assert (
+        result.outputs["turn_recovery_retry_block_reason"]
+        == "subworkflow_budget_exhausted"
+    )
+    summary = result.outputs["subworkflow_invocation_ledger_summary"]
+    assert summary["total_invocations"] == 2
+    assert result.outputs["subworkflow_invocation_budget_state"]["exhausted"] is True
+    assert (
+        result.outputs["selected_workflow_final_state"]
+        == "subworkflow_budget_exhausted"
+        or result.outputs.get("final_state") == "subworkflow_budget_exhausted"
+        or "subworkflow_budget_exhausted" in str(result.outputs)
+    )
