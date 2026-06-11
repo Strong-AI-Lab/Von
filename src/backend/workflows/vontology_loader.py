@@ -39,6 +39,7 @@ from .subworkflow_contracts import (
 from .workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
 )
+from .mcp_tool_bridge import candidate_internal_mcp_tool_names
 from .workflow_action_contracts import resolve_workflow_action_target
 from .workflow_state_contracts import has_actionless_pre_action_contract
 from .write_tool_policy import (
@@ -4238,6 +4239,42 @@ def batch_fetch_workflow_routing_metadata(
     except Exception:
         workflow_docs = {}
 
+    # JVNAUTOSCI-2501: batch-fetch represented step documents so per-workflow
+    # action/tool requirements can be projected into routing metadata without
+    # per-workflow query loops.
+    step_docs_by_id: Dict[str, Mapping[str, Any]] = {}
+    all_step_ids: list[str] = []
+    seen_step_ids: set[str] = set()
+    for workflow_id in ordered_workflow_ids:
+        workflow_doc = workflow_docs.get(workflow_id)
+        workflow_relationships = (
+            workflow_doc.get("relationships")
+            if isinstance(workflow_doc, Mapping)
+            else None
+        )
+        if not isinstance(workflow_relationships, Mapping):
+            continue
+        for step_id in _all_relationship_targets(
+            workflow_relationships,
+            WORKFLOW_GRAPH_PREDICATE_ALIASES["hasStep"],
+        ):
+            clean_step_id = _normalise_non_empty_text(step_id)
+            if clean_step_id and clean_step_id not in seen_step_ids:
+                seen_step_ids.add(clean_step_id)
+                all_step_ids.append(clean_step_id)
+    if all_step_ids:
+        try:
+            cursor = ConceptsRepository.find(
+                {"concept_id": {"$in": all_step_ids}},
+                {"concept_id": 1, "relationships": 1},
+            )
+            for doc in cursor:
+                concept_id = _normalise_non_empty_text(doc.get("concept_id"))
+                if concept_id:
+                    step_docs_by_id[concept_id] = doc
+        except Exception:
+            step_docs_by_id = {}
+
     metadata_by_workflow_id: Dict[str, Dict[str, Any]] = {}
     for workflow_id in ordered_workflow_ids:
         workflow_metadata: Dict[str, Any] = {}
@@ -4336,6 +4373,56 @@ def batch_fetch_workflow_routing_metadata(
         }
         if initial_step:
             workflow_metadata["compact_executability"]["initial_step"] = initial_step
+
+        # JVNAUTOSCI-2501: project represented per-step action invocations into
+        # workflow_action_ids and required_tools so routing surfaces (capability
+        # index, discovery candidates, selector fast-path coverage) can compare
+        # turn contracts against represented workflow capability structurally.
+        workflow_action_ids: list[str] = []
+        required_tool_names: list[str] = []
+        seen_action_ids: set[str] = set()
+        seen_tool_names: set[str] = set()
+        invokes_action_predicates = (
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+        )
+        for step_id in step_ids:
+            step_doc = step_docs_by_id.get(step_id)
+            step_relationships = (
+                step_doc.get("relationships")
+                if isinstance(step_doc, Mapping)
+                else None
+            )
+            if not isinstance(step_relationships, Mapping):
+                continue
+            for action_target in _all_relationship_targets(
+                step_relationships, invokes_action_predicates
+            ):
+                action_id = _normalise_non_empty_text(action_target)
+                if not action_id or action_id in seen_action_ids:
+                    continue
+                seen_action_ids.add(action_id)
+                workflow_action_ids.append(action_id)
+                # workflow_control.* targets are engine control actions, not
+                # tool invocations; everything else maps to internal MCP tool
+                # name candidates by the same structural rule the runtime
+                # bridge uses (identity plus dots-to-underscores).
+                if action_id.startswith("workflow_control."):
+                    continue
+                for tool_name in candidate_internal_mcp_tool_names(action_id):
+                    if tool_name and tool_name not in seen_tool_names:
+                        seen_tool_names.add(tool_name)
+                        required_tool_names.append(tool_name)
+        if workflow_action_ids:
+            workflow_metadata["workflow_action_ids"] = sorted(workflow_action_ids)
+            workflow_metadata["workflow_action_ids_source"] = (
+                "vontology_workflow_graph:invokesAction"
+            )
+        if required_tool_names:
+            workflow_metadata["required_tools"] = sorted(required_tool_names)
+            workflow_metadata["required_tools_source"] = (
+                "vontology_workflow_graph:invokesAction:internal_mcp_tool_name_candidates"
+            )
 
         metadata_by_workflow_id[workflow_id] = workflow_metadata
 
