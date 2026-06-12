@@ -44,6 +44,13 @@ WORKFLOW_EVENT_BINDINGS_COLLECTION = "workflow_event_bindings"
 # Default lock TTL: 5 minutes
 DEFAULT_LOCK_TTL_SECONDS = 300
 
+# Legacy-claim shield for auto_claim_enabled=False instances (JVNAUTOSCI-2503):
+# created as running with this synthetic lock holder and a far-future expiry so
+# claim queries on builds that predate the auto_claim_enabled flag cannot match
+# them. The submitting path finalises these instances by instance_id.
+SUPERVISED_HOLD_LOCK_HOLDER = "supervised_route_hold"
+SUPERVISED_HOLD_LOCK_DAYS = 3650
+
 _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "_id": 0,
     "instance_id": 1,
@@ -678,6 +685,21 @@ class WorkflowInstanceManager:
 
         instance_doc = instance.to_doc()
         instance_doc["auto_claim_enabled"] = bool(auto_claim_enabled)
+        if not auto_claim_enabled:
+            # Legacy-claim shield (JVNAUTOSCI-2503): workers running builds
+            # that predate the auto_claim_enabled flag claim any pending
+            # instance and re-execute the turn (observed live from a foreign
+            # worker on the shared cluster). Create supervised mirror
+            # instances as running with a far-future lock so the legacy claim
+            # query (pending, or running with an expired lock) can never
+            # match them; the submitting path finalises them itself and
+            # terminal updates clear the lock.
+            instance = replace(instance, status=WorkflowInstanceStatus.RUNNING)
+            instance_doc["status"] = WorkflowInstanceStatus.RUNNING.value
+            instance_doc["locked_by"] = SUPERVISED_HOLD_LOCK_HOLDER
+            instance_doc["lock_expires_at"] = datetime.now(timezone.utc) + timedelta(
+                days=SUPERVISED_HOLD_LOCK_DAYS
+            )
         coll.insert_one(instance_doc)
         logger.info(
             "[durable_workflow] Created instance %s for workflow %s "
