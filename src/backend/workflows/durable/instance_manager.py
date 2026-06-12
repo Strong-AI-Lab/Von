@@ -1419,12 +1419,30 @@ class WorkflowInstanceManager:
         Returns:
             True if status was updated.
         """
+        # JVNAUTOSCI-2502: failures are the records that most need provenance.
+        # Name the writer (compact caller stack) in the log and on the doc so
+        # an error string can always be traced to the code path that wrote it.
+        import traceback
+
+        caller_frames = [
+            f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}"
+            for frame in traceback.extract_stack(limit=6)[:-1]
+        ]
+        logger.warning(
+            "[durable_workflow] mark_failed instance=%s error=%r step=%s via %s",
+            instance_id,
+            str(error)[:200],
+            error_step,
+            " <- ".join(reversed(caller_frames[-4:])),
+        )
+
         now = datetime.now(timezone.utc)
         update: dict[str, Any] = {
             "$set": {
                 "status": WorkflowInstanceStatus.FAILED.value,
                 "completed_at": now,
                 "error": error,
+                "error_written_by": caller_frames[-4:],
                 "locked_by": None,
                 "lock_expires_at": None,
                 "progress_message": "failed",
