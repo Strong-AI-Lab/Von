@@ -1232,7 +1232,25 @@ class WorkflowInstanceManager:
         if step_index is not None:
             update["$set"]["step_index"] = step_index
         if error is not None:
+            # JVNAUTOSCI-2502: checkpointed errors need the same writer
+            # provenance as mark_failed — an untraceable persisted error
+            # string cost hours of diagnosis on 2026-06-12.
+            import traceback
+
+            checkpoint_caller_frames = [
+                f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}"
+                for frame in traceback.extract_stack(limit=8)[:-1]
+            ]
+            logger.warning(
+                "[durable_workflow] checkpoint error instance=%s error=%r "
+                "step=%s via %s",
+                instance_id,
+                str(error)[:200],
+                error_step,
+                " <- ".join(reversed(checkpoint_caller_frames[-6:])),
+            )
             update["$set"]["error"] = error
+            update["$set"]["error_written_by"] = checkpoint_caller_frames[-6:]
         if error_step is not None:
             update["$set"]["error_step"] = error_step
         if progress_current is not None:
