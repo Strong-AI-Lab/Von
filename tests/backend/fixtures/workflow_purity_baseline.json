@@ -6,7 +6,7 @@
     "env_event_binding_count": 0,
     "legacy_selector_mode_count": 0,
     "monolith_line_count_catalogue": 32670,
-    "monolith_line_count_orchestrator": 45373,
+    "monolith_line_count_orchestrator": 45426,
     "monolith_line_count_von_routes": 18136,
     "non_vontology_discoverable_workflow_count": 0,
     "python_authored_canonical_workflow_source_count": 0,
@@ -20,7 +20,7 @@
     "vontology_first_seed_fallback_violation_count": 0,
     "workflow_id_special_case_count": 0
   },
-  "generated_at_utc": "2026-06-12T09:13:46.774533+00:00",
+  "generated_at_utc": "2026-06-12T11:43:07.885404+00:00",
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }
