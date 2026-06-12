@@ -845,6 +845,43 @@ class OllamaClient(LLMInterface):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        # JVNAUTOSCI-2506: opt-in exact-match response cache for test/replay
+        # loops. Enabled only via VON_LLM_RESPONSE_CACHE or on agent-test
+        # instances; hits are logged and counted so telemetry can expose them.
+        from ..services.llm_response_cache_service import (
+            build_llm_prompt_key,
+            build_llm_response_cache_key,
+            get_cached_llm_response,
+            is_llm_response_cache_enabled,
+            store_llm_response,
+        )
+
+        response_cache_key: Optional[str] = None
+        response_prompt_key: Optional[str] = None
+        if is_llm_response_cache_enabled():
+            _cache_conv = build_conversation(prompt, context)
+            _cache_messages = to_ollama_messages(_cache_conv)
+            response_cache_key = build_llm_response_cache_key(
+                provider="ollama",
+                host=self.host,
+                model=target_model,
+                messages=_cache_messages,
+                options=llm_params,
+            )
+            response_prompt_key = build_llm_prompt_key(
+                messages=_cache_messages,
+                options=llm_params,
+            )
+            cached_entry = get_cached_llm_response(response_cache_key)
+            if cached_entry is not None:
+                logger.info(
+                    "Returning cached Ollama response for model %s "
+                    "(llm_response_cache, original_duration_ms=%s)",
+                    target_model,
+                    cached_entry.get("original_duration_ms"),
+                )
+                return str(cached_entry.get("response_text") or "")
+
         # JVNAUTOSCI-2384: preflight whether this local model plausibly fits the
         # host before attempting to load it.  Fails closed with a clear reason
         # rather than letting the runtime crash under memory pressure.  Never
@@ -903,6 +940,7 @@ class OllamaClient(LLMInterface):
                 # Ensure model is available locally (optional, can be slow)
                 # self._ensure_model_pulled(target_model)
 
+                _generate_started = time.perf_counter()
                 response = self.client.chat(
                     model=target_model,
                     messages=messages,
@@ -917,6 +955,18 @@ class OllamaClient(LLMInterface):
                         "[LLM RESPONSE][Ollama][%s]: %s",
                         target_model,
                         _truncate_for_log(content),
+                    )
+                if response_cache_key is not None:
+                    store_llm_response(
+                        response_cache_key,
+                        provider="ollama",
+                        host=self.host,
+                        model=target_model,
+                        response_text=content,
+                        duration_ms=(
+                            (time.perf_counter() - _generate_started) * 1000.0
+                        ),
+                        prompt_key=response_prompt_key,
                     )
                 return content
             except Exception as e:
