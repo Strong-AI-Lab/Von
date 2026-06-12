@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.backend.workflows.durable.instance_manager import (
+    SUPERVISED_HOLD_LOCK_HOLDER,
     WorkflowInstanceManager,
     WorkflowInstanceStatus,
 )
@@ -77,8 +78,55 @@ def test_mirror_instance_is_never_claimed():
     mirror_doc = manager._get_instances_collection().find_one(
         {"instance_id": mirror_id}
     )
-    assert mirror_doc["status"] == WorkflowInstanceStatus.PENDING.value
-    assert mirror_doc.get("locked_by") is None
+    assert mirror_doc["status"] == WorkflowInstanceStatus.RUNNING.value
+    assert mirror_doc.get("locked_by") == SUPERVISED_HOLD_LOCK_HOLDER
+
+
+def test_mirror_instance_resists_legacy_claim_query():
+    """Workers on builds predating auto_claim_enabled ignore the flag; their
+    claim query matches any pending instance, or a running one with an
+    expired lock. The shield (created as running, far-future synthetic lock)
+    must keep mirrors out of reach of that query too (JVNAUTOSCI-2503)."""
+
+    from datetime import datetime, timezone
+
+    manager = WorkflowInstanceManager()
+    mirror_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        source_event_type="conversation_turn",
+        source_event_id="req-legacy",
+        event_idempotency_key="von.generate:conversation_turn:sess-l:req-legacy",
+        auto_claim_enabled=False,
+    )
+    coll = manager._get_instances_collection()
+
+    doc = coll.find_one({"instance_id": mirror_id})
+    assert doc["status"] == WorkflowInstanceStatus.RUNNING.value
+    assert doc["locked_by"] == SUPERVISED_HOLD_LOCK_HOLDER
+    expiry = doc["lock_expires_at"]
+    reference = (
+        datetime.now(timezone.utc).replace(tzinfo=None)
+        if expiry.tzinfo is None
+        else datetime.now(timezone.utc)
+    )
+    assert (expiry - reference).days > 3000
+
+    # The exact claim shape used by pre-2503 builds: no auto_claim filter.
+    now = datetime.now(timezone.utc)
+    legacy_query = {
+        "$or": [
+            {"status": WorkflowInstanceStatus.PENDING.value},
+            {"status": WorkflowInstanceStatus.PAUSED.value},
+            {
+                "status": WorkflowInstanceStatus.RUNNING.value,
+                "lock_expires_at": {"$lt": now},
+            },
+        ]
+    }
+    assert coll.find_one(legacy_query) is None
 
 
 def test_create_instance_for_event_threads_auto_claim_flag():
