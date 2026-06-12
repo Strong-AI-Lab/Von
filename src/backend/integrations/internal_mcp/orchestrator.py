@@ -17409,7 +17409,22 @@ class InternalMCPChatOrchestrator:
                 f"all_model_candidates_failed:stage={stage}:"
                 + ",".join(failure_summaries[:6])
             )
-        raise RuntimeError("No model candidates available for stage")
+        # JVNAUTOSCI-2505: this branch means _stage_model_candidates returned
+        # an empty list — which should be impossible with any configured
+        # default/enabled/policy source. Carry the call parameters so the
+        # next occurrence identifies the construction gap directly.
+        raise RuntimeError(
+            "no_model_candidates_for_stage:"
+            f"stage={stage}"
+            f":policy_stage={policy_stage or '-'}"
+            f":default_model={default_model or '-'}"
+            f":prefer_default={bool(prefer_default_model)}"
+            f":policy_enabled={bool(getattr(policy_state, 'enabled', None))}"
+            f":policy_present={bool(getattr(policy_state, 'policy', None))}"
+            f":user={'y' if user_concept_id else 'n'}"
+            f":org={'y' if org_concept_id else 'n'}"
+            f":workflow={workflow_id or '-'}"
+        )
 
     @staticmethod
     def _tool_definition_contract_summaries(
