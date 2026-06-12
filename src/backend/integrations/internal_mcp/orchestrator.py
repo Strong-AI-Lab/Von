@@ -16432,7 +16432,11 @@ class InternalMCPChatOrchestrator:
         return hostname in {"localhost", "127.0.0.1", "::1"}
 
     def _ollama_probe_timeout_ms(self, *, host: str) -> int:
-        default_timeout_ms = 200 if self._is_local_ollama_probe_host(host) else 1200
+        # JVNAUTOSCI-2505: 200ms was hair-trigger for a local runtime under
+        # prefill load; timeouts are now inconclusive rather than fatal, and
+        # the budget is large enough that a healthy-but-busy server usually
+        # answers within it.
+        default_timeout_ms = 1000 if self._is_local_ollama_probe_host(host) else 1200
         return self._coerce_int(
             None,
             env_var="VON_INTERNAL_MCP_OLLAMA_PROBE_TIMEOUT_MS",
@@ -16580,6 +16584,24 @@ class InternalMCPChatOrchestrator:
             }
             self._provider_probe_cache_set(provider=provider, host=host, result=result)
             return result
+        except requests.exceptions.Timeout as exc:
+            # JVNAUTOSCI-2505: a probe timeout on a local runtime usually
+            # means Ollama is busy (e.g. mid-prefill on a large prompt), not
+            # down. Treat it as inconclusive: let the real attempt proceed
+            # under its own per-model timeout, and do not negative-cache or
+            # dead-cache the candidate on this evidence.
+            return {
+                "provider": provider,
+                "host": host,
+                "probe_url": probe_url,
+                "probe_timeout_ms": int(timeout_ms),
+                "duration_ms": int((time.perf_counter() - probe_start) * 1000.0),
+                "reachable": None,
+                "inconclusive": True,
+                "reason": "probe_timeout_busy_or_slow",
+                "error": str(exc),
+                "error_class": type(exc).__name__,
+            }
         except Exception as exc:
             result = {
                 "provider": provider,
@@ -17355,6 +17377,37 @@ class InternalMCPChatOrchestrator:
                 "All model candidates for stage "
                 f"{stage!r} were skipped because they failed terminally earlier "
                 "in this turn (dead-candidate cache); no live model available."
+            )
+        # JVNAUTOSCI-2505: candidates existed but every one failed without a
+        # raised exception (e.g. reachability-probe rejections). Name the
+        # candidates and failure kinds instead of claiming none were
+        # available — the generic message previously misdirected diagnosis.
+        if errors:
+            failure_summaries = []
+            for error_entry in errors:
+                candidate_info = (
+                    error_entry.get("candidate")
+                    if isinstance(error_entry, Mapping)
+                    else None
+                )
+                provider_name = (
+                    str(candidate_info.get("provider") or "?")
+                    if isinstance(candidate_info, Mapping)
+                    else "?"
+                )
+                model_label = str(
+                    (error_entry.get("model_resolved") if isinstance(error_entry, Mapping) else None)
+                    or "?"
+                )
+                kind = str(
+                    (error_entry.get("failure_kind") if isinstance(error_entry, Mapping) else None)
+                    or (error_entry.get("error_class") if isinstance(error_entry, Mapping) else None)
+                    or "failed"
+                )
+                failure_summaries.append(f"{provider_name}:{model_label}={kind}")
+            raise RuntimeError(
+                f"all_model_candidates_failed:stage={stage}:"
+                + ",".join(failure_summaries[:6])
             )
         raise RuntimeError("No model candidates available for stage")
 

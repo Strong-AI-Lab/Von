@@ -746,7 +746,7 @@ def test_probe_model_candidate_reachability_uses_shorter_timeout_for_local_ollam
     assert local_probe["provider"] == "ollama"
     assert local_probe["host"] == "http://localhost:11434"
     assert local_probe["probe_url"] == "http://localhost:11434/api/tags"
-    assert local_probe["probe_timeout_ms"] == 200
+    assert local_probe["probe_timeout_ms"] == 1000
     assert local_probe["reachable"] is True
     assert isinstance(local_probe["duration_ms"], int)
 
@@ -757,8 +757,104 @@ def test_probe_model_candidate_reachability_uses_shorter_timeout_for_local_ollam
     assert remote_probe["probe_timeout_ms"] == 1200
     assert remote_probe["reachable"] is True
     assert isinstance(remote_probe["duration_ms"], int)
-    assert seen_timeouts["http://localhost:11434/api/tags"] == pytest.approx(0.2)
+    assert seen_timeouts["http://localhost:11434/api/tags"] == pytest.approx(1.0)
     assert seen_timeouts["http://10.0.0.8:11434/api/tags"] == pytest.approx(1.2)
+
+
+def test_probe_timeout_is_inconclusive_and_not_cached(monkeypatch) -> None:
+    """JVNAUTOSCI-2505: a probe timeout means busy-or-slow, not unreachable.
+
+    The candidate must proceed to a real attempt, and the negative result
+    must not be cooldown-cached or treated as provider_unreachable.
+    """
+
+    orchestrator = _bare_orchestrator()
+    orchestrator._provider_probe_cooldown_seconds = 120
+
+    request_calls = {"count": 0}
+
+    import requests
+
+    def _fake_get(*_args: Any, **_kwargs: Any):
+        request_calls["count"] += 1
+        raise requests.exceptions.ReadTimeout("probe timed out")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.requests.get",
+        _fake_get,
+    )
+
+    telemetry = {
+        "provider": "ollama",
+        "host": "http://localhost:11434",
+        "model": "qwen3:8b",
+    }
+    first = orchestrator._probe_model_candidate_reachability(telemetry=telemetry)
+    second = orchestrator._probe_model_candidate_reachability(telemetry=telemetry)
+
+    assert isinstance(first, Mapping)
+    assert first.get("reachable") is None
+    assert first.get("inconclusive") is True
+    assert first.get("reason") == "probe_timeout_busy_or_slow"
+
+    # No cooldown cache write: the second probe really probes again.
+    assert isinstance(second, Mapping)
+    assert second.get("cooldown_hit") is not True
+    assert request_calls["count"] == 2
+
+
+def test_all_candidates_probe_failed_raises_named_failure_summary(
+    monkeypatch,
+) -> None:
+    """JVNAUTOSCI-2505: when every candidate fails (e.g. probe refusal), the
+    stage error must name the candidates and failure kinds instead of the
+    misleading generic 'No model candidates available for stage'."""
+
+    orchestrator = _bare_orchestrator()
+
+    def _probe_refused(**_kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "provider": "ollama",
+            "host": "http://localhost:11434",
+            "reachable": False,
+            "error": "connection refused",
+            "error_class": "ConnectionError",
+            "duration_ms": 3,
+        }
+
+    monkeypatch.setattr(
+        type(orchestrator),
+        "_probe_model_candidate_reachability",
+        lambda self, *, telemetry: _probe_refused(),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        orchestrator._run_llm_with_fallbacks(
+            stage="expected_outcome_inference",
+            prompt="probe failure path",
+            context=None,
+            default_client=None,
+            default_model="qwen3:8b",
+            policy_state=_WorkflowModelPolicyState(
+                enabled=False,
+                policy=None,
+                policy_id=None,
+                predicate_id=None,
+                errors=(),
+            ),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=[],
+            record_llm_call=lambda **_kwargs: None,
+            prefer_default_model=True,
+        )
+
+    message = str(excinfo.value)
+    assert message.startswith("all_model_candidates_failed:stage=")
+    assert "provider_unreachable" in message
+    assert "qwen3:8b" in message
 
 
 def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
