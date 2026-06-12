@@ -1066,8 +1066,14 @@ def submit_verified_workflow_instance(
     source_event_id: str | None = None,
     event_idempotency_key: str | None = None,
     action_registry_override: Any | None = None,
+    auto_claim_enabled: bool = True,
 ) -> WorkflowInstanceSubmissionResult:
-    """Create a durable workflow instance only when runnable verification passes."""
+    """Create a durable workflow instance only when runnable verification passes.
+
+    ``auto_claim_enabled=False`` marks the instance as a mirror/telemetry
+    record that its submitting path executes and finalises itself; background
+    workers must never claim it (JVNAUTOSCI-2503).
+    """
 
     workflow_id = str(workflow_id or "").strip()
     inputs_payload = dict(inputs or {})
@@ -1226,6 +1232,7 @@ def submit_verified_workflow_instance(
             inputs=inputs_payload,
             schedule_id=schedule_id,
             max_retries=max_retries,
+            auto_claim_enabled=auto_claim_enabled,
         )
     else:
         instance_id = manager.create_instance(
@@ -1239,6 +1246,7 @@ def submit_verified_workflow_instance(
             source_event_type=source_event_type,
             source_event_id=source_event_id,
             event_idempotency_key=event_idempotency_key,
+            auto_claim_enabled=auto_claim_enabled,
         )
 
     # Idempotent event reuse should not retroactively fail a previously created

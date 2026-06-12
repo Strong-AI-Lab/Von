@@ -30680,6 +30680,10 @@ class InternalMCPChatOrchestrator:
                         inputs=_build_durable_inputs_snapshot(),
                         max_retries=0,
                         action_registry_override=self._action_registry,
+                        # This instance mirrors the in-process supervised
+                        # execution; worker auto-claim would re-execute the
+                        # same turn (JVNAUTOSCI-2503).
+                        auto_claim_enabled=False,
                     )
                 else:
                     submission = submit_verified_workflow_instance(
@@ -30691,6 +30695,7 @@ class InternalMCPChatOrchestrator:
                         inputs=_build_durable_inputs_snapshot(),
                         max_retries=0,
                         action_registry_override=self._action_registry,
+                        auto_claim_enabled=False,
                     )
                 if not submission.success or not submission.instance_id:
                     raise RuntimeError(

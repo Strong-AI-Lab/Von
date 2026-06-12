@@ -621,6 +621,7 @@ class WorkflowInstanceManager:
         source_event_type: str | None = None,
         source_event_id: str | None = None,
         event_idempotency_key: str | None = None,
+        auto_claim_enabled: bool = True,
     ) -> str:
         """Create a new workflow instance.
 
@@ -635,6 +636,12 @@ class WorkflowInstanceManager:
             source_event_type: Optional canonical event type that triggered launch.
             source_event_id: Optional source event identifier.
             event_idempotency_key: Optional idempotency key for event replay safety.
+            auto_claim_enabled: When False, background workers must never
+                claim this instance for execution. Used for mirror/telemetry
+                instances whose execution happens elsewhere (e.g. the
+                supervised conversation-turn path finalises them itself);
+                worker auto-claim of such instances re-executes the same turn
+                and produces duplicate user-visible outputs (JVNAUTOSCI-2503).
 
         Returns:
             The generated instance_id.
@@ -669,11 +676,15 @@ class WorkflowInstanceManager:
         if compacted_inputs is not instance.inputs:
             instance = replace(instance, inputs=compacted_inputs)
 
-        coll.insert_one(instance.to_doc())
+        instance_doc = instance.to_doc()
+        instance_doc["auto_claim_enabled"] = bool(auto_claim_enabled)
+        coll.insert_one(instance_doc)
         logger.info(
-            "[durable_workflow] Created instance %s for workflow %s",
+            "[durable_workflow] Created instance %s for workflow %s "
+            "(auto_claim_enabled=%s)",
             instance.instance_id,
             workflow_id,
+            bool(auto_claim_enabled),
         )
         self._broadcast_instance(instance)
         return instance.instance_id
@@ -691,6 +702,7 @@ class WorkflowInstanceManager:
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
         max_retries: int = 3,
+        auto_claim_enabled: bool = True,
     ) -> tuple[str, bool]:
         """Create an event-triggered instance with idempotency protection.
 
@@ -718,6 +730,7 @@ class WorkflowInstanceManager:
                 source_event_type=source_event_type,
                 source_event_id=source_event_id,
                 event_idempotency_key=key,
+                auto_claim_enabled=auto_claim_enabled,
             )
             return instance_id, True
         except DuplicateKeyError:
@@ -979,8 +992,12 @@ class WorkflowInstanceManager:
         now = datetime.now(timezone.utc)
         lock_expires = now + timedelta(seconds=self._lock_ttl)
 
-        # Query: pending instances OR running with expired lock
+        # Query: pending instances OR running with expired lock.
+        # Mirror/telemetry instances (auto_claim_enabled=False) are executed
+        # and finalised by their submitting path; claiming them here would
+        # re-execute the same turn (JVNAUTOSCI-2503).
         query: dict[str, Any] = {
+            "auto_claim_enabled": {"$ne": False},
             "$or": [
                 {"status": WorkflowInstanceStatus.PENDING.value},
                 {"status": WorkflowInstanceStatus.PAUSED.value},

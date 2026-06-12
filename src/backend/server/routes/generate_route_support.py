@@ -284,6 +284,10 @@ def _submit_generate_conversation_turn_instance(
             event_idempotency_key=(
                 f"von.generate:conversation_turn:{session_id}:{request_id}"
             ),
+            # The supervised generate path executes the turn in-process and
+            # finalises this instance itself; worker auto-claim would
+            # re-execute the same turn (JVNAUTOSCI-2503).
+            auto_claim_enabled=False,
         )
         submission_payload = submission.to_dict()
         if not submission.success or not submission.instance_id:
