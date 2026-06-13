@@ -1282,6 +1282,10 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
         "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
         lambda: discovery_cache_clears.append(True),
     )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.is_authoritative_workflow_concept_id",
+        lambda concept_id: concept_id == "#V#workflow_repair_or_create_workflow",
+    )
 
     text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
         subject_concept_id="#V#workflow_repair_or_create_workflow",
@@ -1295,6 +1299,85 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
     assert len(invalidations) == 1
     assert "workflow_routing_text_relation_changed" in str(invalidations[0])
     assert discovery_cache_clears == [True]
+
+
+def test_workflow_routing_text_relation_change_skips_non_workflow_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routing-relevant predicate on a non-workflow concept must not churn
+    the capability index. Background workflows continually rewrite descriptions
+    on task/episode concepts; those writes previously invalidated the routing
+    index and starved live workflow discovery of a ready index."""
+
+    from src.backend.services import text_value_service
+
+    invalidations: list[str | None] = []
+    discovery_cache_clears: list[bool] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
+        lambda **kwargs: (
+            invalidations.append(kwargs.get("reason")) or {"success": True}
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
+        lambda: discovery_cache_clears.append(True),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.is_authoritative_workflow_concept_id",
+        lambda concept_id: False,
+    )
+
+    text_value_service._invalidate_workflow_routing_projection_for_text_relation_change(
+        subject_concept_id=(
+            "#V#task_episode_critique_remediation_"
+            "vpaperrecommendationevaluationworkflow_metadatavalidationfailure_c64dffb4"
+        ),
+        predicate="#V#hasDescription",
+    )
+
+    assert invalidations == []
+    assert discovery_cache_clears == []
+
+
+def test_is_authoritative_workflow_concept_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        capability_service,
+        "_authoritative_registry_workflow_ids",
+        lambda registry: ("#V#a_workflow", "#V#b_workflow"),
+    )
+
+    assert capability_service.is_authoritative_workflow_concept_id("#V#a_workflow")
+    assert not capability_service.is_authoritative_workflow_concept_id("#V#task_x")
+    assert not capability_service.is_authoritative_workflow_concept_id("")
+    assert not capability_service.is_authoritative_workflow_concept_id(None)  # type: ignore[arg-type]
+
+
+def test_is_authoritative_workflow_concept_id_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    def _raise(**kwargs: object) -> object:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        _raise,
+    )
+
+    # Registry lookup failure must degrade to the prior always-invalidate
+    # behaviour rather than silently skipping a legitimate workflow update.
+    assert capability_service.is_authoritative_workflow_concept_id("#V#task_x")
 
 
 def test_workflow_graph_relationship_change_invalidates_projection(
