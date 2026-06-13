@@ -813,6 +813,66 @@ class WorkflowInstanceManager:
         )
         return self._instance_from_doc(doc)
 
+    def find_instance_id_by_event_key(
+        self, event_idempotency_key: str
+    ) -> str | None:
+        """Return the instance_id already created for an event idempotency key.
+
+        Cheap unique-index lookup used to keep idempotent event redelivery from
+        being suppressed by the event-storm backlog damper (JVNAUTOSCI-2507):
+        a redelivered event must still resolve to its existing instance.
+        """
+        key = str(event_idempotency_key or "").strip()
+        if not key:
+            return None
+        coll = self._get_instances_collection()
+        if coll is None:
+            return None
+        doc = coll.find_one({"event_idempotency_key": key}, {"instance_id": 1})
+        if doc and isinstance(doc.get("instance_id"), str):
+            return doc["instance_id"]
+        return None
+
+    def count_recent_event_backlog(
+        self,
+        *,
+        workflow_id: str,
+        source_event_type: str,
+        statuses: Iterable[WorkflowInstanceStatus | str],
+        since_utc: datetime,
+    ) -> int:
+        """Count recent event-triggered instances for a (workflow, event-type) pair.
+
+        Supports the event-storm backlog damper (JVNAUTOSCI-2507). The query is
+        served by the ``workflow_created`` index (workflow_id + created_at) and is
+        always time-bounded via ``since_utc`` so it cannot turn into an unindexed
+        full scan on the shared cluster.
+        """
+        workflow_id_clean = str(workflow_id or "").strip()
+        source_event_type_clean = str(source_event_type or "").strip()
+        if not workflow_id_clean or not source_event_type_clean:
+            return 0
+        status_values = self._normalise_status_filter(statuses)
+        coll = self._get_instances_collection()
+        if coll is None:
+            return 0
+        query: dict[str, Any] = {
+            "workflow_id": workflow_id_clean,
+            "source_event_type": source_event_type_clean,
+            "created_at": {"$gte": since_utc},
+        }
+        if status_values:
+            query["status"] = {"$in": status_values}
+        try:
+            return int(coll.count_documents(query))
+        except Exception:
+            logger.warning(
+                "[event_storm_damper] backlog count failed for %s/%s",
+                workflow_id_clean,
+                source_event_type_clean,
+            )
+            return 0
+
     def get_instance(self, instance_id: str) -> WorkflowInstance | None:
         """Load a workflow instance by ID.
 

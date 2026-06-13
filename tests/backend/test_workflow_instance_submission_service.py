@@ -1245,6 +1245,45 @@ def test_submit_verified_workflow_instance_uses_event_idempotent_creation() -> N
     assert mock_verify.call_count == 2
 
 
+def test_submit_verified_workflow_instance_throttles_event_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JVNAUTOSCI-2507: a new event-triggered submission is suppressed once an
+    unprocessed backlog for the (workflow, event-type) pair exceeds the limit."""
+    monkeypatch.setenv("VON_WORKFLOW_EVENT_BACKLOG_LIMIT", "5")
+    manager = MagicMock()
+    manager.find_instance_id_by_event_key.return_value = None  # genuinely new event
+    manager.count_recent_event_backlog.return_value = 5  # at the limit
+    verification = _make_verification()
+    definition = _make_definition(include_action=True)
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        side_effect=[verification, verification],
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice/#V#org_nao",
+            inputs={"seed": "abc-123"},
+            source_event_type="text_relation.upserted",
+            source_event_id="rel-1",
+            event_idempotency_key="evt:text_relation.upserted:rel-1",
+        )
+
+    assert result.success is False
+    assert result.status == "throttled_event_backlog"
+    assert result.error_code == "event_backlog_throttled"
+    assert result.created_new is False
+    manager.create_instance_for_event.assert_not_called()
+    manager.create_instance.assert_not_called()
+
+
 def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_postflight_failure() -> None:
     manager = MagicMock()
     manager.create_instance_for_event.return_value = ("instance-evt-existing", False)

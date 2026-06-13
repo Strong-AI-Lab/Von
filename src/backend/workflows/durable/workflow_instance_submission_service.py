@@ -24,8 +24,10 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 import hashlib
 import json
+import logging
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from time import monotonic, perf_counter
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
@@ -57,12 +59,28 @@ from ..workflow_launch_input_contracts import (
 )
 from .instance_manager import WorkflowInstanceManager
 
+logger = logging.getLogger(__name__)
+
 _RUNNABLE_CACHE_TTL_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_TTL_SECONDS"
 _RUNNABLE_CACHE_MAX_ENTRIES_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_MAX_ENTRIES"
 _DEFAULT_RUNNABLE_CACHE_TTL_SECONDS = 45.0
 _DEFAULT_RUNNABLE_CACHE_MAX_ENTRIES = 256
 _MAX_RUNNABLE_CACHE_ENTRIES = 2048
 _MIN_RUNNABLE_CACHE_ENTRIES = 8
+
+# Event-storm backlog damper (JVNAUTOSCI-2507): suppress NEW event-triggered
+# instance creation for a (workflow_id, source_event_type) pair once an
+# unprocessed backlog of that pair already exists. Self-sustaining event
+# cascades (e.g. paper_recommendation/episode workflows that rewrite graph
+# relations, re-triggering themselves) otherwise create hundreds of pending
+# instances that never drain. This is a high-watermark guard, not a per-event
+# dedupe: at the default limit, normal low-volume event processing is
+# unaffected. Set the limit to <= 0 to disable.
+_EVENT_BACKLOG_LIMIT_ENV = "VON_WORKFLOW_EVENT_BACKLOG_LIMIT"
+_EVENT_BACKLOG_WINDOW_ENV = "VON_WORKFLOW_EVENT_BACKLOG_WINDOW_SECONDS"
+_DEFAULT_EVENT_BACKLOG_LIMIT = 50
+_DEFAULT_EVENT_BACKLOG_WINDOW_SECONDS = 21600.0  # 6h; bounds the backlog count
+_EVENT_BACKLOG_PENDING_STATUSES = ("pending", "running")
 
 
 @dataclass(frozen=True)
@@ -245,6 +263,96 @@ def _read_runnable_cache_max_entries() -> int:
         default=_DEFAULT_RUNNABLE_CACHE_MAX_ENTRIES,
         minimum=_MIN_RUNNABLE_CACHE_ENTRIES,
         maximum=_MAX_RUNNABLE_CACHE_ENTRIES,
+    )
+
+
+def _read_event_backlog_limit() -> int:
+    """Backlog high-watermark above which new event-triggered creation is
+    suppressed. ``<= 0`` disables the damper (JVNAUTOSCI-2507)."""
+    return _read_int_env(
+        _EVENT_BACKLOG_LIMIT_ENV,
+        default=_DEFAULT_EVENT_BACKLOG_LIMIT,
+        minimum=0,
+        maximum=100000,
+    )
+
+
+def _read_event_backlog_window_seconds() -> float:
+    return _read_float_env(
+        _EVENT_BACKLOG_WINDOW_ENV,
+        default=_DEFAULT_EVENT_BACKLOG_WINDOW_SECONDS,
+        minimum=60.0,
+        maximum=604800.0,
+    )
+
+
+def _event_backlog_throttle_result(
+    *,
+    manager: "WorkflowInstanceManager",
+    workflow_id: str,
+    source_event_type: str,
+    event_idempotency_key: str,
+    verification_payload: Mapping[str, Any],
+) -> "WorkflowInstanceSubmissionResult | None":
+    """Event-storm backlog damper (JVNAUTOSCI-2507).
+
+    Returns a ``throttled_event_backlog`` submission result when an unprocessed
+    backlog already exists for the ``(workflow_id, source_event_type)`` pair, so
+    a self-sustaining event cascade cannot keep minting instances that never
+    drain. Returns ``None`` (allow creation) when the damper is disabled, when
+    the event is an idempotent redelivery of an already-created instance, or
+    when the backlog is below the configured high-watermark.
+    """
+
+    limit = _read_event_backlog_limit()
+    if limit <= 0:
+        return None
+    # Idempotent redelivery of the same event must resolve to its existing
+    # instance, never be throttled.
+    try:
+        if manager.find_instance_id_by_event_key(event_idempotency_key):
+            return None
+    except Exception:
+        # If the idempotency probe fails, fall through to the backlog check
+        # rather than risk double-suppressing or double-creating.
+        pass
+
+    window_seconds = _read_event_backlog_window_seconds()
+    since_utc = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    backlog = manager.count_recent_event_backlog(
+        workflow_id=workflow_id,
+        source_event_type=source_event_type,
+        statuses=_EVENT_BACKLOG_PENDING_STATUSES,
+        since_utc=since_utc,
+    )
+    if backlog < limit:
+        return None
+
+    logger.warning(
+        "[event_storm_damper] suppressed event-triggered instance for "
+        "workflow=%s source_event_type=%s: backlog=%d (pending/running within "
+        "%.0fs) >= limit=%d",
+        workflow_id,
+        source_event_type,
+        backlog,
+        window_seconds,
+        limit,
+    )
+    return WorkflowInstanceSubmissionResult(
+        success=False,
+        workflow_id=workflow_id,
+        status="throttled_event_backlog",
+        instance_id=None,
+        error_code="event_backlog_throttled",
+        error=(
+            f"Event-triggered instance for workflow '{workflow_id}' on "
+            f"'{source_event_type}' was suppressed: {backlog} unprocessed "
+            f"instance(s) already pending within the backlog window "
+            f"(limit {limit}). The existing backlog must drain before new "
+            "event-triggered work is created."
+        ),
+        verification=dict(verification_payload),
+        created_new=False,
     )
 
 
@@ -1221,6 +1329,15 @@ def submit_verified_workflow_instance(
     )
     created_new = True
     if use_event_idempotency_submission:
+        throttled = _event_backlog_throttle_result(
+            manager=manager,
+            workflow_id=workflow_id,
+            source_event_type=str(source_event_type).strip(),
+            event_idempotency_key=str(event_idempotency_key).strip(),
+            verification_payload=verification_payload,
+        )
+        if throttled is not None:
+            return throttled
         instance_id, created_new = manager.create_instance_for_event(
             workflow_id=workflow_id,
             user_id=resolved_user_id,
