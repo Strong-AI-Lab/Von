@@ -313,6 +313,34 @@ def _authoritative_registry_workflow_ids(registry: Any) -> tuple[str, ...]:
     )
 
 
+def is_authoritative_workflow_concept_id(concept_id: str) -> bool:
+    """Return True when ``concept_id`` is an authoritative workflow concept.
+
+    Used to scope routing-projection invalidation: only writes to concepts the
+    capability index actually tracks should churn it. Description/content writes
+    on unrelated concepts (e.g. task or episode-critique concepts produced by
+    background workflows) must not invalidate the workflow routing index.
+
+    Fails open (returns True) when the registry cannot be resolved, so a lookup
+    failure degrades to the prior always-invalidate behaviour rather than
+    silently skipping a legitimate workflow update.
+    """
+
+    cleaned = str(concept_id or "").strip()
+    if not cleaned:
+        return False
+    try:
+        from ..workflows.durable.registry_factory import (
+            get_shared_workflow_registry_read_only,
+        )
+
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+        authoritative_ids = set(_authoritative_registry_workflow_ids(registry))
+    except Exception:
+        return True
+    return cleaned in authoritative_ids
+
+
 def _authoritative_registry_fingerprint_rows(
     registry: Any,
 ) -> tuple[dict[str, str], ...]:

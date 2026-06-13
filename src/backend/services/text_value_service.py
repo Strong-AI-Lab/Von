@@ -95,10 +95,22 @@ def _invalidate_workflow_routing_projection_for_text_relation_change(
         return
 
     try:
-        from .workflow_capability_service import invalidate_workflow_capability_index
+        from .workflow_capability_service import (
+            invalidate_workflow_capability_index,
+            is_authoritative_workflow_concept_id,
+        )
         from .workflow_discovery_service import (
             invalidate_workflow_discovery_executability_caches,
         )
+
+        # Scope invalidation to concepts the capability index actually tracks.
+        # Background workflows continually rewrite descriptions on unrelated
+        # (non-workflow) concepts; without this guard every such write churns
+        # the routing index and starves live workflow discovery of a ready
+        # index. New workflows are indexed via the registration path, so this
+        # only suppresses no-op invalidations from non-workflow subjects.
+        if not is_authoritative_workflow_concept_id(subject_concept_id):
+            return
 
         invalidate_workflow_capability_index(
             reason=(
