@@ -16784,6 +16784,16 @@ class InternalMCPChatOrchestrator:
             context_telemetry=context_telemetry,
         )
         request_prepared_at_utc = self._utc_now_iso()
+        # JVNAUTOSCI-2517: one stable exchange id per prepared request; each
+        # fallback attempt gets a derived call id so the live Thinking card
+        # groups the whole lifecycle as a single exchange.
+        live_llm_exchange_id = self._build_live_llm_exchange_id(
+            stage=stage,
+            workflow_stage_id=workflow_stage_id,
+            prepared_at_utc=request_prepared_at_utc,
+            request_telemetry=request_telemetry,
+        )
+        prepared_call_id = self._build_live_llm_call_id(live_llm_exchange_id, 1)
         if callable(emit_progress):
             emit_progress(
                 {
@@ -16793,6 +16803,8 @@ class InternalMCPChatOrchestrator:
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
+                        llm_exchange_id=live_llm_exchange_id,
+                        call_id=prepared_call_id,
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
@@ -16836,6 +16848,13 @@ class InternalMCPChatOrchestrator:
                 "model_source": candidate.source,
                 "requested_model": default_model,
                 "effective_model": model_name,
+                # JVNAUTOSCI-2517: carry the stable exchange/attempt identity on
+                # every per-attempt live lifecycle event (sent/received/
+                # completed/cancelled/failed) so the Thinking card groups them.
+                "llm_exchange_id": live_llm_exchange_id,
+                "call_id": self._build_live_llm_call_id(
+                    live_llm_exchange_id, attempt_no
+                ),
             }
             if provider:
                 attempt_meta["provider"] = provider
@@ -17594,18 +17613,78 @@ class InternalMCPChatOrchestrator:
     def _utc_now_iso() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _build_live_llm_exchange_id(
+        *,
+        stage: str | None,
+        workflow_stage_id: str | None,
+        prepared_at_utc: str | None,
+        request_telemetry: Mapping[str, Any] | None,
+    ) -> str:
+        """Build a stable identity for one live LLM exchange (JVNAUTOSCI-2517).
+
+        The same prepared request (same stage, workflow stage, prepared
+        timestamp, and request shape) always yields the same id so the live
+        Thinking card can group a prepared/sent/received/completed/failed
+        lifecycle -- and every fallback attempt -- as one exchange instead of
+        relying on fragile composite fallback keys.
+        """
+
+        prompt_hash: str | None = None
+        context_message_count: Any = None
+        tool_count: Any = None
+        if isinstance(request_telemetry, Mapping):
+            prompt_capture = request_telemetry.get("prompt")
+            prompt_text = (
+                prompt_capture.get("text")
+                if isinstance(prompt_capture, Mapping)
+                and isinstance(prompt_capture.get("text"), str)
+                else None
+            )
+            if prompt_text:
+                prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+            context_message_count = request_telemetry.get("context_message_count")
+            tool_count = request_telemetry.get("tool_count")
+        seed = {
+            "stage": stage,
+            "workflow_stage_id": workflow_stage_id,
+            "prepared_at_utc": prepared_at_utc,
+            "prompt_sha256": prompt_hash,
+            "context_message_count": context_message_count,
+            "tool_count": tool_count,
+        }
+        rendered = json.dumps(seed, sort_keys=True, separators=(",", ":"), default=str)
+        return f"llm-{hashlib.sha256(rendered.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
+    def _build_live_llm_call_id(
+        exchange_id: str,
+        attempt_no: int | None,
+    ) -> str:
+        """Build a per-attempt call id within an exchange (JVNAUTOSCI-2517)."""
+
+        if isinstance(attempt_no, int) and attempt_no > 0:
+            return f"{exchange_id}:attempt:{attempt_no}"
+        return exchange_id
+
     @classmethod
     def _build_live_llm_progress_payload(
         cls,
         *,
         request_telemetry: Mapping[str, Any] | None,
         request_state: str | None,
+        llm_exchange_id: str | None = None,
+        call_id: str | None = None,
         prepared_at_utc: str | None = None,
         sent_at_utc: str | None = None,
         first_output_at_utc: str | None = None,
         response: Any = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
+        if isinstance(llm_exchange_id, str) and llm_exchange_id.strip():
+            payload["llm_exchange_id"] = llm_exchange_id.strip()
+        if isinstance(call_id, str) and call_id.strip():
+            payload["call_id"] = call_id.strip()
         if isinstance(request_telemetry, Mapping) and request_telemetry:
             payload["llm_request"] = dict(request_telemetry)
         if isinstance(request_state, str) and request_state.strip():
@@ -17773,6 +17852,16 @@ class InternalMCPChatOrchestrator:
             context_telemetry=context_telemetry,
         )
         request_prepared_at_utc = self._utc_now_iso()
+        # JVNAUTOSCI-2517: one stable exchange id per prepared request; each
+        # fallback attempt gets a derived call id so the live Thinking card
+        # groups the whole lifecycle as a single exchange.
+        live_llm_exchange_id = self._build_live_llm_exchange_id(
+            stage=stage,
+            workflow_stage_id=workflow_stage_id,
+            prepared_at_utc=request_prepared_at_utc,
+            request_telemetry=request_telemetry,
+        )
+        prepared_call_id = self._build_live_llm_call_id(live_llm_exchange_id, 1)
         if callable(emit_progress):
             emit_progress(
                 {
@@ -17782,6 +17871,8 @@ class InternalMCPChatOrchestrator:
                     **self._build_live_llm_progress_payload(
                         request_telemetry=request_telemetry,
                         request_state="prepared",
+                        llm_exchange_id=live_llm_exchange_id,
+                        call_id=prepared_call_id,
                         prepared_at_utc=request_prepared_at_utc,
                     ),
                 }
@@ -17822,6 +17913,13 @@ class InternalMCPChatOrchestrator:
                 "model_source": candidate.source,
                 "requested_model": default_model,
                 "effective_model": model_name,
+                # JVNAUTOSCI-2517: carry the stable exchange/attempt identity on
+                # every per-attempt live lifecycle event (sent/received/
+                # completed/cancelled/failed) so the Thinking card groups them.
+                "llm_exchange_id": live_llm_exchange_id,
+                "call_id": self._build_live_llm_call_id(
+                    live_llm_exchange_id, attempt_no
+                ),
             }
             if provider:
                 attempt_meta["provider"] = provider

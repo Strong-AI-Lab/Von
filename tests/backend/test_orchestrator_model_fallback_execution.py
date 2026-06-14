@@ -345,6 +345,108 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     assert recorded_calls[0]["note"] == "candidate reachability probe failed; trying fallback"
 
 
+def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
+    monkeypatch,
+) -> None:
+    # JVNAUTOSCI-2517: the live Thinking card groups a prepared/sent/received/
+    # completed lifecycle (and every fallback attempt) by a stable exchange id
+    # plus per-attempt call id. Prove the orchestrator actually emits them.
+    orchestrator = _bare_orchestrator()
+    ollama_candidate = _ModelCandidate(
+        provider="ollama",
+        model="granite3.3:2b",
+        raw="ollama:granite3.3:2b",
+        source="policy",
+        host="http://localhost:11434",
+    )
+    openai_candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-5.2-chat-latest",
+        raw="openai:gpt-5.2-chat-latest",
+        source="policy",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [ollama_candidate, openai_candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        if candidate.provider == "ollama":
+            return (
+                _FailingClient(),
+                "granite3.3:2b",
+                {"provider": "ollama", "model": "granite3.3:2b", "host": None},
+            )
+        return (
+            _SuccessfulClient(),
+            "gpt-5.2-chat-latest",
+            {"provider": "openai", "model": "gpt-5.2-chat-latest", "host": None},
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    orchestrator._run_llm_with_fallbacks(
+        stage="buttonify",
+        prompt="Return quick-reply options",
+        context=[],
+        default_client=object(),
+        default_model="gpt-5.2-chat-latest",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=[],
+        record_llm_call=lambda **_payload: None,
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        workflow_stage_id="tool_plan",
+    )
+
+    prepared = next(
+        e for e in progress_events if e.get("status") == "llm_request_prepared"
+    )
+    exchange_id = prepared["llm_exchange_id"]
+    assert exchange_id.startswith("llm-")
+    assert prepared["call_id"] == f"{exchange_id}:attempt:1"
+
+    # Every live LLM lifecycle event shares the one exchange id, and each
+    # attempt's call id is derived from its fallback attempt number.
+    lifecycle = [e for e in progress_events if e.get("llm_exchange_id")]
+    assert len(lifecycle) >= 3
+    assert {e["llm_exchange_id"] for e in lifecycle} == {exchange_id}
+    for event in lifecycle:
+        attempt_no = event.get("fallback_attempt_no")
+        if isinstance(attempt_no, int) and attempt_no > 0:
+            assert event["call_id"] == f"{exchange_id}:attempt:{attempt_no}"
+
+    # The successful second attempt is reported under attempt-2's call id.
+    completed = next(
+        e
+        for e in progress_events
+        if e.get("status") == "llm_call_end" and e.get("success") is True
+    )
+    assert completed["call_id"] == f"{exchange_id}:attempt:2"
+
+
 def test_run_llm_with_fallbacks_marks_policy_primary_active_llm_selection(
     monkeypatch,
 ) -> None:
