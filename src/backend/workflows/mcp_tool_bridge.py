@@ -216,25 +216,34 @@ def apply_runtime_defaults_to_mcp_payload(
             if isinstance(current_profile, str)
             else ""
         )
-        if default_profile and (
-            not current_profile_text
-            or (
-                current_profile_text in {"default", "primary"}
-                and default_profile != current_profile_text
-            )
-        ):
+        # Enforce the authoritative Gmail profile (request-selected, else the
+        # configured default) over whatever was supplied, INCLUDING an explicit
+        # profile the model chose itself. Which Gmail account to use is an
+        # identity/credential decision the caller's selection owns, not the
+        # model: models have picked stale/unauthorised profiles (e.g. an account
+        # with an expired/revoked token) even when a valid profile was selected,
+        # which hard-fails the whole turn (invalid_grant). When no authoritative
+        # default is resolved (e.g. deterministic/scheduled workflows where it is
+        # None) the supplied value is left untouched — nothing to enforce.
+        if default_profile and current_profile_text != default_profile:
             payload["profile"] = default_profile
-            bindings.append(
-                {
-                    "field": "profile",
-                    "source": (
-                        "default_gmail_profile_placeholder_replacement"
-                        if current_profile_text in {"default", "primary"}
-                        else "default_gmail_profile"
-                    ),
-                    "value_present": True,
-                }
-            )
+            if not current_profile_text:
+                profile_source = "default_gmail_profile"
+            elif current_profile_text in {"default", "primary"}:
+                profile_source = "default_gmail_profile_placeholder_replacement"
+            else:
+                profile_source = "default_gmail_profile_enforced_override"
+            profile_binding: dict[str, Any] = {
+                "field": "profile",
+                "source": profile_source,
+                "value_present": True,
+            }
+            if (
+                current_profile_text
+                and current_profile_text not in {"default", "primary"}
+            ):
+                profile_binding["overridden_profile"] = current_profile_text
+            bindings.append(profile_binding)
 
     namespace_binding = apply_namespace_to_mcp_payload(
         payload,
