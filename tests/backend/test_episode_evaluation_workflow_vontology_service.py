@@ -246,18 +246,33 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         enabled_only=True,
         limit=10,
     )
-    terminal_bindings = manager.list_event_bindings(
+    # JVNAUTOSCI-2507: the completion-gate trigger stays enabled, but the
+    # recursive workflow.instance_terminal trigger is bootstrapped DISABLED, so
+    # it must NOT appear among enabled bindings — while still existing (disabled)
+    # so it remains discoverable/re-enableable once properly gated.
+    enabled_terminal_bindings = manager.list_event_bindings(
         event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
         enabled_only=True,
+        limit=10,
+    )
+    all_terminal_bindings = manager.list_event_bindings(
+        event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
         limit=10,
     )
     assert any(
         binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID for binding in turn_bindings
     )
-    assert any(
+    assert not any(
         binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
-        for binding in terminal_bindings
+        for binding in enabled_terminal_bindings
     )
+    episode_terminal_bindings = [
+        binding
+        for binding in all_terminal_bindings
+        if binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
+    ]
+    assert episode_terminal_bindings
+    assert episode_terminal_bindings[0].enabled is False
 
     for predicate_id in _WORKFLOW_EXPERIENCE_GUIDANCE_PREDICATES:
         doc = concept_service.get_concept_by_concept_id(predicate_id)
