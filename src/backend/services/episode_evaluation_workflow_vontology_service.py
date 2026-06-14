@@ -242,15 +242,25 @@ def _ensure_episode_evaluation_event_bindings() -> dict[str, Any]:
     updated_count = 0
     bindings: list[dict[str, Any]] = []
 
-    for event_type in (
-        EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
-        EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
-    ):
+    # JVNAUTOSCI-2507: the workflow.instance_terminal trigger is a recursive
+    # firehose — every workflow instance terminal (including episode_evaluation's
+    # OWN terminals) re-fires episode evaluation, so a single event self-sustains
+    # into an unbounded backlog (138k instances observed live, amplified by
+    # foreign workers on the shared cluster). It is bootstrapped DISABLED until a
+    # self-exclusion condition + throttling exist; the per-turn completion-gate
+    # trigger remains the supported entry point. replace_existing keeps the
+    # disabled state self-healing across restarts (otherwise bootstrap would
+    # re-enable it and the storm would return).
+    binding_enablement = {
+        EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED: True,
+        EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL: False,
+    }
+    for event_type, binding_enabled in binding_enablement.items():
         binding, created, updated = manager.upsert_event_binding(
             event_type=event_type,
             workflow_id=EPISODE_EVALUATION_WORKFLOW_ID,
             input_mapping={},
-            enabled=True,
+            enabled=binding_enabled,
             actor=_MANAGED_BY,
             replace_existing=True,
         )
