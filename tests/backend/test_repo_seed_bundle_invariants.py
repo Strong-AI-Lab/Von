@@ -374,9 +374,14 @@ def test_referenced_prompt_seed_files_exist_for_canonical_bundle() -> None:
         if prompt_id in bundled_inline:
             continue
         bare = prompt_id[len("#V#") :]
-        candidate = SEED_BUNDLE_DIR / f"{bare}_seed.md"
-        if not candidate.exists():
-            missing.append(f"{prompt_id} -> expected {candidate.name}")
+        candidate_names = [f"{bare}_seed.md", f"{bare}_seed.json"]
+        if bare.startswith("prompt_"):
+            alternate = f"{bare[len('prompt_') :]}_prompt_seed"
+            candidate_names.extend([f"{alternate}.md", f"{alternate}.json"])
+        if not any((SEED_BUNDLE_DIR / name).exists() for name in candidate_names):
+            missing.append(
+                f"{prompt_id} -> expected one of {', '.join(candidate_names)}"
+            )
 
     assert missing == [], (
         "canonical bundle references prompt concepts with no seed source "

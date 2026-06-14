@@ -20,6 +20,7 @@ from src.backend.workflows.definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
 )
 from src.backend.workflows.durable.control_flow_actions import (
@@ -596,6 +597,52 @@ def test_turn_completion_gate_workflow_fails_when_follow_up_is_required() -> Non
     )
 
 
+def test_turn_prompt_context_adjudication_workflow_is_prompt_backed() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID
+    )
+
+    assert workflow.initial_state == "context_adjudication_decision"
+    assert "context_adjudication_decision" in workflow.states
+    assert "completed" in workflow.states
+
+    decision = workflow.states["context_adjudication_decision"]
+    decision_action = decision.actions[0]
+    assert decision_action.action_id == "llm.action"
+    assert decision_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    assert decision_action.prompt_contract is not None
+    assert decision_action.prompt_contract.get("requested_prompt_concept_ids") == [
+        "#V#turn_prompt_context_adjudication_prompt"
+    ]
+    validation_policy = decision_action.validation_policy or {}
+    assert validation_policy.get("output_format") == "json_value"
+    assert "mode" in (validation_policy.get("required_json_fields") or [])
+    assert "summary" in (validation_policy.get("required_json_fields") or [])
+    context_fields = (decision_action.llm_policy or {}).get("context_fields")
+    assert isinstance(context_fields, list)
+    assert any(
+        isinstance(field, dict) and field.get("context_key") == "user_prompt"
+        for field in context_fields
+    )
+    mappings = decision.metadata.get("tool_output_context_mappings") or []
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_context_handoff_decision"
+        and mapping.get("tool_output_field") == "validated_json"
+        for mapping in mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_context_handoff_summary"
+        and mapping.get("tool_output_field") == "validated_json.summary"
+        for mapping in mappings
+    )
+    assert any(
+        t.to_state == "completed" and t.reason == "context_adjudicated"
+        for t in decision.transitions
+    )
+
+
 def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_gate() -> (
     None
 ):
@@ -608,7 +655,8 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert prelude.actions[0].subworkflow_id == (
         WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
     )
-    assert any(t.to_state == "expected_outcome_inference" for t in prelude.transitions)
+    assert any(t.to_state == "context_adjudication" for t in prelude.transitions)
+    assert "context_adjudication" in workflow.states
     assert "expected_outcome_inference" in workflow.states
     assert "selector_preparation" in workflow.states
     assert "selector_decision" in workflow.states
@@ -622,6 +670,39 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert "apply_recovery_answer" in workflow.states
     assert "apply_recovery_follow_up" in workflow.states
     assert "failed" in workflow.states
+
+    context_adjudication = workflow.states["context_adjudication"]
+    context_adjudication_action = context_adjudication.actions[0]
+    assert context_adjudication_action.action_id == "workflow_invoke_subworkflow"
+    assert context_adjudication_action.subworkflow_id == (
+        TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID
+    )
+    assert context_adjudication_action.inputs.get("inherit_parent_context") is True
+    context_adjudication_mappings = (
+        context_adjudication.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_context_handoff_decision"
+        and mapping.get("tool_output_field")
+        == "result.turn_context_handoff_decision"
+        for mapping in context_adjudication_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_context_handoff_summary"
+        and mapping.get("tool_output_field")
+        == "result.turn_context_handoff_summary"
+        for mapping in context_adjudication_mappings
+    )
+    assert "turn_context_handoff_decision" in (
+        context_adjudication.metadata.get("writes_context_keys") or []
+    )
+    assert any(
+        t.to_state == "expected_outcome_inference"
+        and t.reason == "context_adjudicated"
+        for t in context_adjudication.transitions
+    )
 
     expected_outcome = workflow.states["expected_outcome_inference"]
     expected_outcome_action = expected_outcome.actions[0]
@@ -671,6 +752,20 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert "turn_expected_required_tools" in (
         expected_outcome.metadata.get("writes_context_keys") or []
     )
+    expected_outcome_context_fields = (
+        expected_outcome_action.llm_policy or {}
+    ).get("context_fields")
+    assert isinstance(expected_outcome_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_context_handoff_decision"
+        for field in expected_outcome_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_context_handoff_summary"
+        for field in expected_outcome_context_fields
+    )
     assert any(
         t.to_state == "selector_preparation" and t.reason == "expected_outcome_inferred"
         for t in expected_outcome.transitions
@@ -707,6 +802,17 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     )
     selector_context_fields = selector_decision_policy.get("context_fields")
     assert isinstance(selector_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_context_handoff_decision"
+        for field in selector_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key")
+        == "turn_context_handoff_routing_evidence_scope"
+        for field in selector_context_fields
+    )
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "selector_authoritative_candidate_ids"
@@ -1581,6 +1687,11 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
         return WorkflowActionResult(
             outputs={
                 "final_response": request.data.get("final_response") or "",
+                "completion_gate_preserved_response": (
+                    request.data.get("response_text")
+                    or request.data.get("final_response")
+                    or ""
+                ),
                 "required_effects": required_effects,
                 "completion_gate_decision": (
                     "escalation_required" if unresolved else "completed"

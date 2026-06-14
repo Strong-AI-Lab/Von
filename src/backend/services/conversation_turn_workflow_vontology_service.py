@@ -25,6 +25,7 @@ from ..workflows.definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
 )
 
@@ -39,6 +40,9 @@ _REPO_SEED_ASSET_PATH = (
 _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
+_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = (
+    "#V#turn_prompt_context_adjudication_prompt"
+)
 _SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 _NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
@@ -52,6 +56,12 @@ _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "prompt_turn_execution_expected_outcome_inference_seed.md"
+)
+_CONTEXT_ADJUDICATION_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "turn_prompt_context_adjudication_prompt_seed.md"
 )
 _SELECTOR_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -103,6 +113,7 @@ _TARGET_WORKFLOW_IDS: tuple[str, ...] = (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
 
@@ -120,6 +131,15 @@ def _load_expected_outcome_prompt_seed_text() -> str:
     ).strip()
     if not prompt_text:
         raise ValueError("turn_execution_expected_outcome_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_context_adjudication_prompt_seed_text() -> str:
+    prompt_text = _CONTEXT_ADJUDICATION_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("turn_prompt_context_adjudication_prompt_seed_missing")
     return prompt_text
 
 
@@ -215,6 +235,17 @@ def _ensure_conversation_turn_prompt_support(
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
             WorkflowPromptConceptSpec(
+                concept_id=_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
+                name="Turn prompt context adjudication prompt",
+                description=(
+                    "Canonical conversation-turn prompt for deciding which "
+                    "prior conversational context is relevant to the current "
+                    "prompt before expected-outcome inference and workflow "
+                    "selection consume context."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
                 concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
                 name="Chat turn classifier prompt",
                 description=(
@@ -305,6 +336,8 @@ def _ensure_conversation_turn_prompt_support(
             required_markers=(
                 "gmail_send_message",
                 "external-system side effect",
+                "turn_context_handoff_decision",
+                "`no_prior_context`",
                 "represented labels, categories, tags, role markers",
                 "#V#represented_artefact_creation_workflow",
                 "grounded `parent_id`",
@@ -321,7 +354,40 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "turn_context_handoff_decision",
+                "`no_prior_context`",
+                "`raw_recent_turns_required`",
+                "Do not answer the user",
+            ),
+        )
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_context_adjudication_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": "JVNAUTOSCI-2513", "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _SELECTOR_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "turn_context_handoff_decision",
+                "`no_prior_context`",
+                "adjudicated prior-context handoff",
+            ),
+        )
+    ):
         upsert_singleton_text_relation(
             subject_concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -435,6 +501,17 @@ def _ensure_conversation_turn_prompt_support(
         validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
         if _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
     if prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
         errors_by_target.pop(_SELECTOR_PROMPT_CONCEPT_ID, None)

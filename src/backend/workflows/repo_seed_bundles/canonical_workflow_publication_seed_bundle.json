@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "21",
+  "seed_version": "22",
   "workflows": [
     {
       "publication_spec": {
@@ -3503,6 +3503,159 @@
     },
     {
       "publication_spec": {
+        "initial_state": "context_adjudication_decision",
+        "steps": [
+          {
+            "state_id": "context_adjudication_decision",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#turn_prompt_context_adjudication_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "planner",
+              "context_messages_context_key": "augmented_context",
+              "context_fields": [
+                {
+                  "context_key": "user_prompt",
+                  "label": "Current User Request"
+                },
+                {
+                  "context_key": "continuation_context",
+                  "label": "Workflow Continuation Context"
+                },
+                {
+                  "context_key": "conversation_session_id",
+                  "label": "Conversation Session"
+                },
+                {
+                  "context_key": "turn_id",
+                  "label": "Current Turn ID"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated User Concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated Organisation Concept"
+                },
+                {
+                  "context_key": "namespace",
+                  "label": "Namespace"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "mode",
+                "summary",
+                "routing_evidence_scope",
+                "expected_outcome_scope",
+                "answer_scope",
+                "turn_context_handoff_messages",
+                "lineage",
+                "omitted_context_reasons",
+                "risks",
+                "confidence"
+              ]
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_validated_json_to_turn_context_handoff_decision",
+                "context_key": "turn_context_handoff_decision",
+                "tool_output_field": "validated_json"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_mode_to_turn_context_handoff_mode",
+                "context_key": "turn_context_handoff_mode",
+                "tool_output_field": "validated_json.mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_summary_to_turn_context_handoff_summary",
+                "context_key": "turn_context_handoff_summary",
+                "tool_output_field": "validated_json.summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_messages_to_turn_context_handoff_messages",
+                "context_key": "turn_context_handoff_messages",
+                "tool_output_field": "validated_json.turn_context_handoff_messages"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_lineage_to_turn_context_handoff_lineage",
+                "context_key": "turn_context_handoff_lineage",
+                "tool_output_field": "validated_json.lineage"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_omitted_reasons_to_turn_context_handoff_omitted_context_reasons",
+                "context_key": "turn_context_handoff_omitted_context_reasons",
+                "tool_output_field": "validated_json.omitted_context_reasons"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_risks_to_turn_context_handoff_risks",
+                "context_key": "turn_context_handoff_risks",
+                "tool_output_field": "validated_json.risks"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_routing_scope_to_turn_context_handoff_routing_evidence_scope",
+                "context_key": "turn_context_handoff_routing_evidence_scope",
+                "tool_output_field": "validated_json.routing_evidence_scope"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_expected_outcome_scope_to_turn_context_handoff_expected_outcome_scope",
+                "context_key": "turn_context_handoff_expected_outcome_scope",
+                "tool_output_field": "validated_json.expected_outcome_scope"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_prompt_context_adjudication_answer_scope_to_turn_context_handoff_answer_scope",
+                "context_key": "turn_context_handoff_answer_scope",
+                "tool_output_field": "validated_json.answer_scope"
+              }
+            ],
+            "writes_context_keys": [
+              "turn_context_handoff_decision",
+              "turn_context_handoff_mode",
+              "turn_context_handoff_summary",
+              "turn_context_handoff_messages",
+              "turn_context_handoff_lineage",
+              "turn_context_handoff_omitted_context_reasons",
+              "turn_context_handoff_risks",
+              "turn_context_handoff_routing_evidence_scope",
+              "turn_context_handoff_expected_outcome_scope",
+              "turn_context_handoff_answer_scope"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "completed",
+                "reason": "context_adjudicated",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "completed"
+          }
+        ]
+      },
+      "workflow_id": "#V#turn_prompt_context_adjudication_workflow"
+    },
+    {
+      "publication_spec": {
         "initial_state": "workflow_experience_context_prelude",
         "steps": [
           {
@@ -3562,8 +3715,97 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "expected_outcome_inference",
+                "to_state": "context_adjudication",
                 "reason": "workflow_experience_context_loaded",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "context_adjudication",
+            "action_id": "workflow_invoke_subworkflow",
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#turn_prompt_context_adjudication_workflow",
+            "static_input_bindings": [
+              {
+                "key": "inherit_parent_context",
+                "value": true
+              },
+              {
+                "key": "max_transitions",
+                "value": 8
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_decision_to_turn_context_handoff_decision",
+                "context_key": "turn_context_handoff_decision",
+                "tool_output_field": "result.turn_context_handoff_decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_mode_to_turn_context_handoff_mode",
+                "context_key": "turn_context_handoff_mode",
+                "tool_output_field": "result.turn_context_handoff_mode"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_summary_to_turn_context_handoff_summary",
+                "context_key": "turn_context_handoff_summary",
+                "tool_output_field": "result.turn_context_handoff_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_messages_to_turn_context_handoff_messages",
+                "context_key": "turn_context_handoff_messages",
+                "tool_output_field": "result.turn_context_handoff_messages"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_lineage_to_turn_context_handoff_lineage",
+                "context_key": "turn_context_handoff_lineage",
+                "tool_output_field": "result.turn_context_handoff_lineage"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_omitted_reasons_to_turn_context_handoff_omitted_context_reasons",
+                "context_key": "turn_context_handoff_omitted_context_reasons",
+                "tool_output_field": "result.turn_context_handoff_omitted_context_reasons"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_risks_to_turn_context_handoff_risks",
+                "context_key": "turn_context_handoff_risks",
+                "tool_output_field": "result.turn_context_handoff_risks"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_routing_scope_to_turn_context_handoff_routing_evidence_scope",
+                "context_key": "turn_context_handoff_routing_evidence_scope",
+                "tool_output_field": "result.turn_context_handoff_routing_evidence_scope"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_expected_outcome_scope_to_turn_context_handoff_expected_outcome_scope",
+                "context_key": "turn_context_handoff_expected_outcome_scope",
+                "tool_output_field": "result.turn_context_handoff_expected_outcome_scope"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_conversation_turn_context_adjudication_answer_scope_to_turn_context_handoff_answer_scope",
+                "context_key": "turn_context_handoff_answer_scope",
+                "tool_output_field": "result.turn_context_handoff_answer_scope"
+              }
+            ],
+            "writes_context_keys": [
+              "turn_context_handoff_decision",
+              "turn_context_handoff_mode",
+              "turn_context_handoff_summary",
+              "turn_context_handoff_messages",
+              "turn_context_handoff_lineage",
+              "turn_context_handoff_omitted_context_reasons",
+              "turn_context_handoff_risks",
+              "turn_context_handoff_routing_evidence_scope",
+              "turn_context_handoff_expected_outcome_scope",
+              "turn_context_handoff_answer_scope"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "expected_outcome_inference",
+                "reason": "context_adjudicated",
                 "condition_spec": {
                   "kind": "always"
                 }
@@ -3593,6 +3835,22 @@
                 {
                   "context_key": "continuation_context",
                   "label": "Continuation Context"
+                },
+                {
+                  "context_key": "turn_context_handoff_decision",
+                  "label": "Prompt-dependent prior-context handoff decision"
+                },
+                {
+                  "context_key": "turn_context_handoff_summary",
+                  "label": "Admissible prior-context summary"
+                },
+                {
+                  "context_key": "turn_context_handoff_messages",
+                  "label": "Selected raw prior-context messages"
+                },
+                {
+                  "context_key": "turn_context_handoff_risks",
+                  "label": "Prior-context handoff risks"
                 },
                 {
                   "context_key": "workflow_success_guidance_history",
@@ -3755,6 +4013,26 @@
               "context_lineage_context_key": "selector_context_lineage",
               "response_contract_text": "Return JSON only.",
               "context_fields": [
+                {
+                  "context_key": "turn_context_handoff_decision",
+                  "label": "Prompt-dependent prior-context handoff decision"
+                },
+                {
+                  "context_key": "turn_context_handoff_summary",
+                  "label": "Admissible prior-context summary"
+                },
+                {
+                  "context_key": "turn_context_handoff_messages",
+                  "label": "Selected raw prior-context messages"
+                },
+                {
+                  "context_key": "turn_context_handoff_routing_evidence_scope",
+                  "label": "Prior-context routing evidence scope"
+                },
+                {
+                  "context_key": "turn_context_handoff_risks",
+                  "label": "Prior-context handoff risks"
+                },
                 {
                   "context_key": "selector_authoritative_candidate_ids",
                   "label": "Authoritative workflow-discovery candidate IDs prepared before selector policy ordering."

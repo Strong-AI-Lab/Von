@@ -11,6 +11,7 @@ from src.backend.workflows.definitions import (
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
 )
 
 
@@ -25,6 +26,17 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             boundary_type="routing",
             stage_concept_id="#V#conversation_turn_stage_workflow_discovery",
             runtime_aliases=("workflow_discovery",),
+        ),
+        stage_model._StageSpec(
+            stage_id="context_adjudication",
+            stage_label="Adjudicate prior context",
+            order=21,
+            stage_kind="formal",
+            boundary_type="policy",
+            stage_concept_id="#V#conversation_turn_stage_context_adjudication",
+            workflow_id=TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
+            workflow_state_id="context_adjudication_decision",
+            runtime_aliases=("context_adjudication", "context_adjudication_decision"),
         ),
         stage_model._StageSpec(
             stage_id="expected_outcome_inference",
@@ -189,6 +201,7 @@ def test_stage_model_snapshot_exposes_formal_and_non_formal_stages() -> None:
 def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     result = build_conversation_turn_stage_path(
         runtime_stages=[
+            "context_adjudication_decision",
             "expected_outcome_inference",
             "workflow_discovery",
             "workflow_dispatch_prepare",
@@ -206,6 +219,7 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     assert result["has_unmapped_runtime_stages"] is False
     path = result["path"]
     assert [entry["stage_id"] for entry in path] == [
+        "context_adjudication",
         "expected_outcome_inference",
         "workflow_discovery",
         "workflow_dispatch_prepare",

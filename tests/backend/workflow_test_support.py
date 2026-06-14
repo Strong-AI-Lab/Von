@@ -15,6 +15,7 @@ from src.backend.workflows.definitions import (
     TODO_REFRESH_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from src.backend.workflows.durable.parent_specificity_concept_dossier_workflow import (
@@ -138,6 +139,10 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
     TURN_COMPLETION_GATE_WORKFLOW_ID: (
         "Completion-gate workflow that prevents false completion claims when "
         "required effects remain unresolved or unverified."
+    ),
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID: (
+        "Prompt-backed workflow that adjudicates which prior conversation "
+        "context may shape expected-outcome inference, routing, and answering."
     ),
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: (
         "Canonical conversation-turn execution workflow that derives required "

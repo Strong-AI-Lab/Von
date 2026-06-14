@@ -29,6 +29,7 @@ from src.backend.workflows import (
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     workflow_concept_authority_service as authority_service,
 )
@@ -51,6 +52,9 @@ from src.backend.workflows.vontology_loader import (
 
 EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
+)
+CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = (
+    "#V#turn_prompt_context_adjudication_prompt"
 )
 SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
@@ -86,7 +90,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 8
+    assert report.get("seeded_prompt_count") == 9
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -164,6 +168,29 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "workflow launch, verification, read-back, or recovery" in (
         expected_outcome_text
     )
+    assert "turn_context_handoff_decision" in expected_outcome_text
+    assert "`no_prior_context`" in expected_outcome_text
+
+    context_adjudication_rows = get_texts_for_concept(
+        CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    context_adjudication_text = next(
+        (
+            (row or {}).get("text")
+            for row in context_adjudication_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    assert isinstance(context_adjudication_text, str)
+    assert "prompt-dependent prior-context adjudication policy" in (
+        context_adjudication_text
+    )
+    assert "turn_context_handoff_messages" in context_adjudication_text
+    assert "`no_prior_context`" in context_adjudication_text
+    assert "Do not answer the user" in context_adjudication_text
 
     missing_tool_retry_rows = get_texts_for_concept(
         MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
@@ -212,6 +239,9 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert isinstance(selector_text, str)
     assert "full turn context as LLM context messages" in selector_text
+    assert "adjudicated prior-context handoff" in selector_text
+    assert "turn_context_handoff_decision" in selector_text
+    assert "`no_prior_context`" in selector_text
     assert "Do not assume the current request is standalone" in selector_text
     assert "Canonical valid output examples" in selector_text
     assert "Invalid outputs. Never do any of these" in selector_text
@@ -291,7 +321,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 8
+    assert counts.get("workflows_published") == 9
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -303,6 +333,24 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     chat_respond_action = chat_definition.states[chat_respond_step_id].actions[0]
     assert chat_respond_action.action_id == "tool_calling.respond"
+
+    context_adjudication_definition = load_workflow_definition_from_vontology(
+        TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID
+    )
+    assert context_adjudication_definition is not None
+    context_decision_step_id = authority_service._step_concept_id(
+        workflow_id=TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
+        state_id="context_adjudication_decision",
+    )
+    context_decision_action = context_adjudication_definition.states[
+        context_decision_step_id
+    ].actions[0]
+    assert context_decision_action.action_id == "llm.action"
+    context_decision_prompt_contract = context_decision_action.prompt_contract
+    assert isinstance(context_decision_prompt_contract, dict)
+    assert context_decision_prompt_contract.get("resolved_prompt_concept_id") == (
+        CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
+    )
 
     tool_calling_definition = load_workflow_definition_from_vontology(
         TOOL_CALLING_WORKFLOW_ID
@@ -974,6 +1022,35 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert (
         prelude_action.subworkflow_id == WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
     )
+    assert any(
+        transition.to_state
+        == authority_service._step_concept_id(
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            state_id="context_adjudication",
+        )
+        for transition in turn_definition.states[prelude_step_id].transitions
+    )
+    context_adjudication_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="context_adjudication",
+    )
+    context_adjudication = turn_definition.states[context_adjudication_step_id]
+    context_adjudication_action = context_adjudication.actions[0]
+    assert context_adjudication_action.action_id == "workflow_invoke_subworkflow"
+    assert context_adjudication_action.subworkflow_id == (
+        TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID
+    )
+    assert context_adjudication_action.inputs.get("inherit_parent_context") is True
+    context_adjudication_mappings = (
+        context_adjudication.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        mapping.get("context_key") == "turn_context_handoff_decision"
+        and mapping.get("tool_output_field")
+        == "result.turn_context_handoff_decision"
+        for mapping in context_adjudication_mappings
+        if isinstance(mapping, dict)
+    )
     prelude_definition = load_workflow_definition_from_vontology(
         WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID
     )
@@ -1041,6 +1118,15 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
     )
+    expected_outcome_context_fields = (
+        expected_outcome_action.llm_policy or {}
+    ).get("context_fields")
+    assert isinstance(expected_outcome_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_context_handoff_decision"
+        for field in expected_outcome_context_fields
+    )
     expected_outcome_metadata = turn_definition.states[
         expected_outcome_step_id
     ].metadata
@@ -1084,6 +1170,19 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert selector_decision_policy.get("context_lineage_context_key") == (
         "selector_context_lineage"
+    )
+    selector_context_fields = selector_decision_policy.get("context_fields")
+    assert isinstance(selector_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_context_handoff_decision"
+        for field in selector_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key")
+        == "turn_context_handoff_routing_evidence_scope"
+        for field in selector_context_fields
     )
     routing_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,

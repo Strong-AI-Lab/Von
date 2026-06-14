@@ -18,6 +18,7 @@ from .definitions import (
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from .durable.registry_factory import build_workflow_registry_read_only
@@ -277,6 +278,26 @@ _FORMAL_STAGE_PROFILE_BY_WORKFLOW_STATE_ID: dict[
 ] = {
     (
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        "context_adjudication",
+    ): _DerivedFormalStageProfile(
+        stage_id="context_adjudication",
+        stage_label="Adjudicate prior context",
+        order=21,
+        boundary_type="policy",
+        runtime_aliases=("context_adjudication",),
+    ),
+    (
+        TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
+        "context_adjudication_decision",
+    ): _DerivedFormalStageProfile(
+        stage_id="context_adjudication",
+        stage_label="Adjudicate prior context",
+        order=21,
+        boundary_type="policy",
+        runtime_aliases=("context_adjudication", "context_adjudication_decision"),
+    ),
+    (
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         "expected_outcome_inference",
     ): _DerivedFormalStageProfile(
         stage_id="expected_outcome_inference",
@@ -320,6 +341,7 @@ _FORMAL_STAGE_PROFILE_BY_WORKFLOW_STATE_ID: dict[
 _CANONICAL_CONVERSATION_STAGE_WORKFLOW_IDS: tuple[str, ...] = (
     WRITE_TOOL_POLICY_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )

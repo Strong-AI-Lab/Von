@@ -885,6 +885,8 @@ def _build_progress_goal_label(
 def _default_stage_label(stage: str) -> str:
     mapping = {
         "context_build": "Understanding request",
+        "context_adjudication": "Adjudicating prior context",
+        "context_adjudication_decision": "Adjudicating prior context",
         "expected_outcome_inference": "Inferring success criteria",
         "workflow_discovery": "Looking for relevant workflows",
         "workflow_discovery_complete": "Evaluating workflow applicability",

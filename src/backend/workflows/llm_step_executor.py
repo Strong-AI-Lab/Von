@@ -56,6 +56,7 @@ _SPOKEN_BLOCK_RE = re.compile(
 )
 _CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
     {
+        "context_adjudication_decision",
         "expected_outcome_inference",
         "selector_decision",
         "tool_plan",
