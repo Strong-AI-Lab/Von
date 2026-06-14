@@ -24,6 +24,82 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
 }));
 
 describe('thinking card selector telemetry rendering', () => {
+    test('renders recovery progress in default mode and large LLM input cue in expert mode', () => {
+        const { __testOnly_renderThinkingCardBodyHTML } = require(chatTabModulePath);
+
+        const recoveryProgress = {
+            schema_version: 'thinking_recovery_progress.v1',
+            active: false,
+            recent: true,
+            finalising_after_recovery: true,
+            current_stage_id: 'response_finalising',
+            latest_recovery_stage_id: 'recovery_decision',
+            latest_recovery_stage_label: 'Recovery decision',
+            attempt_count: 4,
+            latest_failure: {
+                schema_version: 'thinking_recovery_failure_summary.v1',
+                status: 'tool_failed',
+                stage: 'tool_execute',
+                stage_label: 'Applying actions',
+                tool: 'gmail_list_messages',
+                error_code: 'invalid_grant',
+                failure_kind: 'tool_auth',
+                error: 'gmail_list_messages failed: invalid_grant'
+            },
+            large_llm_call_alerts: [
+                {
+                    schema_version: 'thinking_large_llm_call_alert.v1',
+                    stage: 'recovery_decision',
+                    stage_label: 'Recovery decision',
+                    model: 'qwen3:8b',
+                    provider: 'ollama',
+                    duration_ms: 931385,
+                    prompt_char_count: 150704,
+                    threshold_prompt_chars: 60000
+                }
+            ]
+        };
+        const request = {
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-recovery-thinking-card',
+                status: 'heartbeat',
+                stage: 'response_finalising',
+                phase: 'response_finalising',
+                result_summary: 'Assembling the final response payload.',
+                recovery_progress: recoveryProgress,
+                thinking_interpretability: {
+                    schema_version: 'thinking_interpretability.v1',
+                    execution_family: 'tool_orchestration',
+                    progress_kind: 'post_recovery_finalising',
+                    identity_summary: 'General tool use: gmail_list_messages',
+                    step_summary: 'Finalising response after Recovery decision.',
+                    recovery_progress: recoveryProgress
+                }
+            }
+        };
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(request);
+
+        expect(defaultHtml).toContain('Recovery status');
+        expect(defaultHtml).toContain('Recovery decision');
+        expect(defaultHtml).toContain('finalising after recovery');
+        expect(defaultHtml).toContain('attempt 4');
+        expect(defaultHtml).toContain('Recovery trigger');
+        expect(defaultHtml).toContain('gmail_list_messages');
+        expect(defaultHtml).toContain('invalid_grant');
+        expect(defaultHtml).not.toContain('Large LLM input');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML({
+            ...request,
+            thinkingCardMode: 'expert'
+        });
+
+        expect(expertHtml).toContain('Large LLM input');
+        expect(expertHtml).toContain('Recovery decision: 150,704 prompt chars');
+        expect(expertHtml).toContain('ollama/qwen3:8b');
+    });
+
     test('renders selector prompt and candidate list for workflow dispatch diagnostics', () => {
         const { __testOnly_renderThinkingCardBodyHTML } = require(chatTabModulePath);
 

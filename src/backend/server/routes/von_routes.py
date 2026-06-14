@@ -225,6 +225,20 @@ _ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
 _ONBOARDING_WORKFLOW_KEYWORDS = ("onboard", "onboarding")
 _TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT = 40
 _TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT = 1000
+_THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD = 60_000
+_RECOVERY_STAGE_IDS = {
+    "recovery_decision",
+    "recovery_retry_prepare",
+    "recovery_tool_batch_execute",
+    "recovery_answer_prepare",
+    "recovery_follow_up_prepare",
+}
+_RECOVERY_STAGE_ALIASES = {
+    "apply_recovery_retry": "recovery_retry_prepare",
+    "apply_recovery_tool_batch": "recovery_tool_batch_execute",
+    "apply_recovery_answer": "recovery_answer_prepare",
+    "apply_recovery_follow_up": "recovery_follow_up_prepare",
+}
 _DIAGNOSTIC_EXPORT_STRING_LIMIT = 2000
 _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT = 80
 _DIAGNOSTIC_EXPORT_MAX_DEPTH = 8
@@ -885,6 +899,15 @@ def _default_stage_label(stage: str) -> str:
         "buttonify": "Generating quick replies",
         "response_finalising": "Finalising response",
         "tool_recovery": "Recovering tool call",
+        "recovery_decision": "Recovery decision",
+        "recovery_retry_prepare": "Preparing recovery retry",
+        "recovery_tool_batch_execute": "Executing recovery tools",
+        "recovery_answer_prepare": "Preparing recovery answer",
+        "recovery_follow_up_prepare": "Preparing recovery follow-up",
+        "apply_recovery_retry": "Preparing recovery retry",
+        "apply_recovery_tool_batch": "Executing recovery tools",
+        "apply_recovery_answer": "Preparing recovery answer",
+        "apply_recovery_follow_up": "Preparing recovery follow-up",
         "orchestrator_start": "Planning response approach",
         "orchestrator_end": "Finishing orchestration",
         "completed": "Complete",
@@ -1145,6 +1168,11 @@ def _serialise_tool_progress_state(
         stage_diagnostics=stage_diagnostics,
         latest_progress=payload,
     )
+    recovery_progress = _build_thinking_recovery_progress_payload(payload)
+    if recovery_progress:
+        payload["recovery_progress"] = recovery_progress
+    else:
+        payload.pop("recovery_progress", None)
     payload["thinking_interpretability"] = _build_thinking_interpretability_payload(
         payload
     )
@@ -1390,6 +1418,366 @@ def _build_thinking_progress_precedence_contract(
     }
 
 
+def _copy_progress_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _extract_prompt_context_diagnostics(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    diagnostics = _copy_progress_mapping(value.get("prompt_context_diagnostics"))
+    if diagnostics:
+        return diagnostics
+    outputs = value.get("outputs")
+    if isinstance(outputs, Mapping):
+        diagnostics = _copy_progress_mapping(outputs.get("prompt_context_diagnostics"))
+        if diagnostics:
+            return diagnostics
+    envelope = value.get("llm_step_envelope")
+    if isinstance(envelope, Mapping):
+        diagnostics = _copy_progress_mapping(envelope.get("prompt_context_diagnostics"))
+        if diagnostics:
+            return diagnostics
+    return None
+
+
+def _extract_prompt_char_count(value: Any) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    direct_candidates = (
+        value.get("prompt_char_count"),
+        value.get("rendered_prompt_chars"),
+    )
+    for candidate in direct_candidates:
+        numeric = _progress_number(candidate)
+        if numeric is not None:
+            return int(max(0.0, numeric))
+
+    prompt_context_diagnostics = _extract_prompt_context_diagnostics(value)
+    if isinstance(prompt_context_diagnostics, Mapping):
+        numeric = _progress_number(prompt_context_diagnostics.get("rendered_prompt_chars"))
+        if numeric is not None:
+            return int(max(0.0, numeric))
+
+    for key in (
+        "prompt",
+        "prompt_preview",
+        "llm_prompt_preview",
+        "input",
+        "input_preview",
+    ):
+        capture = value.get(key)
+        if isinstance(capture, Mapping):
+            numeric = _progress_number(capture.get("char_count")) or _progress_number(
+                capture.get("content_char_count")
+            )
+            if numeric is not None:
+                return int(max(0.0, numeric))
+            text = _progress_str(capture.get("text")) or _progress_str(
+                capture.get("preview")
+            )
+            if text:
+                return len(text)
+        elif isinstance(capture, str) and capture:
+            return len(capture)
+
+    llm_request = value.get("llm_request")
+    if isinstance(llm_request, Mapping):
+        prompt_count = _extract_prompt_char_count(llm_request)
+        if prompt_count is not None:
+            return prompt_count
+
+    return None
+
+
+def _llm_call_alert_key(alert: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        _progress_str(alert.get("call_id")),
+        _progress_str(alert.get("stage")),
+        _progress_str(alert.get("model")),
+        _progress_number(alert.get("prompt_char_count")),
+    )
+
+
+def _build_large_llm_call_alerts(
+    payload: Mapping[str, Any],
+    *,
+    diagnostic_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sources: list[Mapping[str, Any]] = []
+    if isinstance(payload, Mapping):
+        sources.append(payload)
+
+    llm_calls = payload.get("llm_calls")
+    if isinstance(llm_calls, list):
+        sources.extend(entry for entry in llm_calls if isinstance(entry, Mapping))
+
+    sources.extend(entry for entry in diagnostic_events if isinstance(entry, Mapping))
+
+    alerts: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for source in sources:
+        prompt_char_count = _extract_prompt_char_count(source)
+        if (
+            prompt_char_count is None
+            or prompt_char_count < _THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD
+        ):
+            continue
+        prompt_context_diagnostics = _extract_prompt_context_diagnostics(source)
+        prompt_context_stage = (
+            _canonicalise_turn_execution_stage_id(
+                prompt_context_diagnostics.get("workflow_state_id")
+            )
+            if isinstance(prompt_context_diagnostics, Mapping)
+            else None
+        )
+        stage = (
+            prompt_context_stage
+            or _canonicalise_turn_execution_stage_id(source.get("workflow_stage_id"))
+            or _canonicalise_turn_execution_stage_id(source.get("stage"))
+            or _canonicalise_turn_execution_stage_id(source.get("phase"))
+            or "unscoped"
+        )
+        alert = {
+            "schema_version": "thinking_large_llm_call_alert.v1",
+            "stage": stage,
+            "stage_label": _progress_str(source.get("stage_label"))
+            or _progress_str(source.get("phase_label"))
+            or _default_stage_label(stage),
+            "model": _progress_str(source.get("model"))
+            or _progress_str(source.get("model_name")),
+            "provider": _progress_str(source.get("provider")),
+            "duration_ms": (
+                int(max(0.0, _progress_number(source.get("duration_ms")) or 0.0))
+                if _progress_number(source.get("duration_ms")) is not None
+                else None
+            ),
+            "prompt_char_count": prompt_char_count,
+            "threshold_prompt_chars": _THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD,
+            "reason": "prompt_chars_exceeded_threshold",
+        }
+        call_id = _progress_str(source.get("call_id")) or _progress_str(
+            source.get("llm_call_id")
+        )
+        if call_id:
+            alert["call_id"] = call_id
+        if isinstance(prompt_context_diagnostics, Mapping):
+            alert["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
+        key = _llm_call_alert_key(alert)
+        if key in seen:
+            continue
+        seen.add(key)
+        alerts.append({key: value for key, value in alert.items() if value is not None})
+    return alerts[-5:]
+
+
+def _latest_failure_event_summary(
+    diagnostic_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    failure_statuses = {
+        "error",
+        "failed",
+        "failure",
+        "tool_failed",
+        "tool_blocked",
+    }
+    for entry in reversed(diagnostic_events):
+        status = (_progress_str(entry.get("status")) or "").lower()
+        success = entry.get("success")
+        has_failure = (
+            status in failure_statuses
+            or success is False
+            or bool(_progress_str(entry.get("error")))
+            or bool(_progress_str(entry.get("error_code")))
+            or bool(_progress_str(entry.get("failure_kind")))
+        )
+        if not has_failure:
+            continue
+        stage = (
+            _canonicalise_turn_execution_stage_id(entry.get("workflow_stage_id"))
+            or _canonicalise_turn_execution_stage_id(entry.get("stage"))
+            or _canonicalise_turn_execution_stage_id(entry.get("phase"))
+        )
+        summary = {
+            "schema_version": "thinking_recovery_failure_summary.v1",
+            "status": _progress_str(entry.get("status")),
+            "stage": stage,
+            "stage_label": _progress_str(entry.get("stage_label"))
+            or _progress_str(entry.get("phase_label"))
+            or (_default_stage_label(stage) if stage else None),
+            "tool": _progress_str(entry.get("tool")),
+            "workflow_task": _progress_str(entry.get("workflow_task")),
+            "error_code": _progress_str(entry.get("error_code")),
+            "error_class": _progress_str(entry.get("error_class")),
+            "failure_kind": _progress_str(entry.get("failure_kind")),
+            "error": _progress_str(entry.get("error")),
+        }
+        return {key: value for key, value in summary.items() if value is not None}
+    return None
+
+
+def _extract_recovery_attempt_count(
+    payload: Mapping[str, Any],
+    *,
+    diagnostic_events: list[dict[str, Any]],
+) -> int | None:
+    candidate_keys = (
+        "completion_gate_loop_attempts",
+        "recovery_attempt_count",
+        "recovery_attempt",
+        "recovery_attempt_no",
+        "fallback_attempt_no",
+    )
+    for source in (payload, *reversed(diagnostic_events)):
+        if not isinstance(source, Mapping):
+            continue
+        for key in candidate_keys:
+            numeric = _progress_number(source.get(key))
+            if numeric is not None and numeric > 0:
+                return int(numeric)
+    return None
+
+
+def _latest_recovery_stage_from_progress(
+    payload: Mapping[str, Any],
+    *,
+    diagnostic_events: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    current_stage = (
+        _canonicalise_recovery_stage(payload.get("phase"))
+        or _canonicalise_recovery_stage(payload.get("stage"))
+        or _canonicalise_recovery_stage(payload.get("workflow_stage_id"))
+    )
+    if current_stage:
+        return current_stage, _default_stage_label(current_stage)
+
+    workflow_stage_path = payload.get("workflow_stage_path")
+    if isinstance(workflow_stage_path, Mapping):
+        path = workflow_stage_path.get("path")
+        if isinstance(path, list):
+            for entry in reversed(path):
+                if not isinstance(entry, Mapping):
+                    continue
+                stage_id = _canonicalise_recovery_stage(entry.get("stage_id"))
+                if not stage_id:
+                    continue
+                return (
+                    stage_id,
+                    _progress_str(entry.get("stage_label"))
+                    or _default_stage_label(stage_id),
+                )
+
+    phase_history = payload.get("phase_history")
+    if isinstance(phase_history, list):
+        for entry in reversed(phase_history):
+            if not isinstance(entry, Mapping):
+                continue
+            stage_id = _canonicalise_recovery_stage(entry.get("phase"))
+            if not stage_id:
+                continue
+            return (
+                stage_id,
+                _progress_str(entry.get("phaseLabel"))
+                or _default_stage_label(stage_id),
+            )
+
+    for entry in reversed(diagnostic_events):
+        stage_id = (
+            _canonicalise_recovery_stage(entry.get("workflow_stage_id"))
+            or _canonicalise_recovery_stage(entry.get("stage"))
+            or _canonicalise_recovery_stage(entry.get("phase"))
+        )
+        if not stage_id:
+            continue
+        return (
+            stage_id,
+            _progress_str(entry.get("stage_label"))
+            or _progress_str(entry.get("phase_label"))
+            or _default_stage_label(stage_id),
+        )
+
+    prompt_context_diagnostics = _extract_prompt_context_diagnostics(payload)
+    if isinstance(prompt_context_diagnostics, Mapping):
+        stage_id = _canonicalise_recovery_stage(
+            prompt_context_diagnostics.get("workflow_state_id")
+        )
+        if stage_id:
+            return stage_id, _default_stage_label(stage_id)
+
+    return None, None
+
+
+def _build_thinking_recovery_progress_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    diagnostic_events = [
+        cast(dict[str, Any], entry)
+        for entry in payload.get("diagnostic_events", [])
+        if isinstance(entry, dict)
+    ]
+    latest_recovery_stage, latest_recovery_stage_label = (
+        _latest_recovery_stage_from_progress(
+            payload,
+            diagnostic_events=diagnostic_events,
+        )
+    )
+    prompt_context_diagnostics = _extract_prompt_context_diagnostics(payload)
+    recovery_prompt_context = (
+        dict(prompt_context_diagnostics)
+        if isinstance(prompt_context_diagnostics, Mapping)
+        and isinstance(
+            prompt_context_diagnostics.get("recovery_context_compaction"),
+            Mapping,
+        )
+        else None
+    )
+
+    if not latest_recovery_stage and not recovery_prompt_context:
+        return None
+
+    current_stage = (
+        _canonicalise_turn_execution_stage_id(payload.get("phase"))
+        or _canonicalise_turn_execution_stage_id(payload.get("stage"))
+        or _canonicalise_turn_execution_stage_id(payload.get("workflow_stage_id"))
+    )
+    active = _is_recovery_stage(current_stage)
+    finalising_after_recovery = bool(
+        current_stage == "response_finalising" and latest_recovery_stage
+    )
+    latest_failure = _latest_failure_event_summary(diagnostic_events)
+    large_llm_call_alerts = _build_large_llm_call_alerts(
+        payload,
+        diagnostic_events=diagnostic_events,
+    )
+    attempt_count = _extract_recovery_attempt_count(
+        payload,
+        diagnostic_events=diagnostic_events,
+    )
+
+    recovery_payload: dict[str, Any] = {
+        "schema_version": "thinking_recovery_progress.v1",
+        "active": active,
+        "recent": bool(latest_recovery_stage),
+        "finalising_after_recovery": finalising_after_recovery,
+        "current_stage_id": current_stage,
+        "latest_recovery_stage_id": latest_recovery_stage,
+        "latest_recovery_stage_label": latest_recovery_stage_label
+        or (_default_stage_label(latest_recovery_stage) if latest_recovery_stage else None),
+        "attempt_count": attempt_count,
+        "latest_failure": latest_failure,
+        "prompt_context_diagnostics": recovery_prompt_context,
+        "large_llm_call_alerts": large_llm_call_alerts,
+    }
+    return {
+        key: value
+        for key, value in recovery_payload.items()
+        if value is not None and value != []
+    }
+
+
 def _build_thinking_interpretability_payload(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1450,11 +1838,47 @@ def _build_thinking_interpretability_payload(
     latest_core_stage_label = (
         _default_stage_label(latest_core_stage) if latest_core_stage else None
     )
-    if stage == "response_finalising" and latest_core_stage_label:
+    recovery_progress = payload.get("recovery_progress")
+    recovery_progress = (
+        dict(recovery_progress) if isinstance(recovery_progress, Mapping) else None
+    )
+    recovery_stage_label = (
+        _progress_str(recovery_progress.get("latest_recovery_stage_label"))
+        if isinstance(recovery_progress, Mapping)
+        else None
+    )
+    if recovery_progress and stage == "response_finalising" and recovery_stage_label:
+        progress_kind = "post_recovery_finalising"
+        step_summary = f"Finalising response after {recovery_stage_label}."
+        if result_summary:
+            step_summary = f"{step_summary} {result_summary}"
+    elif stage == "response_finalising" and latest_core_stage_label:
         progress_kind = "post_processing"
         step_summary = f"Finalising response after {latest_core_stage_label}."
         if result_summary:
             step_summary = f"{step_summary} {result_summary}"
+    elif recovery_progress and recovery_stage_label:
+        progress_kind = "recovery"
+        step_bits = [recovery_stage_label]
+        attempt_count = _progress_number(recovery_progress.get("attempt_count"))
+        if attempt_count is not None:
+            step_bits.append(f"attempt {int(max(0.0, attempt_count))}")
+        latest_failure = recovery_progress.get("latest_failure")
+        if isinstance(latest_failure, Mapping):
+            failure_code = _progress_str(latest_failure.get("error_code"))
+            failure_kind = _progress_str(latest_failure.get("failure_kind"))
+            failure_tool = _progress_str(latest_failure.get("tool")) or _progress_str(
+                latest_failure.get("workflow_task")
+            )
+            failure_bits = [
+                "trigger",
+                failure_tool,
+                failure_code or failure_kind,
+            ]
+            step_bits.append(" ".join(bit for bit in failure_bits if bit))
+        if result_summary:
+            step_bits.append(result_summary)
+        step_summary = " · ".join(bit for bit in step_bits if bit)
     else:
         step_bits = [stage_label, subtask, result_summary]
         step_summary = " · ".join(bit for bit in step_bits if bit)
@@ -1490,6 +1914,7 @@ def _build_thinking_interpretability_payload(
         "stage_label": stage_label,
         "post_processing_only": post_processing_only,
         "progress_contract": progress_contract,
+        "recovery_progress": recovery_progress,
     }
 
 
@@ -1586,10 +2011,27 @@ def _normalise_workflow_discovery_progress_payload(
     return payload
 
 
+def _canonicalise_recovery_stage(stage: Any) -> str | None:
+    clean_stage = _progress_str(stage)
+    if not clean_stage:
+        return None
+    normalised = clean_stage.replace("-", "_").replace(" ", "_").strip().lower()
+    if normalised in _RECOVERY_STAGE_IDS:
+        return normalised
+    return _RECOVERY_STAGE_ALIASES.get(normalised)
+
+
+def _is_recovery_stage(stage: Any) -> bool:
+    return _canonicalise_recovery_stage(stage) is not None
+
+
 def _canonicalise_live_runtime_stage(stage: Any) -> str | None:
     clean_stage = _progress_str(stage)
     if not clean_stage:
         return None
+    recovery_stage = _canonicalise_recovery_stage(clean_stage)
+    if recovery_stage:
+        return recovery_stage
     if clean_stage == "workflow_discovery_complete":
         return "workflow_discovery"
     if clean_stage == "orchestrator_start":
@@ -2539,6 +2981,9 @@ def _normalise_llm_stage_calls(
             "provider": _progress_str(entry.get("provider")),
             "duration_ms": duration_ms,
         }
+        prompt_char_count = _extract_prompt_char_count(entry)
+        if prompt_char_count is not None:
+            row["prompt_char_count"] = prompt_char_count
         row.update(_duration_baseline(entry))
         normalised.append(row)
     return normalised
@@ -2657,6 +3102,12 @@ def _build_timing_breakdown(
         _merge_duration_baseline(bucket, entry)
         bucket["call_count"] = int(bucket["call_count"]) + 1
         bucket["duration_ms"] = int(bucket["duration_ms"]) + duration_ms
+        prompt_char_count = _progress_number(entry.get("prompt_char_count"))
+        if prompt_char_count is not None:
+            bucket["max_prompt_char_count"] = max(
+                int(bucket.get("max_prompt_char_count") or 0),
+                int(max(0.0, prompt_char_count)),
+            )
         if bucket.get("provider") is None and provider is not None:
             bucket["provider"] = provider
 
@@ -2761,6 +3212,9 @@ def _canonicalise_turn_execution_stage_id(stage: Any) -> str | None:
     clean_stage = _progress_str(stage)
     if not clean_stage:
         return None
+    recovery_stage = _canonicalise_recovery_stage(clean_stage)
+    if recovery_stage:
+        return recovery_stage
     if clean_stage == "workflow_discovery_complete":
         return "workflow_discovery"
     if clean_stage == "orchestrator_start":
@@ -4853,6 +5307,23 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                 merged.pop("error_code", None)
         else:
             merged.pop("error_code", None)
+        if "workflow_stage_id" in safe_update:
+            workflow_stage_id = _progress_str(safe_update.get("workflow_stage_id"))
+            if workflow_stage_id:
+                merged["workflow_stage_id"] = workflow_stage_id
+            else:
+                merged.pop("workflow_stage_id", None)
+        elif "phase" in safe_update or "stage" in safe_update:
+            existing_workflow_stage_id = _canonicalise_turn_execution_stage_id(
+                merged.get("workflow_stage_id")
+            )
+            incoming_stage_id = _canonicalise_turn_execution_stage_id(stage)
+            if (
+                existing_workflow_stage_id
+                and incoming_stage_id
+                and existing_workflow_stage_id != incoming_stage_id
+            ):
+                merged.pop("workflow_stage_id", None)
         merged["request_id"] = request_id
         merged["status"] = status
         merged["stage"] = stage
@@ -4963,6 +5434,13 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry["llm_request"] = {
                 str(key): value
                 for key, value in llm_request.items()
+                if isinstance(key, str)
+            }
+        prompt_context_diagnostics = safe_update.get("prompt_context_diagnostics")
+        if isinstance(prompt_context_diagnostics, Mapping):
+            event_entry["prompt_context_diagnostics"] = {
+                str(key): value
+                for key, value in prompt_context_diagnostics.items()
                 if isinstance(key, str)
             }
         llm_request_state = _progress_str(safe_update.get("llm_request_state"))

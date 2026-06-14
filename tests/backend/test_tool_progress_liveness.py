@@ -2006,6 +2006,144 @@ def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat
     ]
 
 
+def test_recovery_progress_projection_survives_finalising_tail(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=5325.0)
+
+    von_routes._set_tool_progress(
+        "scope-recovery-tail",
+        "req-recovery-tail",
+        {
+            "status": "tool_failed",
+            "phase": "tool_execute",
+            "phase_label": "Executing tools",
+            "request_id": "req-recovery-tail",
+            "tool": "gmail_list_messages",
+            "error": "gmail_list_messages failed: invalid_grant",
+            "error_code": "invalid_grant",
+            "error_class": "OAuthError",
+            "failure_kind": "tool_auth",
+            "success": False,
+        },
+    )
+    clock["now"] += 0.2
+    recovery_prompt_context_diagnostics = {
+        "schema_version": "llm_prompt_context_diagnostics.v1",
+        "workflow_state_id": "recovery_decision",
+        "rendered_prompt_chars": 150_704,
+        "recovery_context_compaction": {
+            "schema_version": "recovery_context_compaction.v1",
+            "enabled": True,
+            "workflow_state_id": "recovery_decision",
+            "rendered_context_chars": 11_920,
+            "rendered_context_field_count": 5,
+            "total_context_budget_exhausted": True,
+        },
+    }
+    von_routes._set_tool_progress(
+        "scope-recovery-tail",
+        "req-recovery-tail",
+        {
+            "status": "phase_transition",
+            "phase": "recovery_decision",
+            "phase_label": "Recovery decision",
+            "workflow_stage_id": "recovery_decision",
+            "request_id": "req-recovery-tail",
+            "result_summary": "Choosing recovery path after tool failure.",
+            "completion_gate_loop_attempts": 4,
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-recovery-tail",
+        "req-recovery-tail",
+        {
+            "status": "llm_call_end",
+            "phase": "recovery_decision",
+            "phase_label": "Recovery decision",
+            "workflow_stage_id": "recovery_decision",
+            "request_id": "req-recovery-tail",
+            "model": "qwen3:8b",
+            "provider": "ollama",
+            "duration_ms": 931_385,
+            "prompt_context_diagnostics": recovery_prompt_context_diagnostics,
+            "llm_request": {
+                "prompt": {
+                    "text": "RECOVERY PROMPT PREVIEW",
+                    "char_count": 150_704,
+                    "is_truncated": True,
+                }
+            },
+            "llm_response_preview": {
+                "text": '{"decision":"answer_with_recovery_context"}',
+                "char_count": 43,
+            },
+            "llm_request_state": "completed",
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-recovery-tail",
+        "req-recovery-tail",
+        {
+            "status": "heartbeat",
+            "phase": "response_finalising",
+            "phase_label": "Finalising response",
+            "request_id": "req-recovery-tail",
+            "result_summary": "Assembling the final response payload.",
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-recovery-tail",
+        "req-recovery-tail",
+    )
+    assert snapshot is not None
+    assert snapshot["stage"] == "response_finalising"
+
+    workflow_stage_path = snapshot.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    assert [
+        entry.get("stage_id")
+        for entry in workflow_stage_path.get("path", [])
+        if isinstance(entry, dict) and entry.get("stage_id")
+    ] == [
+        "recovery_decision",
+        "response_finalising",
+    ]
+
+    recovery_progress = snapshot.get("recovery_progress")
+    assert isinstance(recovery_progress, dict)
+    assert recovery_progress["schema_version"] == "thinking_recovery_progress.v1"
+    assert recovery_progress["active"] is False
+    assert recovery_progress["recent"] is True
+    assert recovery_progress["finalising_after_recovery"] is True
+    assert recovery_progress["current_stage_id"] == "response_finalising"
+    assert recovery_progress["latest_recovery_stage_id"] == "recovery_decision"
+    assert recovery_progress["attempt_count"] == 4
+    assert recovery_progress["latest_failure"]["tool"] == "gmail_list_messages"
+    assert recovery_progress["latest_failure"]["error_code"] == "invalid_grant"
+    assert (
+        recovery_progress["prompt_context_diagnostics"]["rendered_prompt_chars"]
+        == 150_704
+    )
+    assert recovery_progress["large_llm_call_alerts"][0]["stage"] == (
+        "recovery_decision"
+    )
+    assert recovery_progress["large_llm_call_alerts"][0]["prompt_char_count"] == (
+        150_704
+    )
+
+    interpretation = snapshot.get("thinking_interpretability")
+    assert isinstance(interpretation, dict)
+    assert interpretation["progress_kind"] == "post_recovery_finalising"
+    assert "Recovery decision" in interpretation["step_summary"]
+    assert interpretation["recovery_progress"]["latest_failure"]["error_code"] == (
+        "invalid_grant"
+    )
+
+
 def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
     monkeypatch,
 ) -> None:
@@ -2161,6 +2299,11 @@ def test_response_finalising_eta_estimate_is_bounded() -> None:
 def test_default_stage_label_includes_response_finalising() -> None:
     assert (
         von_routes._default_stage_label("response_finalising") == "Finalising response"
+    )
+    assert von_routes._default_stage_label("recovery_decision") == "Recovery decision"
+    assert (
+        von_routes._default_stage_label("apply_recovery_tool_batch")
+        == "Executing recovery tools"
     )
 
 

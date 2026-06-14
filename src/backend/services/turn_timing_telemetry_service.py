@@ -828,6 +828,7 @@ def _model_prompt_summary(spans: Sequence[Mapping[str, Any]]) -> list[dict[str, 
                 "success_count": 0,
                 "failure_count": 0,
                 "duration_ms": 0,
+                "max_prompt_char_count": None,
                 "first_output_latency_ms": {
                     "min_ms": None,
                     "max_ms": None,
@@ -842,6 +843,15 @@ def _model_prompt_summary(spans: Sequence[Mapping[str, Any]]) -> list[dict[str, 
             bucket["success_count"] = int(bucket["success_count"]) + 1
         elif status == "failure":
             bucket["failure_count"] = int(bucket["failure_count"]) + 1
+        prompt_char_count = _safe_int_ms(attrs.get("prompt_char_count"))
+        if prompt_char_count is not None:
+            existing_prompt_chars = bucket.get("max_prompt_char_count")
+            bucket["max_prompt_char_count"] = max(
+                prompt_char_count,
+                int(existing_prompt_chars)
+                if isinstance(existing_prompt_chars, int)
+                else 0,
+            )
         latency_ms = _safe_int_ms(attrs.get("first_output_latency_ms"))
         if latency_ms is not None:
             first_output_latencies[key].append(latency_ms)

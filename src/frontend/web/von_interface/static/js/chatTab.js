@@ -1277,6 +1277,20 @@ const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_tele
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
+const THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD = 60_000;
+const THINKING_RECOVERY_STAGE_IDS = new Set([
+    'recovery_decision',
+    'recovery_retry_prepare',
+    'recovery_tool_batch_execute',
+    'recovery_answer_prepare',
+    'recovery_follow_up_prepare'
+]);
+const THINKING_RECOVERY_STAGE_ALIASES = new Map([
+    ['apply_recovery_retry', 'recovery_retry_prepare'],
+    ['apply_recovery_tool_batch', 'recovery_tool_batch_execute'],
+    ['apply_recovery_answer', 'recovery_answer_prepare'],
+    ['apply_recovery_follow_up', 'recovery_follow_up_prepare']
+]);
 // Browser live-progress polls must tolerate local-server contention while the
 // real /von/generate POST is still running. A shorter timeout causes the page
 // to abort its own /von/progress reads and surface a false "Awaiting visible
@@ -4469,6 +4483,306 @@ function findLatestNonFinalisingStageLabel(request) {
     return null;
 }
 
+function canonicaliseThinkingRecoveryStage(value) {
+    const clean = normaliseThinkingActivityString(value)
+        .replace(/[-\s]+/g, '_')
+        .toLowerCase();
+    if (!clean) {
+        return '';
+    }
+    if (THINKING_RECOVERY_STAGE_IDS.has(clean)) {
+        return clean;
+    }
+    return THINKING_RECOVERY_STAGE_ALIASES.get(clean) || '';
+}
+
+function isThinkingRecoveryStage(value) {
+    return Boolean(canonicaliseThinkingRecoveryStage(value));
+}
+
+function normaliseThinkingRecoveryFailure(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const stage = normaliseThinkingActivityString(value.stage);
+    const failure = {
+        schema_version: normaliseThinkingActivityString(value.schema_version)
+            || 'thinking_recovery_failure_summary.v1',
+        status: normaliseThinkingActivityString(value.status) || null,
+        stage: stage || null,
+        stage_label: normaliseThinkingActivityString(value.stage_label)
+            || (stage ? formatThinkingActivityFallbackLabel(stage) : null),
+        tool: normaliseThinkingActivityString(value.tool) || null,
+        workflow_task: normaliseThinkingActivityString(value.workflow_task) || null,
+        error_code: normaliseThinkingActivityString(value.error_code) || null,
+        error_class: normaliseThinkingActivityString(value.error_class) || null,
+        failure_kind: normaliseThinkingActivityString(value.failure_kind) || null,
+        error: normaliseThinkingActivityString(value.error) || null
+    };
+    const hasContent = [
+        failure.status,
+        failure.stage,
+        failure.tool,
+        failure.workflow_task,
+        failure.error_code,
+        failure.error_class,
+        failure.failure_kind,
+        failure.error
+    ].some(Boolean);
+    return hasContent ? failure : null;
+}
+
+function normaliseThinkingPromptContextDiagnostics(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const copy = { ...value };
+    return Object.keys(copy).length > 0 ? copy : null;
+}
+
+function normaliseThinkingLargeLlmCallAlert(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const promptCharCount = toThinkingCardOptionalNonNegativeInteger(
+        value.prompt_char_count || value.max_prompt_char_count
+    );
+    if (promptCharCount === null || promptCharCount < THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD) {
+        return null;
+    }
+    const stage = normaliseThinkingActivityString(value.stage || value.stage_id);
+    const alert = {
+        schema_version: normaliseThinkingActivityString(value.schema_version)
+            || 'thinking_large_llm_call_alert.v1',
+        stage: stage || null,
+        stage_label: normaliseThinkingActivityString(value.stage_label)
+            || (stage ? formatThinkingActivityFallbackLabel(stage) : null),
+        model: normaliseThinkingActivityString(value.model) || null,
+        provider: normaliseThinkingActivityString(value.provider) || null,
+        duration_ms: toThinkingCardOptionalNonNegativeInteger(value.duration_ms),
+        prompt_char_count: promptCharCount,
+        threshold_prompt_chars: toThinkingCardOptionalNonNegativeInteger(value.threshold_prompt_chars)
+            || THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD,
+        reason: normaliseThinkingActivityString(value.reason) || 'prompt_chars_exceeded_threshold',
+        call_id: normaliseThinkingActivityString(value.call_id || value.llm_call_id) || null,
+        prompt_context_diagnostics: normaliseThinkingPromptContextDiagnostics(
+            value.prompt_context_diagnostics
+        )
+    };
+    return alert;
+}
+
+function normaliseThinkingLargeLlmCallAlerts(value) {
+    return Array.isArray(value)
+        ? value
+            .map(normaliseThinkingLargeLlmCallAlert)
+            .filter(Boolean)
+        : [];
+}
+
+function normaliseThinkingRecoveryProgress(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const latestRecoveryStage = canonicaliseThinkingRecoveryStage(
+        value.latest_recovery_stage_id
+    );
+    const currentStage = normaliseThinkingActivityString(value.current_stage_id);
+    const latestFailure = normaliseThinkingRecoveryFailure(value.latest_failure);
+    const promptContextDiagnostics = normaliseThinkingPromptContextDiagnostics(
+        value.prompt_context_diagnostics
+    );
+    const alerts = normaliseThinkingLargeLlmCallAlerts(value.large_llm_call_alerts);
+    const attemptCount = toThinkingCardOptionalNonNegativeInteger(value.attempt_count);
+    const recovery = {
+        schema_version: normaliseThinkingActivityString(value.schema_version)
+            || 'thinking_recovery_progress.v1',
+        active: value.active === true || isThinkingRecoveryStage(currentStage),
+        recent: value.recent === true || Boolean(latestRecoveryStage),
+        finalising_after_recovery: value.finalising_after_recovery === true,
+        current_stage_id: currentStage || null,
+        latest_recovery_stage_id: latestRecoveryStage || null,
+        latest_recovery_stage_label: normaliseThinkingActivityString(
+            value.latest_recovery_stage_label
+        ) || (latestRecoveryStage ? formatThinkingActivityFallbackLabel(latestRecoveryStage) : null),
+        attempt_count: attemptCount,
+        latest_failure: latestFailure,
+        prompt_context_diagnostics: promptContextDiagnostics,
+        large_llm_call_alerts: alerts
+    };
+    const hasContent = recovery.active
+        || recovery.recent
+        || recovery.finalising_after_recovery
+        || Boolean(recovery.latest_recovery_stage_id)
+        || Boolean(recovery.latest_failure)
+        || Boolean(recovery.prompt_context_diagnostics)
+        || recovery.large_llm_call_alerts.length > 0;
+    return hasContent ? recovery : null;
+}
+
+function deriveThinkingRecoveryProgress(request = null) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const candidates = [
+        request?.recoveryProgress,
+        request?.recovery_progress,
+        request?.thinking_interpretability?.recovery_progress,
+        latestProgress?.recovery_progress,
+        latestProgress?.thinking_interpretability?.recovery_progress,
+        latestProgress?.progress_view_model?.recovery_progress
+    ];
+    for (const candidate of candidates) {
+        const recovery = normaliseThinkingRecoveryProgress(candidate);
+        if (recovery) {
+            return recovery;
+        }
+    }
+    return null;
+}
+
+function getThinkingLlmPromptCharCount(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    const direct = toThinkingCardOptionalNonNegativeInteger(
+        entry.prompt_char_count || entry.max_prompt_char_count
+    );
+    if (direct !== null) {
+        return direct;
+    }
+    const promptCapture = entry.prompt && typeof entry.prompt === 'object'
+        ? entry.prompt
+        : null;
+    if (promptCapture) {
+        const captureCount = toThinkingCardOptionalNonNegativeInteger(
+            promptCapture.char_count || promptCapture.content_char_count
+        );
+        if (captureCount !== null) {
+            return captureCount;
+        }
+        const promptText = normaliseThinkingActivityString(promptCapture.text || promptCapture.preview);
+        if (promptText) {
+            return promptText.length;
+        }
+    }
+    return null;
+}
+
+function buildThinkingLargeLlmCallAlertKey(alert) {
+    return [
+        normaliseThinkingActivityString(alert?.call_id),
+        normaliseThinkingActivityString(alert?.stage),
+        normaliseThinkingActivityString(alert?.model),
+        String(alert?.prompt_char_count ?? '')
+    ].join('::');
+}
+
+function collectThinkingLargeLlmCallAlerts(request = null, viewModel = null) {
+    const alerts = [];
+    const addAlert = (candidate) => {
+        const alert = normaliseThinkingLargeLlmCallAlert(candidate);
+        if (alert) {
+            alerts.push(alert);
+        }
+    };
+    normaliseThinkingLargeLlmCallAlerts(viewModel?.large_llm_call_alerts).forEach(addAlert);
+    normaliseThinkingLargeLlmCallAlerts(viewModel?.recovery_progress?.large_llm_call_alerts).forEach(addAlert);
+    normaliseThinkingLargeLlmCallAlerts(request?.latestProgress?.large_llm_call_alerts).forEach(addAlert);
+    normaliseThinkingLargeLlmCallAlerts(request?.latestProgress?.recovery_progress?.large_llm_call_alerts).forEach(addAlert);
+
+    for (const row of getThinkingTimingRows(request)) {
+        addAlert({
+            stage: row.stage || row.stage_id,
+            model: row.model,
+            provider: row.provider,
+            duration_ms: row.duration_ms,
+            prompt_char_count: row.max_prompt_char_count || row.prompt_char_count
+        });
+    }
+    for (const row of getThinkingModelPromptTimingRows(request)) {
+        addAlert({
+            stage: row.stage || row.stage_id,
+            model: row.model,
+            provider: row.provider,
+            duration_ms: row.duration_ms,
+            prompt_char_count: row.max_prompt_char_count || row.prompt_char_count
+        });
+    }
+
+    for (const entry of collectThinkingLiveLlmCallLogEntries(request)) {
+        const promptCharCount = getThinkingLlmPromptCharCount(entry);
+        addAlert({
+            stage: entry.stage,
+            model: entry.model,
+            provider: entry.provider,
+            duration_ms: entry.duration_ms,
+            prompt_char_count: promptCharCount,
+            call_id: entry.call_id || entry.llm_call_id
+        });
+    }
+
+    const seen = new Set();
+    return alerts.filter((alert) => {
+        const key = buildThinkingLargeLlmCallAlertKey(alert);
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
+function formatThinkingLargeLlmCallAlert(alert) {
+    const promptCharCount = toThinkingCardOptionalNonNegativeInteger(alert?.prompt_char_count);
+    if (promptCharCount === null) {
+        return '';
+    }
+    const stage = normaliseThinkingActivityString(alert.stage_label)
+        || normaliseThinkingActivityString(alert.stage)
+        || 'LLM call';
+    const model = [alert.provider, alert.model].filter(Boolean).join('/');
+    const duration = formatThinkingDiagnosticDuration(alert.duration_ms);
+    return [
+        `${stage}: ${promptCharCount.toLocaleString()} prompt chars`,
+        model,
+        duration
+    ].filter(Boolean).join(' · ');
+}
+
+function buildThinkingRecoveryFailureSummary(recoveryProgress) {
+    const failure = recoveryProgress?.latest_failure;
+    if (!failure || typeof failure !== 'object') {
+        return '';
+    }
+    const tool = normaliseThinkingActivityString(failure.tool || failure.workflow_task);
+    const code = normaliseThinkingActivityString(failure.error_code || failure.failure_kind);
+    const error = normaliseThinkingActivityString(failure.error);
+    return [
+        tool,
+        code,
+        error && error !== code ? error : ''
+    ].filter(Boolean).join(' · ');
+}
+
+function buildThinkingRecoveryProgressSummary(recoveryProgress) {
+    if (!recoveryProgress || typeof recoveryProgress !== 'object') {
+        return '';
+    }
+    const label = normaliseThinkingActivityString(recoveryProgress.latest_recovery_stage_label)
+        || normaliseThinkingActivityString(recoveryProgress.latest_recovery_stage_id)
+        || 'Recovery';
+    const attemptCount = toThinkingCardOptionalNonNegativeInteger(recoveryProgress.attempt_count);
+    const state = recoveryProgress.active
+        ? 'active'
+        : (recoveryProgress.finalising_after_recovery ? 'finalising after recovery' : 'recent');
+    return [
+        label,
+        state,
+        attemptCount !== null ? `attempt ${attemptCount}` : ''
+    ].filter(Boolean).join(' · ');
+}
+
 function normaliseThinkingExecutionInterpretation(value, request = null) {
     if (!value || typeof value !== 'object') {
         return null;
@@ -4520,8 +4834,10 @@ function normaliseThinkingExecutionInterpretation(value, request = null) {
         latestProgress?.pending_reason,
         latestProgress?.failure_kind
     ) || null;
+    const recoveryProgress = normaliseThinkingRecoveryProgress(value.recovery_progress)
+        || deriveThinkingRecoveryProgress(request);
 
-    if (!identitySummary && !stepSummary && !blockerSummary && !stageLabel) {
+    if (!identitySummary && !stepSummary && !blockerSummary && !stageLabel && !recoveryProgress) {
         return null;
     }
 
@@ -4541,7 +4857,8 @@ function normaliseThinkingExecutionInterpretation(value, request = null) {
         stage,
         stage_label: stageLabel,
         post_processing_only: value.post_processing_only === true,
-        progress_contract: normaliseThinkingProgressContract(value.progress_contract)
+        progress_contract: normaliseThinkingProgressContract(value.progress_contract),
+        recovery_progress: recoveryProgress
     };
 }
 
@@ -4598,6 +4915,7 @@ function deriveThinkingExecutionInterpretation(request = null) {
     }
 
     const latestCoreStageLabel = findLatestNonFinalisingStageLabel(request);
+    const recoveryProgress = deriveThinkingRecoveryProgress(request);
     let stepSummary = firstThinkingCardText(
         latestProgress?.result_summary,
         latestProgress?.subtask,
@@ -4617,6 +4935,12 @@ function deriveThinkingExecutionInterpretation(request = null) {
             postProcessDetail
         ].filter(Boolean).join(' · ');
     }
+    if (recoveryProgress) {
+        progressKind = stage === 'response_finalising'
+            ? 'post_recovery_finalising'
+            : 'recovery';
+        stepSummary = stepSummary || buildThinkingRecoveryProgressSummary(recoveryProgress);
+    }
 
     return {
         schema_version: 'thinking_interpretability.v1',
@@ -4634,7 +4958,8 @@ function deriveThinkingExecutionInterpretation(request = null) {
         stage,
         stage_label: stageLabel,
         post_processing_only: postProcessingOnly,
-        progress_contract: normaliseThinkingProgressContract(latestProgress?.thinking_interpretability?.progress_contract)
+        progress_contract: normaliseThinkingProgressContract(latestProgress?.thinking_interpretability?.progress_contract),
+        recovery_progress: recoveryProgress
     };
 }
 
@@ -4832,6 +5157,14 @@ function toThinkingCardNonNegativeInteger(value) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) {
         return 0;
+    }
+    return Math.max(0, Math.trunc(parsed));
+}
+
+function toThinkingCardOptionalNonNegativeInteger(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return null;
     }
     return Math.max(0, Math.trunc(parsed));
 }
@@ -5044,6 +5377,23 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         rawViewModel.thinking_interpretability || rawViewModel.execution_interpretation,
         request
     ) || deriveThinkingExecutionInterpretation(request);
+    const recoveryProgress = normaliseThinkingRecoveryProgress(
+        rawViewModel.recovery_progress
+    ) || executionInterpretation?.recovery_progress || deriveThinkingRecoveryProgress(request);
+    const rawLargeLlmCallAlerts = [
+        ...normaliseThinkingLargeLlmCallAlerts(rawViewModel.large_llm_call_alerts),
+        ...normaliseThinkingLargeLlmCallAlerts(recoveryProgress?.large_llm_call_alerts),
+        ...collectThinkingLargeLlmCallAlerts(request)
+    ];
+    const seenLargeLlmCallAlerts = new Set();
+    const largeLlmCallAlerts = rawLargeLlmCallAlerts.filter((alert) => {
+        const key = buildThinkingLargeLlmCallAlertKey(alert);
+        if (seenLargeLlmCallAlerts.has(key)) {
+            return false;
+        }
+        seenLargeLlmCallAlerts.add(key);
+        return true;
+    });
 
     const viewModel = {
         schema_version: THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA,
@@ -5079,6 +5429,8 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         workflow_execution_summary: workflowExecutionSummary,
         workflow_verification_summary: workflowVerificationSummary,
         execution_interpretation: executionInterpretation,
+        recovery_progress: recoveryProgress,
+        large_llm_call_alerts: largeLlmCallAlerts,
         llm_input_lifecycle: llmLifecycle,
         wait_state: waitState,
         confirmation_requirement: firstThinkingCardText(
@@ -5104,10 +5456,12 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         viewModel.workflow_verification_summary,
         viewModel.execution_interpretation?.identity_summary,
         viewModel.execution_interpretation?.step_summary,
+        buildThinkingRecoveryProgressSummary(viewModel.recovery_progress),
         viewModel.confirmation_requirement,
         viewModel.uncertainty_summary
     ].some(Boolean) || Boolean(viewModel.selected_workflow) || Boolean(viewModel.llm_input_lifecycle)
         || Boolean(viewModel.wait_state) || viewModel.missing_telemetry.length > 0
+        || viewModel.large_llm_call_alerts.length > 0
         || viewModel.expert_details.length > 0 || viewModel.debug_details.length > 0;
 
     return hasContent ? viewModel : null;
@@ -5402,6 +5756,8 @@ function buildThinkingCardProgressViewModel(request) {
         llmLifecycle
     });
     const executionInterpretation = deriveThinkingExecutionInterpretation(request);
+    const recoveryProgress = deriveThinkingRecoveryProgress(request);
+    const largeLlmCallAlerts = collectThinkingLargeLlmCallAlerts(request);
 
     const viewModel = {
         schema_version: THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA,
@@ -5414,6 +5770,8 @@ function buildThinkingCardProgressViewModel(request) {
         evidence_context_summary: evidenceSummary || null,
         current_activity: currentActivity || null,
         execution_interpretation: executionInterpretation,
+        recovery_progress: recoveryProgress,
+        large_llm_call_alerts: largeLlmCallAlerts,
         llm_input_lifecycle: llmLifecycle,
         wait_state: waitState,
         confirmation_requirement: confirmationRequirement || null,
@@ -5460,7 +5818,7 @@ function recordThinkingPrecedenceViolation(detail = {}) {
     }
 }
 
-function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_MODE_DEFAULT) {
+function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_MODE_DEFAULT, request = null) {
     if (!viewModel || typeof viewModel !== 'object') {
         return '';
     }
@@ -5493,6 +5851,9 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
         selectedWorkflowRowEmitted = true;
     }
     addItem('Verification', viewModel.workflow_verification_summary);
+    const recoveryProgress = viewModel.recovery_progress || viewModel.execution_interpretation?.recovery_progress;
+    addItem('Recovery status', buildThinkingRecoveryProgressSummary(recoveryProgress));
+    addItem('Recovery trigger', buildThinkingRecoveryFailureSummary(recoveryProgress), '', 'warning');
     if (interpretationFamily === 'selected_workflow'
         && renderThinkingCardSynopsisItemHTML({ label: 'Execution path', value: viewModel.execution_interpretation?.identity_summary })) {
         selectedWorkflowRowEmitted = true;
@@ -5529,6 +5890,10 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
     if (renderMode === THINKING_CARD_MODE_EXPERT || renderMode === THINKING_CARD_MODE_DEBUG) {
         if (viewModel.selected_workflow?.label) {
             addItem('Selected workflow', viewModel.selected_workflow.label);
+        }
+        const largeLlmCallAlerts = collectThinkingLargeLlmCallAlerts(request, viewModel);
+        for (const alert of largeLlmCallAlerts) {
+            addItem('Large LLM input', formatThinkingLargeLlmCallAlert(alert), '', 'warning');
         }
         for (const detail of viewModel.expert_details || []) {
             addItem('Expert detail', detail);
@@ -5647,6 +6012,8 @@ function cloneThinkingModelPromptTimingRows(value) {
                 success_count: Number.isFinite(entry.success_count) ? Number(entry.success_count) : null,
                 failure_count: Number.isFinite(entry.failure_count) ? Number(entry.failure_count) : null,
                 duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
+                prompt_char_count: Number.isFinite(entry.prompt_char_count) ? Number(entry.prompt_char_count) : null,
+                max_prompt_char_count: Number.isFinite(entry.max_prompt_char_count) ? Number(entry.max_prompt_char_count) : null,
                 first_output_latency_ms: cloneThinkingLatencySummary(entry.first_output_latency_ms)
             }))
         : [];
@@ -9643,6 +10010,15 @@ function formatThinkingModelPromptTimingLine(row) {
         ? `${Number(row.failure_count)} failed`
         : '';
     const duration = formatThinkingDiagnosticDuration(row.duration_ms);
+    const promptCharCount = toThinkingCardOptionalNonNegativeInteger(
+        row.max_prompt_char_count || row.prompt_char_count
+    );
+    const promptSize = (
+        promptCharCount !== null
+        && promptCharCount >= THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD
+    )
+        ? `large input ${promptCharCount.toLocaleString()} chars`
+        : '';
     const latencySummary = row.first_output_latency_ms && typeof row.first_output_latency_ms === 'object'
         ? row.first_output_latency_ms
         : null;
@@ -9657,6 +10033,7 @@ function formatThinkingModelPromptTimingLine(row) {
         calls,
         successCount,
         failureCount,
+        promptSize,
         duration,
         firstOutput
     ].filter(Boolean).join(' · ');
@@ -9738,10 +10115,20 @@ function formatThinkingLlmTimingLine(row) {
     const calls = Number.isFinite(row.call_count)
         ? formatThinkingCountLabel(Number(row.call_count), 'call')
         : '';
+    const promptCharCount = toThinkingCardOptionalNonNegativeInteger(
+        row.max_prompt_char_count || row.prompt_char_count
+    );
+    const promptSize = (
+        promptCharCount !== null
+        && promptCharCount >= THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD
+    )
+        ? `large input ${promptCharCount.toLocaleString()} chars`
+        : '';
     const bits = [
         stage ? formatThinkingActivityFallbackLabel(stage) : '',
         provider ? `${provider}/${model}` : model,
         calls,
+        promptSize,
         duration
     ].filter(Boolean);
 
@@ -9860,7 +10247,7 @@ function renderWorkflowDiscoveryHTML(workflows) {
 function renderThinkingCardBodyHTML(request, options = {}) {
     const mode = getThinkingCardMode(request, options);
     const progressViewModel = buildThinkingCardProgressViewModel(request);
-    const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode);
+    const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode, request);
     const criticHtml = renderThinkingCriticPanelHTML(request);
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const llmCallLogHtml = renderThinkingLlmCallLogSectionHTML(request, mode);
@@ -10101,6 +10488,8 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
 
     const promptText = captureTextForThinkingLlmCallLog(promptCapture);
     const responseText = captureTextForThinkingLlmCallLog(responseCapture);
+    const promptCharCount = toThinkingCardOptionalNonNegativeInteger(promptCapture?.char_count)
+        || (promptText ? promptText.length : null);
     const sequenceNo = Number.isFinite(entry?.sequence_no)
         ? Number(entry.sequence_no)
         : (Number.isFinite(existing?.sequence_no) ? Number(existing.sequence_no) : index + 1);
@@ -10129,11 +10518,15 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
         duration_ms: Number.isFinite(entry?.duration_ms)
             ? Math.max(0, Number(entry.duration_ms))
             : (Number.isFinite(existing?.duration_ms) ? Number(existing.duration_ms) : null),
+        prompt_char_count: promptCharCount !== null
+            ? promptCharCount
+            : (Number.isFinite(existing?.prompt_char_count) ? Number(existing.prompt_char_count) : null),
         live_state: state || existing?.live_state || '',
         prompt: promptText
             ? {
                 text: promptText,
-                is_truncated: promptCapture?.preview_truncated === true
+                is_truncated: promptCapture?.preview_truncated === true,
+                char_count: promptCharCount
             }
             : (existing?.prompt || null),
         response: responseText
@@ -10340,6 +10733,14 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
         const responseText = normaliseThinkingActivityString(entry?.response?.text);
         const promptTruncated = entry?.prompt?.is_truncated === true;
         const responseTruncated = entry?.response?.is_truncated === true;
+        const promptCharCount = getThinkingLlmPromptCharCount(entry);
+        const promptSizeCue = (
+            options?.showLargeInputCue === true
+            && promptCharCount !== null
+            && promptCharCount >= THINKING_LARGE_LLM_PROMPT_CHAR_THRESHOLD
+        )
+            ? `large input ${promptCharCount.toLocaleString()} chars`
+            : '';
         const unavailableReason = normaliseThinkingActivityString(entry?.unavailable_reason);
         const durationMs = Number.isFinite(entry?.duration_ms) ? Math.max(0, Number(entry.duration_ms)) : null;
         const atUtc = normaliseThinkingActivityString(entry?.at_utc)
@@ -10355,10 +10756,15 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
             formatThinkingActivityFallbackLabel(callType),
             liveState,
             provider ? `${model} (${provider})` : model,
+            promptSizeCue,
             durationMs !== null ? `${durationMs}ms` : ''
         ].filter(Boolean);
 
-        const promptMeta = promptTruncated ? ' (truncated)' : '';
+        const promptMetaBits = [
+            promptCharCount !== null ? `${promptCharCount.toLocaleString()} chars` : '',
+            promptTruncated ? 'truncated' : ''
+        ].filter(Boolean);
+        const promptMeta = promptMetaBits.length > 0 ? ` (${promptMetaBits.join(', ')})` : '';
         const responseMeta = responseTruncated ? ' (truncated)' : '';
         const archiveLoadButton = (
             options?.canLoadArchive === true
@@ -10390,7 +10796,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
 }
 
 function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
-    normaliseThinkingCardMode(mode);
+    const renderMode = normaliseThinkingCardMode(mode);
 
     const requestId = resolveThinkingRequestIdForLlmCallLog(request);
     if (!requestId) {
@@ -10436,7 +10842,8 @@ function renderThinkingLlmCallLogSectionHTML(request, mode = THINKING_CARD_MODE_
     const entriesHtml = (state.loaded || liveEntries.length > 0 || cachedExpandedEntries.length > 0)
         ? renderThinkingLlmCallLogEntriesHTML(visibleEntries, {
             archiveLoaded: state.loaded,
-            canLoadArchive: true
+            canLoadArchive: true,
+            showLargeInputCue: renderMode !== THINKING_CARD_MODE_DEFAULT
         })
         : '';
 
