@@ -29,6 +29,14 @@ from ..services.workflow_llm_duration_stats_service import (
 )
 from .llm_call_telemetry import stamp_llm_call_timestamps
 from .prompt_metadata_resolution import resolve_model_prompt_variant
+from .recovery_prompt_compaction import (
+    RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
+    RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET,
+    TOTAL_TRUNCATION_MARKER,
+    compact_recovery_context_field,
+    is_recovery_decision_state,
+    render_compacted_recovery_field_text,
+)
 from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -943,13 +951,37 @@ def _resolve_prompt_render(
     return None, None, {}, None
 
 
-def _compose_llm_prompt(
+def _append_recovery_total_truncation_marker(
+    *,
+    sections: list[str],
+    remaining_budget: int,
+    diagnostics: dict[str, Any],
+) -> int:
+    if remaining_budget <= 0:
+        diagnostics["total_truncation_marker_rendered"] = False
+        return remaining_budget
+    marker = (
+        TOTAL_TRUNCATION_MARKER
+        if len(TOTAL_TRUNCATION_MARKER) <= remaining_budget
+        else TOTAL_TRUNCATION_MARKER[:remaining_budget]
+    )
+    if not marker:
+        diagnostics["total_truncation_marker_rendered"] = False
+        return remaining_budget
+    sections.append(marker)
+    diagnostics["total_truncation_marker_rendered"] = True
+    return remaining_budget - len(marker)
+
+
+def _compose_llm_prompt_with_diagnostics(
     *,
     base_prompt: str,
     llm_policy: Mapping[str, Any],
     context: Mapping[str, Any],
-) -> str:
+    workflow_state_id: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     sections: list[str] = []
+    prompt_context_diagnostics: dict[str, Any] = {}
 
     prefix_text = _context_string(
         llm_policy.get("prompt_prefix_text") or llm_policy.get("system_preamble")
@@ -969,20 +1001,155 @@ def _compose_llm_prompt(
     if isinstance(raw_context_fields, Sequence) and not isinstance(
         raw_context_fields, (str, bytes, bytearray)
     ):
-        for item in raw_context_fields:
+        context_field_items = list(raw_context_fields)
+        # JVNAUTOSCI-2514: the recovery-decision step inlines the full turn
+        # state; project each field to bounded runtime evidence and cap the
+        # total so the prompt cannot balloon to tens of thousands of tokens.
+        is_recovery = is_recovery_decision_state(workflow_state_id)
+        remaining_recovery_budget = RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET
+        recovery_diagnostics: dict[str, Any] | None = None
+        if is_recovery:
+            recovery_diagnostics = {
+                "schema_version": "recovery_context_compaction.v1",
+                "enabled": True,
+                "workflow_state_id": _context_string(workflow_state_id),
+                "field_char_budget": RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
+                "total_context_char_budget": RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET,
+                "candidate_context_field_count": len(context_field_items),
+                "rendered_context_field_count": 0,
+                "skipped_empty_context_field_count": 0,
+                "omitted_context_field_count": 0,
+                "rendered_context_chars": 0,
+                "total_context_budget_exhausted": False,
+                "total_truncation_marker_rendered": False,
+                "fields": [],
+            }
+
+        for index, item in enumerate(context_field_items):
             if not isinstance(item, Mapping):
                 continue
             context_key = _context_string(item.get("context_key"))
             if not context_key:
                 continue
             value = context.get(context_key)
+            label = _context_string(item.get("label")) or context_key.replace("_", " ")
+            if is_recovery:
+                assert recovery_diagnostics is not None
+                if remaining_recovery_budget <= 0:
+                    recovery_diagnostics["total_context_budget_exhausted"] = True
+                    recovery_diagnostics["omitted_context_field_count"] = (
+                        len(context_field_items) - index
+                    )
+                    break
+                projection = compact_recovery_context_field(value)
+                value_text = _serialise_prompt_context_value(projection.value)
+                field_diagnostics = dict(projection.diagnostics)
+                field_diagnostics.update(
+                    {
+                        "context_key": context_key,
+                        "label": label,
+                        "input_value_kind": type(value).__name__,
+                    }
+                )
+                if not value_text:
+                    field_diagnostics["skipped_empty"] = True
+                    recovery_diagnostics["skipped_empty_context_field_count"] = (
+                        int(
+                            recovery_diagnostics.get(
+                                "skipped_empty_context_field_count"
+                            )
+                            or 0
+                        )
+                        + 1
+                    )
+                    recovery_diagnostics["fields"].append(field_diagnostics)
+                    continue
+                header = f"{label}:\n"
+                body_budget = min(
+                    RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
+                    max(0, remaining_recovery_budget - len(header)),
+                )
+                if body_budget <= 0:
+                    recovery_diagnostics["total_context_budget_exhausted"] = True
+                    recovery_diagnostics["omitted_context_field_count"] = (
+                        len(context_field_items) - index
+                    )
+                    break
+                serialised_compacted_chars = len(value_text)
+                value_text = render_compacted_recovery_field_text(
+                    value_text,
+                    char_budget=body_budget,
+                )
+                section = f"{header}{value_text}"
+                remaining_recovery_budget -= len(section)
+                field_diagnostics.update(
+                    {
+                        "skipped_empty": False,
+                        "serialised_compacted_chars": serialised_compacted_chars,
+                        "rendered_body_chars": len(value_text),
+                        "rendered_section_chars": len(section),
+                        "field_char_budget_used": body_budget,
+                        "body_truncated_by_char_budget": (
+                            serialised_compacted_chars > body_budget
+                        ),
+                    }
+                )
+                recovery_diagnostics["fields"].append(field_diagnostics)
+                recovery_diagnostics["rendered_context_field_count"] = (
+                    int(recovery_diagnostics.get("rendered_context_field_count") or 0)
+                    + 1
+                )
+                recovery_diagnostics["rendered_context_chars"] = int(
+                    recovery_diagnostics.get("rendered_context_chars") or 0
+                ) + len(section)
+                sections.append(section)
+                continue
             value_text = _serialise_prompt_context_value(value)
             if not value_text:
                 continue
-            label = _context_string(item.get("label")) or context_key.replace("_", " ")
             sections.append(f"{label}:\n{value_text}")
 
-    return "\n\n".join(section for section in sections if section).strip()
+        if recovery_diagnostics is not None:
+            if recovery_diagnostics["omitted_context_field_count"]:
+                remaining_recovery_budget = _append_recovery_total_truncation_marker(
+                    sections=sections,
+                    remaining_budget=remaining_recovery_budget,
+                    diagnostics=recovery_diagnostics,
+                )
+            recovery_diagnostics["context_char_budget_remaining"] = max(
+                0,
+                remaining_recovery_budget,
+            )
+            prompt_context_diagnostics["schema_version"] = (
+                "llm_prompt_context_diagnostics.v1"
+            )
+            prompt_context_diagnostics["workflow_state_id"] = _context_string(
+                workflow_state_id
+            )
+            prompt_context_diagnostics["recovery_context_compaction"] = (
+                recovery_diagnostics
+            )
+
+    rendered_prompt = "\n\n".join(section for section in sections if section).strip()
+    if prompt_context_diagnostics:
+        prompt_context_diagnostics["rendered_prompt_chars"] = len(rendered_prompt)
+    return rendered_prompt, prompt_context_diagnostics
+
+
+def _compose_llm_prompt(
+    *,
+    base_prompt: str,
+    llm_policy: Mapping[str, Any],
+    context: Mapping[str, Any],
+    workflow_state_id: str | None = None,
+) -> str:
+    rendered_prompt, _diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt=base_prompt,
+        llm_policy=llm_policy,
+        context=context,
+        workflow_state_id=workflow_state_id,
+    )
+    return rendered_prompt
 
 
 def _validation_output_format(validation_policy: Mapping[str, Any]) -> str:
@@ -1621,6 +1788,7 @@ def _build_result(
     required_tool_obligation_ledger: Mapping[str, Any] | None = None,
     max_tool_invocations: int | None = None,
     prompt_variant_selection: Mapping[str, Any] | None = None,
+    prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     validated_outputs, validation_summary = _apply_validation_policy(
         request=request,
@@ -1672,6 +1840,10 @@ def _build_result(
         llm_step_envelope["max_tool_invocations"] = int(max_tool_invocations)
     if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
         llm_step_envelope["prompt_variant_selection"] = dict(prompt_variant_selection)
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        llm_step_envelope["prompt_context_diagnostics"] = dict(
+            prompt_context_diagnostics
+        )
 
     outputs = {
         "final_response": response_text,
@@ -1700,6 +1872,8 @@ def _build_result(
         outputs["max_tool_invocations"] = int(max_tool_invocations)
     if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
         outputs["prompt_variant_selection"] = dict(prompt_variant_selection)
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        outputs["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
     outputs.update(validated_outputs)
     validation_status = _context_string(validation_summary.get("status")).lower()
     if validation_status == "failed":
@@ -1725,6 +1899,7 @@ def _build_timeout_failure_result(
     llm_calls: Sequence[Mapping[str, Any]],
     aux_llm_calls: Sequence[Mapping[str, Any]],
     prompt_variant_selection: Mapping[str, Any] | None = None,
+    prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     llm_step_envelope = {
         "execution_mode": "llm",
@@ -1754,13 +1929,20 @@ def _build_timeout_failure_result(
             "base_prompt_concept_id"
         )
         llm_step_envelope["prompt_variant_selection"] = dict(prompt_variant_selection)
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        llm_step_envelope["prompt_context_diagnostics"] = dict(
+            prompt_context_diagnostics
+        )
+    outputs: dict[str, Any] = {
+        "llm_step_envelope": llm_step_envelope,
+        "llm_calls": list(llm_calls),
+        "aux_llm_calls": list(aux_llm_calls),
+    }
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        outputs["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
     return WorkflowActionResult(
         status="failed",
-        outputs={
-            "llm_step_envelope": llm_step_envelope,
-            "llm_calls": list(llm_calls),
-            "aux_llm_calls": list(aux_llm_calls),
-        },
+        outputs=outputs,
         error=f"workflow_llm_step_timeout:{timeout_detail}",
     )
 
@@ -1776,6 +1958,7 @@ def _run_direct_llm_step(
     llm_policy_map: Mapping[str, Any],
     validation_policy_map: Mapping[str, Any],
     prompt_variant_selection: Mapping[str, Any] | None = None,
+    prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     llm_client = request.environment.llm_client
     if llm_client is None or not hasattr(llm_client, "generate"):
@@ -1805,6 +1988,8 @@ def _run_direct_llm_step(
         duration_ms=duration_ms,
         note="generic_llm_step_direct",
     )
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        llm_call_entry["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
     _record_workflow_llm_duration_for_entry(
         request,
         llm_call_entry,
@@ -1830,6 +2015,7 @@ def _run_direct_llm_step(
         llm_calls=request.data.get("llm_calls") or [],
         aux_llm_calls=request.data.get("aux_llm_calls") or [],
         prompt_variant_selection=prompt_variant_selection,
+        prompt_context_diagnostics=prompt_context_diagnostics,
     )
 
 
@@ -1844,6 +2030,7 @@ def _run_gateway_llm_step_no_tools(
     llm_policy_map: Mapping[str, Any],
     validation_policy_map: Mapping[str, Any],
     prompt_variant_selection: Mapping[str, Any] | None = None,
+    prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
         _build_gateway_runtime(request)
@@ -1922,6 +2109,11 @@ def _run_gateway_llm_step_no_tools(
             entry["error_class"] = error_class.strip()
         if isinstance(failure_kind, str) and failure_kind.strip():
             entry["failure_kind"] = failure_kind.strip()
+        if (
+            isinstance(prompt_context_diagnostics, Mapping)
+            and prompt_context_diagnostics
+        ):
+            entry["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
         stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(
@@ -1970,6 +2162,7 @@ def _run_gateway_llm_step_no_tools(
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
             prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
         )
 
     return _build_result(
@@ -1987,6 +2180,7 @@ def _run_gateway_llm_step_no_tools(
         llm_calls=llm_calls,
         aux_llm_calls=aux_llm_calls,
         prompt_variant_selection=prompt_variant_selection,
+        prompt_context_diagnostics=prompt_context_diagnostics,
     )
 
 
@@ -2055,10 +2249,11 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         if prompt_variant_resolution.match_reason != "base_prompt":
             prompt_source = f"{prompt_source or 'prompt'}:model_variant"
 
-    rendered_prompt = _compose_llm_prompt(
+    rendered_prompt, prompt_context_diagnostics = _compose_llm_prompt_with_diagnostics(
         base_prompt=base_prompt_text,
         llm_policy=llm_policy_map,
         context=request.data,
+        workflow_state_id=request.workflow_state_id,
     )
     if not rendered_prompt:
         return WorkflowActionResult(
@@ -2109,6 +2304,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             llm_policy_map=llm_policy_map,
             validation_policy_map=validation_policy_map,
             prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
         )
 
     if _tool_mode(llm_policy_map) != "allowed":
@@ -2122,6 +2318,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             llm_policy_map=llm_policy_map,
             validation_policy_map=validation_policy_map,
             prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
         )
 
     allowed_tools_raw = llm_policy_map.get("allowed_tools")
@@ -2301,6 +2498,11 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             entry["error_class"] = error_class.strip()
         if isinstance(failure_kind, str) and failure_kind.strip():
             entry["failure_kind"] = failure_kind.strip()
+        if (
+            isinstance(prompt_context_diagnostics, Mapping)
+            and prompt_context_diagnostics
+        ):
+            entry["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
         stamp_llm_call_timestamps(entry, duration_ms=duration_ms)
         llm_calls.append(entry)
         _record_workflow_llm_duration_for_entry(
@@ -2516,6 +2718,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
             prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
         )
 
     orchestrator_result = shared_data.get("orchestrator_result")
@@ -2588,6 +2791,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         required_tool_obligation_ledger=final_required_tool_obligation_ledger,
         max_tool_invocations=max_tool_invocations,
         prompt_variant_selection=prompt_variant_selection,
+        prompt_context_diagnostics=prompt_context_diagnostics,
     )
 
 

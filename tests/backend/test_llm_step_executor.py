@@ -15,8 +15,14 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
 )
-from src.backend.workflows.llm_step_executor import execute_llm_step
-from src.backend.workflows.llm_step_executor import _compose_llm_prompt
+from src.backend.workflows.llm_step_executor import (
+    _compose_llm_prompt,
+    _compose_llm_prompt_with_diagnostics,
+    execute_llm_step,
+)
+from src.backend.workflows.recovery_prompt_compaction import (
+    RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET,
+)
 from src.backend.workflows import prompt_metadata_resolution as pmr
 
 
@@ -90,6 +96,120 @@ def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> No
     assert "Inspect telemetry before asking the user." in prompt
 
 
+def test_compose_llm_prompt_compacts_recovery_context_with_diagnostics() -> None:
+    huge_description = "candidate detail " * 800
+    huge_internal_payload = "internal routing payload " * 1200
+    prompt, diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt="Return the recovery JSON.",
+        llm_policy={
+            "context_fields": [
+                {
+                    "context_key": "selected_workflow_trace",
+                    "label": "Selected Workflow Outcome",
+                },
+                {
+                    "context_key": "workflow_discovery_result",
+                    "label": "Workflow Discovery Result",
+                },
+                {
+                    "context_key": "completion_gate_evidence_payload",
+                    "label": "Completion Gate Evidence",
+                },
+                {
+                    "context_key": "completion_gate_loop_attempts",
+                    "label": "Recovery Loop Attempts",
+                },
+                {
+                    "context_key": "extra_payload",
+                    "label": "Extra Payload",
+                },
+            ]
+        },
+        context={
+            "selected_workflow_trace": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "failure_detail": "gmail_list_messages failed: invalid_grant",
+                "workflow_discovery_result": {
+                    "duplicated_bulk": huge_internal_payload,
+                },
+                "stage_timings": {"prefill": huge_internal_payload},
+            },
+            "workflow_discovery_result": {
+                "candidates": [
+                    {
+                        "workflow_id": f"#V#candidate_{index}",
+                        "description": huge_description,
+                        "routing_index_metadata": {"bulk": huge_internal_payload},
+                    }
+                    for index in range(12)
+                ]
+            },
+            "completion_gate_evidence_payload": {
+                "blocking_failure_codes": ["invalid_grant"],
+                "unresolved_preconditions": [
+                    {
+                        "status_reason": (
+                            "gmail_list_messages returned invalid_grant for the "
+                            "authenticated Gmail profile"
+                        ),
+                    }
+                ],
+                "long_internal_note": huge_internal_payload,
+            },
+            "completion_gate_loop_attempts": 4,
+            "extra_payload": {
+                f"payload_{index}": huge_internal_payload for index in range(12)
+            },
+        },
+        workflow_state_id="recovery_decision",
+    )
+
+    assert len(prompt) <= RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET + 200
+    assert "gmail_list_messages failed: invalid_grant" in prompt
+    assert "Recovery Loop Attempts:\n4" in prompt
+    assert "duplicated_bulk" not in prompt
+    assert '"stage_timings"' not in prompt
+
+    recovery = diagnostics["recovery_context_compaction"]
+    assert recovery["enabled"] is True
+    assert recovery["rendered_context_chars"] <= RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET
+    assert recovery["rendered_context_field_count"] >= 4
+    field_diagnostics = {field["context_key"]: field for field in recovery["fields"]}
+    assert (
+        field_diagnostics["selected_workflow_trace"]["dropped_keys"][
+            "workflow_discovery_result"
+        ]
+        == 1
+    )
+    assert (
+        field_diagnostics["workflow_discovery_result"]["truncated_list_omitted_items"]
+        == 6
+    )
+    assert field_diagnostics["extra_payload"]["body_truncated_by_char_budget"] is True
+
+
+def test_compose_llm_prompt_leaves_non_recovery_context_uncompacted() -> None:
+    long_value = "full context " * 700
+    prompt, diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt="Use the selector policy.",
+        llm_policy={
+            "context_fields": [
+                {"context_key": "workflow_discovery_result", "label": "Discovery"}
+            ]
+        },
+        context={
+            "workflow_discovery_result": {
+                "workflow_discovery_result": {"nested": long_value},
+                "description": long_value,
+            }
+        },
+        workflow_state_id="selector_decision",
+    )
+
+    assert long_value in prompt
+    assert diagnostics == {}
+
+
 def test_execute_llm_step_parses_json_value_output() -> None:
     request = _build_request(
         llm_response='{"meeting_type":"project_meeting","title":"Roadmap sync"}'
@@ -128,6 +248,72 @@ def test_execute_llm_step_recovers_embedded_json_value_output() -> None:
         "title": "Roadmap sync",
     }
     assert result.outputs["validated_json_parse_mode"] == "embedded_json"
+
+
+def test_execute_llm_step_records_recovery_prompt_compaction_diagnostics() -> None:
+    llm_client = MagicMock()
+    llm_client.generate.return_value = (
+        '{"turn_next_action":{"action_type":"respond_with_follow_up",'
+        '"target_workflow_id":null,'
+        '"response_text":"Gmail retrieval failed; please reconnect Gmail.",'
+        '"tool_calls":null},'
+        '"reasoning":"The Gmail tool failed with invalid_grant."}'
+    )
+    bulky_trace = {
+        "workflow_id": "#V#tool_calling_workflow",
+        "failure_detail": "gmail_list_messages failed: invalid_grant",
+        "workflow_discovery_result": {"bulk": "duplicated discovery " * 2000},
+        "stage_timings": {"prefill": "timing detail " * 2000},
+    }
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm_client, model="qwen3:8b"),
+        data={
+            "selected_workflow_trace": bulky_trace,
+            "completion_gate_evidence_payload": {
+                "blocking_failure_codes": ["invalid_grant"],
+                "unresolved_preconditions": [
+                    {"status_reason": "gmail_list_messages failed: invalid_grant"}
+                ],
+            },
+            "completion_gate_loop_attempts": 4,
+        },
+        prompt_contract={"prompt_text": "Return recovery JSON only."},
+        llm_policy={
+            "context_fields": [
+                {
+                    "context_key": "selected_workflow_trace",
+                    "label": "Selected Workflow Outcome",
+                },
+                {
+                    "context_key": "completion_gate_evidence_payload",
+                    "label": "Completion Gate Evidence",
+                },
+                {
+                    "context_key": "completion_gate_loop_attempts",
+                    "label": "Recovery Loop Attempts",
+                },
+            ]
+        },
+        validation_policy={"output_format": "json_value"},
+        workflow_state_id="recovery_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    rendered_prompt = llm_client.generate.call_args.args[0]
+    assert "gmail_list_messages failed: invalid_grant" in rendered_prompt
+    assert "duplicated discovery" not in rendered_prompt
+    diagnostics = result.outputs["prompt_context_diagnostics"]
+    recovery = diagnostics["recovery_context_compaction"]
+    assert recovery["enabled"] is True
+    assert recovery["workflow_state_id"] == "recovery_decision"
+    assert recovery["rendered_context_chars"] <= RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["prompt_context_diagnostics"] == diagnostics
+    assert result.outputs["llm_calls"][0]["prompt_context_diagnostics"] == diagnostics
 
 
 def test_execute_llm_step_records_duration_baseline_for_direct_workflow_step(

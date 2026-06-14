@@ -44,6 +44,9 @@ docs/papers/
 # Generated replay-suite validation artefacts
 docs/generated/validation_reports/replay_suite_*
 
+# Local live-turn diagnostic evidence
+.fastpath_evidence/
+
 # Ignore directories and sensitive files
 ignore/
 token.*
