@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -148,5 +149,23 @@ def test_jira_get_transitions_metadata_is_discoverable(monkeypatch):
         assert surface.surface_family == "jira"
         assert surface.evidence_surface_family == "jira"
         assert surface.external_surface is True
+    finally:
+        service.invalidate_cache()
+
+
+def test_jira_get_issue_identifier_binding_metadata_is_discoverable(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        binding = service.get_tool_identifier_binding_metadata("jira_get_issue")
+
+        assert binding is not None
+        assert binding.identifier_argument_name == "issue_key"
+        assert binding.identifier_source == "user_text"
+        assert binding.identifier_max_count == 1
+        assert binding.identifier_normalise == "upper"
+        assert re.search(binding.identifier_pattern, "Tell me about JVNAUTOSCI-150")
     finally:
         service.invalidate_cache()

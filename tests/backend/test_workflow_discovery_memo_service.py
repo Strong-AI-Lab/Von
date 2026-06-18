@@ -163,6 +163,7 @@ def test_turn_workflow_discovery_memo_ranks_with_requested_query(
 
     def _discover(user_input: str, **_kwargs: Any) -> dict[str, Any]:
         calls.append(user_input)
+        assert _kwargs["requested_query"] == raw_query
         return {
             "query": user_input,
             "requested_query": raw_query,
@@ -181,11 +182,11 @@ def test_turn_workflow_discovery_memo_ranks_with_requested_query(
         discovery_func=_discover,
     )
 
-    assert calls == [raw_query]
+    assert calls == [enriched_query]
     assert result is not None
     assert result["query"] == enriched_query
-    assert result["ranking_query_input"] == raw_query
-    assert result["ranking_query_input_source"] == "requested_query"
+    assert result["ranking_query_input"] == enriched_query
+    assert result["ranking_query_input_source"] == "expected_outcome_contract"
     assert result["matches"][0]["concept_id"] == (
         "#V#arxiv_paper_representation_workflow"
     )
@@ -239,6 +240,7 @@ def test_turn_workflow_discovery_memo_passes_structured_contract_to_discovery(
     )
 
     assert captured_kwargs["expected_outcome_contract"] == contract
+    assert captured_kwargs["requested_query"] == raw_query
     assert result is not None
     assert result["ranking_query_input_source"] == "expected_outcome_contract"
     assert (

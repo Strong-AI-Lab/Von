@@ -61,7 +61,7 @@ DEFAULT_MAX_RESULTS = 3
 def _coerce_discovery_timeout_seconds(value: Any, *, default: float) -> float:
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return max(0.0, float(default))
     if parsed <= 0.0:
         return max(0.0, float(default))
@@ -516,7 +516,7 @@ def _compute_capability_index_wait_seconds(timeout_seconds: float) -> float:
     """Return the bounded wait budget for a cold capability-index build."""
     try:
         timeout_budget = max(0.0, float(timeout_seconds))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         timeout_budget = 0.0
     if timeout_budget <= 0.0:
         return 0.0
@@ -1797,6 +1797,7 @@ def discover_workflows(
     allow_non_executable: bool = False,
     workflow_registry: Any | None = None,
     expected_outcome_contract: Mapping[str, Any] | None = None,
+    requested_query: str | None = None,
 ) -> WorkflowDiscoveryResult:
     """Discover workflows relevant to user input.
 
@@ -1827,11 +1828,15 @@ def discover_workflows(
         )
 
     query = query.strip()
+    requested_query_text = (
+        requested_query.strip() if isinstance(requested_query, str) else ""
+    ) or query
     if not query:
         return WorkflowDiscoveryResult(
             query="",
             threshold=relevance_threshold,
             errors=["Empty query after trimming"],
+            requested_query=requested_query_text,
         )
 
     start_time = time.perf_counter()
@@ -1949,7 +1954,7 @@ def discover_workflows(
             routing_matches=routing_matches,
             search_time_ms=elapsed_ms,
             query=search_query,
-            requested_query=query,
+            requested_query=requested_query_text,
             threshold=relevance_threshold,
             errors=errors if errors else [],
             search_sources=search_sources,
@@ -1971,7 +1976,7 @@ def discover_workflows(
     direct_resolution_started_at = time.perf_counter()
     direct_matches = _resolve_contract_direct_workflow_candidates(
         search_query,
-        label_query=query,
+        label_query=requested_query_text,
         contract_projection=contract_projection,
         workflow_registry=workflow_registry,
         limit=max_results * 2,
@@ -2319,9 +2324,9 @@ _SELECTOR_FAST_PATH_SUPPORTED_RULES = frozenset(
 )
 
 
-def _resolve_selector_fast_path_policy() -> tuple[
-    Optional[Dict[str, Any]], Dict[str, Any]
-]:
+def _resolve_selector_fast_path_policy() -> (
+    tuple[Optional[Dict[str, Any]], Dict[str, Any]]
+):
     """Resolve the represented selector fast-path policy (JVNAUTOSCI-2406).
 
     The policy is authored on the Vontology concept
@@ -2430,9 +2435,7 @@ def _annotate_selector_fast_path_coverage(
         if isinstance(item, str) and str(item).strip()
     }
     if not contract_tools:
-        payload["selector_fast_path_coverage_status"] = (
-            "no_contract_required_tools"
-        )
+        payload["selector_fast_path_coverage_status"] = "no_contract_required_tools"
         return
 
     actions_covered_by_absence = bool(
@@ -2517,6 +2520,7 @@ def discover_workflows_for_turn(
     allow_non_executable: Optional[bool] = None,
     workflow_registry: Any | None = None,
     expected_outcome_contract: Mapping[str, Any] | None = None,
+    requested_query: str | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Convenience wrapper for workflow discovery during conversation turns.
 
@@ -2555,6 +2559,7 @@ def discover_workflows_for_turn(
             allow_non_executable=effective_allow_non_executable,
             workflow_registry=workflow_registry,
             expected_outcome_contract=expected_outcome_contract,
+            requested_query=requested_query,
         )
         payload = result.to_dict()
         # Self-describing telemetry: every discovery payload records where it
@@ -2588,7 +2593,11 @@ def discover_workflows_for_turn(
             pass
         return WorkflowDiscoveryResult(
             query=user_input.strip(),
-            requested_query=user_input.strip(),
+            requested_query=(
+                requested_query.strip()
+                if isinstance(requested_query, str) and requested_query.strip()
+                else user_input.strip()
+            ),
             threshold=relevance_threshold,
             errors=[
                 (

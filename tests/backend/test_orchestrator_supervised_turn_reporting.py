@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -24,6 +26,10 @@ from src.backend.workflows.definitions import (
 )
 from orchestrator_test_harness import build_db_independent_orchestrator
 
+_DISPATCH_POLICY_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "turn_contract_dispatch_policy.json"
+)
+
 
 class _DummyLLM:
     def generate(self, prompt, context=None, model=None):  # pragma: no cover
@@ -47,6 +53,24 @@ def _stub_base_system_prompt(
             "Test base system prompt",
             "#V#test_base_prompt",
         ),
+    )
+
+
+def _stub_represented_dispatch_policy(monkeypatch) -> None:
+    payload = json.loads(_DISPATCH_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    def _fixture_rows(concept_id, predicate=None, limit=1):
+        if (
+            concept_id == "#V#turn_contract_dispatch_policy"
+            and predicate == "hasContent"
+        ):
+            return [{"text": json.dumps(payload)}]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_contract_dispatch_policy_service."
+        "get_texts_for_concept",
+        _fixture_rows,
     )
 
 
@@ -494,6 +518,7 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
 def test_turn_execution_route_preflight_overrides_direct_response_with_required_tools(
     monkeypatch,
 ) -> None:
+    _stub_represented_dispatch_policy(monkeypatch)
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, _DummyGateway()),

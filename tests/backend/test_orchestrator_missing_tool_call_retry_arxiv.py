@@ -1438,6 +1438,41 @@ def test_missing_tool_call_retry_does_not_force_jira_search_from_context_prose()
     assert forced is None
 
 
+def test_missing_tool_call_retry_binds_jira_get_issue_from_issue_key(monkeypatch):
+    from src.backend.services import tool_metadata_service as metadata_service
+
+    monkeypatch.setattr(metadata_service, "_load_from_vontology", lambda: {})
+    metadata_service.invalidate_cache()
+    try:
+        orchestrator = _build_orchestrator_stub()
+        prompt = "Tell me about JVNAUTOSCI-150 in JIRA"
+
+        forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+            [],
+            user_prompt=prompt,
+            missing_required_tools=["jira_get_issue"],
+        )
+
+        assert forced == [
+            {
+                "action": "call_tool",
+                "tool": "jira_get_issue",
+                "payload": {"issue_key": "JVNAUTOSCI-150"},
+                "_retry_binding_source": "tool_identifier_binding",
+                "_retry_identifier_source": "user_text",
+            }
+        ]
+
+        search_forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+            [],
+            user_prompt=prompt,
+            missing_required_tools=["jira_search"],
+        )
+        assert search_forced is None
+    finally:
+        metadata_service.invalidate_cache()
+
+
 def test_missing_tool_call_retry_skips_guided_tools_already_invoked():
     orchestrator = _build_orchestrator_stub()
     prompt = (

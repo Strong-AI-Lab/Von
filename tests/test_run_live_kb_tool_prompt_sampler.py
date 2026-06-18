@@ -28,10 +28,14 @@ def test_default_model_override_is_ollama_gemma4() -> None:
 
 def test_infer_provider_from_model_identifier_treats_ollama_tags_as_local() -> None:
     assert sampler._infer_provider_from_model_identifier("gemma4:e4b") == "ollama"
-    assert sampler._infer_provider_from_model_identifier("ollama:llama3.1:8b") == "ollama"
+    assert (
+        sampler._infer_provider_from_model_identifier("ollama:llama3.1:8b") == "ollama"
+    )
 
 
-def test_build_local_ollama_generate_model_override_prefixes_ambiguous_gpt_oss() -> None:
+def test_build_local_ollama_generate_model_override_prefixes_ambiguous_gpt_oss() -> (
+    None
+):
     assert (
         sampler._build_local_ollama_generate_model_override("gpt-oss:20b")
         == "ollama:gpt-oss:20b"
@@ -122,7 +126,11 @@ def test_build_local_ollama_replay_model_candidates_can_pull_missing(
 def test_model_policy_rejects_premium_model_without_explicit_opt_in() -> None:
     report = sampler._build_model_policy_report(
         requested_model_arms=[
-            {"arm_id": "arm_1", "label": "gpt-5.4-mini", "requested_model": "gpt-5.4-mini"}
+            {
+                "arm_id": "arm_1",
+                "label": "gpt-5.4-mini",
+                "requested_model": "gpt-5.4-mini",
+            }
         ],
         run_environment={"server_resolved_active_llm_model": "gemma4:26b"},
         allow_premium_model=False,
@@ -171,7 +179,11 @@ def test_model_policy_rejects_provider_prefixed_premium_model() -> None:
 def test_model_policy_reports_premium_opt_in() -> None:
     report = sampler._build_model_policy_report(
         requested_model_arms=[
-            {"arm_id": "arm_1", "label": "gpt-5.4-mini", "requested_model": "gpt-5.4-mini"}
+            {
+                "arm_id": "arm_1",
+                "label": "gpt-5.4-mini",
+                "requested_model": "gpt-5.4-mini",
+            }
         ],
         run_environment={"server_resolved_active_llm_provider": "openai"},
         allow_premium_model=True,
@@ -346,8 +358,7 @@ def test_evaluate_user_happiness_flags_canonical_concept_id_near_miss() -> None:
     assert evaluation["should_user_be_happy"] is False
     assert evaluation["verdict"] == "unhappy"
     assert any(
-        "Canonical concept ID mismatch" in reason
-        and "#V#michael_switbrock" in reason
+        "Canonical concept ID mismatch" in reason and "#V#michael_switbrock" in reason
         for reason in evaluation["reasons"]
     )
     fidelity = evaluation["canonical_concept_id_fidelity"]
@@ -446,9 +457,7 @@ def test_evaluate_user_happiness_accepts_unrelated_retrieved_concept_id() -> Non
     fidelity = evaluation["canonical_concept_id_fidelity"]
     assert fidelity["status"] == "passed"
     assert fidelity["expected_concept_ids"] == ["#V#michael_witbrock"]
-    assert fidelity["observed_concept_ids"] == [
-        "#V#learning_to_tell_two_spirals_apart"
-    ]
+    assert fidelity["observed_concept_ids"] == ["#V#learning_to_tell_two_spirals_apart"]
     assert fidelity["findings"] == []
 
 
@@ -1044,6 +1053,7 @@ def test_run_generate_background_omits_model_when_not_requested(
         model=None,
         gmail_profile=None,
         presenter_mode=False,
+        turn_expected_outcome_contract=None,
         timeout_seconds=30.0,
         poll_interval_seconds=0.2,
     )
@@ -1080,6 +1090,7 @@ def test_run_generate_background_can_request_presenter_mode(
         model="gpt-5.4-mini",
         gmail_profile=None,
         presenter_mode=True,
+        turn_expected_outcome_contract=None,
         timeout_seconds=30.0,
         poll_interval_seconds=0.2,
     )
@@ -1116,6 +1127,7 @@ def test_run_generate_background_sends_local_model_provider_override(
         model="gemma4:e4b",
         gmail_profile=None,
         presenter_mode=False,
+        turn_expected_outcome_contract=None,
         timeout_seconds=30.0,
         poll_interval_seconds=0.2,
     )
@@ -1151,12 +1163,66 @@ def test_run_generate_background_can_request_gmail_profile(
         model=None,
         gmail_profile="zhan-gmail",
         presenter_mode=False,
+        turn_expected_outcome_contract=None,
         timeout_seconds=30.0,
         poll_interval_seconds=0.2,
     )
 
     assert seen_payloads
     assert seen_payloads[0]["gmail_profile"] == "zhan-gmail"
+
+
+def test_run_generate_background_sends_turn_expected_outcome_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
+            return {"task_id": "task-123"}
+        if url.endswith("/von/api/task/status/task-123"):
+            return {"status": "completed"}
+        if url.endswith("/von/api/task/result/task-123"):
+            return {"result": {"response": "ok"}}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    prompt_entry = {
+        "id": "tell_me_about_jvnautosci_150_in_jira",
+        "category": "single_tool_jira_summary",
+        "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+        "knowledge_surfaces": ["turn_context", "jira"],
+        "likely_tools": ["jira_get_issue"],
+        "requires_tool_use": True,
+    }
+    contract = sampler._build_turn_expected_outcome_contract_for_prompt_entry(
+        prompt_entry
+    )
+
+    sampler._run_generate_background(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        prompt=str(prompt_entry["prompt"]),
+        model=None,
+        gmail_profile=None,
+        presenter_mode=False,
+        turn_expected_outcome_contract=contract,
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+
+    assert seen_payloads
+    payload_contract = seen_payloads[0]["turn_expected_outcome_contract"]
+    assert isinstance(payload_contract, dict)
+    assert payload_contract["schema_version"] == "turn_expected_outcome_contract.v1"
+    assert payload_contract["required_tools"] == ["jira_get_issue"]
+    assert payload_contract["prompt_bank_entry_id"] == (
+        "tell_me_about_jvnautosci_150_in_jira"
+    )
+    assert payload_contract["knowledge_surfaces"] == ["turn_context", "jira"]
 
 
 def test_run_generate_background_cancels_task_after_timeout(
@@ -1200,6 +1266,7 @@ def test_run_generate_background_cancels_task_after_timeout(
             model="gemma4:26b",
             gmail_profile=None,
             presenter_mode=False,
+            turn_expected_outcome_contract=None,
             timeout_seconds=30.0,
             poll_interval_seconds=0.2,
         )
@@ -1301,9 +1368,15 @@ def test_run_local_ollama_model_probe_stops_at_first_threshold_model(
             return {"status": "ok", "evaluation": {"should_user_be_happy": True}}
         return {"status": "failed", "evaluation": {"should_user_be_happy": False}}
 
-    monkeypatch.setattr(sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b", "gemma4:e4b"})
+    monkeypatch.setattr(
+        sampler,
+        "_list_installed_ollama_models",
+        lambda: {"granite3.3:2b", "gemma4:e4b"},
+    )
     monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
-    monkeypatch.setattr(sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm)
+    monkeypatch.setattr(
+        sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm
+    )
     monkeypatch.setattr(sampler, "_run_sampler_subprocess_replay_suite", fake_run_suite)
 
     summary = sampler._run_local_ollama_model_probe(
@@ -1342,13 +1415,20 @@ def test_run_local_ollama_model_probe_reports_no_working_local_model(
     def fake_temporary_scoped_active_llm(**_kwargs: object):
         yield {"provider": "openai", "model": "gpt-5.4-mini", "scope": "user"}
 
-    monkeypatch.setattr(sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b"})
+    monkeypatch.setattr(
+        sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b"}
+    )
     monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
-    monkeypatch.setattr(sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm)
+    monkeypatch.setattr(
+        sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm
+    )
     monkeypatch.setattr(
         sampler,
         "_run_sampler_subprocess_replay_suite",
-        lambda **_kwargs: {"status": "failed", "evaluation": {"should_user_be_happy": False}},
+        lambda **_kwargs: {
+            "status": "failed",
+            "evaluation": {"should_user_be_happy": False},
+        },
     )
 
     summary = sampler._run_local_ollama_model_probe(
@@ -1704,6 +1784,7 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
         generate_payload={"response": "Test response."},
         llm_debug_data={
             "model": "gpt-5.4-nano",
+            "tool_invocations": [{"tool": "search_knowledge_base"}],
             "turn_execution_diagnostics": {
                 "workflow_routing_diagnostics": {
                     "dispatch": {
@@ -1766,6 +1847,9 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
         == "jvnautosci-1894-replay-programme"
     )
     assert summary["environment"]["server_resolved_active_llm_model"] == "gemma4:26b"
+    assert summary["telemetry"]["tool_history"] == []
+    assert summary["telemetry"]["observed_tools"] == ["search_knowledge_base"]
+    assert summary["telemetry"]["tool_count"] == 1
     model_report = summary["model_portfolio_evaluation"]
     assert model_report["schema_version"] == "model_portfolio_replay_report.v1"
     assert model_report["replay_set_id"] == "JVNAUTOSCI-1894"
@@ -1776,6 +1860,7 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
         "workflow_selector",
         "turn_answer",
     ]
+    assert model_report["stage_evidence"][1]["metrics"]["tool_count"] == 1
     assert model_report["certification_decision"]["promotion_authorised"] is False
     assert "insufficient_distinct_replay_cases" in (
         model_report["certification_decision"]["promotion_blockers"]
@@ -1854,9 +1939,7 @@ def test_build_summary_flags_empty_success_llm_output_as_suspect() -> None:
     assert answer_evidence["verdict"] == "failed"
     assert answer_evidence["metrics"]["empty_success_suspect_count"] == 2
     assert answer_evidence["promotion_eligible"] is False
-    assert "single_prompt_replay_evidence_only" in answer_evidence[
-        "promotion_blockers"
-    ]
+    assert "single_prompt_replay_evidence_only" in answer_evidence["promotion_blockers"]
 
 
 def test_build_summary_records_canonical_concept_id_mismatch_evidence() -> None:
@@ -1920,14 +2003,14 @@ def test_build_summary_records_canonical_concept_id_mismatch_evidence() -> None:
     assert answer_evidence["workflow_stage"] == "turn_answer"
     assert answer_evidence["verdict"] == "failed"
     assert (
-        answer_evidence["metrics"]["canonical_concept_id_fidelity_status"]
-        == "failed"
+        answer_evidence["metrics"]["canonical_concept_id_fidelity_status"] == "failed"
     )
     assert answer_evidence["metrics"]["canonical_concept_id_mismatch_count"] == 1
     artifact = answer_evidence["evidence_artifact"]
-    assert artifact["canonical_concept_id_fidelity"]["findings"][0][
-        "reason_code"
-    ] == "canonical_concept_id_mismatch"
+    assert (
+        artifact["canonical_concept_id_fidelity"]["findings"][0]["reason_code"]
+        == "canonical_concept_id_mismatch"
+    )
     assert "#V#michael_switbrock" in (answer_evidence["rationale"] or "")
 
 
@@ -2276,7 +2359,9 @@ def test_experiment_observation_captures_prompt_variant_arm() -> None:
         "#V#gemma_mail_answer_prompt_v2"
     )
     assert observation["candidate_validation"]["valid"] is None
-    assert observation["candidate_validation"]["structural_prompt_variant_blockers"] == []
+    assert (
+        observation["candidate_validation"]["structural_prompt_variant_blockers"] == []
+    )
     assert (
         observation["candidate_validation"]["evaluation_authority"]["authoritative"]
         is False
@@ -2647,4 +2732,7 @@ def test_main_can_start_from_failure_conversation_ref_json(
     first_prompt_entry = replay_calls[0]["prompt_entry"]
     assert isinstance(first_prompt_entry, dict)
     assert first_prompt_entry["prompt"] == "List my last six email messages."
-    assert output["failure_case_intake"] == {"success": True, "request_id": "req-failure"}
+    assert output["failure_case_intake"] == {
+        "success": True,
+        "request_id": "req-failure",
+    }

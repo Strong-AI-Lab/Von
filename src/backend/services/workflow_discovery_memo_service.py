@@ -41,7 +41,7 @@ def _positive_float_env(name: str, default: float) -> float:
         return float(default)
     try:
         parsed = float(str(raw).strip())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return float(default)
     return parsed if parsed > 0.0 else float(default)
 
@@ -52,7 +52,7 @@ def _positive_int_env(name: str, default: int) -> int:
         return int(default)
     try:
         parsed = int(str(raw).strip())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return int(default)
     return parsed if parsed > 0 else int(default)
 
@@ -136,7 +136,7 @@ def _candidate_count(payload: Mapping[str, Any]) -> int:
             continue
         try:
             parsed = int(raw_value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if parsed >= 0:
             return parsed
@@ -154,9 +154,6 @@ def _discovery_ranking_input(
 ) -> str:
     """Choose the text used for retrieval ranking."""
 
-    clean_requested_query = _safe_text(requested_query)
-    if clean_requested_query:
-        return clean_requested_query
     return _safe_text(user_input)
 
 
@@ -327,6 +324,7 @@ def discover_workflows_for_turn_memoized(
             if isinstance(expected_outcome_contract, Mapping)
             else None
         ),
+        requested_query=_safe_text(requested_query) or None,
     )
     uncached_elapsed_ms = (time.perf_counter() - uncached_started) * 1000.0
     if not isinstance(raw_result, Mapping):
@@ -335,7 +333,14 @@ def discover_workflows_for_turn_memoized(
     payload = copy.deepcopy(dict(raw_result))
     clean_user_input = _safe_text(user_input)
     clean_discovery_input = _safe_text(discovery_input)
-    if clean_user_input and clean_discovery_input != clean_user_input:
+    clean_requested_query = _safe_text(requested_query)
+    discovery_input_differs_from_user = bool(
+        clean_user_input and clean_discovery_input != clean_user_input
+    )
+    discovery_input_differs_from_requested = bool(
+        clean_requested_query and clean_discovery_input != clean_requested_query
+    )
+    if discovery_input_differs_from_user or discovery_input_differs_from_requested:
         payload["ranking_query_input"] = (
             _safe_text(payload.get("query")) or clean_discovery_input
         )
@@ -347,10 +352,19 @@ def discover_workflows_for_turn_memoized(
         )
         payload["ranking_query_input_source"] = (
             "expected_outcome_contract"
-            if isinstance(contract_fields_used, list) and contract_fields_used
+            if (
+                isinstance(contract_fields_used, list)
+                and contract_fields_used
+                or (
+                    isinstance(expected_outcome_contract, Mapping)
+                    and bool(expected_outcome_contract)
+                    and discovery_input_differs_from_requested
+                )
+            )
             else "requested_query"
         )
-        payload["query"] = clean_user_input
+        if clean_user_input:
+            payload["query"] = clean_user_input
     candidate_count = _candidate_count(payload)
     with _CACHE_LOCK:
         _CACHE[cache_key_digest] = _MemoEntry(

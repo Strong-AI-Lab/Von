@@ -206,6 +206,7 @@ from src.backend.workflows.model_execution_budget_policy import (
 from src.backend.services.tool_metadata_service import (
     get_tool_dispatch_surface_metadata,
     get_tool_family,
+    get_tool_identifier_binding_metadata,
     get_tool_metadata,
     get_tool_planner_hint,
     get_tool_salience,
@@ -594,9 +595,7 @@ class _CustomWorkflowDispatchSupport:
                 str(outcome.get("override_reason")) if is_override else None
             ),
             reasoning=(
-                str(outcome.get("reasoning"))
-                if outcome.get("reasoning")
-                else None
+                str(outcome.get("reasoning")) if outcome.get("reasoning") else None
             ),
             dispatch_policy_source="represented",
             dispatch_policy_rule_id=str(outcome.get("rule_id") or "") or None,
@@ -1438,11 +1437,11 @@ class _CustomWorkflowDispatchSupport:
 
         try:
             candidate_count = int(discovery_payload.get("candidate_count") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             candidate_count = 0
         try:
             match_count = int(discovery_payload.get("match_count") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             match_count = 0
         if candidate_count > 0 or match_count > 0:
             return False
@@ -4687,9 +4686,7 @@ class InternalMCPChatOrchestrator:
         recovery_outcome = (
             "retry_needed"
             if retry_needed
-            else "retry_suppressed"
-            if retry_suppressed
-            else "no_retry_required"
+            else "retry_suppressed" if retry_suppressed else "no_retry_required"
         )
         if retry_suppressed:
             try:
@@ -5817,9 +5814,9 @@ class InternalMCPChatOrchestrator:
             retry_suppressed = True
             retry_attempts = max(retry_attempts, retry_budget)
             retries_remaining_after = 0
-            cast(MutableMapping[str, Any], data)["missing_tool_call_retry_attempts"] = (
-                retry_attempts
-            )
+            cast(MutableMapping[str, Any], data)[
+                "missing_tool_call_retry_attempts"
+            ] = retry_attempts
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -6089,9 +6086,7 @@ class InternalMCPChatOrchestrator:
             classifier_verdict_text = (
                 "yes"
                 if classifier_verdict is True
-                else "no"
-                if classifier_verdict is False
-                else "unavailable"
+                else "no" if classifier_verdict is False else "unavailable"
             )
             if "missing_tool_call_detection" not in existing_types:
                 aux_log.append(
@@ -6152,9 +6147,7 @@ class InternalMCPChatOrchestrator:
         retry_stage = (
             "completed"
             if retry_success
-            else "skipped"
-            if retry_suppressed
-            else "failed"
+            else "skipped" if retry_suppressed else "failed"
         )
         aux_log.append(
             {
@@ -6757,7 +6750,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw, str):
                     try:
                         raw = datetime.fromisoformat(raw)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         continue
                 if isinstance(raw, datetime):
                     if raw.tzinfo is None:
@@ -16182,9 +16175,7 @@ class InternalMCPChatOrchestrator:
                         graph_completeness = completeness or "graph_incomplete"
                         graph_incomplete_reasons = [
                             str(reason)
-                            for reason in (
-                                graph_policy.get("incomplete_reasons") or []
-                            )
+                            for reason in (graph_policy.get("incomplete_reasons") or [])
                         ]
             except Exception:
                 pass  # Fall through to JSON fallback
@@ -17415,12 +17406,24 @@ class InternalMCPChatOrchestrator:
                     else "?"
                 )
                 model_label = str(
-                    (error_entry.get("model_resolved") if isinstance(error_entry, Mapping) else None)
+                    (
+                        error_entry.get("model_resolved")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
                     or "?"
                 )
                 kind = str(
-                    (error_entry.get("failure_kind") if isinstance(error_entry, Mapping) else None)
-                    or (error_entry.get("error_class") if isinstance(error_entry, Mapping) else None)
+                    (
+                        error_entry.get("failure_kind")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
+                    or (
+                        error_entry.get("error_class")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
                     or "failed"
                 )
                 failure_summaries.append(f"{provider_name}:{model_label}={kind}")
@@ -18809,7 +18812,7 @@ class InternalMCPChatOrchestrator:
             # Try to parse as JSON
             try:
                 parsed = json.loads(fenced_content)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
 
             # Check if it looks like a tool call (single object or array)
@@ -18914,7 +18917,7 @@ class InternalMCPChatOrchestrator:
                 or missing_action_but_tool_shape
                 or has_tool_uses_shape
             )
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return False
 
     def _extract_tool_calls(self, text: str) -> list[_ToolCallRequest] | None:
@@ -20383,7 +20386,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(max_predicates_value, (int, float, str))
                         else 3
                     )
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     max_predicates_int = 3
                 derivation_context = self._predicate_follow_up_derivation_context(
                     derivation_spec,
@@ -27136,6 +27139,75 @@ class InternalMCPChatOrchestrator:
             )
         return forced_calls or None
 
+    @classmethod
+    def _infer_identifier_bound_required_retry_tool_calls(
+        cls,
+        *,
+        tool_name: str,
+        user_text: str | None,
+    ) -> list[_ToolCallRequest] | None:
+        binding = get_tool_identifier_binding_metadata(tool_name)
+        if binding is None:
+            return None
+        source = str(binding.identifier_source or "").strip().lower()
+        if source not in {"user_text", "last_user_text", "prompt"}:
+            return None
+        if not isinstance(user_text, str) or not user_text.strip():
+            return None
+
+        source_text = user_text[:4000]
+        try:
+            matches = list(re.finditer(binding.identifier_pattern, source_text))
+        except re.error:
+            return None
+        if not matches:
+            return None
+
+        identifiers: list[str] = []
+        seen: set[str] = set()
+        max_count = binding.identifier_max_count if binding.identifier_max_count else 5
+        for match in matches:
+            identifier = ""
+            named_identifier = match.groupdict().get("identifier")
+            if isinstance(named_identifier, str) and named_identifier.strip():
+                identifier = named_identifier.strip()
+            elif match.lastindex:
+                first_group = match.group(1)
+                if isinstance(first_group, str) and first_group.strip():
+                    identifier = first_group.strip()
+            if not identifier:
+                identifier = match.group(0).strip()
+            if binding.identifier_normalise == "upper":
+                identifier = identifier.upper()
+            elif binding.identifier_normalise == "lower":
+                identifier = identifier.lower()
+            if not identifier:
+                continue
+            lowered = identifier.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            identifiers.append(identifier)
+            if len(identifiers) >= max_count:
+                break
+        if not identifiers:
+            return None
+
+        forced_calls: list[_ToolCallRequest] = []
+        for identifier in identifiers:
+            payload: MutableMapping[str, Any] = dict(binding.default_payload)
+            payload[binding.identifier_argument_name] = identifier
+            forced_calls.append(
+                {
+                    "action": "call_tool",
+                    "tool": tool_name,
+                    "payload": payload,
+                    "_retry_binding_source": "tool_identifier_binding",
+                    "_retry_identifier_source": source,
+                }
+            )
+        return forced_calls or None
+
     @staticmethod
     def _coerce_retry_strategy_max_count(value: Any) -> int | None:
         if isinstance(value, bool):
@@ -27911,6 +27983,16 @@ class InternalMCPChatOrchestrator:
                 if metadata_bound_calls:
                     forced_calls.extend(metadata_bound_calls)
                     continue
+
+            identifier_bound_calls = (
+                self._infer_identifier_bound_required_retry_tool_calls(
+                    tool_name=name,
+                    user_text=user_text,
+                )
+            )
+            if identifier_bound_calls:
+                forced_calls.extend(identifier_bound_calls)
+                continue
 
             if name in {"resilient_extract_url", "extract_url"}:
                 target_url = (
@@ -34267,9 +34349,9 @@ class InternalMCPChatOrchestrator:
                     except Exception:
                         return
 
-                def _build_action_turn_live_workflow_routing_payload() -> Mapping[
-                    str, Any
-                ]:
+                def _build_action_turn_live_workflow_routing_payload() -> (
+                    Mapping[str, Any]
+                ):
                     payload: dict[str, Any] = {}
                     if isinstance(workflow_discovery_result, Mapping):
                         payload["workflow_discovery"] = dict(workflow_discovery_result)
@@ -35482,6 +35564,7 @@ class InternalMCPChatOrchestrator:
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
         turn_memory_context: Mapping[str, Any] | None = None,
+        turn_expected_outcome_contract: Mapping[str, Any] | None = None,
         thinking_card_mode: str | None = None,
     ) -> OrchestratorResult:
         """Execute the current turn via the durable Master Turn Workflow.
@@ -35833,7 +35916,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 parsed = default
             if parsed <= 0:
                 return default
@@ -36172,6 +36255,12 @@ class InternalMCPChatOrchestrator:
             subtask="Build supervised workflow inputs",
             result_summary="Building supervised conversation-turn workflow inputs.",
         )
+        turn_expected_outcome_boundary = _run_supervised_setup_step(
+            "Normalise turn expected-outcome contract",
+            lambda: build_turn_expected_outcome_boundary_payload(
+                turn_expected_outcome_contract
+            ),
+        )
         workflow_inputs = {
             "prompt": prompt,
             "user_prompt": prompt,
@@ -36270,6 +36359,8 @@ class InternalMCPChatOrchestrator:
             "completion_gate_escalation_signal": False,
             "completion_gate_escalation_reason": None,
         }
+        if isinstance(turn_expected_outcome_boundary, Mapping):
+            workflow_inputs.update(dict(turn_expected_outcome_boundary))
 
         _emit_supervised_setup_progress(
             subtask="Execute supervised workflow",
@@ -36361,9 +36452,11 @@ class InternalMCPChatOrchestrator:
         gate_requires_follow_up = bool(
             workflow_data.get(
                 "completion_gate_requires_follow_up",
-                turn_record_completion_gate.get("requires_follow_up", False)
-                if isinstance(turn_record_completion_gate, Mapping)
-                else False,
+                (
+                    turn_record_completion_gate.get("requires_follow_up", False)
+                    if isinstance(turn_record_completion_gate, Mapping)
+                    else False
+                ),
             )
         )
         gate_safe_to_claim_completion = bool(
@@ -36838,7 +36931,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 parsed = default
             if parsed <= 0:
                 return default
@@ -37686,9 +37779,9 @@ class InternalMCPChatOrchestrator:
             ),
         )
 
-        def _prepare_workflow_continuation_context() -> tuple[
-            str, Mapping[str, Any] | None
-        ]:
+        def _prepare_workflow_continuation_context() -> (
+            tuple[str, Mapping[str, Any] | None]
+        ):
             effective_prompt = prompt
             workflow_continuation_payload_local = (
                 dict(workflow_continuation_context)
@@ -41376,7 +41469,9 @@ class InternalMCPChatOrchestrator:
                             "chunks": f"Chunk {row_index}",
                             "matches": f"Match {row_index}",
                             "references": f"Reference {row_index}",
-                        }.get(collection_key, f"Section {row_index}")
+                        }.get(
+                            collection_key, f"Section {row_index}"
+                        )
                         section = _section_from_mapping(
                             row,
                             section_id=section_id,
@@ -44502,9 +44597,7 @@ class InternalMCPChatOrchestrator:
                         if continue_to_tool_pipeline
                         and continue_to_tool_pipeline_reason
                         == "custom_workflow_missing_required_prompt_tools"
-                        else "completed"
-                        if wf_completed
-                        else "failed"
+                        else "completed" if wf_completed else "failed"
                     )
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
@@ -44992,12 +45085,9 @@ class InternalMCPChatOrchestrator:
             aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
             source_stage="run.tool_workflow_final",
         )
-        if (
-            preserved_response_text
-            and (
-                not final_response_text.strip()
-                or final_response_text.lstrip().startswith("Execution status:")
-            )
+        if preserved_response_text and (
+            not final_response_text.strip()
+            or final_response_text.lstrip().startswith("Execution status:")
         ):
             final_response_text = preserved_response_text
 
@@ -45016,9 +45106,7 @@ class InternalMCPChatOrchestrator:
             if tc_completed
             and gate_safe_to_claim_completion
             and not gate_requires_follow_up
-            else "follow_up_required"
-            if tc_completed
-            else "failed"
+            else "follow_up_required" if tc_completed else "failed"
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.
@@ -45062,9 +45150,7 @@ class InternalMCPChatOrchestrator:
                 if tc_completed
                 and gate_safe_to_claim_completion
                 and not gate_requires_follow_up
-                else "follow_up_required"
-                if tc_completed
-                else "failed"
+                else "follow_up_required" if tc_completed else "failed"
             ),
             final_state=tc_result.final_state,
             completed=tc_completed,

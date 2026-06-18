@@ -71,7 +71,9 @@ DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
 LOCAL_MODEL_PROVIDER_NAME = "ollama"
-PREMIUM_MODEL_PROVIDER_NAMES = frozenset({"openai", "anthropic", "gemini", "azure_openai"})
+PREMIUM_MODEL_PROVIDER_NAMES = frozenset(
+    {"openai", "anthropic", "gemini", "azure_openai"}
+)
 KNOWN_MODEL_PROVIDER_NAMES = frozenset(
     {LOCAL_MODEL_PROVIDER_NAME, *PREMIUM_MODEL_PROVIDER_NAMES}
 )
@@ -941,26 +943,32 @@ def _build_model_policy_report(
     run_environment: Mapping[str, Any],
     allow_premium_model: bool,
 ) -> dict[str, Any]:
-    active_provider = _safe_text(
-        run_environment.get("server_resolved_active_llm_provider")
-    ) or None
-    active_model = _safe_text(run_environment.get("server_resolved_active_llm_model")) or None
-    active_lookup_error = _safe_text(
-        run_environment.get("server_resolved_active_llm_lookup_error")
-    ) or None
+    active_provider = (
+        _safe_text(run_environment.get("server_resolved_active_llm_provider")) or None
+    )
+    active_model = (
+        _safe_text(run_environment.get("server_resolved_active_llm_model")) or None
+    )
+    active_lookup_error = (
+        _safe_text(run_environment.get("server_resolved_active_llm_lookup_error"))
+        or None
+    )
     arms: list[dict[str, Any]] = []
     for arm in requested_model_arms:
         requested_model = _safe_text(arm.get("requested_model")) or None
         requested_provider = _safe_text(arm.get("requested_provider")) or None
         if requested_model and not requested_provider:
             requested_provider = _infer_provider_from_model_identifier(requested_model)
-        source = "explicit_model_override" if requested_model else "active_authenticated_model"
+        source = (
+            "explicit_model_override"
+            if requested_model
+            else "active_authenticated_model"
+        )
         effective_model = requested_model or active_model
         effective_provider = requested_provider if requested_model else active_provider
-        premium = (
-            _model_identifier_looks_premium(effective_model)
-            or _provider_looks_premium(effective_provider)
-        )
+        premium = _model_identifier_looks_premium(
+            effective_model
+        ) or _provider_looks_premium(effective_provider)
         unverifiable_active_model = (
             requested_model is None and not active_model and bool(active_lookup_error)
         )
@@ -1035,7 +1043,9 @@ def _load_json_mapping_argument(value: str, *, argument_name: str) -> dict[str, 
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{argument_name} must be JSON or @path to JSON: {exc}") from exc
+        raise ValueError(
+            f"{argument_name} must be JSON or @path to JSON: {exc}"
+        ) from exc
     if not isinstance(payload, Mapping):
         raise ValueError(f"{argument_name} must decode to a JSON object.")
     return {str(key): item for key, item in payload.items() if isinstance(key, str)}
@@ -1064,9 +1074,9 @@ def _normalise_prompt_entry(
         "prompt": cleaned_prompt,
         "knowledge_surfaces": surfaces or ["turn_context"],
         "likely_tools": tool_names,
-        "requires_tool_use": bool(tool_names)
-        if requires_tool_use is None
-        else bool(requires_tool_use),
+        "requires_tool_use": (
+            bool(tool_names) if requires_tool_use is None else bool(requires_tool_use)
+        ),
         "source_kind": _safe_text(source_kind) or None,
         "source_request_id": _safe_text(source_request_id) or None,
         "source_workflow_id": _safe_text(source_workflow_id) or None,
@@ -1454,7 +1464,7 @@ def _list_installed_ollama_models() -> set[str]:
             encoding="utf-8",
             timeout=30,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return set()
     return _parse_ollama_list_output(completed.stdout)
 
@@ -1552,7 +1562,11 @@ def _build_local_ollama_replay_model_candidates(
 ) -> list[dict[str, Any]]:
     requested = [_safe_text(entry) for entry in requested_candidates]
     requested = [entry for entry in requested if entry]
-    installed = installed_models if installed_models is not None else _list_installed_ollama_models()
+    installed = (
+        installed_models
+        if installed_models is not None
+        else _list_installed_ollama_models()
+    )
     catalogue_by_model = {
         _normalise_ollama_model_name(entry.get("model")): dict(entry)
         for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE
@@ -1566,7 +1580,9 @@ def _build_local_ollama_replay_model_candidates(
     elif registry_by_model:
         source_models = list(registry_by_model)
     else:
-        source_models = [entry["model"] for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE]
+        source_models = [
+            entry["model"] for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE
+        ]
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     pull_results: dict[str, Any] = {}
@@ -1587,7 +1603,9 @@ def _build_local_ollama_replay_model_candidates(
                 installed_now = True
         if not installed_now:
             continue
-        strength_rank = registry_entry.get("strength_rank", catalogue_entry.get("strength_rank"))
+        strength_rank = registry_entry.get(
+            "strength_rank", catalogue_entry.get("strength_rank")
+        )
         relative_cost_rank = registry_entry.get(
             "relative_cost_rank", catalogue_entry.get("relative_cost_rank")
         )
@@ -1598,14 +1616,20 @@ def _build_local_ollama_replay_model_candidates(
                 "provider": LOCAL_MODEL_PROVIDER_NAME,
                 "installed": installed_now,
                 "strength_rank": _coerce_rank(strength_rank, fallback=1000 + index),
-                "relative_cost_rank": _coerce_rank(relative_cost_rank, fallback=1000 + index),
+                "relative_cost_rank": _coerce_rank(
+                    relative_cost_rank, fallback=1000 + index
+                ),
                 "catalogue_source": (
-                    "vontology_model_registry" if registry_entry else "replay_local_catalogue"
+                    "vontology_model_registry"
+                    if registry_entry
+                    else "replay_local_catalogue"
                 ),
                 "registry_source": registry_entry.get("registry_source"),
                 "registry_entry_id": registry_entry.get("registry_entry_id"),
                 "concept_id": registry_entry.get("concept_id"),
-                "notes": _safe_text(registry_entry.get("notes") or catalogue_entry.get("notes"))
+                "notes": _safe_text(
+                    registry_entry.get("notes") or catalogue_entry.get("notes")
+                )
                 or None,
                 "pull_result": pull_results.get(model_key),
             }
@@ -1650,7 +1674,9 @@ def _set_scoped_active_llm_setting(
         return bool(set_user_llm_setting(user_id, provider, model))
     if organisation_id:
         return bool(set_org_llm_setting(organisation_id, provider, model))
-    raise RuntimeError("A user or organisation concept id is required to override scoped active LLM.")
+    raise RuntimeError(
+        "A user or organisation concept id is required to override scoped active LLM."
+    )
 
 
 @contextmanager
@@ -1699,7 +1725,7 @@ def _git_capture(*args: str) -> str | None:
             text=True,
             encoding="utf-8",
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     value = completed.stdout.strip()
     return value or None
@@ -1977,6 +2003,61 @@ def _request_task_cancellation(
     return result
 
 
+def _build_turn_expected_outcome_contract_for_prompt_entry(
+    prompt_entry: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    required_tools = _dedupe_texts(
+        [
+            name
+            for name in _as_list(prompt_entry.get("likely_tools"))
+            if _safe_text(name)
+        ]
+    )
+    if not bool(prompt_entry.get("requires_tool_use")) or not required_tools:
+        return None
+
+    prompt_id = _safe_text(prompt_entry.get("id"))
+    category = _safe_text(prompt_entry.get("category"))
+    knowledge_surfaces = _dedupe_texts(_as_list(prompt_entry.get("knowledge_surfaces")))
+    fields = {
+        "summary": (
+            "Satisfy the replay prompt using the required grounded tools recorded "
+            "by the replay prompt entry."
+        ),
+        "grounding_requirement": (
+            "Use the required replay tools before finalising; report unavailable "
+            "evidence explicitly."
+        ),
+        "selector_guidance": (
+            "Prefer a workflow or tool route that can execute the required tools "
+            "recorded by the replay prompt entry."
+        ),
+        "answering_guidance": (
+            "Answer from gathered tool evidence, or return a typed tool-access "
+            "or evidence-availability blocker."
+        ),
+        "reasoning": (
+            "The live replay prompt bank declares this case as requiring "
+            "operational tool use; the sampler passes that represented obligation "
+            "into the turn instead of scoring it only out of band."
+        ),
+    }
+    contract: dict[str, Any] = {
+        "schema_version": "turn_expected_outcome_contract.v1",
+        "fields": fields,
+        "required_tools": required_tools,
+        "sources": ["live_kb_tool_prompt_sampler"],
+    }
+    if prompt_id:
+        contract["prompt_bank_entry_id"] = prompt_id
+        contract["sources"].append(f"prompt_bank:{prompt_id}")
+    if category:
+        contract["prompt_bank_category"] = category
+    if knowledge_surfaces:
+        contract["knowledge_surfaces"] = knowledge_surfaces
+    return contract
+
+
 def _run_generate_background(
     *,
     session: requests.Session,
@@ -1985,6 +2066,7 @@ def _run_generate_background(
     model: str | None,
     gmail_profile: str | None,
     presenter_mode: bool,
+    turn_expected_outcome_contract: Mapping[str, Any] | None,
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> tuple[str, dict[str, Any]]:
@@ -2002,6 +2084,10 @@ def _run_generate_background(
         request_payload["gmail_profile"] = cleaned_gmail_profile
     if presenter_mode:
         request_payload["presenter_mode"] = True
+    if isinstance(turn_expected_outcome_contract, Mapping):
+        request_payload["turn_expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract
+        )
     model_provider = _infer_provider_from_model_identifier(cleaned_model)
     if model_provider:
         request_payload["model_provider"] = model_provider
@@ -2610,10 +2696,8 @@ def _extract_selector_evidence(
         "selection_resolution": (
             _safe_text(selector.get("selection_resolution")) or None
         ),
-        "raw_candidate_label": _safe_text(selector.get("raw_candidate_label"))
-        or None,
-        "raw_response_format": _safe_text(selector.get("raw_response_format"))
-        or None,
+        "raw_candidate_label": _safe_text(selector.get("raw_candidate_label")) or None,
+        "raw_response_format": _safe_text(selector.get("raw_response_format")) or None,
         "structured_output_valid": _selector_structured_output_valid(selector),
         "raw_response": (
             _text_capture_preview(response_capture) if response_capture else None
@@ -2638,7 +2722,9 @@ def _selector_telemetry_completeness(routing: Mapping[str, Any]) -> dict[str, An
     }
 
 
-def _iter_llm_exchange_summaries(llm_debug_data: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _iter_llm_exchange_summaries(
+    llm_debug_data: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for stage in _as_list(llm_debug_data.get("stage_diagnostics")):
         if not isinstance(stage, Mapping):
@@ -2725,9 +2811,7 @@ def _extract_timing_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
         "elapsed_ms": totals.get("elapsed_ms"),
         "llm_elapsed_ms": totals.get("llm_elapsed_ms"),
         "llm_call_count": totals.get("llm_call_count"),
-        "llm_calls_by_stage_model": _as_list(
-            timing.get("llm_calls_by_stage_model")
-        ),
+        "llm_calls_by_stage_model": _as_list(timing.get("llm_calls_by_stage_model")),
     }
 
 
@@ -2761,10 +2845,10 @@ def _build_model_portfolio_arm_evaluation(
     missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
     missing_evidence = _as_list(evaluation.get("missing_evidence"))
     tool_history = _as_list(telemetry.get("tool_history"))
+    observed_tools = _as_list(telemetry.get("observed_tools"))
+    tool_count = len(observed_tools) if observed_tools else len(tool_history)
     prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
-    replay_scoring_consistency = _as_mapping(
-        summary.get("replay_scoring_consistency")
-    )
+    replay_scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
     structured_output_valid = selector_evidence.get("structured_output_valid")
     should_user_be_happy = bool(evaluation.get("should_user_be_happy"))
     selector_metrics = {
@@ -2780,13 +2864,12 @@ def _build_model_portfolio_arm_evaluation(
     answer_metrics = {
         "final_response_length": len(response_text),
         "final_answer_useful": should_user_be_happy,
-        "tool_count": len(tool_history),
+        "tool_count": tool_count,
         "missing_evidence_count": len(missing_evidence),
         "missing_answer_evidence_count": len(missing_answer_evidence),
         "empty_success_suspect_count": len(empty_success_suspects),
         "canonical_concept_id_fidelity_status": (
-            _safe_text(canonical_concept_id_fidelity.get("status"))
-            or "not_applicable"
+            _safe_text(canonical_concept_id_fidelity.get("status")) or "not_applicable"
         ),
         "canonical_concept_id_mismatch_count": len(canonical_concept_id_findings),
         "canonical_expected_concept_id_count": len(
@@ -2822,7 +2905,8 @@ def _build_model_portfolio_arm_evaluation(
     )
     selector_verdict = (
         "passed"
-        if selector_metrics.get("selected_workflow_id") and structured_output_valid is not False
+        if selector_metrics.get("selected_workflow_id")
+        and structured_output_valid is not False
         else "suspect"
     )
     if not should_user_be_happy or empty_success_suspects:
@@ -2925,9 +3009,7 @@ def _build_model_portfolio_comparison_report(
         prompt_variant_evaluation = _as_mapping(
             arm_summary.get("prompt_variant_evaluation")
         )
-        scoring_consistency = _as_mapping(
-            arm_summary.get("replay_scoring_consistency")
-        )
+        scoring_consistency = _as_mapping(arm_summary.get("replay_scoring_consistency"))
         arm_reports.append(
             {
                 "arm_id": _safe_text(arm.get("arm_id")) or None,
@@ -3093,6 +3175,7 @@ def _build_summary(
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
     dispatch = _as_mapping(routing.get("dispatch"))
     tool_history = _as_list(diagnostics.get("tool_history"))
+    observed_tools = _collect_tool_names(diagnostics, llm_debug_data)
     response_text = (
         _safe_text(generate_payload.get("response"))
         or _safe_text(generate_payload.get("response_text"))
@@ -3156,7 +3239,8 @@ def _build_summary(
             )
             or None,
             "tool_history": tool_history,
-            "tool_count": len(tool_history),
+            "observed_tools": observed_tools,
+            "tool_count": len(observed_tools) if observed_tools else len(tool_history),
             "workflow_routing_diagnostics": routing,
             "selector_telemetry_completeness": _selector_telemetry_completeness(
                 routing
@@ -3340,6 +3424,9 @@ def _run_prompt_replay_arm(
         model=requested_model,
         gmail_profile=gmail_profile,
         presenter_mode=presenter_mode,
+        turn_expected_outcome_contract=(
+            _build_turn_expected_outcome_contract_for_prompt_entry(prompt_entry)
+        ),
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
@@ -3469,15 +3556,13 @@ def _build_multi_arm_summary(
     summary["model_portfolio_report"] = _build_model_portfolio_comparison_report(
         arm_summaries=arm_summaries
     )
-    summary["decision_attribution_aggregate"] = (
-        aggregate_turn_decision_attributions(
-            [
-                _as_mapping(arm_summary.get("decision_attribution"))
-                for arm_summary in arm_summaries
-                if isinstance(arm_summary, Mapping)
-                and isinstance(arm_summary.get("decision_attribution"), Mapping)
-            ]
-        )
+    summary["decision_attribution_aggregate"] = aggregate_turn_decision_attributions(
+        [
+            _as_mapping(arm_summary.get("decision_attribution"))
+            for arm_summary in arm_summaries
+            if isinstance(arm_summary, Mapping)
+            and isinstance(arm_summary.get("decision_attribution"), Mapping)
+        ]
     )
     return summary
 
@@ -3516,7 +3601,9 @@ def _run_replay_plan(
             prompt_bank_schema_version=prompt_bank_schema_version,
             requested_complexity_classes=requested_complexity_classes,
             seed=seed,
-            arm_metadata=replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None,
+            arm_metadata=(
+                replay_arms[0] if (base_prompt_id or prompt_variant_ids) else None
+            ),
             presenter_mode=presenter_mode,
             gmail_profile=gmail_profile,
         )
@@ -3622,7 +3709,9 @@ def _build_repeated_replay_summary(
     minimum_success_rate: float,
 ) -> dict[str, Any]:
     attempt_count = len(attempt_summaries)
-    success_rate = (float(success_count) / float(attempt_count)) if attempt_count else 0.0
+    success_rate = (
+        (float(success_count) / float(attempt_count)) if attempt_count else 0.0
+    )
     return {
         "status": "ok" if success_rate >= minimum_success_rate else "failed",
         "mode": "repeated_replay_suite",
@@ -3648,7 +3737,9 @@ def _build_repeated_replay_summary(
             "meets_minimum_success_rate": success_rate >= minimum_success_rate,
         },
         "attempts": [
-            dict(attempt) for attempt in attempt_summaries if isinstance(attempt, Mapping)
+            dict(attempt)
+            for attempt in attempt_summaries
+            if isinstance(attempt, Mapping)
         ],
     }
 
@@ -3681,7 +3772,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 timeout=15,
             )
             return
-        except (OSError, subprocess.SubprocessError):
+        except OSError, subprocess.SubprocessError:
             pass
     process.kill()
 
@@ -3775,7 +3866,9 @@ def _run_sampler_subprocess_replay_suite(
         if output_path.exists():
             try:
                 parsed_output = json.loads(output_path.read_text(encoding="utf-8"))
-                summary = dict(parsed_output) if isinstance(parsed_output, Mapping) else {}
+                summary = (
+                    dict(parsed_output) if isinstance(parsed_output, Mapping) else {}
+                )
             except Exception as exc:
                 summary = {
                     "status": "error",
@@ -3957,9 +4050,9 @@ def _run_local_ollama_model_probe(
                     minimum_success_rate=minimum_success_rate,
                     process_timeout_seconds=attempt_process_timeout_seconds,
                 )
-                if _summary_meets_success_threshold(summary) and max(int(repeat_count), 1) > max(
-                    int(screen_repeat_count), 1
-                ):
+                if _summary_meets_success_threshold(summary) and max(
+                    int(repeat_count), 1
+                ) > max(int(screen_repeat_count), 1):
                     screen_summary = summary
                     summary = _run_sampler_subprocess_replay_suite(
                         prompt_entry=prompt_entry,
@@ -4006,7 +4099,9 @@ def _run_local_ollama_model_probe(
         minimum_success_rate=minimum_success_rate,
     )
     if cache_path is not None:
-        _write_local_model_probe_cache(cache_path=cache_path, probe_summary=probe_summary)
+        _write_local_model_probe_cache(
+            cache_path=cache_path, probe_summary=probe_summary
+        )
     return probe_summary
 
 
@@ -4487,7 +4582,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
             repeat_count=repeat_count,
             screen_repeat_count=max(int(args.model_probe_screen_repeat_count or 1), 1),
-            attempt_process_timeout_seconds=float(args.model_probe_attempt_timeout_seconds),
+            attempt_process_timeout_seconds=float(
+                args.model_probe_attempt_timeout_seconds
+            ),
             minimum_success_rate=minimum_success_rate,
             requested_candidates=[
                 entry
@@ -4611,7 +4708,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         experiment_recording = _record_experiment_observations(
             run_id=experiment_run_id,
             arm_summaries=[
-                entry for entry in arm_summaries_for_recording if isinstance(entry, Mapping)
+                entry
+                for entry in arm_summaries_for_recording
+                if isinstance(entry, Mapping)
             ],
         )
         summary["experiment_recording"] = experiment_recording

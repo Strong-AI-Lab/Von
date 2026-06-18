@@ -541,13 +541,16 @@ def _get_current_chat_prompt_queue_scope() -> dict[str, str | None] | tuple[Any,
         user_concept_id = session.get("user_concept_id")
 
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-        return jsonify(
-            {
-                "success": False,
-                "error": "Not authenticated",
-                "error_code": "not_authenticated",
-            }
-        ), 401
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Not authenticated",
+                    "error_code": "not_authenticated",
+                }
+            ),
+            401,
+        )
 
     window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     effective_context = get_effective_context(
@@ -576,7 +579,9 @@ def _chat_prompt_queue_payload() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _chat_prompt_queue_scope_log_summary(scope: Mapping[str, Any] | None) -> dict[str, Any]:
+def _chat_prompt_queue_scope_log_summary(
+    scope: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     if not isinstance(scope, Mapping):
         return {}
 
@@ -600,13 +605,16 @@ def _chat_prompt_queue_error_response(
     scope: Mapping[str, Any] | None = None,
 ):
     if isinstance(exc, chat_prompt_queue_service.InvalidChatPromptQueueInput):
-        return jsonify(
-            {
-                "success": False,
-                "error": str(exc),
-                "error_code": "invalid_input",
-            }
-        ), 400
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "error_code": "invalid_input",
+                }
+            ),
+            400,
+        )
     if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueRecordNotFound):
         current_app.logger.warning(
             "Chat prompt queue transition miss action=%s queue_id=%s code=%s details=%s scope=%s",
@@ -616,14 +624,17 @@ def _chat_prompt_queue_error_response(
             exc.details,
             _chat_prompt_queue_scope_log_summary(scope),
         )
-        return jsonify(
-            {
-                "success": False,
-                "error": str(exc),
-                "error_code": exc.error_code,
-                "details": exc.details,
-            }
-        ), 404
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                    "details": exc.details,
+                }
+            ),
+            404,
+        )
     if isinstance(exc, chat_prompt_queue_service.ChatPromptQueueUnavailable):
         current_app.logger.warning(
             "Chat prompt queue unavailable action=%s queue_id=%s scope=%s",
@@ -631,21 +642,27 @@ def _chat_prompt_queue_error_response(
             queue_id,
             _chat_prompt_queue_scope_log_summary(scope),
         )
-        return jsonify(
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "error_code": "backend_unavailable",
+                }
+            ),
+            503,
+        )
+    current_app.logger.exception("Chat prompt queue route failed")
+    return (
+        jsonify(
             {
                 "success": False,
-                "error": str(exc),
-                "error_code": "backend_unavailable",
+                "error": "Internal server error",
+                "error_code": "internal_error",
             }
-        ), 503
-    current_app.logger.exception("Chat prompt queue route failed")
-    return jsonify(
-        {
-            "success": False,
-            "error": "Internal server error",
-            "error_code": "internal_error",
-        }
-    ), 500
+        ),
+        500,
+    )
 
 
 @von_bp.route("/api/chat_prompt_queue", methods=["GET"])
@@ -1460,7 +1477,9 @@ def _extract_prompt_char_count(value: Any) -> int | None:
 
     prompt_context_diagnostics = _extract_prompt_context_diagnostics(value)
     if isinstance(prompt_context_diagnostics, Mapping):
-        numeric = _progress_number(prompt_context_diagnostics.get("rendered_prompt_chars"))
+        numeric = _progress_number(
+            prompt_context_diagnostics.get("rendered_prompt_chars")
+        )
         if numeric is not None:
             return int(max(0.0, numeric))
 
@@ -1767,7 +1786,11 @@ def _build_thinking_recovery_progress_payload(
         "current_stage_id": current_stage,
         "latest_recovery_stage_id": latest_recovery_stage,
         "latest_recovery_stage_label": latest_recovery_stage_label
-        or (_default_stage_label(latest_recovery_stage) if latest_recovery_stage else None),
+        or (
+            _default_stage_label(latest_recovery_stage)
+            if latest_recovery_stage
+            else None
+        ),
         "attempt_count": attempt_count,
         "latest_failure": latest_failure,
         "prompt_context_diagnostics": recovery_prompt_context,
@@ -3206,7 +3229,9 @@ def _extract_turn_timing_spans_from_payload(
     if isinstance(timing_trace, Mapping):
         trace_spans = timing_trace.get("spans")
         if isinstance(trace_spans, list):
-            spans.extend(dict(item) for item in trace_spans if isinstance(item, Mapping))
+            spans.extend(
+                dict(item) for item in trace_spans if isinstance(item, Mapping)
+            )
     return merge_timing_spans([], spans)
 
 
@@ -7072,7 +7097,9 @@ def _finalise_llm_debug_info(
     )
     turn_record_tool_invocations_payload = (
         llm_debug_info.get("turn_execution_record_tool_invocations")
-        if isinstance(llm_debug_info.get("turn_execution_record_tool_invocations"), list)
+        if isinstance(
+            llm_debug_info.get("turn_execution_record_tool_invocations"), list
+        )
         else tool_invocations_payload
     )
     search_evidence_payload = (
@@ -8248,7 +8275,9 @@ def _extract_nested_workflow_tool_evidence(
     )
     if not isinstance(projected, Mapping):
         return {
-            "workflow_evidence_seen": bool((tool_name or "").lower().startswith("workflow_")),
+            "workflow_evidence_seen": bool(
+                (tool_name or "").lower().startswith("workflow_")
+            ),
             "progress_lines": [],
             "contract_ids": [],
             "telemetry": None,
@@ -8286,6 +8315,7 @@ def _extract_surfaceable_artefact_tool_evidence(
         return {"evidence": [], "lines": [], "telemetry": None}
 
     candidates: list[dict[str, Any]] = []
+
     def _looks_like_raw_workflow_aggregate(value: Mapping[str, Any]) -> bool:
         workflow_markers = {
             "iteration_results",
@@ -8416,7 +8446,9 @@ def _format_represented_progress_fact_line(fact: Mapping[str, Any]) -> str | Non
     if contract_id:
         suffix_parts.append(f"contract `{contract_id}`")
     if provenance_bits:
-        suffix_parts.append("source " + " / ".join(f"`{bit}`" for bit in provenance_bits))
+        suffix_parts.append(
+            "source " + " / ".join(f"`{bit}`" for bit in provenance_bits)
+        )
     suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
     if value_text:
         return f"- {label}: `{value_text}`{suffix}."
@@ -8548,7 +8580,10 @@ def _build_presenter_screen_summary_from_tool_messages(
                 nested_evidence.get("workflow_evidence_seen")
             )
             for contract_id in nested_evidence.get("contract_ids") or []:
-                if isinstance(contract_id, str) and contract_id not in represented_contract_seen:
+                if (
+                    isinstance(contract_id, str)
+                    and contract_id not in represented_contract_seen
+                ):
                     represented_contract_seen.add(contract_id)
                     represented_contract_ids.append(contract_id)
             telemetry = nested_evidence.get("telemetry")
@@ -10827,6 +10862,31 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             400,
         )
 
+    request_turn_expected_outcome_contract = None
+    request_turn_expected_outcome_contract_raw = data.get(
+        "turn_expected_outcome_contract"
+    )
+    if request_turn_expected_outcome_contract_raw is None:
+        request_turn_expected_outcome_contract_raw = data.get(
+            "turn_expected_outcome_contract_state"
+        )
+    if isinstance(request_turn_expected_outcome_contract_raw, Mapping):
+        request_turn_expected_outcome_contract = {
+            str(key): value
+            for key, value in request_turn_expected_outcome_contract_raw.items()
+            if isinstance(key, str)
+        }
+    elif request_turn_expected_outcome_contract_raw is not None:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_turn_expected_outcome_contract",
+                    "detail": "turn_expected_outcome_contract must be an object.",
+                }
+            ),
+            400,
+        )
+
     _emit_context_setup_progress(
         subtask="flask session user lookup",
         result_summary="Reading authenticated user id from the Flask session.",
@@ -11512,9 +11572,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # Update existing system message to include user/org context
                 existing_system = enhanced_context[0]["content"]
                 if not any(part in existing_system for part in system_message_parts):
-                    enhanced_context[0]["content"] = (
-                        f"{existing_system} | {' | '.join(system_message_parts)}"
-                    )
+                    enhanced_context[0][
+                        "content"
+                    ] = f"{existing_system} | {' | '.join(system_message_parts)}"
 
         # Ensure user-specific system prompt is included even when the orchestrator
         # is disabled/unavailable.
@@ -12465,6 +12525,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
                     turn_memory_context=request_turn_memory_context,
+                    turn_expected_outcome_contract=request_turn_expected_outcome_contract,
                     thinking_card_mode=thinking_card_mode,
                 )
                 llm_interaction["duration_ms"] = (
@@ -14385,7 +14446,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 or 0
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             diagnostics_unsatisfied_required_tools = 0
         if (
             isinstance(response_text, str)
@@ -14510,9 +14571,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else None
             ),
         }
-        llm_debug_info["turn_output_health"] = build_turn_output_health(
-            llm_debug_info
-        )
+        llm_debug_info["turn_output_health"] = build_turn_output_health(llm_debug_info)
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
 

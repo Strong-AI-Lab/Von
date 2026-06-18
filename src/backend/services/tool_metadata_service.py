@@ -64,6 +64,12 @@ class ToolMetadata:
     target_concept_source: str | None = None
     target_concept_max_count: int | None = None
     default_payload: dict[str, Any] | None = None
+    identifier_argument_name: str | None = None
+    identifier_pattern: str | None = None
+    identifier_source: str | None = None
+    identifier_max_count: int | None = None
+    identifier_normalise: str | None = None
+    identifier_default_payload: dict[str, Any] | None = None
     expose_in_vontology_stdio: bool | None = None
     expose_in_vonrag_stdio: bool | None = None
     expose_in_manifest: bool | None = None
@@ -104,6 +110,18 @@ class ToolTargetConceptBindingMetadata:
     target_concept_argument_name: str
     target_concept_source: str = "focal_concept"
     target_concept_max_count: int | None = None
+    default_payload: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolIdentifierBindingMetadata:
+    """Exact identifier binding metadata for a required-tool retry."""
+
+    identifier_argument_name: str
+    identifier_pattern: str
+    identifier_source: str = "user_text"
+    identifier_max_count: int | None = None
+    identifier_normalise: str | None = None
     default_payload: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -468,6 +486,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "dispatch_surface_family": "jira",
         "evidence_surface_family": "jira",
         "external_surface": True,
+        "identifier_argument_name": "issue_key",
+        "identifier_pattern": r"\b[A-Z][A-Z0-9]+-\d+\b",
+        "identifier_source": "user_text",
+        "identifier_max_count": 1,
+        "identifier_normalise": "upper",
     },
     "jira_get_project_issue_types": {
         "salience": "medium",
@@ -1424,6 +1447,16 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                     attrs.get("target_concept_max_count")
                 ),
                 default_payload=_coerce_optional_mapping(attrs.get("default_payload")),
+                identifier_argument_name=attrs.get("identifier_argument_name"),
+                identifier_pattern=attrs.get("identifier_pattern"),
+                identifier_source=attrs.get("identifier_source"),
+                identifier_max_count=_coerce_optional_positive_int(
+                    attrs.get("identifier_max_count")
+                ),
+                identifier_normalise=attrs.get("identifier_normalise"),
+                identifier_default_payload=_coerce_optional_mapping(
+                    attrs.get("identifier_default_payload")
+                ),
                 expose_in_vontology_stdio=attrs.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=attrs.get("expose_in_vonrag_stdio"),
                 expose_in_manifest=attrs.get("expose_in_manifest"),
@@ -1495,6 +1528,16 @@ def _refresh_cache_if_needed() -> None:
                 ),
                 default_payload=_coerce_optional_mapping(
                     defaults.get("default_payload")
+                ),
+                identifier_argument_name=defaults.get("identifier_argument_name"),
+                identifier_pattern=defaults.get("identifier_pattern"),
+                identifier_source=defaults.get("identifier_source"),
+                identifier_max_count=_coerce_optional_positive_int(
+                    defaults.get("identifier_max_count")
+                ),
+                identifier_normalise=defaults.get("identifier_normalise"),
+                identifier_default_payload=_coerce_optional_mapping(
+                    defaults.get("identifier_default_payload")
                 ),
                 expose_in_vontology_stdio=defaults.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=defaults.get("expose_in_vonrag_stdio"),
@@ -1573,6 +1616,32 @@ def _refresh_cache_if_needed() -> None:
                     default_payload=(
                         _coerce_optional_mapping(metadata.default_payload)
                         or _coerce_optional_mapping(default_metadata.default_payload)
+                    ),
+                    identifier_argument_name=(
+                        metadata.identifier_argument_name
+                        or default_metadata.identifier_argument_name
+                    ),
+                    identifier_pattern=(
+                        metadata.identifier_pattern
+                        or default_metadata.identifier_pattern
+                    ),
+                    identifier_source=(
+                        metadata.identifier_source or default_metadata.identifier_source
+                    ),
+                    identifier_max_count=(
+                        metadata.identifier_max_count
+                        if metadata.identifier_max_count is not None
+                        else default_metadata.identifier_max_count
+                    ),
+                    identifier_normalise=(
+                        metadata.identifier_normalise
+                        or default_metadata.identifier_normalise
+                    ),
+                    identifier_default_payload=(
+                        _coerce_optional_mapping(metadata.identifier_default_payload)
+                        or _coerce_optional_mapping(
+                            default_metadata.identifier_default_payload
+                        )
                     ),
                     expose_in_vontology_stdio=(
                         metadata.expose_in_vontology_stdio
@@ -1846,6 +1915,31 @@ def _normalise_target_concept_source(value: Any) -> str:
     return source or "focal_concept"
 
 
+def _normalise_identifier_pattern(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    pattern = value.strip()
+    if not pattern or len(pattern) > 500:
+        return None
+    return pattern
+
+
+def _normalise_identifier_source(value: Any) -> str:
+    if not isinstance(value, str):
+        return "user_text"
+    source = value.strip().lower()
+    return source or "user_text"
+
+
+def _normalise_identifier_normalise(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalise = value.strip().lower()
+    if normalise in {"upper", "lower"}:
+        return normalise
+    return None
+
+
 def get_tool_target_concept_binding_metadata(
     tool_name: str,
 ) -> ToolTargetConceptBindingMetadata | None:
@@ -1864,6 +1958,32 @@ def get_tool_target_concept_binding_metadata(
         ),
         target_concept_max_count=metadata.target_concept_max_count,
         default_payload=_coerce_optional_mapping(metadata.default_payload) or {},
+    )
+
+
+def get_tool_identifier_binding_metadata(
+    tool_name: str,
+) -> ToolIdentifierBindingMetadata | None:
+    """Resolve exact identifier binding metadata for a required-tool retry."""
+
+    metadata = get_tool_metadata(tool_name)
+    argument_name = _normalise_target_concept_argument_name(
+        metadata.identifier_argument_name
+    )
+    pattern = _normalise_identifier_pattern(metadata.identifier_pattern)
+    if argument_name is None or pattern is None:
+        return None
+    return ToolIdentifierBindingMetadata(
+        identifier_argument_name=argument_name,
+        identifier_pattern=pattern,
+        identifier_source=_normalise_identifier_source(metadata.identifier_source),
+        identifier_max_count=metadata.identifier_max_count,
+        identifier_normalise=_normalise_identifier_normalise(
+            metadata.identifier_normalise
+        ),
+        default_payload=(
+            _coerce_optional_mapping(metadata.identifier_default_payload) or {}
+        ),
     )
 
 
@@ -1994,9 +2114,7 @@ def get_tool_evidence_role(
     action_spec = (
         _resolve_workflow_action_spec(tool_name) if allow_registry_fallback else None
     )
-    action_role = _normalise_evidence_role(
-        getattr(action_spec, "evidence_role", None)
-    )
+    action_role = _normalise_evidence_role(getattr(action_spec, "evidence_role", None))
     if action_role is not None:
         return action_role
 
