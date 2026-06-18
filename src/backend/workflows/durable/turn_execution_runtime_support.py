@@ -976,9 +976,47 @@ def _sanitise_user_response_candidate(text: Any) -> str | None:
 
     if _looks_like_execution_bookkeeping_response(candidate):
         return None
+    if _text_contains_workflow_llm_timeout(candidate):
+        return None
     if _looks_like_count_only_result_summary(candidate):
         return None
     return candidate
+
+
+def coerce_user_visible_response_text(value: Any) -> str | None:
+    candidate = _sanitise_user_response_candidate(value)
+    if candidate and not _looks_like_machine_json_text(candidate):
+        return candidate
+
+    if isinstance(value, Mapping):
+        for key in (
+            "response_text",
+            "final_response",
+            "current_response",
+            "selected_workflow_user_response",
+        ):
+            if key not in value:
+                continue
+            nested_candidate = coerce_user_visible_response_text(value.get(key))
+            if nested_candidate:
+                return nested_candidate
+        scalar_parts: list[str] = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(item, (str, int, float, bool)) and item is not None:
+                scalar_parts.append(f"{key}: {item}")
+        return "; ".join(scalar_parts) if scalar_parts else None
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        lines: list[str] = []
+        for index, item in enumerate(value, start=1):
+            item_text = coerce_user_visible_response_text(item)
+            if item_text:
+                lines.append(f"{index}. {item_text}")
+        return "\n".join(lines) if lines else None
+
+    return None
 
 
 _COMPLETION_LEDGER_STATUS_PREFIXES: tuple[str, ...] = (
@@ -1780,7 +1818,9 @@ def _completion_gate_record_has_stale_required_tool_obligation_effect(
         refreshed_ledger = build_required_tool_obligation_ledger(
             required_tools=stale_required_tools,
             invocations=[
-                invocation for invocation in invocations if isinstance(invocation, Mapping)
+                invocation
+                for invocation in invocations
+                if isinstance(invocation, Mapping)
             ],
         )
     except Exception:
@@ -1905,7 +1945,7 @@ def render_selected_workflow_user_response(
         (completion_report_map, "response_text"),
         (workflow_execution_summary_map, "response_text"),
     ):
-        candidate = _sanitise_user_response_candidate(payload.get(field_name))
+        candidate = coerce_user_visible_response_text(payload.get(field_name))
         if not candidate:
             continue
         lowered = candidate.lower()
@@ -2022,7 +2062,7 @@ def build_turn_execution_selected_workflow_outputs(
     child_outputs_map = (
         dict(child_outputs) if isinstance(child_outputs, Mapping) else {}
     )
-    rendered_response = _safe_str(rendered_child_response_text)
+    rendered_response = coerce_user_visible_response_text(rendered_child_response_text)
     child_snapshot = (
         dict(child_result_snapshot)
         if isinstance(child_result_snapshot, Mapping)
@@ -2067,27 +2107,23 @@ def build_turn_execution_selected_workflow_outputs(
                 "final_response",
                 "response_text",
             ):
-                candidate = _sanitise_user_response_candidate(payload.get(field_name))
+                candidate = coerce_user_visible_response_text(payload.get(field_name))
                 if not candidate:
-                    continue
-                if _looks_like_machine_json_text(candidate):
                     continue
                 return candidate
         completion_report_candidate = child_outputs_map.get("completion_report")
         if isinstance(completion_report_candidate, Mapping):
-            candidate = _sanitise_user_response_candidate(
+            candidate = coerce_user_visible_response_text(
                 completion_report_candidate.get("response_text")
             )
-            if candidate and not _looks_like_machine_json_text(candidate):
+            if candidate:
                 return candidate
         return None
 
     preserved_child_user_response = _preserved_child_user_response()
     if preserved_child_user_response and (
         not derived_user_response
-        or _coerce_non_empty_text(derived_user_response).startswith(
-            "Execution status:"
-        )
+        or _coerce_non_empty_text(derived_user_response).startswith("Execution status:")
         or _looks_like_machine_json_text(derived_user_response)
     ):
         derived_user_response = preserved_child_user_response
@@ -2112,9 +2148,15 @@ def build_turn_execution_selected_workflow_outputs(
         else:
             response_preview = (
                 rendered_response
-                or _safe_str(child_outputs_map.get("response_text"))
-                or _safe_str(child_outputs_map.get("final_response"))
-                or _safe_str(child_outputs_map.get("current_response"))
+                or coerce_user_visible_response_text(
+                    child_outputs_map.get("response_text")
+                )
+                or coerce_user_visible_response_text(
+                    child_outputs_map.get("final_response")
+                )
+                or coerce_user_visible_response_text(
+                    child_outputs_map.get("current_response")
+                )
             )
             completion_report = {
                 "schema_version": "conversation_turn_selected_workflow_result.v1",
@@ -3136,9 +3178,9 @@ def run_turn_execution_completion_gate(
                 or "escalation_required"
             )
         if not decision_reason:
-            decision_reason = _safe_str(
-                workflow_llm_timeout_blocker.get("decision_reason")
-            ) or ""
+            decision_reason = (
+                _safe_str(workflow_llm_timeout_blocker.get("decision_reason")) or ""
+            )
 
     if not blocking_failure_codes:
         for unresolved in unresolved_preconditions:
@@ -3800,6 +3842,76 @@ def run_turn_execution_completion_gate(
             )
         except Exception:
             pass
+
+    def _ready_response_candidate(value: Any) -> str | None:
+        return coerce_user_visible_response_text(value)
+
+    def _completion_gate_ready_response_text() -> str | None:
+        for value in (
+            selected_workflow_user_response,
+            preserved_user_response,
+            data.get("completion_gate_preserved_response"),
+            final_response,
+            current_response,
+            response_text,
+            data.get("llm_step_response"),
+        ):
+            candidate = _ready_response_candidate(value)
+            if candidate:
+                return candidate
+        for payload in (
+            data.get("completion_report"),
+            data.get("selected_workflow_trace"),
+            data.get("workflow_execution_summary"),
+        ):
+            if not isinstance(payload, Mapping):
+                continue
+            candidate = _ready_response_candidate(payload.get("response_text"))
+            if candidate:
+                return candidate
+            nested_report = payload.get("completion_report")
+            if isinstance(nested_report, Mapping):
+                candidate = _ready_response_candidate(
+                    nested_report.get("response_text")
+                )
+                if candidate:
+                    return candidate
+        return None
+
+    emit_progress = data.get("emit_progress")
+    if callable(emit_progress) and not repeat_iteration:
+        ready_response_text = _completion_gate_ready_response_text()
+        if isinstance(ready_response_text, str) and ready_response_text.strip():
+            try:
+                emit_progress(
+                    {
+                        "status": "orchestrator_result_ready",
+                        "stage": "response_ready",
+                        "phase": "response_ready",
+                        "phase_label": "Response ready",
+                        "request_id": _safe_str(data.get("turn_id")),
+                        "response_text": ready_response_text,
+                        "workflow_discovery": data.get("workflow_discovery_result"),
+                        "workflow_routing": data.get("workflow_routing"),
+                        "tool_invocations": (
+                            list(invocations_raw)
+                            if isinstance(invocations_raw, list)
+                            else []
+                        ),
+                        "aux_llm_calls": (
+                            list(aux_llm_calls)
+                            if isinstance(aux_llm_calls, list)
+                            else []
+                        ),
+                        "llm_calls": (
+                            list(data.get("llm_calls"))
+                            if isinstance(data.get("llm_calls"), list)
+                            else []
+                        ),
+                    }
+                )
+            except Exception:
+                pass
 
     return WorkflowActionResult(
         outputs={

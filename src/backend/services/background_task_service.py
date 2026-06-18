@@ -305,13 +305,28 @@ class BackgroundTaskRegistry:
                 return task_status
 
             if task_status.status in _TERMINAL_STATUSES:
-                if task_status.status != terminal_status and terminal_status == "completed":
+                if (
+                    task_status.status != terminal_status
+                    and terminal_status == "completed"
+                ):
                     task_status.status = terminal_status
                     task_status.completed_at = now
                     task_status.result = result
                     task_status.error = None
                     task_status.progress = progress_payload
                     _append_progress_history(task_status, progress_payload)
+                    return task_status
+                if task_status.status == terminal_status == "completed":
+                    if result is not None:
+                        task_status.result = result
+                    task_status.error = None
+                    if progress_payload:
+                        task_status.progress = progress_payload
+                        _append_progress_history(task_status, progress_payload)
+                    if task_status.session_id is None and session_id is not None:
+                        task_status.session_id = session_id
+                    if task_status.user_id is None and user_id is not None:
+                        task_status.user_id = user_id
                     return task_status
                 if task_status.result is None and result is not None:
                     task_status.result = result

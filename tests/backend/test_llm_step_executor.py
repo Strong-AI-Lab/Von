@@ -250,6 +250,40 @@ def test_execute_llm_step_recovers_embedded_json_value_output() -> None:
     assert result.outputs["validated_json_parse_mode"] == "embedded_json"
 
 
+def test_execute_llm_step_recovers_json_value_with_raw_newlines_in_string() -> None:
+    llm_client = MagicMock()
+    llm_client.generate.return_value = (
+        '{"response_text":"Here are the messages:\n\n'
+        "1. From: A, Subject: One\n"
+        '   Summary: First summary."}'
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={},
+        prompt_contract={"prompt_text": "Return response JSON only."},
+        validation_policy={
+            "output_format": "json_value",
+            "required_json_fields": ["response_text"],
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"] == {
+        "response_text": (
+            "Here are the messages:\n\n"
+            "1. From: A, Subject: One\n"
+            "   Summary: First summary."
+        )
+    }
+    assert result.outputs["validated_json_parse_mode"] == "relaxed_json_control_chars"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["status"] == "success"
+
+
 def test_execute_llm_step_records_recovery_prompt_compaction_diagnostics() -> None:
     llm_client = MagicMock()
     llm_client.generate.return_value = (

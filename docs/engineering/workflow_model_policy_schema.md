@@ -23,6 +23,7 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
 - `#V#narration_stage`
 - `#V#summariser_stage`
 - `#V#buttonify_stage`
+- `#V#mail_review_response_rendering_stage`
 
 ### Stage configuration instances
 - `#V#default_planner_config`
@@ -34,6 +35,7 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
 - `#V#default_narration_config`
 - `#V#default_summariser_config`
 - `#V#default_buttonify_config`
+- `#V#default_mail_review_response_rendering_config`
 
 ### Predicates
 - `#V#applies_to_workflow_stage` - Links config → stage
@@ -95,6 +97,7 @@ The orchestrator uses graph policy only when the payload reports
 - `narration`
 - `summariser`
 - `buttonify`
+- `mail_review_response_rendering`
 
 ## Policy JSON schema (draft)
 
@@ -287,4 +290,3 @@ Remaining:
 `GET /admin/policy_comparison?policy_id=#V#default_workflow_model_policy`
 
 Returns a comparison report between JSON and graph representations, showing mismatches.
-

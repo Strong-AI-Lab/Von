@@ -194,11 +194,23 @@ def _extract_json_payload(raw_text: str) -> tuple[Any, str]:
     except Exception:
         pass
 
+    try:
+        return json.loads(cleaned, strict=False), "relaxed_json_control_chars"
+    except Exception:
+        pass
+
     fence_match = _JSON_FENCE_RE.search(cleaned)
     if fence_match:
         candidate = fence_match.group("body")
         try:
             return json.loads(candidate), "fenced_json"
+        except Exception:
+            pass
+        try:
+            return (
+                json.loads(candidate, strict=False),
+                "fenced_relaxed_json_control_chars",
+            )
         except Exception:
             pass
 
@@ -208,6 +220,13 @@ def _extract_json_payload(raw_text: str) -> tuple[Any, str]:
         candidate = cleaned[start : end + 1]
         try:
             return json.loads(candidate), "braced_json"
+        except Exception:
+            pass
+        try:
+            return (
+                json.loads(candidate, strict=False),
+                "braced_relaxed_json_control_chars",
+            )
         except Exception:
             pass
 
@@ -224,6 +243,20 @@ def _extract_json_payload(raw_text: str) -> tuple[Any, str]:
         embedded_candidate = parsed
     if embedded_candidate is not None:
         return embedded_candidate, "embedded_json"
+
+    relaxed_decoder = json.JSONDecoder(strict=False)
+    embedded_candidate = None
+    for index, char in enumerate(cleaned):
+        if char not in "{[":
+            continue
+        candidate = cleaned[index:]
+        try:
+            parsed, _end = relaxed_decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        embedded_candidate = parsed
+    if embedded_candidate is not None:
+        return embedded_candidate, "embedded_relaxed_json_control_chars"
 
     return None, "unparsed"
 

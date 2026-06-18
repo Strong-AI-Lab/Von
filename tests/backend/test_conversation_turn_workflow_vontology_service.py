@@ -24,6 +24,7 @@ from src.backend.services.gmail_tool_evidence_contract_vontology_service import 
     bootstrap_gmail_tool_evidence_contract,
 )
 from src.backend.services.text_value_service import get_texts_for_concept
+from src.backend.services.workflow_policy_graph_service import resolve_policy_from_graph
 from src.backend.workflows import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -53,9 +54,7 @@ from src.backend.workflows.vontology_loader import (
 EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
-CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = (
-    "#V#turn_prompt_context_adjudication_prompt"
-)
+CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = "#V#turn_prompt_context_adjudication_prompt"
 SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
@@ -323,6 +322,13 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert counts.get("errors") == 0
     assert counts.get("workflows_published") == 9
 
+    model_policy = resolve_policy_from_graph("#V#default_workflow_model_policy")
+    assert model_policy is not None
+    assert model_policy.get("completeness") == "graph_complete"
+    mail_render_stage = model_policy["stages"]["mail_review_response_rendering"]
+    assert mail_render_stage["primary"] == "active_llm"
+    assert mail_render_stage["fallback"] == ["ollama:granite3.3:2b"]
+
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
     )
@@ -351,6 +357,27 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert context_decision_prompt_contract.get("resolved_prompt_concept_id") == (
         CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
     )
+    context_decision_policy = context_decision_action.validation_policy or {}
+    assert context_decision_policy.get("output_format") == "json_value"
+    context_decision_defaults = context_decision_policy.get("json_field_defaults") or {}
+    assert "mode" not in context_decision_defaults
+    assert "summary" not in context_decision_defaults
+    assert context_decision_defaults == {
+        "routing_evidence_scope": "current_request_only",
+        "expected_outcome_scope": "current_request_only",
+        "answer_scope": "current_request_only",
+        "turn_context_handoff_messages": [],
+        "lineage": [],
+        "omitted_context_reasons": [],
+        "risks": [],
+        "confidence": 0.5,
+    }
+    context_decision_required = (
+        context_decision_policy.get("required_json_fields") or []
+    )
+    assert all(
+        field in context_decision_required for field in context_decision_defaults
+    )
 
     tool_calling_definition = load_workflow_definition_from_vontology(
         TOOL_CALLING_WORKFLOW_ID
@@ -376,9 +403,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert tool_calling_synth_prep_action.action_id == "synthesiser_context_prep"
     assert tool_calling_synth_prep_action.execution_mode == "deterministic"
     assert tool_calling_synth_prep_action.prompt_contract is not None
-    assert tool_calling_synth_prep_action.prompt_contract[
-        "resolved_prompt_concept_id"
-    ] == SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+    assert (
+        tool_calling_synth_prep_action.prompt_contract["resolved_prompt_concept_id"]
+        == SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
+    )
     framing_prompt_rows = get_texts_for_concept(
         SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -666,15 +694,16 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_extract_action.llm_policy.get("tool_mode") == "none"
     assert mail_review_extract_action.llm_policy.get("required_tools") == []
     assert "last 3" in mail_review_extract_action.llm_policy["response_contract_text"]
-    assert "last four" in mail_review_extract_action.llm_policy[
-        "response_contract_text"
-    ]
-    assert "one through twenty-five" in mail_review_extract_action.llm_policy[
-        "response_contract_text"
-    ]
-    extract_required_fields = (
-        mail_review_extract_action.validation_policy or {}
-    ).get("required_json_fields")
+    assert (
+        "last four" in mail_review_extract_action.llm_policy["response_contract_text"]
+    )
+    assert (
+        "one through twenty-five"
+        in mail_review_extract_action.llm_policy["response_contract_text"]
+    )
+    extract_required_fields = (mail_review_extract_action.validation_policy or {}).get(
+        "required_json_fields"
+    )
     assert "mail_query" not in extract_required_fields
     assert set(extract_required_fields) == {
         "requested_message_count",
@@ -806,7 +835,18 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert mail_review_render_action.action_id == "mail_review.render_grounded_response"
     assert mail_review_render_action.llm_policy is not None
     assert mail_review_render_action.llm_policy.get("tool_mode") == "none"
+    render_validation_policy = mail_review_render_action.validation_policy or {}
+    assert render_validation_policy.get("required_json_fields") == ["response_text"]
+    assert "json_field_defaults" not in render_validation_policy
     render_contract = mail_review_render_action.llm_policy["response_contract_text"]
+    assert (
+        'Return exactly one JSON object of the form {"response_text":"..."}'
+        in render_contract
+    )
+    assert "put the numbered list inside that one string" in render_contract
+    assert (
+        "Do not include message_id unless the user explicitly asks" in render_contract
+    )
     assert "projected to the caller's required fields" in render_contract
     assert "do not claim that details cannot be displayed" in render_contract
     assert "mail_review_item_output_requirement" in {
@@ -1046,8 +1086,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert any(
         mapping.get("context_key") == "turn_context_handoff_decision"
-        and mapping.get("tool_output_field")
-        == "result.turn_context_handoff_decision"
+        and mapping.get("tool_output_field") == "result.turn_context_handoff_decision"
         for mapping in context_adjudication_mappings
         if isinstance(mapping, dict)
     )
@@ -1118,9 +1157,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
     )
-    expected_outcome_context_fields = (
-        expected_outcome_action.llm_policy or {}
-    ).get("context_fields")
+    expected_outcome_context_fields = (expected_outcome_action.llm_policy or {}).get(
+        "context_fields"
+    )
     assert isinstance(expected_outcome_context_fields, list)
     assert any(
         isinstance(field, dict)
@@ -1180,8 +1219,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert any(
         isinstance(field, dict)
-        and field.get("context_key")
-        == "turn_context_handoff_routing_evidence_scope"
+        and field.get("context_key") == "turn_context_handoff_routing_evidence_scope"
         for field in selector_context_fields
     )
     routing_step_id = authority_service._step_concept_id(
@@ -1516,7 +1554,9 @@ def test_gmail_message_detail_fetch_workflow_uses_projected_mcp_payload(
     assert detail_outputs["mcp_raw_result_omitted_from_workflow_context"] is True
     assert detail_outputs["result"]["_llm_view"] == "tool_evidence_projection.v1"
     assert "payload" not in detail_outputs["result"]
-    assert "gmail_message_detail" not in json.dumps(payload, sort_keys=True, default=str)
+    assert "gmail_message_detail" not in json.dumps(
+        payload, sort_keys=True, default=str
+    )
     assert large_marker not in json.dumps(result.data, sort_keys=True, default=str)
 
 

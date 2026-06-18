@@ -6,20 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.backend.services import workflow_repo_seed_bootstrap as seed_bootstrap
-from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
 from src.backend.workflows import workflow_template_profile_service as template_service
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_repo_seed_layout_replaces_old_authored_source_paths() -> None:
-    assert not (
-        PROJECT_ROOT / "src/backend/workflows/authored_sources"
-    ).exists()
-    assert (
-        PROJECT_ROOT / "src/backend/workflows/repo_seed_bundles"
-    ).is_dir()
+    assert not (PROJECT_ROOT / "src/backend/workflows/authored_sources").exists()
+    assert (PROJECT_ROOT / "src/backend/workflows/repo_seed_bundles").is_dir()
     assert not (
         PROJECT_ROOT / "src/backend/services/workflow_authored_source_bootstrap.py"
     ).exists()
@@ -33,7 +30,9 @@ def test_workflow_seed_helpers_no_longer_export_authoritative_sounding_names() -
     assert not hasattr(authority_service, "clear_authored_workflow_source_bundle_cache")
     assert not hasattr(authority_service, "upsert_authored_text_relations")
     assert not hasattr(template_service, "load_authored_workflow_template_bundle")
-    assert not hasattr(template_service, "clear_authored_workflow_template_bundle_cache")
+    assert not hasattr(
+        template_service, "clear_authored_workflow_template_bundle_cache"
+    )
     assert not hasattr(template_service, "ensure_seeded_workflow_template_bundle")
 
 
@@ -50,7 +49,108 @@ def test_repo_workflow_seed_bundles_declare_seed_version() -> None:
     assert missing == []
 
 
-def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata() -> None:
+def test_support_concepts_materialise_relationships_and_text_relations(
+    monkeypatch,
+) -> None:
+    docs = {
+        "#V#policy": {
+            "concept_id": "#V#policy",
+            "relationships": {"#V#has_stage_configuration": ["#V#existing_config"]},
+        }
+    }
+    created = []
+    updates = []
+    text_updates = []
+
+    def _get_concept(concept_id):
+        return docs.get(concept_id)
+
+    def _create_concept(**kwargs):
+        concept_id = kwargs["concept_id"]
+        doc = {
+            "concept_id": concept_id,
+            "relationships": {
+                "is_an_instance_of": list(kwargs.get("parent_concept_ids") or [])
+            },
+        }
+        docs[concept_id] = doc
+        created.append(kwargs)
+        return doc
+
+    def _update_concept(concept_id, update_data, **kwargs):
+        updates.append((concept_id, update_data, kwargs))
+        doc = docs[concept_id]
+        doc["relationships"] = dict(update_data["relationships"])
+        return doc
+
+    monkeypatch.setattr(
+        seed_bootstrap.concept_service,
+        "get_concept_by_concept_id_exact",
+        _get_concept,
+    )
+    monkeypatch.setattr(
+        seed_bootstrap.concept_service,
+        "create_concept",
+        _create_concept,
+    )
+    monkeypatch.setattr(
+        seed_bootstrap.concept_service,
+        "update_concept",
+        _update_concept,
+    )
+    monkeypatch.setattr(
+        seed_bootstrap.authority_service,
+        "upsert_seed_bundle_text_relations",
+        lambda **kwargs: text_updates.append(kwargs),
+    )
+
+    report = seed_bootstrap._materialise_support_concepts(
+        [
+            {
+                "concept_id": "#V#policy",
+                "name": "Policy",
+                "relationships": {"#V#has_stage_configuration": ["#V#mail_config"]},
+                "text_relations": [
+                    {"predicate": "#V#has_max_fallback_hops", "text": "2"}
+                ],
+            },
+            {
+                "concept_id": "#V#mail_config",
+                "name": "Mail Config",
+                "parent_concept_ids": ["#V#workflow_stage_configuration"],
+                "create_as_instance": True,
+                "relationships": {"#V#applies_to_workflow_stage": "#V#mail_stage"},
+            },
+        ],
+        source_tag="test-source",
+        managed_by="test-managed",
+    )
+
+    assert report["errors"] == []
+    assert report["existing_concept_ids"] == ["#V#policy"]
+    assert report["created_concept_ids"] == ["#V#mail_config"]
+    assert created[0]["defer_text_relations"] is True
+    assert docs["#V#policy"]["relationships"]["#V#has_stage_configuration"] == [
+        "#V#existing_config",
+        "#V#mail_config",
+    ]
+    assert docs["#V#mail_config"]["relationships"]["#V#applies_to_workflow_stage"] == [
+        "#V#mail_stage"
+    ]
+    assert report["relationship_updated_concept_ids"] == [
+        "#V#policy",
+        "#V#mail_config",
+    ]
+    assert report["text_relation_updated_concept_ids"] == ["#V#policy"]
+    assert text_updates[0]["subject_concept_id"] == "#V#policy"
+    assert text_updates[0]["source_tag"] == "test-source"
+    assert text_updates[0]["managed_by"] == "test-managed"
+    assert all(update[2]["defer_side_effects"] is True for update in updates)
+
+
+def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata() -> (
+    None
+):
     definitions = authority_service.build_repo_seed_workflow_definitions(
         target_workflow_ids=["#V#zhan_gmail_arxiv_ingestion_workflow"]
     )
@@ -60,9 +160,7 @@ def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata()
     assert "Gmail-to-arXiv" in str(definition.purpose)
     metadata = dict(definition.metadata)
     assert metadata["description_source"].startswith("repo_seed_text_relation:")
-    assert metadata["discovery_exemplars_source"].startswith(
-        "repo_seed_text_relation:"
-    )
+    assert metadata["discovery_exemplars_source"].startswith("repo_seed_text_relation:")
     exemplars = metadata["discovery_exemplars"]
     assert "recent email messages about arxiv papers" in exemplars["keywords"]
     assert any("recent email messages" in item for item in exemplars["examples"])
@@ -89,27 +187,25 @@ def test_repo_seed_workflow_definitions_include_gmail_arxiv_progress_projection_
     assert parent.metadata["progress_projection_source"].startswith(
         "repo_seed_text_relation:"
     )
-    assert {
-        fact["contract_id"] for fact in parent_projection["facts"]
-    } >= {
+    assert {fact["contract_id"] for fact in parent_projection["facts"]} >= {
         "#V#gmail_arxiv_messages_scanned_progress_fact",
         "#V#gmail_arxiv_messages_completed_progress_fact",
         "#V#gmail_arxiv_messages_failed_progress_fact",
     }
     assert {
         fact["contract_id"]
-        for fact in parent.states["process_messages"].metadata[
-            "progress_projection"
-        ]["facts"]
+        for fact in parent.states["process_messages"].metadata["progress_projection"][
+            "facts"
+        ]
     } >= {"#V#gmail_arxiv_batch_result_progress_fact"}
 
     message = definitions["#V#email_arxiv_ingestion_from_message_workflow"]
     message_normalise_facts = message.states["normalise_message"].metadata[
         "progress_projection"
     ]["facts"]
-    assert {
-        fact["contract_id"] for fact in message_normalise_facts
-    } >= {"#V#gmail_arxiv_email_message_subject_progress_fact"}
+    assert {fact["contract_id"] for fact in message_normalise_facts} >= {
+        "#V#gmail_arxiv_email_message_subject_progress_fact"
+    }
     assert {
         fact["source_path"]
         for fact in message_normalise_facts
@@ -122,9 +218,7 @@ def test_repo_seed_workflow_definitions_include_gmail_arxiv_progress_projection_
         ]["facts"]
     } >= {"#V#gmail_arxiv_message_result_progress_fact"}
 
-    resource = definitions[
-        "#V#arxiv_resource_ingestion_from_email_reference_workflow"
-    ]
+    resource = definitions["#V#arxiv_resource_ingestion_from_email_reference_workflow"]
     assert {
         fact["contract_id"]
         for fact in resource.states["normalise_reference"].metadata[
@@ -190,9 +284,7 @@ def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishi
                 "current_workflow_ids": ["#V#test_workflow"],
                 "drift_workflow_ids": [],
                 "issue_codes": [],
-                "workflow_status_by_id": {
-                    "#V#test_workflow": {"status": "current"}
-                },
+                "workflow_status_by_id": {"#V#test_workflow": {"status": "current"}},
                 "bundle_snapshot_drift_detected": False,
                 "bundle_snapshot_drift_workflow_ids": [],
                 "bundle_snapshot_issue_codes": [],
@@ -271,9 +363,7 @@ def test_equal_repo_seed_version_does_not_hide_executable_snapshot_drift(
                 "current_workflow_ids": ["#V#test_workflow"],
                 "drift_workflow_ids": [],
                 "issue_codes": [],
-                "workflow_status_by_id": {
-                    "#V#test_workflow": {"status": "current"}
-                },
+                "workflow_status_by_id": {"#V#test_workflow": {"status": "current"}},
                 "bundle_snapshot_drift_detected": True,
                 "bundle_snapshot_drift_workflow_ids": ["#V#test_workflow"],
                 "bundle_snapshot_issue_codes": ["definition_mismatch"],
@@ -394,9 +484,7 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
                 "current_workflow_ids": ["#V#test_workflow"],
                 "drift_workflow_ids": [],
                 "issue_codes": [],
-                "workflow_status_by_id": {
-                    "#V#test_workflow": {"status": "current"}
-                },
+                "workflow_status_by_id": {"#V#test_workflow": {"status": "current"}},
                 "bundle_snapshot_drift_detected": False,
                 "bundle_snapshot_drift_workflow_ids": [],
                 "bundle_snapshot_issue_codes": [],
@@ -404,6 +492,7 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
             },
         ),
     )
+
     def _publish_with_context_capture(**kwargs):
         publications.append(
             {
@@ -478,7 +567,9 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
     )
 
     assert result["publication"].get("skip_reason") is None
-    assert result["publication"]["materialisation_status"] == "repo_seed_version_refresh"
+    assert (
+        result["publication"]["materialisation_status"] == "repo_seed_version_refresh"
+    )
     assert result["publication"]["counts"]["workflows_published"] == 1
     assert result["publication"]["repo_seed_version_refresh_workflow_ids"] == [
         "#V#test_workflow"

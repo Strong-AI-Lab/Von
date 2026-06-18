@@ -1,7 +1,86 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "22",
+  "seed_version": "27",
+  "support_concepts": [
+    {
+      "concept_id": "#V#default_workflow_model_policy",
+      "name": "Default Workflow Model Policy",
+      "parent_concept_ids": [
+        "#V#workflow_model_policy"
+      ],
+      "create_as_instance": true,
+      "description": "Default stage-aware workflow model selection policy.",
+      "system_tags": [
+        "workflow-model-policy",
+        "workflow-support"
+      ],
+      "relationships": {
+        "#V#has_stage_configuration": [
+          "#V#default_mail_review_response_rendering_config"
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#has_max_fallback_hops",
+          "text": "2",
+          "lang": "en-NZ"
+        }
+      ]
+    },
+    {
+      "concept_id": "#V#mail_review_response_rendering_stage",
+      "name": "Mail Review Response Rendering Stage",
+      "parent_concept_ids": [
+        "#V#workflow_stage"
+      ],
+      "create_as_instance": true,
+      "description": "Workflow model-policy stage for rendering grounded mail review answers.",
+      "system_tags": [
+        "workflow-model-policy",
+        "mail-review",
+        "workflow-support"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#has_runtime_stage_name",
+          "text": "mail_review_response_rendering",
+          "lang": "en-NZ"
+        }
+      ]
+    },
+    {
+      "concept_id": "#V#default_mail_review_response_rendering_config",
+      "name": "Default Mail Review Response Rendering Model Configuration",
+      "parent_concept_ids": [
+        "#V#workflow_stage_configuration"
+      ],
+      "create_as_instance": true,
+      "description": "Default model-policy configuration for grounded mail review answer rendering.",
+      "system_tags": [
+        "workflow-model-policy",
+        "mail-review",
+        "workflow-support"
+      ],
+      "relationships": {
+        "#V#applies_to_workflow_stage": [
+          "#V#mail_review_response_rendering_stage"
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#has_primary_model",
+          "text": "active_llm",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#has_fallback_model",
+          "text": "ollama:granite3.3:2b",
+          "lang": "en-NZ"
+        }
+      ]
+    }
+  ],
   "workflows": [
     {
       "publication_spec": {
@@ -2544,12 +2623,12 @@
             "invoked_workflow_id": null,
             "llm_policy": {
               "policy_stage": "mail_review_response_rendering",
-              "prompt_text": "Render the grounded mail-review answer from retrieved Gmail list and message-detail evidence. Do not call tools. Return JSON only.",
+              "prompt_text": "Do not think step by step. Do not include analysis. Produce one compact JSON object immediately. Begin with { and end with }. Render the grounded mail-review answer from retrieved Gmail list and message-detail evidence. Do not call tools. Return JSON only.",
               "tool_mode": "none",
               "allowed_tools": [],
               "required_tools": [],
               "max_tool_invocations": 0,
-              "response_contract_text": "Return JSON with key response_text. The response_text must answer the user request using only mail_message_detail_results, mail_review_list_result, and the mail_review_item_output_requirement. mail_message_detail_results is a compact list of per-message payloads projected to the caller's required fields. Render only the fields requested by the user, while preserving message_id only as grounding/provenance unless the user asked to see IDs. If mail_message_detail_results contains entries, render those entries and do not claim that details cannot be displayed. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
+              "response_contract_text": "Return exactly one JSON object of the form {\"response_text\":\"...\"}. Do not use markdown fences, arrays, nested objects, or any text outside the JSON object. response_text must be a single user-visible string; when the request asks for multiple messages, put the numbered list inside that one string and encode line breaks as \\n. The response_text must answer the user request using only mail_message_detail_results, mail_review_list_result, and the mail_review_item_output_requirement. mail_message_detail_results is a compact list of per-message payloads projected to the caller's required fields. Render every field requested by the user, including sender, subject, received date/time, and one-sentence summary when those are requested. Do not include message_id unless the user explicitly asks to see IDs. If mail_message_detail_results contains entries, render those entries and do not claim that details cannot be displayed. Do not mention workflow bookkeeping unless the Gmail evidence is incomplete; if details are partially missing, say exactly which retrieval failed using the supplied iteration errors.",
               "context_fields": [
                 {
                   "context_key": "prompt",
@@ -2623,10 +2702,7 @@
               "output_format": "json_value",
               "required_json_fields": [
                 "response_text"
-              ],
-              "json_field_defaults": {
-                "response_text": "I retrieved Gmail evidence but could not safely render the requested mail list from the available message details."
-              }
+              ]
             },
             "writes_context_keys": [
               "response_text",
@@ -3560,6 +3636,16 @@
             },
             "validation_policy": {
               "output_format": "json_value",
+              "json_field_defaults": {
+                "routing_evidence_scope": "current_request_only",
+                "expected_outcome_scope": "current_request_only",
+                "answer_scope": "current_request_only",
+                "turn_context_handoff_messages": [],
+                "lineage": [],
+                "omitted_context_reasons": [],
+                "risks": [],
+                "confidence": 0.5
+              },
               "required_json_fields": [
                 "mode",
                 "summary",

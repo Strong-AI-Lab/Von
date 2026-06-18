@@ -150,9 +150,11 @@ def test_resolve_concept_id_by_name_uses_direct_slug_for_existing_concept(
 
     monkeypatch.setattr(
         "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
-        lambda query, *_args, **_kwargs: {"_id": "1"}
-        if query == {"concept_id": "#V#default_workflow_model_policy"}
-        else None,
+        lambda query, *_args, **_kwargs: (
+            {"_id": "1"}
+            if query == {"concept_id": "#V#default_workflow_model_policy"}
+            else None
+        ),
     )
     monkeypatch.setattr(
         "src.backend.vontology.code_concepts_registry.is_code_concept_id",
@@ -165,9 +167,7 @@ def test_resolve_concept_id_by_name_uses_direct_slug_for_existing_concept(
         ),
     )
 
-    resolved = orchestrator._resolve_concept_id_by_name(
-        "default_workflow_model_policy"
-    )
+    resolved = orchestrator._resolve_concept_id_by_name("default_workflow_model_policy")
 
     assert resolved == "#V#default_workflow_model_policy"
 
@@ -192,9 +192,7 @@ def test_resolve_concept_id_by_name_skips_name_search_for_missing_slug(
         ),
     )
 
-    resolved = orchestrator._resolve_concept_id_by_name(
-        "default_workflow_model_policy"
-    )
+    resolved = orchestrator._resolve_concept_id_by_name("default_workflow_model_policy")
 
     assert resolved is None
 
@@ -328,9 +326,7 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     assert second_end["fallback_used"] is True
 
     stage_summary = next(
-        entry
-        for entry in aux_log
-        if entry.get("type") == "workflow_model_policy_stage"
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
     assert stage_summary["fallback_attempt_count"] == 2
     assert stage_summary["failure_count"] == 1
@@ -342,7 +338,10 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     assert attempts[0]["error_class"] == "ConnectionError"
     assert attempts[1]["status"] == "succeeded"
 
-    assert recorded_calls[0]["note"] == "candidate reachability probe failed; trying fallback"
+    assert (
+        recorded_calls[0]["note"]
+        == "candidate reachability probe failed; trying fallback"
+    )
 
 
 def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
@@ -487,9 +486,7 @@ def test_run_llm_with_fallbacks_marks_policy_primary_active_llm_selection(
     assert telemetry.get("source") == "active_llm"
 
     stage_summary = next(
-        entry
-        for entry in aux_log
-        if entry.get("type") == "workflow_model_policy_stage"
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
     assert stage_summary["policy_stage"] == "classifier"
     assert stage_summary["requested_model"] == "gpt-5.4-mini"
@@ -553,9 +550,7 @@ def test_run_llm_with_fallbacks_records_client_default_when_active_llm_is_null(
     assert recorded_calls[0]["provider"] == "ollama"
 
     stage_summary = next(
-        entry
-        for entry in aux_log
-        if entry.get("type") == "workflow_model_policy_stage"
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
     assert stage_summary["selection_mode"] == "policy_primary_active_llm"
     assert stage_summary["selected"]["model_resolved"] == "llama3.2:latest"
@@ -660,18 +655,14 @@ def test_run_llm_with_fallbacks_marks_explicit_policy_stage_override(
     assert telemetry.get("source") == "policy"
 
     stage_summary = next(
-        entry
-        for entry in aux_log
-        if entry.get("type") == "workflow_model_policy_stage"
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
     assert stage_summary["policy_stage"] == "classifier"
     assert stage_summary["requested_model"] == "gpt-5.4-mini"
     assert stage_summary["selection_mode"] == "policy_primary_override"
     assert stage_summary["follows_active_llm"] is False
     assert stage_summary["explicit_stage_model_override"] is True
-    assert (
-        stage_summary["explicit_stage_model_override_origin"] == "policy_primary"
-    )
+    assert stage_summary["explicit_stage_model_override_origin"] == "policy_primary"
 
 
 def test_run_llm_with_fallbacks_prefers_default_model_when_requested(
@@ -727,9 +718,7 @@ def test_run_llm_with_fallbacks_prefers_default_model_when_requested(
     assert telemetry.get("source") == "active_llm"
 
     stage_summary = next(
-        entry
-        for entry in aux_log
-        if entry.get("type") == "workflow_model_policy_stage"
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
     assert stage_summary["requested_model"] == "gemma4:26b"
     assert stage_summary["selection_mode"] == "preferred_default_model"
@@ -737,7 +726,9 @@ def test_run_llm_with_fallbacks_prefers_default_model_when_requested(
     assert stage_summary["follows_active_llm"] is True
 
 
-def test_stage_model_candidates_stay_on_requested_default_model(monkeypatch) -> None:
+def test_stage_model_candidates_try_requested_default_before_policy_fallbacks(
+    monkeypatch,
+) -> None:
     orchestrator = _bare_orchestrator()
     policy_state = _WorkflowModelPolicyState(
         enabled=True,
@@ -768,8 +759,56 @@ def test_stage_model_candidates_stay_on_requested_default_model(monkeypatch) -> 
         prefer_default_model=True,
     )
 
-    assert [(candidate.source, candidate.provider, candidate.model) for candidate in candidates] == [
-        ("active_llm", None, "gemma4:26b")
+    assert [
+        (candidate.source, candidate.provider, candidate.model)
+        for candidate in candidates
+    ] == [
+        ("active_llm", None, "gemma4:26b"),
+        ("policy", "openai", "gpt-4o-mini"),
+        ("policy", "ollama", "granite3.3:2b"),
+        ("enabled_settings", "openai", "gpt-5.4-mini"),
+    ]
+
+
+def test_stage_model_candidates_dedupe_active_and_enabled_before_policy_fallback(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "mail_review_response_rendering": {
+                    "primary": "active_llm",
+                    "fallback": ["ollama:granite3.3:2b"],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **_kwargs: [{"provider": "ollama", "model": "qwen3:8b"}],
+    )
+
+    candidates = orchestrator._stage_model_candidates(
+        stage="mail_review_response_rendering",
+        default_model="qwen3:8b",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        prefer_default_model=True,
+    )
+
+    assert [
+        (candidate.source, candidate.provider, candidate.model)
+        for candidate in candidates
+    ] == [
+        ("active_llm", None, "qwen3:8b"),
+        ("policy", "ollama", "granite3.3:2b"),
     ]
 
 
@@ -1198,7 +1237,9 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         captured["context"] = kwargs.get("context")
         return "Final answer", "gpt-test", {}
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
     monkeypatch.setattr(
         orchestrator,
         "_interpret_model_turn",
@@ -1225,13 +1266,17 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         lambda **_kwargs: _kwargs["evaluation"],
     )
     monkeypatch.setattr(
-        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
     )
     monkeypatch.setattr(
-        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
     )
     monkeypatch.setattr(
         orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
@@ -1555,7 +1600,9 @@ def test_tool_calling_respond_runs_synthesiser_context_prep_before_backfill(
     )
 
 
-def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(monkeypatch) -> None:
+def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(
+    monkeypatch,
+) -> None:
     orchestrator = _bare_orchestrator()
 
     captured: dict[str, Any] = {}
@@ -1582,7 +1629,9 @@ def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(monkeypatch)
             )
         return "I cannot identify any grounded predicates yet.", "gpt-test", {}
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
     monkeypatch.setattr(
         orchestrator,
         "_interpret_model_turn",
@@ -1609,13 +1658,17 @@ def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(monkeypatch)
         lambda **_kwargs: _kwargs["evaluation"],
     )
     monkeypatch.setattr(
-        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
     )
     monkeypatch.setattr(
-        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
     )
     monkeypatch.setattr(
         orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
@@ -1779,7 +1832,9 @@ def test_tool_calling_backfill_surfaces_relation_argument_evidence(monkeypatch) 
             )
         return "I cannot identify any grounded relation evidence yet.", "gpt-test", {}
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
     monkeypatch.setattr(
         orchestrator,
         "_interpret_model_turn",
@@ -1806,13 +1861,17 @@ def test_tool_calling_backfill_surfaces_relation_argument_evidence(monkeypatch) 
         lambda **_kwargs: _kwargs["evaluation"],
     )
     monkeypatch.setattr(
-        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
     )
     monkeypatch.setattr(
-        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
     )
     monkeypatch.setattr(
         orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
@@ -1972,7 +2031,9 @@ def test_tool_calling_backfill_prioritises_positive_evidence_over_zero_result_su
             )
         return "I couldn't find any grounded represented links.", "gpt-test", {}
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
     monkeypatch.setattr(
         orchestrator,
         "_interpret_model_turn",
@@ -1999,13 +2060,17 @@ def test_tool_calling_backfill_prioritises_positive_evidence_over_zero_result_su
         lambda **_kwargs: _kwargs["evaluation"],
     )
     monkeypatch.setattr(
-        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
     )
     monkeypatch.setattr(
-        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+        orchestrator,
+        "_sanitise_user_visible_action_output",
+        lambda text, **_kwargs: text,
     )
     monkeypatch.setattr(
         orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
@@ -2112,10 +2177,13 @@ def test_tool_calling_backfill_prioritises_positive_evidence_over_zero_result_su
         if isinstance(message, Mapping)
     )
     assert "Positive retrieval signals for this turn:" in context_text
-    assert "Zero-result or inconclusive retrieval surfaces for this turn:" in context_text
     assert (
-        context_text.find("Positive retrieval signals for this turn:")
-        < context_text.find("Zero-result or inconclusive retrieval surfaces for this turn:")
+        "Zero-result or inconclusive retrieval surfaces for this turn:" in context_text
+    )
+    assert context_text.find(
+        "Positive retrieval signals for this turn:"
+    ) < context_text.find(
+        "Zero-result or inconclusive retrieval surfaces for this turn:"
     )
     assert "Treat zero-result notes as query-specific misses only." in context_text
     assert "Example Record via #V#linked_to_user -> Test User" in context_text
@@ -2176,7 +2244,9 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
             None,
         )
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
 
     progress_events: list[Mapping[str, Any]] = []
     request = SimpleNamespace(
@@ -2227,8 +2297,7 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
     aux_entries = [
         entry
         for entry in request.data["aux_llm_calls"]
-        if isinstance(entry, Mapping)
-        and entry.get("type") == "tool_limit_finalisation"
+        if isinstance(entry, Mapping) and entry.get("type") == "tool_limit_finalisation"
     ]
     assert aux_entries
     assert aux_entries[-1]["settings_key"] == "internal_mcp_max_tool_invocations"
@@ -2283,7 +2352,9 @@ def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
             None,
         )
 
-    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks
+    )
 
     progress_events: list[Mapping[str, Any]] = []
     request = SimpleNamespace(
@@ -2379,9 +2450,7 @@ def test_load_workflow_model_policy_distinguishes_graph_completeness(
     import src.backend.services.text_value_service as text_value_service
     import src.backend.services.workflow_policy_graph_service as graph_service
 
-    json_policy_text = (
-        '{"stages": {"planner": {"primary": "ollama:gemma4:26b"}}}'
-    )
+    json_policy_text = '{"stages": {"planner": {"primary": "ollama:gemma4:26b"}}}'
 
     def _orchestrator_with_concepts() -> InternalMCPChatOrchestrator:
         orchestrator = _bare_orchestrator()
@@ -2429,9 +2498,7 @@ def test_load_workflow_model_policy_distinguishes_graph_completeness(
     state, telemetry = orchestrator._load_workflow_model_policy(None)
     assert telemetry["policy_source"] == "json"
     assert telemetry["graph_completeness"] == "graph_incomplete"
-    assert telemetry["graph_incomplete_reasons"] == [
-        "missing_max_fallback_hops"
-    ]
+    assert telemetry["graph_incomplete_reasons"] == ["missing_max_fallback_hops"]
     assert state.policy is not None
     assert state.policy["stages"]["planner"]["primary"] == "ollama:gemma4:26b"
 

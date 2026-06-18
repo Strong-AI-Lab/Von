@@ -6140,6 +6140,137 @@ def _normalise_background_generate_result(result: Any) -> dict[str, Any]:
     return payload
 
 
+def _mark_background_generate_completed_if_ready(
+    *,
+    background_task_id: str | None,
+    result_body: Mapping[str, Any],
+    request_id: str,
+    session_id: str | None,
+    user_id: str | None,
+    response_text: str | None,
+) -> None:
+    """Expose a completed background generate result before slow persistence.
+
+    The supervised workflow may already have produced the user-visible answer
+    before chat-history/debug persistence and durable telemetry finalisation
+    finish. For background turns, make that completed answer available to
+    polling clients immediately; the worker may still continue best-effort
+    persistence, and any late failure is intentionally not allowed to overwrite
+    the completed user-facing result.
+    """
+
+    if not isinstance(background_task_id, str) or not background_task_id.strip():
+        return
+    marker = getattr(background_task_registry, "mark_terminal_external", None)
+    if not callable(marker):
+        return
+    response_preview = (
+        response_text[:500]
+        if isinstance(response_text, str) and response_text.strip()
+        else None
+    )
+    progress = {
+        "status": "completed",
+        "source": "background_generate_success_body",
+        "phase": "response_finalising",
+        "phase_label": "Response ready",
+        "request_id": request_id,
+        "result_summary": response_preview or "Background generate response is ready.",
+    }
+    try:
+        marker(
+            background_task_id.strip(),
+            status="completed",
+            result=dict(result_body),
+            progress=progress,
+            session_id=session_id,
+            user_id=user_id,
+        )
+    except Exception:
+        current_app.logger.debug(
+            "[background_task] Failed to mark completed generate result for %s",
+            background_task_id,
+            exc_info=True,
+        )
+
+
+def _mark_background_generate_completed_from_orchestrator_ready_progress(
+    *,
+    background_task_id: str | None,
+    progress_payload: Mapping[str, Any],
+    request_id: str,
+    session_id: str | None,
+    created_conversation_session_name: str | None,
+    created_conversation_session: bool,
+    user_id: str | None,
+    rag_trace: Any,
+) -> None:
+    if str(progress_payload.get("status") or "").strip() != "orchestrator_result_ready":
+        return
+    response_text = progress_payload.get("response_text")
+    if not isinstance(response_text, str) or not response_text.strip():
+        return
+
+    presenter_channels = _extract_presenter_channels(response_text)
+    workflow_discovery = progress_payload.get("workflow_discovery")
+    workflow_routing = progress_payload.get("workflow_routing")
+    selected_workflow_trace = progress_payload.get("selected_workflow_trace")
+    aux_llm_calls = progress_payload.get("aux_llm_calls")
+    llm_calls = progress_payload.get("llm_calls")
+    tool_invocations = progress_payload.get("tool_invocations")
+    render_plan = progress_payload.get("render_plan")
+    llm_debug_info: dict[str, Any] = {
+        "interaction_timestamp_utc": _now_utc_iso(),
+        "request_id": request_id,
+        "model": progress_payload.get("model"),
+        "response": response_text,
+        "presenter_channels": presenter_channels,
+        "tool_invocations": (
+            list(tool_invocations) if isinstance(tool_invocations, list) else []
+        ),
+        "aux_llm_calls": list(aux_llm_calls) if isinstance(aux_llm_calls, list) else [],
+        "llm_calls": list(llm_calls) if isinstance(llm_calls, list) else [],
+        "workflow_discovery": (
+            dict(workflow_discovery)
+            if isinstance(workflow_discovery, Mapping)
+            else None
+        ),
+        "workflow_routing": (
+            dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
+        ),
+        "selected_workflow_trace": (
+            dict(selected_workflow_trace)
+            if isinstance(selected_workflow_trace, Mapping)
+            else None
+        ),
+        "background_result_source": "orchestrator_result_ready_progress",
+    }
+    if isinstance(render_plan, Mapping):
+        llm_debug_info["render_plan"] = dict(render_plan)
+
+    result_body = _build_generate_success_body(
+        request_id=request_id,
+        session_id=session_id,
+        created_conversation_session_name=created_conversation_session_name,
+        created_conversation_session=created_conversation_session,
+        response_text=response_text,
+        presenter_channels=(
+            presenter_channels if isinstance(presenter_channels, dict) else None
+        ),
+        llm_debug_info=llm_debug_info,
+        display_elements_contract=None,
+        rag_trace=rag_trace,
+    )
+    _mark_background_generate_completed_if_ready(
+        background_task_id=background_task_id,
+        result_body=result_body,
+        request_id=request_id,
+        session_id=session_id,
+        user_id=user_id,
+        response_text=response_text,
+    )
+
+
 def _resolve_generate_requested_model(
     data: Mapping[str, Any] | None,
     *,
@@ -12430,6 +12561,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             else {"status": "unknown"}
                         )
                         payload.setdefault("request_id", request_id)
+                        _mark_background_generate_completed_from_orchestrator_ready_progress(
+                            background_task_id=background_task_id or request_id,
+                            progress_payload=payload,
+                            request_id=request_id,
+                            session_id=session_id,
+                            created_conversation_session_name=created_conversation_session_name,
+                            created_conversation_session=created_conversation_session,
+                            user_id=history_user_id or user_concept_id,
+                            rag_trace=rag_trace,
+                        )
                         _emit_generate_progress(payload)
 
                     progress_tracker = ProgressTracker(
@@ -12660,12 +12801,96 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         },
                     )
 
+        completion_gate_summary = _latest_turn_completion_gate(auxiliary_llm_calls)
+        if isinstance(response_text, str) and isinstance(
+            completion_gate_summary, Mapping
+        ):
+            gate_requires_follow_up = bool(
+                completion_gate_summary.get("requires_follow_up", False)
+            )
+            gate_safe_to_claim_completion = bool(
+                completion_gate_summary.get(
+                    "safe_to_claim_completion", not gate_requires_follow_up
+                )
+            )
+            if gate_safe_to_claim_completion and not gate_requires_follow_up:
+                response_text = strip_completion_ledger_suffix(response_text)
+
         presenter_channels = _extract_presenter_channels(response_text)
+
+        # Publish a compact background result as soon as the supervised
+        # workflow has produced the response. The rest of this route still
+        # performs presenter backfill, diagnostics, history persistence, and
+        # durable-finalisation best effort, and can enrich the task result
+        # later without blocking polling clients on that bookkeeping.
+        current_turn_messages = [{"role": "user", "content": prompt_text}]
+        if tool_messages:
+            current_turn_messages.extend(tool_messages)
+        selected_workflow_trace_payload = (
+            dict(raw_selected_workflow_trace)
+            if isinstance(
+                raw_selected_workflow_trace := getattr(
+                    orchestrator_result,
+                    "selected_workflow_trace",
+                    None,
+                ),
+                Mapping,
+            )
+            else None
+        )
+        serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
+            tool_invocations
+        )
+        background_ready_llm_debug: dict[str, Any] = {
+            "interaction_timestamp_utc": interaction_timestamp_utc,
+            "request_id": request_id,
+            "model": model_name,
+            "llm_interaction": {
+                **llm_interaction,
+                "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                * 1000.0,
+            },
+            "messages": current_turn_messages,
+            "response": response_text,
+            "presenter_channels": presenter_channels,
+            "user_prompt": user_prompt_debug,
+            "namespace_report": namespace_report,
+            "tool_invocations": serialised_tool_invocations,
+            "aux_llm_calls": auxiliary_llm_calls,
+            "workflow_discovery": workflow_discovery_result,
+            "workflow_routing": workflow_routing_info,
+            "selected_workflow_trace": selected_workflow_trace_payload,
+            "display_elements": None,
+            "background_result_source": "generate_response_ready",
+        }
+        if isinstance(render_plan_debug, dict):
+            background_ready_llm_debug["render_plan"] = dict(render_plan_debug)
+        background_ready_body = _build_generate_success_body(
+            request_id=request_id,
+            session_id=session_id,
+            created_conversation_session_name=created_conversation_session_name,
+            created_conversation_session=created_conversation_session,
+            response_text=response_text,
+            presenter_channels=(
+                presenter_channels if isinstance(presenter_channels, dict) else None
+            ),
+            llm_debug_info=background_ready_llm_debug,
+            display_elements_contract=None,
+            rag_trace=rag_trace,
+        )
+        _mark_background_generate_completed_if_ready(
+            background_task_id=background_task_id,
+            result_body=background_ready_body,
+            request_id=request_id,
+            session_id=session_id,
+            user_id=history_user_id or user_concept_id,
+            response_text=response_text,
+        )
+
         presenter_channels_missing = (
             not isinstance(presenter_channels, dict) or not presenter_channels
         )
         has_tool_messages = bool(tool_messages)
-        completion_gate_summary = _latest_turn_completion_gate(auxiliary_llm_calls)
         response_transformations = build_response_transformation_telemetry_payload(
             request_id=request_id
         )
@@ -13885,14 +14110,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             spoken_backfill_second_pass_reason=spoken_backfill_second_pass_reason,
         )
 
-        # Build LLM debug information FIRST (before saving to history)
-        # so we can persist it alongside the assistant message
-        # NOTE: Only include the NEW messages for this turn to avoid exponential token growth
-        # as the full context would include all previous turns' debug data
-        current_turn_messages = [{"role": "user", "content": prompt_text}]
-        if tool_messages:
-            current_turn_messages.extend(tool_messages)
-
         # Calculate context statistics for visibility.
         # If the internal orchestrator is enabled, it augments and trims the context
         # before sending it to the LLM, so report stats for the *actual* sent context.
@@ -14354,18 +14571,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             tool_progress_snapshot = _snapshot_tool_progress_for_request(
                 progress_scope_key, request_id
             )
-        selected_workflow_trace_payload = (
-            dict(raw_selected_workflow_trace)
-            if isinstance(
-                raw_selected_workflow_trace := getattr(
-                    orchestrator_result,
-                    "selected_workflow_trace",
-                    None,
-                ),
-                Mapping,
-            )
-            else None
-        )
         with turn_timing_recorder.span(
             stage_id="response_finalising",
             operation_kind="mcp_access_metadata",
@@ -14446,7 +14651,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 or 0
             )
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             diagnostics_unsatisfied_required_tools = 0
         if (
             isinstance(response_text, str)
@@ -14462,9 +14667,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if isinstance(entry, dict)
             and str(entry.get("type", "")).strip() == "workflow_use_episode"
         ]
-        serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
-            tool_invocations
-        )
         turn_record_tool_invocations = (
             _serialise_tool_invocations_for_turn_execution_record(tool_invocations)
         )
@@ -14657,6 +14859,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
 
         _refresh_llm_debug_timing_payload(llm_debug_info)
+
+        background_success_body = _build_generate_success_body(
+            request_id=request_id,
+            session_id=session_id,
+            created_conversation_session_name=created_conversation_session_name,
+            created_conversation_session=created_conversation_session,
+            response_text=response_text,
+            presenter_channels=(
+                presenter_channels if isinstance(presenter_channels, dict) else None
+            ),
+            llm_debug_info=llm_debug_info,
+            display_elements_contract=display_elements_contract,
+            rag_trace=rag_trace,
+        )
+        _mark_background_generate_completed_if_ready(
+            background_task_id=background_task_id,
+            result_body=background_success_body,
+            request_id=request_id,
+            session_id=session_id,
+            user_id=history_user_id or user_concept_id,
+            response_text=response_text,
+        )
 
         current_app.config["CONTEXT"] = _persist_generate_turn_messages(
             history_user_id=history_user_id,

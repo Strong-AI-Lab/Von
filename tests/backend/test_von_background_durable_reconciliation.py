@@ -30,6 +30,7 @@ class _RouteRegistry:
             error=kwargs.get("error"),
             progress=dict(kwargs.get("progress") or {}),
             session_id=kwargs.get("session_id"),
+            user_id=kwargs.get("user_id"),
         )
         return self.status
 
@@ -44,7 +45,9 @@ class _TerminalTurnManager:
         return [self.instance]
 
 
-def _make_app(monkeypatch, registry: _RouteRegistry, manager: _TerminalTurnManager) -> Flask:
+def _make_app(
+    monkeypatch, registry: _RouteRegistry, manager: _TerminalTurnManager
+) -> Flask:
     from src.backend.server.routes.von_routes import von_bp
 
     monkeypatch.setattr(
@@ -182,3 +185,88 @@ def test_background_result_restores_failed_task_from_completed_durable_turn(
     assert registry.status is not None
     assert registry.status.status == "completed"
     assert registry.status.error is None
+
+
+def test_background_generate_success_body_marks_task_completed_before_persistence(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-ready",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    monkeypatch.setattr(von_routes, "background_task_registry", registry)
+
+    von_routes._mark_background_generate_completed_if_ready(
+        background_task_id="turn-ready",
+        result_body={"response": "Ready answer", "request_id": "turn-ready"},
+        request_id="turn-ready",
+        session_id="session-ready",
+        user_id="#V#michael_witbrock",
+        response_text="Ready answer",
+    )
+
+    assert registry.status is not None
+    assert registry.status.status == "completed"
+    assert registry.status.session_id == "session-ready"
+    assert registry.status.user_id == "#V#michael_witbrock"
+    assert registry.status.result == {
+        "response": "Ready answer",
+        "request_id": "turn-ready",
+    }
+    assert registry.status.progress["source"] == "background_generate_success_body"
+    assert registry.status.progress["phase"] == "response_finalising"
+
+
+def test_orchestrator_ready_progress_marks_background_generate_completed(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-orchestrator-ready",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    monkeypatch.setattr(von_routes, "background_task_registry", registry)
+
+    von_routes._mark_background_generate_completed_from_orchestrator_ready_progress(
+        background_task_id="turn-orchestrator-ready",
+        progress_payload={
+            "status": "orchestrator_result_ready",
+            "response_text": "<spoken>Ready.</spoken><screen>Ready answer</screen>",
+            "model": "qwen3:8b",
+            "workflow_routing": {"selected_workflow_id": "#V#general_mail_review"},
+            "tool_invocations": [{"tool": "gmail_list_messages"}],
+            "aux_llm_calls": [{"type": "workflow_use_episode"}],
+        },
+        request_id="turn-orchestrator-ready",
+        session_id="session-ready",
+        created_conversation_session_name=None,
+        created_conversation_session=False,
+        user_id="#V#michael_witbrock",
+        rag_trace={"tools_invoked": ["gmail_list_messages"]},
+    )
+
+    assert registry.status is not None
+    assert registry.status.status == "completed"
+    assert registry.status.session_id == "session-ready"
+    assert registry.status.user_id == "#V#michael_witbrock"
+    assert registry.status.result["response"] == (
+        "<spoken>Ready.</spoken><screen>Ready answer</screen>"
+    )
+    assert registry.status.result["response_channels"]["screen"] == "Ready answer"
+    assert registry.status.result["llm_debug"]["background_result_source"] == (
+        "orchestrator_result_ready_progress"
+    )
+    assert registry.status.result["llm_debug"]["workflow_routing"] == {
+        "selected_workflow_id": "#V#general_mail_review"
+    }

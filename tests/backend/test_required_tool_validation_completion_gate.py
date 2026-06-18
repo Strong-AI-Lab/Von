@@ -12,6 +12,7 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
 )
 from src.backend.workflows.durable.turn_execution_runtime_support import (
+    build_turn_execution_selected_workflow_outputs,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
@@ -361,9 +362,7 @@ def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> Non
                                 "Required tool obligations were not satisfied: "
                                 "scholarly_paper.verify_representation"
                             ),
-                            "failure_codes": [
-                                "required_tool_not_available_on_gateway"
-                            ],
+                            "failure_codes": ["required_tool_not_available_on_gateway"],
                         }
                     ],
                 },
@@ -427,6 +426,7 @@ def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> Non
 
 
 def test_completion_gate_promotes_selected_workflow_response_to_response_text() -> None:
+    progress_events: list[dict[str, Any]] = []
     data = {
         "turn_execution_record": {
             "completion_gate": {
@@ -443,6 +443,9 @@ def test_completion_gate_promotes_selected_workflow_response_to_response_text() 
         "current_response": "",
         "invocations": [],
         "aux_llm_calls": [],
+        "emit_progress": progress_events.append,
+        "turn_id": "turn-completion-ready",
+        "workflow_routing": {"selected_workflow_id": "#V#example_workflow"},
     }
     request = SimpleNamespace(
         data=data,
@@ -465,6 +468,219 @@ def test_completion_gate_promotes_selected_workflow_response_to_response_text() 
     assert result.outputs["final_response"] == "Grounded selected workflow answer."
     assert result.outputs["response_text"] == "Grounded selected workflow answer."
     assert result.outputs["current_response"] == "Grounded selected workflow answer."
+    ready_events = [
+        event
+        for event in progress_events
+        if event.get("status") == "orchestrator_result_ready"
+    ]
+    assert ready_events
+    assert ready_events[-1]["request_id"] == "turn-completion-ready"
+    assert ready_events[-1]["response_text"] == "Grounded selected workflow answer."
+    assert ready_events[-1]["workflow_routing"] == {
+        "selected_workflow_id": "#V#example_workflow"
+    }
+
+
+def test_completion_gate_ready_progress_uses_completion_report_over_machine_json() -> (
+    None
+):
+    progress_events: list[dict[str, Any]] = []
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "required_effects": [],
+        },
+        "completion_report": {
+            "response_text": "Here are the six recent email messages."
+        },
+        "selected_workflow_user_response": "",
+        "final_response": "",
+        "response_text": (
+            '{"confidence": 1.0, "workflow_id": "#V#general_mail_review_workflow"}'
+        ),
+        "current_response": "",
+        "invocations": [],
+        "aux_llm_calls": [],
+        "emit_progress": progress_events.append,
+        "turn_id": "turn-completion-report-ready",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    ready_events = [
+        event
+        for event in progress_events
+        if event.get("status") == "orchestrator_result_ready"
+    ]
+    assert ready_events
+    assert ready_events[-1]["request_id"] == "turn-completion-report-ready"
+    assert ready_events[-1]["response_text"] == (
+        "Here are the six recent email messages."
+    )
+
+
+def test_completion_gate_ready_progress_renders_structured_response_text() -> None:
+    progress_events: list[dict[str, Any]] = []
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "required_effects": [],
+        },
+        "completion_report": {
+            "response_text": [
+                {
+                    "sender": "Jacob Crandall <crandall@cs.byu.edu>",
+                    "subject": "Re: Paper and chat?",
+                    "date": "Thu, 18 Jun 2026 10:59:59 -0600",
+                    "snippet": "Great. Let me know what times could work for you.",
+                },
+                {
+                    "sender": "Admin <admin@example.test>",
+                    "subject": "Weekly update",
+                    "date": "Thu, 18 Jun 2026 09:42:00 -0600",
+                    "snippet": "The weekly update is ready for review.",
+                },
+            ]
+        },
+        "selected_workflow_user_response": "",
+        "final_response": "",
+        "response_text": (
+            '{"confidence": 1.0, "workflow_id": "#V#general_mail_review_workflow"}'
+        ),
+        "current_response": "",
+        "invocations": [],
+        "aux_llm_calls": [],
+        "emit_progress": progress_events.append,
+        "turn_id": "turn-structured-response-ready",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    ready_events = [
+        event
+        for event in progress_events
+        if event.get("status") == "orchestrator_result_ready"
+    ]
+    assert ready_events
+    rendered_text = ready_events[-1]["response_text"]
+    assert ready_events[-1]["request_id"] == "turn-structured-response-ready"
+    assert (
+        "1. sender: Jacob Crandall <crandall@cs.byu.edu>; "
+        "subject: Re: Paper and chat?; date: Thu, 18 Jun 2026 10:59:59 -0600; "
+        "snippet: Great. Let me know what times could work for you."
+    ) in rendered_text
+    assert (
+        "2. sender: Admin <admin@example.test>; subject: Weekly update; "
+        "date: Thu, 18 Jun 2026 09:42:00 -0600; "
+        "snippet: The weekly update is ready for review."
+    ) in rendered_text
+
+
+def test_completion_gate_does_not_publish_timeout_as_ready_response() -> None:
+    progress_events: list[dict[str, Any]] = []
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "needs_follow_up",
+                "decision_reason": "Renderer timed out.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+            },
+            "required_effects": [],
+        },
+        "completion_report": {
+            "response_text": (
+                "workflow_llm_step_timeout:LLM call timed out after 120s "
+                "(stage=mail_review_response_rendering, model=qwen3:8b)"
+            )
+        },
+        "selected_workflow_user_response": "",
+        "final_response": "",
+        "response_text": "",
+        "current_response": "",
+        "invocations": [],
+        "aux_llm_calls": [],
+        "emit_progress": progress_events.append,
+        "turn_id": "turn-timeout-not-ready",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert [
+        event
+        for event in progress_events
+        if event.get("status") == "orchestrator_result_ready"
+    ] == []
+
+
+def test_selected_workflow_outputs_render_structured_response_text() -> None:
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#general_mail_review_workflow",
+        child_completed=True,
+        final_state="complete",
+        failure_detail=None,
+        child_outputs={
+            "completion_report": {
+                "response_text": [
+                    {
+                        "sender": "Jacob Crandall <crandall@cs.byu.edu>",
+                        "subject": "Re: Paper and chat?",
+                        "date": "Thu, 18 Jun 2026 10:59:59 -0600",
+                        "snippet": "Great. Let me know what times could work for you.",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert outputs["selected_workflow_user_response"] == (
+        "1. sender: Jacob Crandall <crandall@cs.byu.edu>; "
+        "subject: Re: Paper and chat?; date: Thu, 18 Jun 2026 10:59:59 -0600; "
+        "snippet: Great. Let me know what times could work for you."
+    )
+    assert outputs["completion_report"]["response_text"] == (
+        outputs["selected_workflow_user_response"]
+    )
 
 
 def test_postcondition_critic_bundle_carries_final_answer_projection_for_visible_answer_check() -> (
@@ -562,9 +778,10 @@ def test_postcondition_critic_bundle_carries_final_answer_projection_for_visible
     synthesis = bundle["final_answer_synthesis"]
     projection = synthesis["tool_evidence_projection"]
     assert projection["projection_count"] == 1
-    assert projection["entries"][0]["projected_payload"]["messages"][0][
-        "subject"
-    ] == "Lab scheduling"
+    assert (
+        projection["entries"][0]["projected_payload"]["messages"][0]["subject"]
+        == "Lab scheduling"
+    )
     assert "#V#gmail_subject_field" in projection["preserved_field_concept_ids"]
 
 
@@ -665,9 +882,7 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
                     "message-list answer."
                 ),
                 "failure_code": "projected_final_answer_evidence_not_consumed",
-                "failure_codes": [
-                    "projected_final_answer_evidence_not_consumed"
-                ],
+                "failure_codes": ["projected_final_answer_evidence_not_consumed"],
                 "repeat_eligible": True,
                 "blocker_source": "critic_verdict",
             },

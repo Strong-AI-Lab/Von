@@ -10,6 +10,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
     InternalMCPChatOrchestrator,
     ProgressTracker,
+    _WorkflowModelPolicyState,
 )
 from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
@@ -275,7 +276,7 @@ def test_supervised_turn_check_cancellation_uses_progress_tracker(monkeypatch) -
     assert observed["cancelled_task_id"] == "task-123"
 
 
-def test_agent_test_explicit_local_model_skips_remote_model_preloads(
+def test_agent_test_explicit_local_model_preserves_workflow_model_policy(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
@@ -283,13 +284,36 @@ def test_agent_test_explicit_local_model_skips_remote_model_preloads(
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     _stub_base_system_prompt(monkeypatch, orchestrator)
 
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "mail_review_response_rendering": {
+                    "primary": "active_llm",
+                    "fallback": ["ollama:granite3.3:2b"],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+
     def _unexpected_remote_lookup(*_args, **_kwargs):
         raise AssertionError("remote AgentTest setup lookup should be skipped")
 
     monkeypatch.setattr(
         orchestrator,
         "_load_workflow_model_policy",
-        _unexpected_remote_lookup,
+        lambda *_args, **_kwargs: (
+            policy_state,
+            {
+                "type": "workflow_model_policy",
+                "enabled": True,
+                "loaded": True,
+                "policy_source": "test_graph",
+            },
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.model_registry_service.get_model_registry_snapshot",
@@ -341,7 +365,11 @@ def test_agent_test_explicit_local_model_skips_remote_model_preloads(
     workflow_data = captured.get("data")
     assert isinstance(workflow_data, dict)
     assert result.response_text == "Done."
-    assert workflow_data["policy_state"].enabled is False
+    assert workflow_data["policy_state"] is policy_state
+    assert workflow_data["policy_state"].enabled is True
+    assert workflow_data["policy_state"].policy["stages"][
+        "mail_review_response_rendering"
+    ]["fallback"] == ["ollama:granite3.3:2b"]
     assert workflow_data["registry_snapshot"]["source"] == (
         "explicit_local_model_override"
     )
@@ -353,7 +381,7 @@ def test_agent_test_explicit_local_model_skips_remote_model_preloads(
         for event in progress_events
         if isinstance(event.get("subtask"), str)
     }
-    assert "Use explicit local model policy" in subtasks
+    assert "Load routing model policy for explicit local model" in subtasks
     assert "Use explicit local model registry snapshot" in subtasks
     assert "Use no turn memory context" in subtasks
     assert "Execute supervised workflow" in subtasks

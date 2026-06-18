@@ -163,6 +163,7 @@ from ...services.synthesiser_context_framing_service import (
 from ...workflows.durable.subworkflow_actions import register_subworkflow_actions
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
+    coerce_user_visible_response_text,
     render_selected_workflow_user_response,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
@@ -15542,12 +15543,6 @@ class InternalMCPChatOrchestrator:
             source="active_llm",
             host=None,
         )
-        if (
-            _is_agent_test_instance()
-            and prefer_default_model
-            and active_llm_candidate.model
-        ):
-            return [active_llm_candidate]
         try:
             from src.backend.services.settings_service import (
                 resolve_enabled_llm_settings,
@@ -15579,12 +15574,10 @@ class InternalMCPChatOrchestrator:
                 )
             )
 
-        # When the turn explicitly requested a model/client override, keep the
-        # LLM path on that user-chosen model instead of silently drifting back
-        # to policy or enabled-settings candidates later in the fallback chain.
-        if prefer_default_model and active_llm_candidate.model:
-            candidates.append(active_llm_candidate)
-        elif not policy_state.enabled or not policy_state.policy:
+        # When the turn explicitly requested a model/client override, try that
+        # user-chosen model first while still preserving represented fallback
+        # policy for stages where the requested model times out or fails.
+        if not policy_state.enabled or not policy_state.policy:
             if prefer_default_model:
                 candidates.append(active_llm_candidate)
             candidates.extend(enabled_candidates)
@@ -15630,12 +15623,32 @@ class InternalMCPChatOrchestrator:
             if not prefer_default_model:
                 candidates.append(active_llm_candidate)
 
-        # De-duplicate by provider+model+host so the same model does not appear
-        # multiple times merely because it was sourced from settings and active_llm.
+        # De-duplicate by effective provider+model+host so the same model does
+        # not appear multiple times merely because it was sourced from
+        # settings, active_llm, and a represented primary alias.  In explicit
+        # local replays this keeps a requested model from consuming every
+        # fallback slot before represented stage fallbacks can run.
         seen: set[tuple[str | None, str | None, str | None]] = set()
         unique: list[_ModelCandidate] = []
         for candidate in candidates:
-            key = (candidate.provider, candidate.model, candidate.host)
+            model_for_identity = candidate.model
+            if candidate.source == "active_llm" and not model_for_identity:
+                model_for_identity = default_model
+            provider_for_identity = candidate.provider or (
+                self._infer_provider_from_model_reference(model_for_identity)
+                if model_for_identity
+                else None
+            )
+            normalised_model = self._normalise_llm_model_name(model_for_identity)
+            key = (
+                provider_for_identity,
+                normalised_model,
+                (
+                    candidate.host.strip().lower()
+                    if isinstance(candidate.host, str) and candidate.host.strip()
+                    else None
+                ),
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -35542,6 +35555,37 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
         )
+        if callable(emit_progress):
+            ready_response_text = coerce_user_visible_response_text(
+                outputs.get("selected_workflow_user_response")
+            )
+            if not ready_response_text:
+                completion_report = outputs.get("completion_report")
+                if isinstance(completion_report, Mapping):
+                    ready_response_text = coerce_user_visible_response_text(
+                        completion_report.get("response_text")
+                    )
+            if completed and ready_response_text:
+                emit_progress(
+                    {
+                        "status": "orchestrator_result_ready",
+                        "stage": "response_ready",
+                        "phase": "response_ready",
+                        "phase_label": "Response ready",
+                        "request_id": data.get("turn_id"),
+                        "response_text": ready_response_text,
+                        "model": getattr(env, "model", None),
+                        "workflow_discovery": outputs.get("workflow_discovery_result")
+                        or outputs.get("workflow_discovery"),
+                        "workflow_routing": outputs.get("workflow_routing"),
+                        "selected_workflow_trace": outputs.get(
+                            "selected_workflow_trace"
+                        ),
+                        "tool_invocations": outputs.get("invocations") or [],
+                        "aux_llm_calls": outputs.get("aux_llm_calls") or [],
+                        "llm_calls": outputs.get("llm_calls") or [],
+                    }
+                )
         return WorkflowActionResult(outputs=outputs)
 
     def execute_conversation_turn_supervised(
@@ -35916,34 +35960,11 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 parsed = default
             if parsed <= 0:
                 return default
             return parsed
-
-        def _disabled_workflow_model_policy_state(
-            reason_code: str,
-        ) -> tuple[_WorkflowModelPolicyState, Mapping[str, Any]]:
-            return (
-                _WorkflowModelPolicyState(
-                    enabled=False,
-                    policy=None,
-                    policy_id=None,
-                    predicate_id=None,
-                    errors=(),
-                ),
-                {
-                    "type": "workflow_model_policy",
-                    "enabled": False,
-                    "policy_id": "",
-                    "predicate_id": "",
-                    "loaded": False,
-                    "policy_source": "request_override",
-                    "errors": [],
-                    "skip_reason": reason_code,
-                },
-            )
 
         def _explicit_local_model_registry_snapshot() -> Mapping[str, Any]:
             provider = _provider_from_llm_client(llm_client)
@@ -36042,18 +36063,14 @@ class InternalMCPChatOrchestrator:
             )
             return self._limit_context_for_llm(fallback_context)
 
-        if explicit_local_agent_test_model:
-            policy_state, _policy_telemetry = _run_supervised_setup_step(
-                "Use explicit local model policy",
-                lambda: _disabled_workflow_model_policy_state(
-                    "agent_test_explicit_local_model"
-                ),
-            )
-        else:
-            policy_state, _policy_telemetry = _run_supervised_setup_step(
-                "Load routing model policy",
-                lambda: self._load_workflow_model_policy(preferred_language),
-            )
+        policy_state, _policy_telemetry = _run_supervised_setup_step(
+            (
+                "Load routing model policy for explicit local model"
+                if explicit_local_agent_test_model
+                else "Load routing model policy"
+            ),
+            lambda: self._load_workflow_model_policy(preferred_language),
+        )
         if _policy_telemetry:
             aux_llm_calls.append(_policy_telemetry)
 
@@ -36714,6 +36731,40 @@ class InternalMCPChatOrchestrator:
             """
             if progress_tracker is not None:
                 progress_tracker.check_cancellation()
+
+        def _emit_orchestrator_result_ready_local(
+            result: OrchestratorResult,
+        ) -> None:
+            response_text = coerce_user_visible_response_text(
+                getattr(result, "response_text", None)
+            )
+            if not response_text:
+                return
+            payload: dict[str, Any] = {
+                "status": "orchestrator_result_ready",
+                "stage": "response_ready",
+                "phase": "response_ready",
+                "phase_label": "Response ready",
+                "request_id": turn_id,
+                "response_text": response_text,
+                "model": model,
+                "tool_invocations": list(getattr(result, "tool_invocations", ()) or ()),
+                "aux_llm_calls": list(getattr(result, "aux_llm_calls", ()) or ()),
+                "llm_calls": list(getattr(result, "llm_calls", ()) or ()),
+                "llm_usage": getattr(result, "llm_usage", None),
+                "orchestrator_duration_ms": getattr(
+                    result, "orchestrator_duration_ms", None
+                ),
+            }
+            result_workflow_routing = getattr(result, "workflow_routing", None)
+            if isinstance(result_workflow_routing, Mapping):
+                payload["workflow_routing"] = dict(result_workflow_routing)
+            if isinstance(workflow_discovery_result, Mapping):
+                payload["workflow_discovery"] = dict(workflow_discovery_result)
+            result_render_plan = getattr(result, "render_plan", None)
+            if isinstance(result_render_plan, Mapping):
+                payload["render_plan"] = dict(result_render_plan)
+            _emit_progress_local(payload)
 
         def _infer_provider(model_id: str | None) -> str | None:
             if not isinstance(model_id, str):
@@ -45143,6 +45194,7 @@ class InternalMCPChatOrchestrator:
                 or result_response_text.lstrip().startswith("Execution status:")
             ):
                 result = replace(result, response_text=preserved_response_text)
+        _emit_orchestrator_result_ready_local(result)
         _finalise_selection_experience_record(
             result=result,
             outcome=(

@@ -49,6 +49,45 @@ def _repo_seed_version_text_max_time_ms() -> int:
     return max(1000, min(parsed, 120000))
 
 
+def _normalise_support_concept_targets(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, str):
+        raw_items: Sequence[Any] = (raw_value,)
+    elif isinstance(raw_value, Sequence) and not isinstance(
+        raw_value, (str, bytes, bytearray)
+    ):
+        raw_items = raw_value
+    else:
+        return []
+    targets: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if cleaned and cleaned not in targets:
+            targets.append(cleaned)
+    return targets
+
+
+def _merge_support_relationship_targets(
+    existing_value: Any, targets: Sequence[str]
+) -> list[Any]:
+    merged: list[Any] = []
+    if isinstance(existing_value, list):
+        merged.extend(existing_value)
+    elif isinstance(existing_value, str) and existing_value.strip():
+        merged.append(existing_value.strip())
+    elif existing_value is not None:
+        merged.append(existing_value)
+
+    seen_strings = {item for item in merged if isinstance(item, str)}
+    for target in targets:
+        if target in seen_strings:
+            continue
+        merged.append(target)
+        seen_strings.add(target)
+    return merged
+
+
 def _materialise_support_concepts(
     raw_specs: Any,
     *,
@@ -62,6 +101,8 @@ def _materialise_support_concepts(
 
     created_concept_ids: list[str] = []
     existing_concept_ids: list[str] = []
+    relationship_updated_concept_ids: list[str] = []
+    text_relation_updated_concept_ids: list[str] = []
     errors: list[dict[str, Any]] = []
     for spec in raw_specs:
         if not isinstance(spec, Mapping):
@@ -80,48 +121,111 @@ def _materialise_support_concepts(
             existing = concept_service.get_concept_by_concept_id_exact(concept_id)
         except Exception:
             existing = None
-        if isinstance(existing, Mapping):
+        concept_doc: Mapping[str, Any] | None = (
+            existing if isinstance(existing, Mapping) else None
+        )
+        if isinstance(concept_doc, Mapping):
             existing_concept_ids.append(concept_id)
-            continue
+        else:
+            parent_ids = [
+                str(item).strip()
+                for item in (spec.get("parent_concept_ids") or [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            attributes = dict(spec.get("attributes") or {})
+            if source_tag:
+                attributes.setdefault("repo_seed_source_tag", source_tag)
+            if managed_by:
+                attributes.setdefault("repo_seed_managed_by", managed_by)
+            try:
+                concept_doc = concept_service.create_concept(
+                    name=name,
+                    concept_id=concept_id,
+                    parent_concept_ids=parent_ids,
+                    create_as_instance=bool(spec.get("create_as_instance")),
+                    description=spec.get("description"),
+                    notes=spec.get("notes"),
+                    system_tags=[
+                        str(item).strip()
+                        for item in (spec.get("system_tags") or [])
+                        if isinstance(item, str) and str(item).strip()
+                    ],
+                    attributes=attributes or None,
+                    defer_text_relations=True,
+                )
+                created_concept_ids.append(concept_id)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "concept_id": concept_id,
+                        "reason_code": "support_concept_create_failed",
+                        "error": str(exc),
+                    }
+                )
+                continue
 
-        parent_ids = [
-            str(item).strip()
-            for item in (spec.get("parent_concept_ids") or [])
-            if isinstance(item, str) and str(item).strip()
+        raw_relationships = spec.get("relationships")
+        if isinstance(raw_relationships, Mapping):
+            relationships = dict((concept_doc or {}).get("relationships") or {})
+            relationship_changed = False
+            for predicate_raw, targets_raw in raw_relationships.items():
+                predicate = str(predicate_raw or "").strip()
+                targets = _normalise_support_concept_targets(targets_raw)
+                if not predicate or not targets:
+                    continue
+                merged_targets = _merge_support_relationship_targets(
+                    relationships.get(predicate),
+                    targets,
+                )
+                if relationships.get(predicate) != merged_targets:
+                    relationships[predicate] = merged_targets
+                    relationship_changed = True
+            if relationship_changed:
+                try:
+                    concept_doc = concept_service.update_concept(
+                        concept_id,
+                        {"relationships": relationships},
+                        defer_side_effects=True,
+                    )
+                    relationship_updated_concept_ids.append(concept_id)
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "concept_id": concept_id,
+                            "reason_code": "support_concept_relationship_update_failed",
+                            "error": str(exc),
+                        }
+                    )
+
+        text_relation_specs = [
+            item
+            for item in (spec.get("text_relations") or [])
+            if isinstance(item, Mapping)
         ]
-        attributes = dict(spec.get("attributes") or {})
-        if source_tag:
-            attributes.setdefault("repo_seed_source_tag", source_tag)
-        if managed_by:
-            attributes.setdefault("repo_seed_managed_by", managed_by)
-        try:
-            concept_service.create_concept(
-                name=name,
-                concept_id=concept_id,
-                parent_concept_ids=parent_ids,
-                create_as_instance=bool(spec.get("create_as_instance")),
-                description=spec.get("description"),
-                notes=spec.get("notes"),
-                system_tags=[
-                    str(item).strip()
-                    for item in (spec.get("system_tags") or [])
-                    if isinstance(item, str) and str(item).strip()
-                ],
-                attributes=attributes or None,
-            )
-            created_concept_ids.append(concept_id)
-        except Exception as exc:
-            errors.append(
-                {
-                    "concept_id": concept_id,
-                    "reason_code": "support_concept_create_failed",
-                    "error": str(exc),
-                }
-            )
+        if text_relation_specs:
+            try:
+                authority_service.upsert_seed_bundle_text_relations(
+                    subject_concept_id=concept_id,
+                    relation_specs=tuple(text_relation_specs),
+                    workflow_id=concept_id,
+                    source_tag=source_tag,
+                    managed_by=managed_by,
+                )
+                text_relation_updated_concept_ids.append(concept_id)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "concept_id": concept_id,
+                        "reason_code": "support_concept_text_relation_update_failed",
+                        "error": str(exc),
+                    }
+                )
 
     return {
         "created_concept_ids": created_concept_ids,
         "existing_concept_ids": existing_concept_ids,
+        "relationship_updated_concept_ids": relationship_updated_concept_ids,
+        "text_relation_updated_concept_ids": text_relation_updated_concept_ids,
         "errors": errors,
     }
 
@@ -273,8 +377,7 @@ def _load_workflow_repo_seed_version_marker(
             continue
         return {
             "seed_version": seed_version,
-            "schema_version": str(payload.get("schema_version") or "").strip()
-            or None,
+            "schema_version": str(payload.get("schema_version") or "").strip() or None,
             "family_id": str(payload.get("family_id") or "").strip() or None,
             "source_tag": str(payload.get("source_tag") or "").strip() or None,
             "relation_id": row.get("relation_id"),
@@ -380,13 +483,11 @@ def _suppress_repo_seed_snapshot_drift_when_vontology_version_is_current(
             updated["bundle_snapshot_issue_codes"] = sorted(
                 {
                     str(
-                        (status_by_id.get(workflow_id) or {}).get("issue_code")
-                        or ""
+                        (status_by_id.get(workflow_id) or {}).get("issue_code") or ""
                     ).strip()
                     for workflow_id in remaining_snapshot_drift_ids
                     if str(
-                        (status_by_id.get(workflow_id) or {}).get("issue_code")
-                        or ""
+                        (status_by_id.get(workflow_id) or {}).get("issue_code") or ""
                     ).strip()
                 }
             )
@@ -1416,9 +1517,7 @@ def bootstrap_repo_seed_workflow_bundle(
         "forced_republish": bool(force_republish),
     }
     skip_publication = (
-        already_current
-        and not force_republish
-        and not repo_seed_version_refresh_ids
+        already_current and not force_republish and not repo_seed_version_refresh_ids
     )
     no_op_version_blocked_ids = (
         repo_seed_version_blocked_ids if skip_publication else ()
@@ -1678,9 +1777,7 @@ def bootstrap_repo_seed_workflow_bundle(
         "authority_contract": authority_contract,
         "materialisation_preflight": materialisation_preflight,
         "workflow_ids": list(target_workflow_ids),
-        "repo_seed_version_gate": materialisation_preflight[
-            "repo_seed_version_gate"
-        ],
+        "repo_seed_version_gate": materialisation_preflight["repo_seed_version_gate"],
         "seed_version_marker_updates": seed_version_marker_updates,
         "publication": publication_report,
         "typed_workflow_ids": typed_workflow_ids,
