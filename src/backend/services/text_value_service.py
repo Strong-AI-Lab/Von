@@ -403,6 +403,7 @@ def get_texts_for_concepts(
     subject_concept_ids: Sequence[str],
     *,
     predicate: Optional[str] = None,
+    predicates: Optional[Sequence[str]] = None,
     lang: Optional[str] = None,
     limit_per_concept: int = 50,
     recent_first: bool = False,
@@ -435,6 +436,14 @@ def get_texts_for_concepts(
     rel_filter: Dict[str, Any] = {"subject_concept_id": {"$in": ordered_subject_ids}}
     if predicate:
         rel_filter["predicate"] = predicate
+    elif predicates:
+        predicate_values = [
+            str(item).strip()
+            for item in predicates
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if predicate_values:
+            rel_filter["predicate"] = {"$in": predicate_values}
 
     sort = [("updated_at", -1), ("created_at", -1)] if recent_first else None
     relation_limit = max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1)

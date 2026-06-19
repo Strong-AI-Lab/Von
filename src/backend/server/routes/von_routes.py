@@ -34,6 +34,7 @@ from ...workflows.durable.turn_execution_runtime_support import (
 from ...languagemodels.llm_interface import (
     _extract_ollama_model_id,
     _extract_openai_model_id,
+    _looks_like_browser_object_model_reference,
     _looks_like_ollama_model,
     _looks_like_openai_model,
     get_active_model_name,
@@ -342,6 +343,13 @@ def _progress_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _prettify_concept_id_label(concept_id: str) -> str:
+    cleaned = str(concept_id or "").strip()
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    return cleaned.replace("_", " ").strip().title() or str(concept_id)
 
 
 def _progress_number(value: Any) -> float | None:
@@ -6293,6 +6301,10 @@ def _resolve_generate_requested_model(
     requested_model_name = data.get("model") if isinstance(data, Mapping) else None
     if isinstance(requested_model_name, str):
         requested_model_name = requested_model_name.strip() or None
+        if requested_model_name and _looks_like_browser_object_model_reference(
+            requested_model_name
+        ):
+            requested_model_name = None
     else:
         requested_model_name = None
 
@@ -6332,7 +6344,8 @@ def _resolve_generate_requested_model(
             explicit_client_type = "ollama"
             model_name = requested_ollama_model
         else:
-            model_name = requested_model_name
+            if not _looks_like_browser_object_model_reference(requested_model_name):
+                model_name = requested_model_name
     if not model_name:
         model_name = get_active_model_name(
             user_concept_id=user_concept_id,
@@ -11625,29 +11638,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 result_summary="Resolving the authenticated user's concept label.",
             )
             _check_background_cancellation("user concept lookup")
-            try:
-                from ...services.concept_service import get_concept_by_concept_id
-
-                user_concept = get_concept_by_concept_id(effective_request_user_id)
-                if user_concept:
-                    user_name = user_concept.get("name") or effective_request_user_id
-                    system_message_parts.append(
-                        f"Current user: {user_name} ({effective_request_user_id})"
-                    )
-                    current_app.logger.info(
-                        f"User context: {user_name} ({effective_request_user_id})"
-                    )
-                else:
-                    system_message_parts.append(
-                        f"Current user ID: {effective_request_user_id}"
-                    )
-            except Exception as e:
-                current_app.logger.warning(
-                    f"Could not fetch user concept {effective_request_user_id}: {e}"
-                )
-                system_message_parts.append(
-                    f"Current user ID: {effective_request_user_id}"
-                )
+            user_name = _prettify_concept_id_label(effective_request_user_id)
+            system_message_parts.append(
+                f"Current user: {user_name} ({effective_request_user_id})"
+            )
+            current_app.logger.info(
+                f"User context: {user_name} ({effective_request_user_id})"
+            )
             _check_background_cancellation("user concept lookup")
 
         # Try to get organization name from concept if org_id provided
@@ -11657,29 +11654,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 result_summary="Resolving the active organisation concept label.",
             )
             _check_background_cancellation("organisation concept lookup")
-            try:
-                from ...services.concept_service import get_concept_by_concept_id
-
-                org_concept = get_concept_by_concept_id(effective_request_org_id)
-                if org_concept:
-                    org_name = org_concept.get("name") or effective_request_org_id
-                    system_message_parts.append(
-                        f"Organization: {org_name} ({effective_request_org_id})"
-                    )
-                    current_app.logger.info(
-                        f"Organization context: {org_name} ({effective_request_org_id})"
-                    )
-                else:
-                    system_message_parts.append(
-                        f"Organization ID: {effective_request_org_id}"
-                    )
-            except Exception as e:
-                current_app.logger.warning(
-                    f"Could not fetch org concept {effective_request_org_id}: {e}"
-                )
-                system_message_parts.append(
-                    f"Organization ID: {effective_request_org_id}"
-                )
+            org_name = _prettify_concept_id_label(effective_request_org_id)
+            system_message_parts.append(
+                f"Organization: {org_name} ({effective_request_org_id})"
+            )
+            current_app.logger.info(
+                f"Organization context: {org_name} ({effective_request_org_id})"
+            )
             _check_background_cancellation("organisation concept lookup")
 
         # Add language preference if provided
@@ -12630,6 +12611,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     workflow_continuation_context=workflow_continuation_context,
                     get_instance_manager_fn=get_instance_manager,
                     submit_verified_workflow_instance_fn=submit_verified_workflow_instance,
+                    background_task_id=background_task_id,
                     logger=current_app.logger,
                 )
                 if progress_updates_enabled:

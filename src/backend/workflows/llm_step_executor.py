@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
+import threading
 import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, cast
 
@@ -1587,6 +1589,84 @@ def _request_id_from_data(data: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _positive_float_env(env_name: str, default: float) -> float:
+    raw_value = os.getenv(env_name)
+    try:
+        parsed = float(raw_value) if raw_value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def _append_workflow_llm_setup_diagnostic(
+    request: WorkflowActionRequest,
+    entry: Mapping[str, Any],
+) -> None:
+    if not isinstance(request.data, MutableMapping):
+        return
+    bucket = request.data.get("aux_llm_calls")
+    if not isinstance(bucket, list):
+        bucket = []
+        request.data["aux_llm_calls"] = bucket
+    bucket.append(dict(entry))
+
+
+def _run_gateway_runtime_setup_step(
+    request: WorkflowActionRequest,
+    *,
+    step_id: str,
+    step_label: str,
+    operation: Any,
+    timeout_seconds: float | None,
+    timeout_fallback: Any | None = None,
+) -> Any:
+    _check_request_cancellation(request)
+    step_start = time.perf_counter()
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return operation()
+
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            result_queue.put(("result", operation()))
+        except Exception as exc:
+            result_queue.put(("exception", exc))
+
+    thread = threading.Thread(
+        target=_worker,
+        name=f"workflow-llm-step-setup-{step_id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        kind, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty:
+        duration_ms = int((time.perf_counter() - step_start) * 1000)
+        _append_workflow_llm_setup_diagnostic(
+            request,
+            {
+                "type": "workflow_llm_step_setup",
+                "step_id": step_id,
+                "step_label": step_label,
+                "stage": "workflow_llm_step_setup",
+                "status": "timed_out",
+                "failure_reason": "workflow_llm_step_setup_timeout",
+                "timeout_seconds": timeout_seconds,
+                "duration_ms": duration_ms,
+            },
+        )
+        if timeout_fallback is not None:
+            return timeout_fallback(timeout_seconds)
+        raise TimeoutError(f"{step_label} timed out after {timeout_seconds:.1f}s")
+    if kind == "exception":
+        raise payload
+    _check_request_cancellation(request)
+    return payload
+
+
 def _record_workflow_llm_duration_for_entry(
     request: WorkflowActionRequest,
     entry: MutableMapping[str, Any],
@@ -1647,7 +1727,10 @@ def _build_gateway_runtime(
     *,
     max_tool_invocations: int | None = None,
 ) -> tuple[Any, Any, Mapping[str, Any], str | None, str | None]:
-    from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+    from ..integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+        _WorkflowModelPolicyState,
+    )
     from ..services.model_registry_service import get_model_registry_snapshot
 
     gateway = request.environment.gateway
@@ -1675,13 +1758,89 @@ def _build_gateway_runtime(
     )
     user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
     policy_state = request.data.get("policy_state")
-    if policy_state is None:
-        policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
+    def _policy_state_needs_refresh(value: Any) -> bool:
+        if not isinstance(value, _WorkflowModelPolicyState):
+            return value is None
+        if isinstance(value.policy, Mapping) and value.policy:
+            return False
+        return "workflow_model_policy_timeout" in {
+            str(error) for error in (value.errors or ())
+        }
+
+    if _policy_state_needs_refresh(policy_state):
+        def _timeout_workflow_model_policy(
+            timeout_seconds: float,
+        ) -> tuple[Any, Mapping[str, Any]]:
+            return (
+                _WorkflowModelPolicyState(
+                    enabled=True,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=("workflow_model_policy_timeout",),
+                ),
+                {
+                    "type": "workflow_model_policy",
+                    "enabled": True,
+                    "policy_id": "",
+                    "predicate_id": "",
+                    "loaded": False,
+                    "policy_source": "timeout",
+                    "errors": ["workflow_model_policy_timeout"],
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+
+        refresh_reason = (
+            "inherited_policy_timeout"
+            if isinstance(policy_state, _WorkflowModelPolicyState)
+            else None
+        )
+        policy_state, policy_telemetry = _run_gateway_runtime_setup_step(
+            request,
+            step_id="workflow_model_policy",
+            step_label="Load workflow LLM model policy",
+            operation=lambda: orchestrator._load_workflow_model_policy(None),
+            timeout_seconds=_positive_float_env(
+                "VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            timeout_fallback=_timeout_workflow_model_policy,
+        )
+        if isinstance(policy_telemetry, Mapping) and policy_telemetry:
+            policy_telemetry_payload = dict(policy_telemetry)
+            if refresh_reason:
+                policy_telemetry_payload["refresh_reason"] = refresh_reason
+            _append_workflow_llm_setup_diagnostic(request, policy_telemetry_payload)
     registry_snapshot_raw = request.data.get("registry_snapshot")
     if isinstance(registry_snapshot_raw, Mapping):
         registry_snapshot = registry_snapshot_raw
     else:
-        registry_snapshot_result = get_model_registry_snapshot()
+        def _timeout_registry_snapshot(timeout_seconds: float) -> Mapping[str, Any]:
+            return {
+                "source": "timeout",
+                "models": [],
+                "loaded": False,
+                "errors": [
+                    {
+                        "failure_reason": "workflow_llm_step_setup_timeout",
+                        "step_id": "model_registry_snapshot",
+                        "timeout_seconds": timeout_seconds,
+                    }
+                ],
+            }
+
+        registry_snapshot_result = _run_gateway_runtime_setup_step(
+            request,
+            step_id="model_registry_snapshot",
+            step_label="Load workflow LLM model registry snapshot",
+            operation=get_model_registry_snapshot,
+            timeout_seconds=_positive_float_env(
+                "VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS",
+                12.0,
+            ),
+            timeout_fallback=_timeout_registry_snapshot,
+        )
         registry_snapshot = (
             registry_snapshot_result
             if isinstance(registry_snapshot_result, Mapping)
@@ -2039,7 +2198,14 @@ def _run_gateway_llm_step_no_tools(
     prefer_default_model = _prefer_default_model_for_request(request)
     timeout_override_sec = _conversation_turn_llm_timeout_override_sec(request)
     llm_calls: list[dict[str, Any]] = []
-    aux_llm_calls: list[dict[str, Any]] = []
+    aux_llm_calls = cast(
+        list[dict[str, Any]],
+        (
+            request.data.get("aux_llm_calls")
+            if isinstance(request.data.get("aux_llm_calls"), list)
+            else []
+        ),
+    )
     context_messages_key = _context_string(
         llm_policy_map.get("context_messages_context_key")
     )
@@ -2058,6 +2224,44 @@ def _run_gateway_llm_step_no_tools(
         if callable(request.data.get("check_cancellation"))
         else None
     )
+    last_validation_failure: dict[str, Any] | None = None
+    last_validation_response_text: str | None = None
+    last_validation_model: str | None = None
+    last_validation_candidate: Mapping[str, Any] | None = None
+
+    def _validate_candidate_response(
+        response_text: str,
+        model_name: str | None,
+        candidate: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        nonlocal last_validation_failure
+        nonlocal last_validation_response_text
+        nonlocal last_validation_model
+        nonlocal last_validation_candidate
+
+        _validated_outputs, validation_summary = _apply_validation_policy(
+            request=request,
+            response_text=response_text,
+            prompt_id=prompt_id,
+            selected_model=model_name,
+            validation_policy=validation_policy_map,
+        )
+        validation_status = _context_string(validation_summary.get("status")).lower()
+        if validation_status != "failed":
+            return None
+
+        validation_failure = {
+            "reason": _context_string(validation_summary.get("reason"))
+            or "workflow_llm_step_validation_failed",
+            "error_class": "WorkflowLLMStepValidationError",
+            "failure_kind": "response_validation_failed",
+            "validation": dict(validation_summary),
+        }
+        last_validation_failure = dict(validation_failure)
+        last_validation_response_text = response_text
+        last_validation_model = model_name
+        last_validation_candidate = dict(candidate)
+        return validation_failure
 
     def _record_llm_call(
         *,
@@ -2147,6 +2351,7 @@ def _run_gateway_llm_step_no_tools(
                 prefer_default_model=prefer_default_model,
                 timeout_override_sec=timeout_override_sec,
                 check_cancellation=check_cancellation,
+                response_validator=_validate_candidate_response,
             )
         )
     except TimeoutError as exc:
@@ -2165,6 +2370,51 @@ def _run_gateway_llm_step_no_tools(
             prompt_variant_selection=prompt_variant_selection,
             prompt_context_diagnostics=prompt_context_diagnostics,
         )
+    except RuntimeError as exc:
+        exc_text = str(exc)
+        all_candidates_failed_prefix = f"all_model_candidates_failed:stage={stage}:"
+        failure_entries = (
+            [
+                entry
+                for entry in exc_text[len(all_candidates_failed_prefix) :].split(",")
+                if entry
+            ]
+            if exc_text.startswith(all_candidates_failed_prefix)
+            else []
+        )
+        if (
+            failure_entries
+            and all(
+                entry.endswith("=response_validation_failed")
+                for entry in failure_entries
+            )
+            and last_validation_failure is not None
+            and last_validation_response_text is not None
+        ):
+            result = _build_result(
+                request=request,
+                response_text=last_validation_response_text,
+                prompt_id=prompt_id,
+                prompt_source=prompt_source,
+                rendered_variables=rendered_variables,
+                llm_policy_map=llm_policy_map,
+                validation_policy_map=validation_policy_map,
+                selected_model=last_validation_model,
+                selected_candidate=last_validation_candidate,
+                tool_invocations=(),
+                tool_messages=(),
+                llm_calls=llm_calls,
+                aux_llm_calls=aux_llm_calls,
+                prompt_variant_selection=prompt_variant_selection,
+                prompt_context_diagnostics=prompt_context_diagnostics,
+            )
+            envelope = result.outputs.get("llm_step_envelope")
+            if isinstance(envelope, MutableMapping):
+                envelope["validation_fallback_exhausted"] = True
+                envelope["validation_fallback_error"] = exc_text
+                envelope["last_validation_failure"] = dict(last_validation_failure)
+            return result
+        raise
 
     return _build_result(
         request=request,

@@ -357,6 +357,22 @@ def _looks_like_openai_model(name: str) -> bool:
     return isinstance(name, str) and name.startswith(_OPENAI_MODEL_PREFIXES)
 
 
+def _looks_like_browser_object_model_reference(value: str) -> bool:
+    """Detect accidental DOM/Event object stringification in model settings."""
+
+    if not isinstance(value, str):
+        return False
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    for prefix in ("openai:", "ollama:", "gemini:"):
+        if lowered.startswith(prefix):
+            cleaned = cleaned.split(":", 1)[1].strip()
+            break
+    return cleaned.startswith("[object ") and cleaned.endswith("]")
+
+
 def _extract_openai_model_id(value: str) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -365,6 +381,8 @@ def _extract_openai_model_id(value: str) -> Optional[str]:
         return None
     if cleaned.lower().startswith("openai:"):
         cleaned = cleaned.split(":", 1)[1].strip()
+    if _looks_like_browser_object_model_reference(cleaned):
+        return None
     return cleaned or None
 
 
@@ -376,6 +394,8 @@ def _extract_ollama_model_id(value: str) -> Optional[str]:
         return None
     if cleaned.lower().startswith("ollama:"):
         cleaned = cleaned.split(":", 1)[1].strip()
+    if _looks_like_browser_object_model_reference(cleaned):
+        return None
     return cleaned or None
 
 
@@ -451,6 +471,8 @@ def resolve_ollama_model_name(model: Optional[str]) -> Optional[str]:
     raw = model.strip()
     if not raw:
         return raw
+    if _looks_like_browser_object_model_reference(raw):
+        return None
 
     direct = _extract_ollama_model_id(raw)
     if direct and _looks_like_ollama_model(direct):
@@ -496,6 +518,8 @@ def resolve_openai_model_name(model: Optional[str]) -> Optional[str]:
     raw = model.strip()
     if not raw:
         return raw
+    if _looks_like_browser_object_model_reference(raw):
+        return None
 
     direct = _extract_openai_model_id(raw)
     if direct and _looks_like_openai_model(direct):

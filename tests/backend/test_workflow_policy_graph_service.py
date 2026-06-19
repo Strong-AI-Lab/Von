@@ -36,6 +36,42 @@ def _config_concept(config_id, stage_concept_id):
     }
 
 
+def _batch_text_lookup_side_effect(single_lookup):
+    def _side_effect(
+        subject_concept_ids,
+        *,
+        predicate=None,
+        predicates=None,
+        limit_per_concept=50,
+        **_kwargs,
+    ):
+        if predicate:
+            predicate_values = [predicate]
+        else:
+            predicate_values = [
+                item
+                for item in (predicates or [])
+                if isinstance(item, str) and item
+            ]
+        rows_by_concept = {}
+        for concept_id in subject_concept_ids:
+            rows = []
+            for pred in predicate_values:
+                for row in single_lookup(
+                    concept_id,
+                    predicate=pred,
+                    limit=limit_per_concept,
+                ):
+                    payload = dict(row)
+                    payload.setdefault("subject_concept_id", concept_id)
+                    payload.setdefault("predicate", pred)
+                    rows.append(payload)
+            rows_by_concept[concept_id] = rows[:limit_per_concept]
+        return rows_by_concept
+
+    return _side_effect
+
+
 def test_resolve_policy_from_graph_returns_none_when_policy_not_found():
     """Graph resolver returns None only when the policy concept is absent."""
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo:
@@ -48,6 +84,9 @@ def test_resolve_policy_from_graph_reports_incomplete_when_no_configs():
     """A policy concept with no stage configurations is explicitly incomplete."""
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", return_value=[]
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        return_value={"#V#test_policy": []},
     ):
         mock_repo.find_one.return_value = {
             "concept_id": "#V#test_policy",
@@ -88,6 +127,9 @@ def test_resolve_policy_from_graph_resolves_fully_represented_policy():
 
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", side_effect=mock_get_texts
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        side_effect=_batch_text_lookup_side_effect(mock_get_texts),
     ):
         mock_repo.find_one.side_effect = mock_find_one
 
@@ -133,6 +175,9 @@ def test_resolve_policy_from_graph_derives_stage_name_structurally():
 
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", side_effect=mock_get_texts
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        side_effect=_batch_text_lookup_side_effect(mock_get_texts),
     ):
         mock_repo.find_one.side_effect = mock_find_one
 
@@ -163,6 +208,9 @@ def test_resolve_policy_missing_primary_model_is_incomplete_not_active_llm():
 
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", side_effect=mock_get_texts
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        side_effect=_batch_text_lookup_side_effect(mock_get_texts),
     ):
         mock_repo.find_one.side_effect = mock_find_one
 
@@ -205,6 +253,9 @@ def test_resolve_policy_missing_fallback_hops_is_incomplete_not_two():
     ):
         with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
             f"{_SERVICE}.get_texts_for_concept", side_effect=side_effect
+        ), patch(
+            f"{_SERVICE}.get_texts_for_concepts",
+            side_effect=_batch_text_lookup_side_effect(side_effect),
         ):
             mock_repo.find_one.side_effect = mock_find_one
 
@@ -239,6 +290,9 @@ def test_resolve_policy_new_stage_needs_no_python_change():
 
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", side_effect=mock_get_texts
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        side_effect=_batch_text_lookup_side_effect(mock_get_texts),
     ):
         mock_repo.find_one.side_effect = mock_find_one
 
@@ -272,6 +326,9 @@ def test_resolve_policy_invalid_local_only_is_incomplete():
 
     with patch(f"{_SERVICE}.ConceptsRepository") as mock_repo, patch(
         f"{_SERVICE}.get_texts_for_concept", side_effect=mock_get_texts
+    ), patch(
+        f"{_SERVICE}.get_texts_for_concepts",
+        side_effect=_batch_text_lookup_side_effect(mock_get_texts),
     ):
         mock_repo.find_one.side_effect = mock_find_one
 

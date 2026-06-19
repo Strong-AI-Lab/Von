@@ -293,6 +293,28 @@ def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeyp
     assert client_type == "openai"
 
 
+def test_resolve_generate_requested_model_ignores_browser_object_request_model(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_active_model_name",
+        lambda *args, **kwargs: "gpt-5.4-mini",
+    )
+
+    model_name, client_type = von_routes._resolve_generate_requested_model(
+        {"model": "openai:[object PointerEvent]"},
+        user_concept_id="#V#test_user",
+        org_concept_id=None,
+        configured_model=None,
+    )
+
+    assert model_name == "gpt-5.4-mini"
+    assert client_type is None
+
+
 def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit_request(
     monkeypatch,
 ):
@@ -411,3 +433,51 @@ def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
     assert auxiliary_llm_calls
     assert auxiliary_llm_calls[0]["status"] == "submission_skipped"
     assert auxiliary_llm_calls[0]["reason_code"] == "agent_test_instance"
+
+
+def test_submit_generate_conversation_turn_instance_skips_background_reentry() -> None:
+    from src.backend.server.routes.generate_route_support import (
+        _GenerateConversationTurnInstanceState,
+        _submit_generate_conversation_turn_instance,
+    )
+
+    auxiliary_llm_calls: list[dict[str, Any]] = []
+    state = _GenerateConversationTurnInstanceState()
+
+    def fail_get_instance_manager():
+        raise AssertionError(
+            "background re-entry should not submit durable turn instances"
+        )
+
+    def fail_submit_verified_workflow_instance(**_kwargs):
+        raise AssertionError(
+            "background re-entry should not submit durable turn instances"
+        )
+
+    _submit_generate_conversation_turn_instance(
+        state=state,
+        auxiliary_llm_calls=auxiliary_llm_calls,
+        session_id="session-1",
+        request_id="request-1",
+        user_namespace="#V#user@#V#org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        namespace_source="test",
+        presenter_mode_requested=False,
+        request_gmail_profile=None,
+        request_language="en-NZ",
+        requested_model="gemma4:e4b",
+        requested_client_type="ollama",
+        prompt_text="Prompt",
+        workflow_discovery_result=None,
+        workflow_continuation_context=None,
+        get_instance_manager_fn=fail_get_instance_manager,
+        submit_verified_workflow_instance_fn=fail_submit_verified_workflow_instance,
+        background_task_id="task-123",
+    )
+
+    assert state.manager is None
+    assert state.instance_id is None
+    assert auxiliary_llm_calls
+    assert auxiliary_llm_calls[0]["status"] == "submission_skipped"
+    assert auxiliary_llm_calls[0]["reason_code"] == "background_task_reentry"

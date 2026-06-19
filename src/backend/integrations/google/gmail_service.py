@@ -81,11 +81,21 @@ class GmailProfile:
         out-of-band to avoid unexpected prompts in headless environments.
         """
 
+        effective_scopes = resolve_effective_profile_scopes(self)
+
         if callable(_get_agent_gmail_token_payload):
-            token_payload = _get_agent_gmail_token_payload(self.profile_id)
+            try:
+                token_payload = _get_agent_gmail_token_payload(self.profile_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[gmail_service] DB Gmail token lookup failed for profile %s: %s",
+                    self.profile_id,
+                    exc,
+                )
+                token_payload = None
             if token_payload:
                 creds = Credentials.from_authorized_user_info(
-                    token_payload, scopes=self.scopes
+                    token_payload, scopes=effective_scopes
                 )
 
                 if creds and creds.expired and creds.refresh_token:
@@ -99,7 +109,7 @@ class GmailProfile:
                             profile_id=self.profile_id,
                             token_payload=json.loads(creds.to_json()),
                             authorised_email=authorised_email,
-                            scopes=list(self.scopes),
+                            scopes=list(effective_scopes),
                             expires_at=getattr(creds, "expiry", None),
                         )
                 elif not creds or not creds.valid:
@@ -119,7 +129,7 @@ class GmailProfile:
             )
 
         creds = Credentials.from_authorized_user_file(
-            self.token_path, scopes=self.scopes
+            self.token_path, scopes=effective_scopes
         )
 
         if creds and creds.expired and creds.refresh_token:
@@ -132,6 +142,43 @@ class GmailProfile:
             )
 
         return creds
+
+
+def _resolve_vontology_profile_scopes(profile_id: str) -> list[str] | None:
+    """Read represented OAuth scopes for a Gmail profile, if available."""
+
+    try:
+        from ...services import concept_service
+        from ...services.mail_profile_resource_vontology_service import (
+            gmail_profile_resource_concept_id,
+        )
+
+        concept_doc = concept_service.get_concept_by_concept_id(
+            gmail_profile_resource_concept_id(profile_id)
+        )
+        if not isinstance(concept_doc, Mapping):
+            return None
+        raw_scopes = (concept_doc.get("attributes") or {}).get("oauth_scopes")
+        if not isinstance(raw_scopes, list):
+            return None
+        scopes = [scope for scope in raw_scopes if isinstance(scope, str) and scope]
+        return scopes or None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[gmail_service] Vontology scope lookup failed for profile %s: %s",
+            profile_id,
+            exc,
+        )
+        return None
+
+
+def resolve_effective_profile_scopes(profile: GmailProfile) -> list[str]:
+    """Return represented OAuth scopes, falling back to env profile scopes."""
+
+    represented_scopes = _resolve_vontology_profile_scopes(profile.profile_id)
+    if represented_scopes:
+        return represented_scopes
+    return list(profile.scopes or [])
 
 
 def _persist_credentials(token_path: str, creds: Credentials) -> None:
@@ -568,7 +615,7 @@ def create_label(
     )
 
     profile = get_profile(profile_id, profiles)
-    if MUTATION_SCOPE not in profile.scopes:
+    if MUTATION_SCOPE not in resolve_effective_profile_scopes(profile):
         raise PermissionError("Profile scopes do not include gmail.modify")
 
     _log_gmail_audit(
@@ -692,7 +739,7 @@ def send_message(
         raise ValueError("At least one recipient is required in to")
 
     profile = get_profile(profile_id, profiles)
-    profile_scopes = set(profile.scopes or [])
+    profile_scopes = set(resolve_effective_profile_scopes(profile))
     if not profile_scopes.intersection(SEND_CAPABLE_SCOPES):
         raise PermissionError(
             "Profile scopes do not include a Gmail send-capable scope"
@@ -769,7 +816,7 @@ def modify_labels(
         label_ids=(add_labels or []) + (remove_labels or []),
         allow_mutation=allow_mutation,
     )
-    if MUTATION_SCOPE not in profile.scopes:
+    if MUTATION_SCOPE not in resolve_effective_profile_scopes(profile):
         raise PermissionError("Profile scopes do not include gmail.modify")
 
     service = get_service(profile_id, profiles)

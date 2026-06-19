@@ -16,6 +16,7 @@ from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
 )
 from src.backend.workflows import (
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowRegistration,
@@ -23,6 +24,7 @@ from src.backend.workflows import (
 )
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_NARRATION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
 )
 from orchestrator_test_harness import build_db_independent_orchestrator
@@ -72,6 +74,43 @@ def _stub_represented_dispatch_policy(monkeypatch) -> None:
         "src.backend.services.turn_contract_dispatch_policy_service."
         "get_texts_for_concept",
         _fixture_rows,
+    )
+
+
+def test_generic_selected_workflow_modes_do_not_load_vontology_definitions(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=_DummyGateway(),
+    )
+
+    def fail_definition_load(_workflow_id):
+        raise AssertionError("generic workflow mode should not load Vontology metadata")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        fail_definition_load,
+    )
+
+    assert (
+        orchestrator._selected_workflow_execution_mode(
+            selected_workflow_id=TOOL_CALLING_WORKFLOW_ID
+        )
+        == "tool_pipeline"
+    )
+    assert (
+        orchestrator._selected_workflow_execution_mode(
+            selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID
+        )
+        == "direct_response"
+    )
+    assert (
+        orchestrator._selected_workflow_execution_mode(
+            selected_workflow_id=CHAT_NARRATION_WORKFLOW_ID
+        )
+        == "direct_response"
     )
 
 
@@ -451,6 +490,213 @@ def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> N
     )
     assert submission_event["status"] == "submission_skipped"
     assert submission_event["reason_code"] == "agent_test_instance"
+
+
+def test_conversation_turn_supervised_execute_workflow_skips_duplicate_durable_submission(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    definition = WorkflowDefinition(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+        purpose="Conversation turn duplicate durable submission skip regression.",
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            definition=definition,
+            purpose=definition.purpose,
+            source="test",
+        )
+    )
+    aux_log: list[dict[str, Any]] = []
+
+    def _unexpected_submit(*_args, **_kwargs):
+        raise AssertionError(
+            "conversation_turn_supervised should not block on duplicate durable submission"
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _unexpected_submit,
+    )
+
+    result = orchestrator.execute_workflow(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        data={
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "conversation_session_id": "session-1",
+            "turn_id": "turn-1",
+            "workflow_episode_source": "conversation_turn_supervised",
+            "workflow_episode_stage": "conversation_turn",
+            "aux_llm_calls": aux_log,
+        },
+        llm_client=_DummyLLM(),
+        model="gemma4:e4b",
+        user_namespace="#V#michael_witbrock",
+    )
+
+    assert result is not None
+    assert result.completed is True
+    submission_event = next(
+        item for item in aux_log if item.get("type") == "workflow_instance_submission"
+    )
+    assert submission_event["status"] == "submission_skipped"
+    assert (
+        submission_event["reason_code"] == "conversation_turn_supervised_in_process"
+    )
+
+
+def test_selected_workflow_execute_workflow_skips_in_process_persistence(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    definition = WorkflowDefinition(
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+        purpose="Selected workflow in-process persistence skip regression.",
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            definition=definition,
+            purpose=definition.purpose,
+            source="test",
+        )
+    )
+    aux_log: list[dict[str, Any]] = []
+
+    def _unexpected_submit(*_args, **_kwargs):
+        raise AssertionError(
+            "selected in-process workflow should not block on durable submission"
+        )
+
+    def _unexpected_episode_start(*_args, **_kwargs):
+        raise AssertionError(
+            "selected in-process workflow should not block on episode start"
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _unexpected_submit,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_episode_service.start_workflow_use_episode",
+        _unexpected_episode_start,
+    )
+
+    result = orchestrator.execute_workflow(
+        TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "conversation_session_id": "session-1",
+            "turn_id": "turn-1",
+            "workflow_episode_source": "conversation_turn_selected_workflow",
+            "workflow_episode_stage": "selected_workflow_execution",
+            "aux_llm_calls": aux_log,
+        },
+        llm_client=_DummyLLM(),
+        model="gemma4:e4b",
+        user_namespace="#V#michael_witbrock",
+    )
+
+    assert result is not None
+    assert result.completed is True
+    submission_event = next(
+        item for item in aux_log if item.get("type") == "workflow_instance_submission"
+    )
+    assert submission_event["status"] == "submission_skipped"
+    assert (
+        submission_event["reason_code"]
+        == "conversation_turn_selected_workflow_in_process"
+    )
+
+
+def test_supervised_turn_times_out_workflow_model_policy_load(monkeypatch) -> None:
+    import time
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS", "0.01")
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+
+    def _slow_policy_load(_preferred_language=None):
+        time.sleep(0.2)
+        return (
+            _WorkflowModelPolicyState(
+                enabled=True,
+                policy={"unexpected": True},
+                policy_id="#V#slow_policy",
+                predicate_id="#V#has_model_policy_json",
+                errors=(),
+            ),
+            {"type": "workflow_model_policy", "loaded": True},
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_workflow_model_policy",
+        _slow_policy_load,
+    )
+
+    def _execute_workflow(*_args, **kwargs):
+        data = kwargs.get("data")
+        aux_calls = data.get("aux_llm_calls") if isinstance(data, dict) else []
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "response_text": "ok",
+                "aux_llm_calls": (
+                    [dict(item) for item in aux_calls if isinstance(item, dict)]
+                    if isinstance(aux_calls, list)
+                    else []
+                ),
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="List my recent mail.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="gemma4:e4b",
+    )
+
+    assert result.response_text == "ok"
+    timeout_event = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "workflow_dispatch_prepare_step"
+    )
+    assert timeout_event["step_label"].startswith("Load routing model policy")
+    assert timeout_event["status"] == "timed_out"
+    policy_event = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "workflow_model_policy"
+    )
+    assert policy_event["policy_source"] == "timeout"
+    assert policy_event["loaded"] is False
+    assert policy_event["errors"] == ["workflow_model_policy_timeout"]
 
 
 def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(

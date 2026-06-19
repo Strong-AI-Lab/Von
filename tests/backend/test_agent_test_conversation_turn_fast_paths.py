@@ -923,6 +923,54 @@ def test_agent_test_selector_preparation_bounds_local_discovery_timeout(
     assert outputs["workflow_discovery_result"]["candidate_count"] == 0
 
 
+def test_selector_preparation_bounds_live_discovery_timeout(monkeypatch) -> None:
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    monkeypatch.setenv("VON_TURN_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS", "0.42")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    calls: list[dict[str, Any]] = []
+
+    def _capturing_discovery(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "recent email messages",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _capturing_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": "List my six most recent email messages.",
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gpt-5.4-mini",
+                user_namespace=None,
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert calls
+    assert calls[0]["timeout_seconds"] == "0.42"
+    assert outputs["workflow_discovery_result"]["candidate_count"] == 0
+
+
 def test_agent_test_narration_fast_path_reuses_selected_workflow_response(
     monkeypatch,
 ) -> None:

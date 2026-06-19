@@ -342,6 +342,11 @@ def _ensure_conversation_turn_prompt_support(
                 "#V#represented_artefact_creation_workflow",
                 "grounded `parent_id`",
                 "stable target handles",
+                "read-only Gmail retrieval",
+                "#V#general_mail_review_workflow",
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
             ),
         )
     ):
@@ -430,6 +435,10 @@ def _ensure_conversation_turn_prompt_support(
                 "represented labels, categories, tags, workflow markers",
                 "Do NOT emit `create_concepts` without `parent_id`",
                 "Do NOT use `#V#thing` as the parent",
+                "read-only Gmail tools",
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
             ),
         )
     ):

@@ -16,7 +16,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,15 @@ PRED_HAS_LOCAL_ONLY = "#V#has_local_only_constraint"
 PRED_HAS_MAX_FALLBACK_HOPS = "#V#has_max_fallback_hops"
 PRED_HAS_MODEL_POLICY_JSON = "#V#has_model_policy_json"
 PRED_HAS_RUNTIME_STAGE_NAME = "#V#has_runtime_stage_name"
+_POLICY_TEXT_PREDICATES = (
+    PRED_HAS_STAGE_CONFIG,
+    PRED_APPLIES_TO_STAGE,
+    PRED_HAS_PRIMARY_MODEL,
+    PRED_HAS_FALLBACK_MODEL,
+    PRED_HAS_LOCAL_ONLY,
+    PRED_HAS_MAX_FALLBACK_HOPS,
+    PRED_HAS_RUNTIME_STAGE_NAME,
+)
 
 GRAPH_POLICY_COMPLETE = "graph_complete"
 GRAPH_POLICY_INCOMPLETE = "graph_incomplete"
@@ -43,7 +52,132 @@ _BOOLEAN_TEXT_VALUES = {
 }
 
 
-def _resolve_stage_name(stage_concept_id: str) -> tuple[Optional[str], Optional[str]]:
+TextLookup = Mapping[str, List[Dict[str, Any]]]
+
+
+def _normalise_concept_ids(concept_ids: List[str]) -> List[str]:
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for raw_id in concept_ids:
+        if not isinstance(raw_id, str):
+            continue
+        concept_id = raw_id.strip()
+        if not concept_id or concept_id in seen:
+            continue
+        seen.add(concept_id)
+        ordered.append(concept_id)
+    return ordered
+
+
+def _load_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Load concept documents in bulk, falling back to point reads for tests/gaps."""
+
+    ordered_ids = _normalise_concept_ids(concept_ids)
+    if not ordered_ids:
+        return {}
+
+    docs_by_id: Dict[str, Dict[str, Any]] = {}
+    try:
+        for doc in ConceptsRepository.find(
+            {"concept_id": {"$in": ordered_ids}},
+            projection={"concept_id": 1, "relationships": 1},
+        ):
+            if not isinstance(doc, Mapping):
+                continue
+            concept_id = doc.get("concept_id")
+            if isinstance(concept_id, str):
+                docs_by_id[concept_id] = dict(doc)
+    except Exception:
+        docs_by_id = {}
+
+    for concept_id in ordered_ids:
+        if concept_id in docs_by_id:
+            continue
+        try:
+            doc = ConceptsRepository.find_one(
+                {"concept_id": concept_id},
+                projection={"concept_id": 1, "relationships": 1},
+            )
+        except TypeError:
+            doc = ConceptsRepository.find_one({"concept_id": concept_id})
+        if isinstance(doc, Mapping):
+            docs_by_id[concept_id] = dict(doc)
+
+    return docs_by_id
+
+
+def _load_text_lookup(concept_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    ordered_ids = _normalise_concept_ids(concept_ids)
+    if not ordered_ids:
+        return {}
+    try:
+        rows_by_concept = get_texts_for_concepts(
+            ordered_ids,
+            predicates=_POLICY_TEXT_PREDICATES,
+            limit_per_concept=100,
+        )
+    except Exception:
+        return {}
+    return {
+        concept_id: list(rows)
+        for concept_id, rows in rows_by_concept.items()
+        if isinstance(concept_id, str) and isinstance(rows, list)
+    }
+
+
+def _lookup_text_values(
+    concept_id: str,
+    predicate: str,
+    text_lookup: Optional[TextLookup],
+    *,
+    limit: Optional[int] = None,
+) -> Optional[List[str]]:
+    if text_lookup is None or concept_id not in text_lookup:
+        return None
+
+    values: List[str] = []
+    for row in text_lookup.get(concept_id) or []:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("predicate") != predicate:
+            continue
+        text = row.get("text")
+        if not isinstance(text, str):
+            continue
+        stripped = text.strip()
+        if stripped:
+            values.append(stripped)
+            if limit is not None and len(values) >= limit:
+                break
+    return values
+
+
+def _get_text_value_from_lookup(
+    concept_id: str,
+    predicate: str,
+    text_lookup: Optional[TextLookup],
+) -> Optional[str]:
+    values = _lookup_text_values(concept_id, predicate, text_lookup, limit=1)
+    if values is None:
+        return _get_text_value(concept_id, predicate)
+    return values[0] if values else None
+
+
+def _get_text_values_from_lookup(
+    concept_id: str,
+    predicate: str,
+    text_lookup: Optional[TextLookup],
+) -> List[str]:
+    values = _lookup_text_values(concept_id, predicate, text_lookup)
+    if values is None:
+        return _get_text_values(concept_id, predicate)
+    return values
+
+
+def _resolve_stage_name(
+    stage_concept_id: str,
+    text_lookup: Optional[TextLookup] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """Resolve the runtime stage name for a stage concept.
 
     Returns ``(stage_name, source)`` where source is
@@ -54,7 +188,11 @@ def _resolve_stage_name(stage_concept_id: str) -> tuple[Optional[str], Optional[
     consulted (JVNAUTOSCI-2496).
     """
 
-    represented = _get_text_value(stage_concept_id, PRED_HAS_RUNTIME_STAGE_NAME)
+    represented = _get_text_value_from_lookup(
+        stage_concept_id,
+        PRED_HAS_RUNTIME_STAGE_NAME,
+        text_lookup,
+    )
     if represented:
         return represented, "represented_runtime_stage_name"
     if stage_concept_id.startswith("#V#") and stage_concept_id.endswith("_stage"):
@@ -78,25 +216,24 @@ def _get_text_values(concept_id: str, predicate: str) -> List[str]:
     return [t["text"].strip() for t in texts if t.get("text")]
 
 
-def _get_related_concept_ids(concept_id: str, predicate: str) -> List[str]:
-    """Fetch concept IDs related via a structural relationship stored as linked_to or similar."""
-    concept = ConceptsRepository.find_one({"concept_id": concept_id})
-    if not concept:
+def _get_related_concept_ids_from_document(
+    concept: Mapping[str, Any] | None,
+    predicate: str,
+) -> List[str]:
+    if not isinstance(concept, Mapping):
         return []
 
-    # Check relationships for the predicate
     relationships = concept.get("relationships", {})
+    if not isinstance(relationships, Mapping):
+        return []
 
-    # Try standard relationship storage
     if predicate in relationships:
         val = relationships[predicate]
         if isinstance(val, list):
             return [v for v in val if isinstance(v, str)]
-        elif isinstance(val, str):
+        if isinstance(val, str):
             return [val]
 
-    # Check linked_to with predicate metadata
-    # This is for predicates that store as linked relations
     linked_to = relationships.get("linked_to", [])
     if isinstance(linked_to, list):
         results = []
@@ -108,9 +245,30 @@ def _get_related_concept_ids(concept_id: str, predicate: str) -> List[str]:
         if results:
             return results
 
+    return []
+
+
+def _get_related_concept_ids(
+    concept_id: str,
+    predicate: str,
+    *,
+    concept: Mapping[str, Any] | None = None,
+    text_lookup: Optional[TextLookup] = None,
+) -> List[str]:
+    """Fetch concept IDs related via a structural relationship stored as linked_to or similar."""
+    if concept is None:
+        concept = ConceptsRepository.find_one({"concept_id": concept_id})
+    if not concept:
+        return []
+
+    # Check relationships for the predicate
+    related_ids = _get_related_concept_ids_from_document(concept, predicate)
+    if related_ids:
+        return related_ids
+
     # Query text_relations for concept-to-concept relations stored there
     # (some predicates store concept IDs as text values)
-    text_vals = _get_text_values(concept_id, predicate)
+    text_vals = _get_text_values_from_lookup(concept_id, predicate, text_lookup)
     concept_ids = [v for v in text_vals if v.startswith("#V#")]
     return concept_ids
 
@@ -131,7 +289,8 @@ def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, A
     ``graph_complete`` or ``graph_incomplete`` otherwise.
     """
     try:
-        policy_concept = ConceptsRepository.find_one({"concept_id": policy_concept_id})
+        policy_docs = _load_concepts_by_id([policy_concept_id])
+        policy_concept = policy_docs.get(policy_concept_id)
         if not policy_concept:
             logger.debug(f"Policy concept not found: {policy_concept_id}")
             return None
@@ -139,39 +298,99 @@ def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, A
         incomplete_reasons: List[str] = []
         stage_provenance: Dict[str, Dict[str, Any]] = {}
 
-        config_ids = _get_related_concept_ids(policy_concept_id, PRED_HAS_STAGE_CONFIG)
+        text_lookup: Dict[str, List[Dict[str, Any]]] = {}
+        config_ids = _get_related_concept_ids_from_document(
+            policy_concept,
+            PRED_HAS_STAGE_CONFIG,
+        )
+        if not config_ids:
+            text_lookup.update(_load_text_lookup([policy_concept_id]))
+            config_ids = _get_related_concept_ids(
+                policy_concept_id,
+                PRED_HAS_STAGE_CONFIG,
+                concept=policy_concept,
+                text_lookup=text_lookup,
+            )
+        if not config_ids:
+            config_ids = _get_related_concept_ids(
+                policy_concept_id,
+                PRED_HAS_STAGE_CONFIG,
+                concept=policy_concept,
+                text_lookup=None,
+            )
         if not config_ids:
             incomplete_reasons.append("no_stage_configurations")
+
+        config_docs = _load_concepts_by_id(config_ids)
+
+        stage_ids_by_config: Dict[str, List[str]] = {}
+        stage_concept_ids: List[str] = []
+        for config_id in config_ids:
+            config_concept = config_docs.get(config_id)
+            stage_ids = _get_related_concept_ids_from_document(
+                config_concept,
+                PRED_APPLIES_TO_STAGE,
+            )
+            if not stage_ids and config_id not in text_lookup:
+                text_lookup.update(_load_text_lookup([config_id]))
+            if not stage_ids:
+                stage_ids = _get_related_concept_ids(
+                    config_id,
+                    PRED_APPLIES_TO_STAGE,
+                    concept=config_concept,
+                    text_lookup=text_lookup,
+                )
+            stage_ids_by_config[config_id] = stage_ids
+            stage_concept_ids.extend(stage_ids)
+
+        text_lookup.update(
+            _load_text_lookup([policy_concept_id, *config_ids, *stage_concept_ids])
+        )
 
         stages: Dict[str, Dict[str, Any]] = {}
         local_only_stages: List[str] = []
 
         for config_id in config_ids:
-            config_concept = ConceptsRepository.find_one({"concept_id": config_id})
+            config_concept = config_docs.get(config_id)
             if not config_concept:
                 incomplete_reasons.append(f"stage_configuration_missing:{config_id}")
                 continue
 
-            stage_ids = _get_related_concept_ids(config_id, PRED_APPLIES_TO_STAGE)
+            stage_ids = stage_ids_by_config.get(config_id) or []
             if not stage_ids:
                 incomplete_reasons.append(f"stage_link_missing:{config_id}")
                 continue
 
             stage_concept_id = stage_ids[0]
-            stage_name, stage_name_source = _resolve_stage_name(stage_concept_id)
+            stage_name, stage_name_source = _resolve_stage_name(
+                stage_concept_id,
+                text_lookup,
+            )
             if not stage_name:
                 incomplete_reasons.append(
                     f"stage_name_unresolved:{stage_concept_id}"
                 )
                 continue
 
-            primary = _get_text_value(config_id, PRED_HAS_PRIMARY_MODEL)
+            primary = _get_text_value_from_lookup(
+                config_id,
+                PRED_HAS_PRIMARY_MODEL,
+                text_lookup,
+            )
             if not primary:
                 incomplete_reasons.append(f"missing_primary_model:{config_id}")
                 continue
 
-            fallbacks = _get_text_values(config_id, PRED_HAS_FALLBACK_MODEL)
-            local_only_text = _get_text_value(config_id, PRED_HAS_LOCAL_ONLY)
+            fallbacks = _get_text_values_from_lookup(
+                config_id,
+                PRED_HAS_FALLBACK_MODEL,
+                text_lookup,
+            )
+            local_only_text = _get_text_value_from_lookup(
+                config_id,
+                PRED_HAS_LOCAL_ONLY,
+                text_lookup,
+            )
             local_only = False
             local_only_source = None
             if local_only_text is not None:
@@ -201,8 +420,10 @@ def resolve_policy_from_graph(policy_concept_id: str) -> Optional[Mapping[str, A
                 local_only_stages.append(stage_name)
 
         constraints: Dict[str, Any] = {"local_only_stages": local_only_stages}
-        max_fallback_hops_text = _get_text_value(
-            policy_concept_id, PRED_HAS_MAX_FALLBACK_HOPS
+        max_fallback_hops_text = _get_text_value_from_lookup(
+            policy_concept_id,
+            PRED_HAS_MAX_FALLBACK_HOPS,
+            text_lookup,
         )
         max_fallback_hops_source = None
         if max_fallback_hops_text is None:

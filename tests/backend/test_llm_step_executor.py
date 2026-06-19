@@ -5,7 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.backend.integrations.internal_mcp.orchestrator import CancellationRequested
+from src.backend.integrations.internal_mcp.orchestrator import (
+    CancellationRequested,
+    _WorkflowModelPolicyState,
+)
 from src.backend.services import prompt_template_service as pts
 from src.backend.workflows import llm_step_executor as lse
 from src.backend.workflows.action_registry import (
@@ -540,6 +543,104 @@ def test_execute_llm_step_fails_json_value_when_required_fields_missing() -> Non
     assert envelope["validation"]["missing_required_fields"] == ["must_exist"]
 
 
+def test_gateway_llm_step_reports_validation_failure_after_fallback_exhaustion(
+    monkeypatch,
+) -> None:
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            response_validator = kwargs.get("response_validator")
+            assert callable(response_validator)
+            validation_failure = response_validator(
+                '{"summary":"missing the required mode"}',
+                "qwen3:8b",
+                {"provider": "ollama", "model": "qwen3:8b"},
+            )
+            assert validation_failure is not None
+            assert validation_failure["reason"] == "json_required_fields_missing"
+            raise RuntimeError(
+                "all_model_candidates_failed:stage=context_adjudication:"
+                "ollama:qwen3:8b=response_validation_failed"
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {}, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="qwen3:8b",
+        ),
+        data={},
+        prompt_contract={"prompt_text": "Return context adjudication JSON."},
+        llm_policy={"policy_stage": "context_adjudication"},
+        validation_policy={
+            "output_format": "json_value",
+            "required_json_fields": ["mode"],
+        },
+        workflow_state_id="context_adjudication_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert result.error == "json_required_fields_missing"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["validation"]["missing_required_fields"] == ["mode"]
+    assert envelope["validation_fallback_exhausted"] is True
+    assert "response_validation_failed" in envelope["validation_fallback_error"]
+
+
+def test_gateway_llm_step_does_not_mask_mixed_fallback_failures(
+    monkeypatch,
+) -> None:
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            response_validator = kwargs.get("response_validator")
+            assert callable(response_validator)
+            validation_failure = response_validator(
+                '{"summary":"missing the required mode"}',
+                "qwen3:8b",
+                {"provider": "ollama", "model": "qwen3:8b"},
+            )
+            assert validation_failure is not None
+            raise RuntimeError(
+                "all_model_candidates_failed:stage=context_adjudication:"
+                "ollama:qwen3:8b=response_validation_failed,"
+                "ollama:granite3.3:2b=provider_unreachable"
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {}, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="qwen3:8b",
+        ),
+        data={},
+        prompt_contract={"prompt_text": "Return context adjudication JSON."},
+        llm_policy={"policy_stage": "context_adjudication"},
+        validation_policy={
+            "output_format": "json_value",
+            "required_json_fields": ["mode"],
+        },
+        workflow_state_id="context_adjudication_decision",
+    )
+
+    with pytest.raises(RuntimeError, match="provider_unreachable"):
+        execute_llm_step(request)
+
+
 def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     request = _build_request(llm_response="This is not valid JSON.")
 
@@ -854,6 +955,167 @@ def test_gateway_runtime_reuses_parent_policy_and_registry_snapshot(
     assert isinstance(orchestrator, _StubOrchestrator)
     assert resolved_policy is policy_state
     assert resolved_registry is registry_snapshot
+
+
+def test_gateway_runtime_refreshes_inherited_policy_timeout(monkeypatch) -> None:
+    inherited_policy = _WorkflowModelPolicyState(
+        enabled=True,
+        policy=None,
+        policy_id=None,
+        predicate_id=None,
+        errors=("workflow_model_policy_timeout",),
+    )
+    refreshed_policy = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={"stages": {"context_adjudication": {"primary": "active_llm"}}},
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+    registry_snapshot = {"source": "parent_turn_snapshot", "models": []}
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            self._turn_model_failures_local = threading.local()
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            return (
+                refreshed_policy,
+                {
+                    "type": "workflow_model_policy",
+                    "loaded": True,
+                    "policy_source": "graph",
+                },
+            )
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=object()),
+        data={
+            "policy_state": inherited_policy,
+            "registry_snapshot": registry_snapshot,
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+    )
+
+    _orchestrator, resolved_policy, resolved_registry, _, _ = (
+        lse._build_gateway_runtime(request)
+    )
+
+    assert resolved_policy is refreshed_policy
+    assert resolved_registry is registry_snapshot
+    diagnostics = request.data["aux_llm_calls"]
+    assert any(
+        entry.get("type") == "workflow_model_policy"
+        and entry.get("loaded") is True
+        and entry.get("refresh_reason") == "inherited_policy_timeout"
+        for entry in diagnostics
+    )
+
+
+def test_gateway_runtime_times_out_policy_load_with_telemetry(monkeypatch) -> None:
+    registry_snapshot = {"source": "parent_turn_snapshot", "models": []}
+    blocker = threading.Event()
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            self._turn_model_failures_local = threading.local()
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            blocker.wait(1.0)
+            raise AssertionError("policy load should have timed out")
+
+    monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=object()),
+        data={"registry_snapshot": registry_snapshot},
+        prompt_contract={"prompt_text": "Return JSON only."},
+    )
+
+    _orchestrator, resolved_policy, resolved_registry, _, _ = (
+        lse._build_gateway_runtime(request)
+    )
+
+    assert tuple(getattr(resolved_policy, "errors", ())) == (
+        "workflow_model_policy_timeout",
+    )
+    assert resolved_registry is registry_snapshot
+    diagnostics = request.data["aux_llm_calls"]
+    assert any(
+        entry.get("type") == "workflow_llm_step_setup"
+        and entry.get("step_id") == "workflow_model_policy"
+        and entry.get("status") == "timed_out"
+        for entry in diagnostics
+    )
+    assert any(
+        entry.get("type") == "workflow_model_policy"
+        and entry.get("policy_source") == "timeout"
+        for entry in diagnostics
+    )
+
+
+def test_gateway_runtime_times_out_registry_snapshot_with_telemetry(
+    monkeypatch,
+) -> None:
+    policy_state = object()
+    blocker = threading.Event()
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            self._turn_model_failures_local = threading.local()
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            raise AssertionError("parent policy_state should be reused")
+
+    def _blocking_registry_snapshot():
+        blocker.wait(1.0)
+        raise AssertionError("registry load should have timed out")
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        _blocking_registry_snapshot,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=object()),
+        data={"policy_state": policy_state},
+        prompt_contract={"prompt_text": "Return JSON only."},
+    )
+
+    _orchestrator, resolved_policy, resolved_registry, _, _ = (
+        lse._build_gateway_runtime(request)
+    )
+
+    assert resolved_policy is policy_state
+    assert resolved_registry["source"] == "timeout"
+    assert resolved_registry["loaded"] is False
+    diagnostics = request.data["aux_llm_calls"]
+    assert any(
+        entry.get("type") == "workflow_llm_step_setup"
+        and entry.get("step_id") == "model_registry_snapshot"
+        and entry.get("status") == "timed_out"
+        for entry in diagnostics
+    )
 
 
 def test_execute_llm_step_honours_explicit_prefer_default_model_flag(

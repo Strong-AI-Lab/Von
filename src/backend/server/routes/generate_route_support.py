@@ -196,6 +196,7 @@ def _submit_generate_conversation_turn_instance(
     workflow_continuation_context: Mapping[str, Any] | None,
     get_instance_manager_fn: Callable[[], Any],
     submit_verified_workflow_instance_fn: Callable[..., Any],
+    background_task_id: str | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
     if not isinstance(user_namespace, str) or not user_namespace.strip():
@@ -252,6 +253,20 @@ def _submit_generate_conversation_turn_instance(
             org_concept_id=org_concept_id,
             status="submission_skipped",
             reason_code="agent_test_instance",
+        )
+        return
+
+    if isinstance(background_task_id, str) and background_task_id.strip():
+        _append_generate_conversation_turn_instance_event(
+            auxiliary_llm_calls=auxiliary_llm_calls,
+            state=state,
+            session_id=session_id,
+            request_id=request_id,
+            user_namespace=user_namespace,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            status="submission_skipped",
+            reason_code="background_task_reentry",
         )
         return
 

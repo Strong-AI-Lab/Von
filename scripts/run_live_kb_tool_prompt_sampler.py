@@ -1464,7 +1464,7 @@ def _list_installed_ollama_models() -> set[str]:
             encoding="utf-8",
             timeout=30,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return set()
     return _parse_ollama_list_output(completed.stdout)
 
@@ -1725,7 +1725,7 @@ def _git_capture(*args: str) -> str | None:
             text=True,
             encoding="utf-8",
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return None
     value = completed.stdout.strip()
     return value or None
@@ -3772,7 +3772,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 timeout=15,
             )
             return
-        except OSError, subprocess.SubprocessError:
+        except (OSError, subprocess.SubprocessError):
             pass
     process.kill()
 

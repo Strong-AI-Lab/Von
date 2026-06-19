@@ -28872,9 +28872,11 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "List the Gmail profiles configured for this deployment, with "
                 "the authorised Gmail address for each profile when known. "
                 "Returns rows shaped {profile_id, authorised_email}. Use this "
-                "first when a user asks about a mailbox by email address so "
-                "you can pass the correct profile alias to gmail_list_messages "
-                "and gmail_get_message. Does not return tokens or secrets."
+                "first when a user asks about a mailbox and no concrete Gmail "
+                "profile is already grounded, or after a Gmail profile-not-found "
+                "error, so you can pass the exact profile_id to "
+                "gmail_list_messages and gmail_get_message. Does not return "
+                "tokens or secrets."
             ),
         ),
         MethodDefinition(
@@ -28924,10 +28926,11 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             description=(
                 "List Gmail messages for a profile with optional query and label "
                 "filters. The 'profile' parameter accepts either the configured "
-                "profile alias (e.g. 'zhan-gmail') or the authorised Gmail "
-                "address itself (e.g. 'alice@example.com'); the address is "
-                "resolved to the matching profile via the stored OAuth "
-                "credentials. Returned rows include a message_id alias for "
+                "profile alias returned by gmail_list_profiles or the authorised "
+                "Gmail address itself; the address is resolved to the matching "
+                "profile via the stored OAuth credentials. Do not invent profile "
+                "aliases: call gmail_list_profiles first when the profile is not "
+                "already grounded. Returned rows include a message_id alias for "
                 "Gmail's id. The response includes an 'effective_query' field "
                 "reporting any profile-level query_prefix/label_filter applied "
                 "and the composed query string sent to Gmail; 'notes' surfaces "

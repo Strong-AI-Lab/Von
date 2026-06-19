@@ -13,6 +13,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _ModelCandidate,
     _WorkflowModelPolicyState,
 )
+from src.backend.languagemodels.structured_tool_calling.types import (
+    LLMResponse,
+    ToolCall,
+    ToolDefinition,
+)
 from src.backend.services.synthesiser_context_framing_service import (
     SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
     SynthesiserContextFramingTemplate,
@@ -41,6 +46,17 @@ class _SuccessfulClient:
         return '["Proceed", "Hold"]'
 
 
+class _SuccessfulOllamaClient(_SuccessfulClient):
+    def __init__(self, *, default_model: str = "gemma4:26b") -> None:
+        self.default_model = default_model
+        self.host = "http://localhost:11434"
+
+
+class _StubOpenAIClient:
+    def generate(self, *_args: Any, **_kwargs: Any) -> str:  # pragma: no cover
+        raise AssertionError("OpenAI client should not be used in this test")
+
+
 class _StubOllamaClient:
     def __init__(self, *, default_model: str = "llama3.2:latest") -> None:
         self.default_model = default_model
@@ -57,6 +73,35 @@ class _StubOllamaClient:
     ) -> str:
         self.calls.append({"context": context, "model": model})
         return "resolved client default"
+
+
+class _StructuredToolClient:
+    def __init__(self, response: LLMResponse) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def _should_use_structured_calling(self) -> bool:
+        return True
+
+    def generate_with_tools(
+        self,
+        *,
+        prompt: str,
+        available_tools: list[ToolDefinition],
+        context: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "available_tools": [tool.name for tool in available_tools],
+                "context": context,
+                "model": model,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return self.response
 
 
 def _policy_state() -> _WorkflowModelPolicyState:
@@ -92,6 +137,9 @@ def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator._max_tool_result_chars = 5_000
     orchestrator._max_tool_result_field_chars = 1_500
     orchestrator._max_missing_tool_call_retries_per_turn = 3
+    orchestrator._structured_tool_provider_default_limit = 128
+    orchestrator._structured_tool_cap_headroom = 0
+    orchestrator._structured_tool_candidate_cap_override = 0
     return orchestrator
 
 
@@ -344,6 +392,308 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     )
 
 
+def test_run_llm_with_fallbacks_tries_next_candidate_after_response_validation_failure(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    qwen_candidate = _ModelCandidate(
+        provider="ollama",
+        model="qwen3:8b",
+        raw="ollama:qwen3:8b",
+        source="active_llm",
+        host="http://localhost:11434",
+    )
+    granite_candidate = _ModelCandidate(
+        provider="ollama",
+        model="granite3.3:2b",
+        raw="ollama:granite3.3:2b",
+        source="policy",
+        host="http://localhost:11434",
+    )
+
+    class _MalformedJsonClient:
+        def generate(self, *_args: Any, **_kwargs: Any) -> str:
+            return '{"summary":"Use only the current request."}'
+
+    class _ValidJsonClient:
+        def generate(self, *_args: Any, **_kwargs: Any) -> str:
+            return (
+                '{"mode":"no_prior_context",'
+                '"summary":"Use only the current request."}'
+            )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [qwen_candidate, granite_candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        if candidate.model == "qwen3:8b":
+            return (
+                _MalformedJsonClient(),
+                "qwen3:8b",
+                {
+                    "provider": "ollama",
+                    "model": "qwen3:8b",
+                    "raw": candidate.raw,
+                    "source": candidate.source,
+                    "host": "http://localhost:11434",
+                },
+            )
+        return (
+            _ValidJsonClient(),
+            "granite3.3:2b",
+            {
+                "provider": "ollama",
+                "model": "granite3.3:2b",
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "host": "http://localhost:11434",
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    def _response_validator(
+        response_text: str,
+        _model_name: str | None,
+        _candidate: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        if '"mode"' in response_text:
+            return None
+        return {
+            "reason": "json_required_fields_missing",
+            "error_class": "WorkflowLLMStepValidationError",
+            "failure_kind": "response_validation_failed",
+            "validation": {
+                "status": "failed",
+                "missing_required_fields": ["mode"],
+            },
+        }
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="context_adjudication",
+        prompt="Return context adjudication JSON",
+        context=[],
+        default_client=object(),
+        default_model="qwen3:8b",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        response_validator=_response_validator,
+    )
+
+    assert '"mode":"no_prior_context"' in response
+    assert model_name == "granite3.3:2b"
+    assert telemetry.get("model") == "granite3.3:2b"
+
+    first_end = next(
+        event
+        for event in progress_events
+        if event.get("status") == "llm_call_end"
+        and event.get("fallback_attempt_no") == 1
+    )
+    assert first_end["success"] is False
+    assert first_end["error"] == "json_required_fields_missing"
+    assert first_end["failure_kind"] == "response_validation_failed"
+
+    second_end = next(
+        event
+        for event in progress_events
+        if event.get("status") == "llm_call_end"
+        and event.get("fallback_attempt_no") == 2
+    )
+    assert second_end["success"] is True
+    assert second_end["fallback_used"] is True
+
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["fallback_attempt_count"] == 2
+    assert stage_summary["failure_count"] == 1
+    attempts = stage_summary["fallback_attempts"]
+    assert attempts[0]["failure_kind"] == "response_validation_failed"
+    assert attempts[0]["validation"]["validation"]["missing_required_fields"] == [
+        "mode"
+    ]
+    assert attempts[1]["status"] == "succeeded"
+
+    assert (
+        recorded_calls[0]["note"]
+        == "llm.generate response failed validation; trying fallback"
+    )
+
+
+def test_run_llm_with_tools_fallbacks_retries_when_required_tool_omitted(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    qwen_candidate = _ModelCandidate(
+        provider="ollama",
+        model="qwen3:8b",
+        raw="ollama:qwen3:8b",
+        source="active_llm",
+        host="http://localhost:11434",
+    )
+    granite_candidate = _ModelCandidate(
+        provider="ollama",
+        model="granite3.3:2b",
+        raw="ollama:granite3.3:2b",
+        source="policy",
+        host="http://localhost:11434",
+    )
+    first_client = _StructuredToolClient(
+        LLMResponse(text_response="I can list those messages.", tool_calls=[])
+    )
+    second_client = _StructuredToolClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="gmail_list_messages",
+                    payload={"max_results": 6},
+                    call_id="call-2",
+                )
+            ],
+            model="granite3.3:2b",
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [qwen_candidate, granite_candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        client = first_client if candidate.model == "qwen3:8b" else second_client
+        return (
+            client,
+            str(candidate.model),
+            {
+                "provider": "ollama",
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "host": "http://localhost:11434",
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+    tool_definition = ToolDefinition(
+        name="gmail_list_messages",
+        description="List Gmail messages.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    response, model_name, telemetry = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="List my six most recent email messages.",
+        context=[],
+        tool_definitions=[tool_definition],
+        default_client=object(),
+        default_model="qwen3:8b",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        method_catalogue={"gmail_list_messages": {"category": "read"}},
+        required_prompt_tools=["gmail_list_messages"],
+    )
+
+    assert model_name == "granite3.3:2b"
+    assert telemetry.get("model") == "granite3.3:2b"
+    assert response.tool_calls[0].tool_name == "gmail_list_messages"
+    assert first_client.calls[0]["available_tools"] == ["gmail_list_messages"]
+    assert second_client.calls[0]["available_tools"] == ["gmail_list_messages"]
+
+    first_end = next(
+        event
+        for event in progress_events
+        if event.get("status") == "llm_call_end"
+        and event.get("fallback_attempt_no") == 1
+    )
+    assert first_end["success"] is False
+    assert first_end["error"] == "required_tool_call_omitted"
+    assert first_end["failure_kind"] == "response_validation_failed"
+
+    second_end = next(
+        event
+        for event in progress_events
+        if event.get("status") == "llm_call_end"
+        and event.get("fallback_attempt_no") == 2
+    )
+    assert second_end["success"] is True
+    assert second_end["fallback_used"] is True
+
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["fallback_attempt_count"] == 2
+    assert stage_summary["failure_count"] == 1
+    attempts = stage_summary["fallback_attempts"]
+    assert attempts[0]["failure_kind"] == "response_validation_failed"
+    assert attempts[0]["validation"]["reason"] == "required_tool_call_omitted"
+    assert attempts[0]["validation"]["required_available_tools"] == [
+        "gmail_list_messages"
+    ]
+    assert attempts[1]["status"] == "succeeded"
+    assert recorded_calls[0]["status"] == "failed"
+    assert recorded_calls[0]["error"] == "required_tool_call_omitted"
+
+
 def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
     monkeypatch,
 ) -> None:
@@ -469,7 +819,7 @@ def test_run_llm_with_fallbacks_marks_policy_primary_active_llm_selection(
         policy_stage="classifier",
         prompt="Select workflow",
         context=[],
-        default_client=_SuccessfulClient(),
+        default_client=_SuccessfulOllamaClient(default_model="gemma4:26b"),
         default_model="gpt-5.4-mini",
         policy_state=_active_llm_policy_state(),
         registry_snapshot=None,
@@ -556,6 +906,108 @@ def test_run_llm_with_fallbacks_records_client_default_when_active_llm_is_null(
     assert stage_summary["selected"]["model_resolved"] == "llama3.2:latest"
     assert stage_summary["selected"]["model"] == "llama3.2:latest"
     assert stage_summary["selected"]["model_resolution_source"] == "client_default"
+
+
+def test_run_llm_with_fallbacks_ignores_browser_object_active_model(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    default_client = _StubOllamaClient(default_model="llama3.2:latest")
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="workflow_dispatch",
+        policy_stage="classifier",
+        prompt="Select workflow",
+        context=[],
+        default_client=default_client,
+        default_model="[object PointerEvent]",
+        policy_state=_active_llm_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+    )
+
+    assert response == "resolved client default"
+    assert model_name == "llama3.2:latest"
+    assert default_client.calls == [{"context": [], "model": "llama3.2:latest"}]
+    assert telemetry["model"] == "llama3.2:latest"
+    assert all(
+        event.get("model") != "[object PointerEvent]" for event in progress_events
+    )
+
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["requested_model"] is None
+    assert stage_summary["selected"]["model"] == "llama3.2:latest"
+
+
+def test_raw_ollama_tag_policy_candidate_keeps_whole_model_name() -> None:
+    candidate = InternalMCPChatOrchestrator._parse_policy_model_candidate(
+        "qwen3:8b"
+    )
+
+    assert candidate is not None
+    assert candidate.provider == "ollama"
+    assert candidate.model == "qwen3:8b"
+    assert candidate.raw == "qwen3:8b"
+
+
+def test_active_llm_local_model_switches_from_openai_client_to_ollama(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    default_client = _StubOpenAIClient()
+    ollama_client = _StubOllamaClient(default_model="qwen3:8b")
+    requested_clients: list[str | None] = []
+
+    def _get_llm_client(*, client_type: str | None = None, **_kwargs: Any) -> Any:
+        requested_clients.append(client_type)
+        assert client_type == "ollama"
+        return ollama_client
+
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        _get_llm_client,
+    )
+
+    client, model_name, telemetry = orchestrator._create_client_for_candidate(
+        _ModelCandidate(
+            provider=None,
+            model="qwen3:8b",
+            raw="active_llm",
+            source="active_llm",
+            host=None,
+        ),
+        default_client=default_client,
+        default_model="qwen3:8b",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+    )
+
+    assert client is ollama_client
+    assert requested_clients == ["ollama"]
+    assert model_name == "qwen3:8b"
+    assert telemetry["provider"] == "ollama"
+    assert telemetry["model"] == "qwen3:8b"
+    assert telemetry["host"] == "http://localhost:11434"
 
 
 def test_provider_diagnostics_treat_raw_ollama_tags_as_ollama() -> None:
@@ -700,7 +1152,7 @@ def test_run_llm_with_fallbacks_prefers_default_model_when_requested(
         policy_stage="classifier",
         prompt="Select workflow",
         context=[],
-        default_client=_SuccessfulClient(),
+        default_client=_SuccessfulOllamaClient(default_model="gemma4:26b"),
         default_model="gemma4:26b",
         policy_state=policy_state,
         registry_snapshot=None,
@@ -790,7 +1242,13 @@ def test_stage_model_candidates_dedupe_active_and_enabled_before_policy_fallback
     )
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_enabled_llm_settings",
-        lambda **_kwargs: [{"provider": "ollama", "model": "qwen3:8b"}],
+        lambda **_kwargs: [
+            {
+                "provider": "ollama",
+                "model": "qwen3:8b",
+                "host": "http://127.0.0.1:11434",
+            }
+        ],
     )
 
     candidates = orchestrator._stage_model_candidates(

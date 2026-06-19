@@ -61,7 +61,7 @@ DEFAULT_MAX_RESULTS = 3
 def _coerce_discovery_timeout_seconds(value: Any, *, default: float) -> float:
     try:
         parsed = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return max(0.0, float(default))
     if parsed <= 0.0:
         return max(0.0, float(default))
@@ -516,7 +516,7 @@ def _compute_capability_index_wait_seconds(timeout_seconds: float) -> float:
     """Return the bounded wait budget for a cold capability-index build."""
     try:
         timeout_budget = max(0.0, float(timeout_seconds))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         timeout_budget = 0.0
     if timeout_budget <= 0.0:
         return 0.0

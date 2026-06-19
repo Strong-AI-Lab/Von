@@ -159,6 +159,19 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "gmail_send_message" in expected_outcome_text
     assert "allow_send=true" in expected_outcome_text
     assert '"required_tools":["gmail_send_message"]' in expected_outcome_text
+    assert "read-only external-system retrieval" in expected_outcome_text
+    assert "#V#general_mail_review_workflow" in expected_outcome_text
+    assert "ordinary mailbox review" in expected_outcome_text
+    assert (
+        '"required_tools":["gmail_list_profiles","gmail_list_messages","gmail_get_message"]'
+        in expected_outcome_text
+    )
+    assert "do not let later stages invent example aliases" in expected_outcome_text
+    assert "bypass_profile_query_prefix=true" in expected_outcome_text
+    assert "when list rows do not already include sender, subject" in (
+        expected_outcome_text
+    )
+    assert "Read-only recent Gmail listing example" in expected_outcome_text
     assert "deictic or count-based" in expected_outcome_text
     assert "stable target handles" in expected_outcome_text
     assert "Do not replace concrete handles such as `2605.03042`" in (
@@ -222,6 +235,13 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "external-system side effect" in missing_tool_retry_text
     assert "`gmail_send_message`" in missing_tool_retry_text
     assert "Gmail list/read/label tools" in missing_tool_retry_text
+    assert "read-only Gmail tools" in missing_tool_retry_text
+    assert "`gmail_list_profiles`" in missing_tool_retry_text
+    assert "`gmail_list_messages`" in missing_tool_retry_text
+    assert "max_results" in missing_tool_retry_text
+    assert "Do not emit unsupported payload fields such as `count` or `fields`" in (
+        missing_tool_retry_text
+    )
     assert "represented labels, categories, tags, workflow markers" in (
         missing_tool_retry_text
     )
@@ -328,6 +348,15 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     mail_render_stage = model_policy["stages"]["mail_review_response_rendering"]
     assert mail_render_stage["primary"] == "active_llm"
     assert mail_render_stage["fallback"] == ["ollama:granite3.3:2b"]
+    context_adjudication_stage = model_policy["stages"]["context_adjudication"]
+    assert context_adjudication_stage["primary"] == "active_llm"
+    assert context_adjudication_stage["fallback"] == ["ollama:granite3.3:2b"]
+    tool_call_stage = model_policy["stages"]["tool_call"]
+    assert tool_call_stage["primary"] == "active_llm"
+    assert tool_call_stage["fallback"] == ["ollama:granite3.3:2b"]
+    tool_recovery_stage = model_policy["stages"]["tool_recovery"]
+    assert tool_recovery_stage["primary"] == "active_llm"
+    assert tool_recovery_stage["fallback"] == ["ollama:granite3.3:2b"]
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -352,6 +381,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         context_decision_step_id
     ].actions[0]
     assert context_decision_action.action_id == "llm.action"
+    assert (context_decision_action.llm_policy or {}).get("policy_stage") == (
+        "context_adjudication"
+    )
     context_decision_prompt_contract = context_decision_action.prompt_contract
     assert isinstance(context_decision_prompt_contract, dict)
     assert context_decision_prompt_contract.get("resolved_prompt_concept_id") == (

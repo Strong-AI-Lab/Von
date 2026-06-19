@@ -41,7 +41,7 @@ def _positive_float_env(name: str, default: float) -> float:
         return float(default)
     try:
         parsed = float(str(raw).strip())
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return float(default)
     return parsed if parsed > 0.0 else float(default)
 
@@ -52,7 +52,7 @@ def _positive_int_env(name: str, default: int) -> int:
         return int(default)
     try:
         parsed = int(str(raw).strip())
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return int(default)
     return parsed if parsed > 0 else int(default)
 
@@ -136,7 +136,7 @@ def _candidate_count(payload: Mapping[str, Any]) -> int:
             continue
         try:
             parsed = int(raw_value)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         if parsed >= 0:
             return parsed

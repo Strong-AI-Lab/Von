@@ -20,6 +20,7 @@ from ..integrations.google.gmail_service import (
     GmailProfile,
     get_profile,
     load_profiles_from_env,
+    resolve_effective_profile_scopes,
 )
 from .agent_gmail_token_store import upsert_agent_gmail_tokens
 from .google_oauth_config import configure_oauthlib_insecure_transport
@@ -99,37 +100,9 @@ class AgentGmailOAuthService:
 
     def _resolve_scopes(self, *, profile_id: str, profile: GmailProfile) -> list[str]:
         """Resolve OAuth scopes from Vontology, falling back to env-loaded profile."""
-        try:
-            from .mail_profile_resource_vontology_service import (
-                gmail_profile_resource_concept_id,
-            )
-            from . import concept_service
-            from collections.abc import Mapping as _Mapping
-
-            concept_id = gmail_profile_resource_concept_id(profile_id)
-            concept_doc = concept_service.get_concept_by_concept_id(concept_id)
-            if isinstance(concept_doc, _Mapping):
-                raw = (concept_doc.get("attributes") or {}).get("oauth_scopes")
-                if isinstance(raw, list) and raw:
-                    vontology_scopes = [s for s in raw if isinstance(s, str)]
-                    if vontology_scopes:
-                        logger.debug(
-                            "gmail_oauth._resolve_scopes: Vontology scopes for %s: %r",
-                            profile_id,
-                            vontology_scopes,
-                        )
-                        return vontology_scopes
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "gmail_oauth._resolve_scopes: Vontology lookup failed for %s, "
-                "falling back to env: %r",
-                profile_id,
-                exc,
-            )
-
-        env_scopes = list(getattr(profile, "scopes", []) or [])
+        env_scopes = resolve_effective_profile_scopes(profile)
         logger.debug(
-            "gmail_oauth._resolve_scopes: env scopes for %s: %r",
+            "gmail_oauth._resolve_scopes: effective scopes for %s: %r",
             profile_id,
             env_scopes,
         )
@@ -229,7 +202,7 @@ class AgentGmailOAuthService:
         expires_at = getattr(creds, "expiry", None)
 
         profile = self._get_profile(profile_id)
-        scopes = list(getattr(profile, "scopes", []) or [])
+        scopes = self._resolve_scopes(profile_id=profile_id, profile=profile)
 
         upsert_agent_gmail_tokens(
             profile_id=profile_id,

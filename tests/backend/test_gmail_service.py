@@ -47,6 +47,21 @@ def test_load_profiles_from_fallback_env(monkeypatch):
     assert gs.MUTATION_SCOPE in profile.scopes
 
 
+def test_resolve_effective_profile_scopes_prefers_vontology(monkeypatch):
+    profile = gs.GmailProfile(
+        profile_id="p",
+        token_path="/tmp/token.json",
+        scopes=list(gs.DEFAULT_SCOPES),
+    )
+    monkeypatch.setattr(
+        gs,
+        "_resolve_vontology_profile_scopes",
+        lambda profile_id: [gs.MUTATION_SCOPE],
+    )
+
+    assert gs.resolve_effective_profile_scopes(profile) == [gs.MUTATION_SCOPE]
+
+
 def test_get_profile_missing(monkeypatch):
     monkeypatch.delenv(gs.PROFILES_ENV_VAR, raising=False)
     monkeypatch.delenv("VON_GMAIL_TOKEN_PATH", raising=False)
@@ -238,16 +253,24 @@ def test_create_label_guard_and_calls_gmail_api(monkeypatch):
 @patch(
     "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
 )
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_info"
+)
 @patch("src.backend.integrations.google.gmail_service.os.path.exists")
 @patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_payload")
 def test_ensure_credentials_prefers_db_tokens(
-    mock_get_payload, mock_exists, mock_file_loader
+    mock_get_payload, mock_exists, mock_info_loader, mock_file_loader, monkeypatch
 ):
     mock_exists.side_effect = AssertionError(
         "Should not check token file when DB tokens exist"
     )
     mock_file_loader.side_effect = AssertionError(
         "Should not load token file when DB tokens exist"
+    )
+    monkeypatch.setattr(
+        gs,
+        "_resolve_vontology_profile_scopes",
+        lambda profile_id: [gs.MUTATION_SCOPE],
     )
 
     mock_get_payload.return_value = {
@@ -259,13 +282,19 @@ def test_ensure_credentials_prefers_db_tokens(
         "scopes": list(gs.DEFAULT_SCOPES),
         "expiry": "2099-01-01T00:00:00Z",
     }
+    creds = MagicMock(valid=True, expired=False, refresh_token=None)
+    creds.token = "access-token"
+    mock_info_loader.return_value = creds
 
     profile = gs.GmailProfile(
         profile_id="p", token_path="", scopes=list(gs.DEFAULT_SCOPES)
     )
-    creds = profile.ensure_credentials()
+    loaded = profile.ensure_credentials()
 
-    assert creds.token == "access-token"
+    assert loaded.token == "access-token"
+    mock_info_loader.assert_called_once_with(
+        mock_get_payload.return_value, scopes=[gs.MUTATION_SCOPE]
+    )
 
 
 @patch(
@@ -283,9 +312,15 @@ def test_ensure_credentials_refreshes_db_tokens_and_persists(
     mock_status,
     mock_upsert,
     mock_file_loader,
+    monkeypatch,
 ):
     mock_file_loader.side_effect = AssertionError(
         "Should not load token file when DB tokens exist"
+    )
+    monkeypatch.setattr(
+        gs,
+        "_resolve_vontology_profile_scopes",
+        lambda profile_id: [gs.MUTATION_SCOPE],
     )
 
     mock_get_payload.return_value = {
@@ -313,5 +348,9 @@ def test_ensure_credentials_refreshes_db_tokens_and_persists(
     )
     profile.ensure_credentials()
 
+    mock_info_loader.assert_called_once_with(
+        mock_get_payload.return_value, scopes=[gs.MUTATION_SCOPE]
+    )
     creds.refresh.assert_called_once()
     mock_upsert.assert_called_once()
+    assert mock_upsert.call_args.kwargs["scopes"] == [gs.MUTATION_SCOPE]

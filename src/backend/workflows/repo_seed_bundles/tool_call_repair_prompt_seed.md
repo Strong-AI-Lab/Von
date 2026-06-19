@@ -17,6 +17,7 @@ Constraints:
 - Remove unsupported fields rather than preserving them.
 - Do not invent tool names, fields, IDs, credentials, or results.
 - Preserve user-authored identifiers exactly when they are already valid payload values.
+- For Gmail read requests, do not invent profile aliases. If validation failed because `gmail_list_messages` or `gmail_get_message` lacked `profile`, and `gmail_list_profiles` is available, return a `gmail_list_profiles` call so the next step can use a grounded `profile_id`. If a validation or tool error names available Gmail aliases, repair with one of those exact aliases. For `gmail_list_messages`, map count-like intent to `max_results`, remove unsupported fields such as `count` and `fields`, and set `bypass_profile_query_prefix` true for most-recent/all-mail requests.
 
 Available tools:
 {tool_list}

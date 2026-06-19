@@ -7,6 +7,7 @@ from oauthlib.oauth2.rfc6749.parameters import parse_token_response
 
 from src.backend.services import agent_gmail_oauth_service as oauth_module
 from src.backend.services.agent_gmail_oauth_service import AgentGmailOAuthService
+from src.backend.integrations.google import gmail_service as gs
 
 
 def test_oauthlib_scope_change_is_warning_exception() -> None:
@@ -75,6 +76,9 @@ def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) 
         def _get_profile(self, profile_id: str):  # type: ignore[override]
             return DummyProfile()  # type: ignore[return-value]
 
+        def _resolve_scopes(self, *, profile_id: str, profile):  # type: ignore[override]
+            return list(profile.scopes)
+
         def _get_authorised_email(self, creds: object):  # type: ignore[override]
             return None
 
@@ -98,6 +102,61 @@ def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) 
             os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
         else:
             os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = previous
+
+
+def test_agent_gmail_oauth_persists_resolved_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyCreds:
+        expiry = None
+
+        def to_json(self) -> str:
+            return json.dumps({"token": "x"})
+
+    class DummyFlow:
+        credentials = DummyCreds()
+
+        def fetch_token(self, authorization_response: str) -> None:
+            assert authorization_response.endswith("code=abc")
+
+    class DummyProfile:
+        profile_id = "zhan-gmail"
+        scopes = list(gs.DEFAULT_SCOPES)
+
+    stored: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.backend.services.agent_gmail_oauth_service.upsert_agent_gmail_tokens",
+        lambda **kwargs: stored.update(kwargs),
+    )
+
+    class TestService(AgentGmailOAuthService):
+        def _build_flow(  # type: ignore[override]
+            self,
+            *,
+            profile_id: str,
+            code_verifier: str | None = None,
+            redirect_uri: str | None = None,
+        ):
+            return DummyFlow()
+
+        def _get_profile(self, profile_id: str):  # type: ignore[override]
+            return DummyProfile()  # type: ignore[return-value]
+
+        def _resolve_scopes(self, *, profile_id: str, profile):  # type: ignore[override]
+            return [gs.MUTATION_SCOPE]
+
+        def _get_authorised_email(self, creds: object):  # type: ignore[override]
+            return "zhan@example.com"
+
+    result = TestService().exchange_code_for_tokens(
+        profile_id="zhan-gmail",
+        authorisation_response_url="http://localhost/callback?code=abc",
+    )
+
+    assert result.scopes == [gs.MUTATION_SCOPE]
+    assert stored["scopes"] == [gs.MUTATION_SCOPE]
+    assert stored["authorised_email"] == "zhan@example.com"
 
 
 def test_agent_gmail_oauth_allows_localhost_redirect(

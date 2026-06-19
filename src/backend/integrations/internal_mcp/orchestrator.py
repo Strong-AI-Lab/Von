@@ -1438,11 +1438,11 @@ class _CustomWorkflowDispatchSupport:
 
         try:
             candidate_count = int(discovery_payload.get("candidate_count") or 0)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             candidate_count = 0
         try:
             match_count = int(discovery_payload.get("match_count") or 0)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             match_count = 0
         if candidate_count > 0 or match_count > 0:
             return False
@@ -4302,6 +4302,13 @@ class InternalMCPChatOrchestrator:
         )
         if not cleaned_workflow_id:
             return None
+        if cleaned_workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            return "tool_pipeline"
+        if cleaned_workflow_id in {
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        }:
+            return "direct_response"
         declared_execution_mode = self._selected_workflow_declared_execution_mode(
             selected_workflow_id=cleaned_workflow_id
         )
@@ -6751,7 +6758,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw, str):
                     try:
                         raw = datetime.fromisoformat(raw)
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         continue
                 if isinstance(raw, datetime):
                     if raw.tzinfo is None:
@@ -15130,6 +15137,15 @@ class InternalMCPChatOrchestrator:
         if not candidate:
             return None
 
+        candidate_tail = candidate
+        lowered_candidate = candidate.lower()
+        for provider_prefix in ("openai:", "ollama:", "gemini:"):
+            if lowered_candidate.startswith(provider_prefix):
+                candidate_tail = candidate.split(":", 1)[1].strip()
+                break
+        if candidate_tail.startswith("[object ") and candidate_tail.endswith("]"):
+            return None
+
         if candidate.startswith("#V#"):
             candidate = candidate[3:]
 
@@ -15167,9 +15183,20 @@ class InternalMCPChatOrchestrator:
             model = model.strip()
             host = host.strip()
         elif ":" in candidate:
-            provider, _, model = candidate.partition(":")
-            provider = provider.strip().lower() or None
-            model = model.strip()
+            provider_prefix, _, model_suffix = candidate.partition(":")
+            provider_prefix = provider_prefix.strip().lower()
+            if provider_prefix in {"openai", "ollama", "gemini"}:
+                provider = provider_prefix
+                model = model_suffix.strip()
+            elif candidate.lower().startswith("ft:"):
+                provider = "openai"
+                model = candidate.strip()
+            elif _model_identifier_looks_local_ollama(candidate):
+                provider = "ollama"
+                model = candidate.strip()
+            else:
+                provider = provider_prefix or None
+                model = model_suffix.strip()
 
         if not model:
             return None
@@ -15534,6 +15561,7 @@ class InternalMCPChatOrchestrator:
         org_concept_id: Optional[str] = None,
         prefer_default_model: bool = False,
     ) -> list[_ModelCandidate]:
+        default_model = self._normalise_llm_model_name(default_model)
         candidates: list[_ModelCandidate] = []
         enabled_candidates: list[_ModelCandidate] = []
         active_llm_candidate = _ModelCandidate(
@@ -15559,7 +15587,9 @@ class InternalMCPChatOrchestrator:
             if not isinstance(entry, Mapping):
                 continue
             provider = str(entry.get("provider") or "").strip().lower() or None
-            model = str(entry.get("model") or "").strip() or None
+            model = self._normalise_llm_model_name(
+                str(entry.get("model") or "").strip() or None
+            )
             host = str(entry.get("host") or "").strip() or None
             if not provider or not model:
                 continue
@@ -15627,8 +15657,12 @@ class InternalMCPChatOrchestrator:
         # not appear multiple times merely because it was sourced from
         # settings, active_llm, and a represented primary alias.  In explicit
         # local replays this keeps a requested model from consuming every
-        # fallback slot before represented stage fallbacks can run.
-        seen: set[tuple[str | None, str | None, str | None]] = set()
+        # fallback slot before represented stage fallbacks can run.  A missing
+        # host means "the active/default client host"; treat it as a wildcard
+        # for duplicate detection rather than as a distinct fallback target.
+        seen_hosts_by_model: dict[
+            tuple[str | None, str | None], set[str | None]
+        ] = {}
         unique: list[_ModelCandidate] = []
         for candidate in candidates:
             model_for_identity = candidate.model
@@ -15640,18 +15674,24 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             normalised_model = self._normalise_llm_model_name(model_for_identity)
-            key = (
-                provider_for_identity,
-                normalised_model,
-                (
-                    candidate.host.strip().lower()
-                    if isinstance(candidate.host, str) and candidate.host.strip()
-                    else None
-                ),
+            host_for_identity = (
+                candidate.host.strip().lower()
+                if isinstance(candidate.host, str) and candidate.host.strip()
+                else None
             )
-            if key in seen:
-                continue
-            seen.add(key)
+            model_key = (provider_for_identity, normalised_model)
+            seen_hosts = seen_hosts_by_model.get(model_key)
+            if seen_hosts is not None:
+                if (
+                    host_for_identity in seen_hosts
+                    or host_for_identity is None
+                    or None in seen_hosts
+                ):
+                    continue
+            else:
+                seen_hosts = set()
+                seen_hosts_by_model[model_key] = seen_hosts
+            seen_hosts.add(host_for_identity)
             unique.append(candidate)
 
         return unique
@@ -16277,6 +16317,7 @@ class InternalMCPChatOrchestrator:
         org_concept_id: Optional[str] = None,
         prefer_default_model: bool = False,
     ) -> Optional[str]:
+        default_model = self._normalise_llm_model_name(default_model)
         candidates = self._stage_model_candidates(
             stage=stage,
             default_model=default_model,
@@ -16289,8 +16330,10 @@ class InternalMCPChatOrchestrator:
         )
 
         for candidate in candidates:
-            if candidate.source == "active_llm" and default_model:
-                return default_model
+            if candidate.source == "active_llm":
+                if default_model:
+                    return default_model
+                continue
             model_name = self._normalise_llm_model_name(candidate.model)
             if model_name:
                 return model_name
@@ -16306,6 +16349,7 @@ class InternalMCPChatOrchestrator:
         user_concept_id: Optional[str],
         org_concept_id: Optional[str],
     ) -> tuple[Any, Optional[str], Mapping[str, Any]]:
+        default_model = self._normalise_llm_model_name(default_model)
         telemetry: dict[str, Any] = {
             "raw": candidate.raw,
             "provider": candidate.provider,
@@ -16315,10 +16359,12 @@ class InternalMCPChatOrchestrator:
         }
 
         if candidate.source == "active_llm":
+            client = default_client
             resolved_model = default_model
             resolved_provider = None
             try:
                 from src.backend.languagemodels.llm_interface import (
+                    get_llm_client,
                     infer_llm_client_provider,
                     resolve_effective_llm_model_for_client,
                     resolve_provider_from_model_concept,
@@ -16326,17 +16372,45 @@ class InternalMCPChatOrchestrator:
                     resolve_ollama_model_name,
                 )
 
+                default_provider = infer_llm_client_provider(default_client)
+                model_implied_provider = self._infer_provider_from_model_reference(
+                    default_model
+                )
+                if (
+                    model_implied_provider
+                    and model_implied_provider != default_provider
+                    and model_implied_provider in {"openai", "ollama", "gemini"}
+                ):
+                    client = get_llm_client(
+                        client_type=model_implied_provider,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                    )
+                    resolved_provider = model_implied_provider
+                else:
+                    resolved_provider = (
+                        resolve_provider_from_model_concept(default_model)
+                        or default_provider
+                    )
                 resolved_model = resolve_effective_llm_model_for_client(
-                    default_client,
+                    client,
                     default_model,
                 )
-                resolved_provider = resolve_provider_from_model_concept(
-                    default_model
-                ) or infer_llm_client_provider(default_client)
+                if (
+                    resolved_provider == "openai"
+                    and _model_identifier_looks_local_ollama(resolved_model)
+                ):
+                    client = get_llm_client(
+                        client_type="ollama",
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                    )
+                    resolved_provider = "ollama"
                 if resolved_provider == "openai":
                     resolved_model = resolve_openai_model_name(resolved_model)
                 elif resolved_provider == "ollama":
                     resolved_model = resolve_ollama_model_name(resolved_model)
+                resolved_model = self._normalise_llm_model_name(resolved_model)
             except Exception:
                 resolved_provider = None
 
@@ -16346,10 +16420,10 @@ class InternalMCPChatOrchestrator:
                 telemetry["model"] = resolved_model
                 if not default_model:
                     telemetry["model_resolution_source"] = "client_default"
-            client_host = getattr(default_client, "host", None)
+            client_host = getattr(client, "host", None)
             if isinstance(client_host, str) and client_host.strip():
                 telemetry["host"] = client_host.strip()
-            return default_client, resolved_model or default_model, telemetry
+            return client, resolved_model or default_model, telemetry
 
         provider = candidate.provider
         model = self._normalise_llm_model_name(candidate.model)
@@ -16371,6 +16445,15 @@ class InternalMCPChatOrchestrator:
                     model = resolve_ollama_model_name(candidate.raw) or model
             except Exception:
                 pass
+
+        if not provider:
+            provider = self._infer_provider_from_model_reference(model)
+        if provider == "openai" and _model_identifier_looks_local_ollama(model):
+            provider = "ollama"
+        if provider:
+            telemetry["provider"] = provider
+        if model:
+            telemetry["model"] = model
 
         if provider in {None, "", "openai", "ollama", "gemini"}:
             pass
@@ -16727,6 +16810,10 @@ class InternalMCPChatOrchestrator:
         check_cancellation: Callable[[], None] | None = None,
         workflow_stage_id: str | None = None,
         workflow_id: str | None = None,
+        response_validator: (
+            Callable[[str, Optional[str], Mapping[str, Any]], Mapping[str, Any] | None]
+            | None
+        ) = None,
         turn_model_failures: (
             dict[tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]]
             | None
@@ -16742,6 +16829,7 @@ class InternalMCPChatOrchestrator:
         # ``workflow_stage_id`` alongside it lets stage diagnostics match
         # without forcing every call site to pretend the two namespaces
         # are the same.
+        default_model = self._normalise_llm_model_name(default_model)
         _stage_extra: dict[str, Any] = {}
         if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
             _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
@@ -17022,6 +17110,7 @@ class InternalMCPChatOrchestrator:
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 first_output_at_utc = self._utc_now_iso()
+                response_text = str(response)
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -17042,6 +17131,134 @@ class InternalMCPChatOrchestrator:
                             ),
                         }
                     )
+                validation_failure: dict[str, Any] | None = None
+                if callable(response_validator):
+                    validation_result = response_validator(
+                        response_text,
+                        model_name,
+                        telemetry if isinstance(telemetry, Mapping) else {},
+                    )
+                    if isinstance(validation_result, Mapping) and validation_result:
+                        validation_failure = dict(validation_result)
+
+                if validation_failure is not None:
+                    validation_reason = str(
+                        validation_failure.get("reason")
+                        or validation_failure.get("error")
+                        or "response_validation_failed"
+                    )
+                    validation_error_class = str(
+                        validation_failure.get("error_class")
+                        or "ResponseValidationError"
+                    )
+                    validation_failure_kind = str(
+                        validation_failure.get("failure_kind")
+                        or "response_validation_failed"
+                    )
+                    if callable(emit_progress):
+                        emit_progress(
+                            {
+                                "status": "llm_call_end",
+                                "stage": stage,
+                                "model": model_name,
+                                "duration_ms": int(duration_ms),
+                                "success": False,
+                                "error": validation_reason,
+                                "error_class": validation_error_class,
+                                "failure_kind": validation_failure_kind,
+                                **_stage_extra,
+                                **attempt_meta,
+                                **self._build_live_llm_progress_payload(
+                                    request_telemetry=request_telemetry,
+                                    request_state="failed",
+                                    prepared_at_utc=request_prepared_at_utc,
+                                    sent_at_utc=request_sent_at_utc,
+                                    first_output_at_utc=first_output_at_utc,
+                                    response=response,
+                                ),
+                            }
+                        )
+                    failure_extra = self._build_llm_failure_exchange_extra(
+                        status="failed",
+                        error=validation_reason,
+                        error_class=validation_error_class,
+                        failure_kind=validation_failure_kind,
+                    )
+                    failure_extra["validation"] = dict(validation_failure)
+                    record_llm_call(
+                        call_type="llm.generate",
+                        model_name=model_name,
+                        duration_ms=duration_ms,
+                        usage=None,
+                        note="llm.generate response failed validation; trying fallback",
+                        stage=stage,
+                        provider=(
+                            telemetry.get("provider")
+                            if isinstance(telemetry, Mapping)
+                            else None
+                        ),
+                        candidate=telemetry,
+                        workflow_stage_id=workflow_stage_id,
+                        status="failed",
+                        success=False,
+                        error=validation_reason,
+                        error_class=validation_error_class,
+                        failure_kind=validation_failure_kind,
+                        exchange_blob_ref=self._capture_llm_exchange_blob(
+                            stage=stage,
+                            workflow_stage_id=workflow_stage_id,
+                            call_type="llm.generate",
+                            prompt=prompt,
+                            context=context,
+                            response=response,
+                            model_name=model_name,
+                            provider=(
+                                telemetry.get("provider")
+                                if isinstance(telemetry, Mapping)
+                                else None
+                            ),
+                            prepared_at_utc=request_prepared_at_utc,
+                            sent_at_utc=request_sent_at_utc,
+                            first_output_at_utc=first_output_at_utc,
+                            usage=None,
+                            extra=failure_extra,
+                        ),
+                    )
+                    error_entry = {
+                        "candidate": telemetry,
+                        "model_resolved": model_name,
+                        "error": validation_reason,
+                        "error_class": validation_error_class,
+                        "failure_kind": validation_failure_kind,
+                        "validation": dict(validation_failure),
+                    }
+                    errors.append(error_entry)
+                    last_failure_class = validation_error_class
+                    last_failure_kind = validation_failure_kind
+                    fallback_attempts.append(
+                        {
+                            "attempt_no": attempt_no,
+                            "provider": provider,
+                            "model": model_name,
+                            "status": "failed",
+                            "error": validation_reason,
+                            "error_class": validation_error_class,
+                            "failure_kind": validation_failure_kind,
+                            "duration_ms": int(duration_ms),
+                            "response": {
+                                "char_count": len(response_text),
+                            },
+                            "validation": dict(validation_failure),
+                            "candidate": (
+                                dict(telemetry)
+                                if isinstance(telemetry, Mapping)
+                                else None
+                            ),
+                        }
+                    )
+                    continue
+
+                if callable(emit_progress):
                     emit_progress(
                         {
                             "status": "llm_call_end",
@@ -18261,6 +18478,167 @@ class InternalMCPChatOrchestrator:
                             ),
                         }
                     )
+                required_tool_omitted_failure: dict[str, Any] | None = None
+                if required_available_tool_names and not getattr(
+                    llm_response, "tool_calls", None
+                ):
+                    required_tool_omitted_failure = {
+                        "reason": "required_tool_call_omitted",
+                        "error_class": "RequiredToolCallOmittedError",
+                        "failure_kind": "response_validation_failed",
+                        "required_prompt_tools": list(required_prompt_tools),
+                        "required_available_tools": list(
+                            required_available_tool_names
+                        ),
+                    }
+                if (
+                    required_tool_omitted_failure is not None
+                    and attempt_no < total_candidates
+                ):
+                    validation_reason = str(
+                        required_tool_omitted_failure["reason"]
+                    )
+                    validation_error_class = str(
+                        required_tool_omitted_failure["error_class"]
+                    )
+                    validation_failure_kind = str(
+                        required_tool_omitted_failure["failure_kind"]
+                    )
+                    response_text = str(
+                        getattr(llm_response, "text_response", "") or ""
+                    )
+                    if callable(emit_progress):
+                        emit_progress(
+                            {
+                                "status": "llm_call_end",
+                                "stage": stage,
+                                "model": model_name,
+                                "duration_ms": int(duration_ms),
+                                "success": False,
+                                "error": validation_reason,
+                                "error_class": validation_error_class,
+                                "failure_kind": validation_failure_kind,
+                                **_stage_extra,
+                                **attempt_meta,
+                                **self._build_live_llm_progress_payload(
+                                    request_telemetry=request_telemetry,
+                                    request_state="failed",
+                                    prepared_at_utc=request_prepared_at_utc,
+                                    sent_at_utc=request_sent_at_utc,
+                                    first_output_at_utc=first_output_at_utc,
+                                    response=response_text,
+                                ),
+                            }
+                        )
+                    failure_extra = self._build_llm_failure_exchange_extra(
+                        status="failed",
+                        error=validation_reason,
+                        error_class=validation_error_class,
+                        failure_kind=validation_failure_kind,
+                    )
+                    failure_extra["validation"] = dict(
+                        required_tool_omitted_failure
+                    )
+                    resolved_model_name = (
+                        llm_response.model
+                        if isinstance(getattr(llm_response, "model", None), str)
+                        else model_name
+                    )
+                    record_llm_call(
+                        call_type="llm.generate_with_tools",
+                        model_name=resolved_model_name,
+                        duration_ms=duration_ms,
+                        usage=(
+                            llm_response.usage
+                            if isinstance(getattr(llm_response, "usage", None), Mapping)
+                            else None
+                        ),
+                        note=(
+                            "llm.generate_with_tools omitted a required "
+                            "available tool call; trying fallback"
+                        ),
+                        stage=stage,
+                        provider=provider,
+                        candidate=telemetry,
+                        workflow_stage_id=workflow_stage_id,
+                        status="failed",
+                        success=False,
+                        error=validation_reason,
+                        error_class=validation_error_class,
+                        failure_kind=validation_failure_kind,
+                        exchange_blob_ref=self._capture_llm_exchange_blob(
+                            stage=stage,
+                            workflow_stage_id=workflow_stage_id,
+                            call_type="llm.generate_with_tools",
+                            prompt=prompt,
+                            context=context,
+                            response=response_text,
+                            model_name=resolved_model_name,
+                            provider=provider,
+                            prepared_at_utc=request_prepared_at_utc,
+                            sent_at_utc=request_sent_at_utc,
+                            first_output_at_utc=first_output_at_utc,
+                            usage=(
+                                llm_response.usage
+                                if isinstance(
+                                    getattr(llm_response, "usage", None), Mapping
+                                )
+                                else None
+                            ),
+                            extra=failure_extra,
+                        ),
+                    )
+                    errors.append(
+                        {
+                            "candidate": telemetry,
+                            "model_resolved": model_name,
+                            "error": validation_reason,
+                            "error_class": validation_error_class,
+                            "failure_kind": validation_failure_kind,
+                            "validation": dict(required_tool_omitted_failure),
+                        }
+                    )
+                    last_failure_class = validation_error_class
+                    last_failure_kind = validation_failure_kind
+                    fallback_attempts.append(
+                        {
+                            "attempt_no": attempt_no,
+                            "provider": provider,
+                            "model": model_name,
+                            "status": "failed",
+                            "error": validation_reason,
+                            "error_class": validation_error_class,
+                            "failure_kind": validation_failure_kind,
+                            "duration_ms": int(duration_ms),
+                            "response": {
+                                "text": response_text,
+                                "char_count": len(response_text),
+                            },
+                            "raw_response_present": bool(
+                                getattr(llm_response, "raw_response", None)
+                            ),
+                            "tool_call_diagnostics": (
+                                list(llm_response.tool_call_diagnostics)
+                                if isinstance(
+                                    getattr(
+                                        llm_response,
+                                        "tool_call_diagnostics",
+                                        None,
+                                    ),
+                                    list,
+                                )
+                                else []
+                            ),
+                            "validation": dict(required_tool_omitted_failure),
+                            "candidate": (
+                                dict(telemetry)
+                                if isinstance(telemetry, Mapping)
+                                else None
+                            ),
+                        }
+                    )
+                    continue
+                if callable(emit_progress):
                     emit_progress(
                         {
                             "status": "llm_call_end",
@@ -18825,7 +19203,7 @@ class InternalMCPChatOrchestrator:
             # Try to parse as JSON
             try:
                 parsed = json.loads(fenced_content)
-            except json.JSONDecodeError, ValueError:
+            except (json.JSONDecodeError, ValueError):
                 continue
 
             # Check if it looks like a tool call (single object or array)
@@ -18930,7 +19308,7 @@ class InternalMCPChatOrchestrator:
                 or missing_action_but_tool_shape
                 or has_tool_uses_shape
             )
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return False
 
     def _extract_tool_calls(self, text: str) -> list[_ToolCallRequest] | None:
@@ -20399,7 +20777,7 @@ class InternalMCPChatOrchestrator:
                         if isinstance(max_predicates_value, (int, float, str))
                         else 3
                     )
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     max_predicates_int = 3
                 derivation_context = self._predicate_follow_up_derivation_context(
                     derivation_spec,
@@ -30902,6 +31280,19 @@ class InternalMCPChatOrchestrator:
                 reason_code="agent_test_instance",
             )
         elif (
+            workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+            and str(resolved_source).strip() == "conversation_turn_supervised"
+        ):
+            _record_durable_instance_submission_event(
+                status="submission_skipped",
+                reason_code="conversation_turn_supervised_in_process",
+            )
+        elif str(resolved_source).strip() == "conversation_turn_selected_workflow":
+            _record_durable_instance_submission_event(
+                status="submission_skipped",
+                reason_code="conversation_turn_selected_workflow_in_process",
+            )
+        elif (
             isinstance(workflow_id, str)
             and workflow_id.strip()
             and resolved_user_id
@@ -31032,6 +31423,8 @@ class InternalMCPChatOrchestrator:
         try:
             if _is_agent_test_instance():
                 raise RuntimeError("agent_test_instance")
+            if str(resolved_source).strip() == "conversation_turn_selected_workflow":
+                raise RuntimeError("conversation_turn_selected_workflow_in_process")
             from ...services.workflow_episode_service import (
                 build_workflow_episode_stable_key,
                 finalise_workflow_use_episode,
@@ -33428,18 +33821,20 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw_discovery_timeout_seconds, (int, float, str))
                 else None
             )
-            if (
-                discovery_timeout_seconds is None
-                and _is_agent_test_instance()
-                and _explicit_model_request_uses_local_provider(
+            if discovery_timeout_seconds is None:
+                if _is_agent_test_instance() and _explicit_model_request_uses_local_provider(
                     llm_client=env.llm_client,
                     model=getattr(env, "model", None),
-                )
-            ):
-                discovery_timeout_seconds = os.getenv(
-                    "VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
-                    "1.0",
-                )
+                ):
+                    discovery_timeout_seconds = os.getenv(
+                        "VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
+                        "1.0",
+                    )
+                else:
+                    discovery_timeout_seconds = os.getenv(
+                        "VON_TURN_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
+                        "0.75",
+                    )
             turn_scope = None
             for scope_key in ("turn_id", "request_id"):
                 scope_value = data.get(scope_key)
@@ -36017,6 +36412,29 @@ class InternalMCPChatOrchestrator:
                 ],
             }
 
+        def _timeout_workflow_model_policy(
+            timeout_seconds: float,
+        ) -> tuple[_WorkflowModelPolicyState, Mapping[str, Any]]:
+            return (
+                _WorkflowModelPolicyState(
+                    enabled=True,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=("workflow_model_policy_timeout",),
+                ),
+                {
+                    "type": "workflow_model_policy",
+                    "enabled": True,
+                    "policy_id": "",
+                    "predicate_id": "",
+                    "loaded": False,
+                    "policy_source": "timeout",
+                    "errors": ["workflow_model_policy_timeout"],
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+
         def _timeout_turn_memory_context_state(
             timeout_seconds: float,
         ) -> dict[str, Any]:
@@ -36070,6 +36488,11 @@ class InternalMCPChatOrchestrator:
                 else "Load routing model policy"
             ),
             lambda: self._load_workflow_model_policy(preferred_language),
+            timeout_seconds=_supervised_setup_timeout_seconds(
+                "VON_WORKFLOW_MODEL_POLICY_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            timeout_fallback=_timeout_workflow_model_policy,
         )
         if _policy_telemetry:
             aux_llm_calls.append(_policy_telemetry)
@@ -36982,7 +37405,7 @@ class InternalMCPChatOrchestrator:
             raw_value = os.getenv(env_name)
             try:
                 parsed = float(raw_value) if raw_value is not None else default
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 parsed = default
             if parsed <= 0:
                 return default

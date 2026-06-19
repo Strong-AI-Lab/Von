@@ -621,6 +621,9 @@ def test_turn_prompt_context_adjudication_workflow_is_prompt_backed() -> None:
     decision_action = decision.actions[0]
     assert decision_action.action_id == "llm.action"
     assert decision_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    assert (decision_action.llm_policy or {}).get("policy_stage") == (
+        "context_adjudication"
+    )
     assert decision_action.prompt_contract is not None
     assert decision_action.prompt_contract.get("requested_prompt_concept_ids") == [
         "#V#turn_prompt_context_adjudication_prompt"
