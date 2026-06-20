@@ -229,6 +229,46 @@ WORKFLOW_CREATION_RETIRED_SYMBOLS = {
     "_extract_phd_student_profile": "retired_workflow_authoring_label_parser_symbol",
     "_derive_generated_workflow_id": "retired_workflow_authoring_stopword_symbol",
 }
+PRESENTER_ROUTE_AUTHORED_TEXT_BUILDER_PATTERN = re.compile(
+    r"^_build_presenter_.*(?:summary|follow_?up|outcome).*$",
+    re.IGNORECASE,
+)
+PRESENTER_ROUTE_FALLBACK_DECISION_CLASSES = frozenset({"presenter_fallback"})
+PRESENTER_ROUTE_FALLBACK_SOURCE_VALUES = frozenset(
+    {
+        "follow_up_summary",
+        "response_text_plus_follow_up_summary",
+        "tool_activity_summary_fallback",
+        "tool_backed_follow_up_summary",
+    }
+)
+PRESENTER_ROUTE_FALLBACK_REASON_CODES = frozenset(
+    {
+        "response_text_supplemented_with_follow_up_summary",
+        "tool_backed_follow_up_summary",
+        "tool_activity_summary_fallback",
+    }
+)
+PRESENTER_ROUTE_POLICY_INTENTIONAL_EXCEPTIONS = (
+    {
+        "decision_class": "presenter_detector",
+        "justification": (
+            "Structural detection of unusable screen candidates only; it must not "
+            "author presenter wording or fallback responses."
+        ),
+    },
+    {
+        "decision_class": "presenter_support_safety_net",
+        "justification": (
+            "Narrow fail-closed suppression of unsupported represented-prompt claims; "
+            "it must not author replacement presenter wording."
+        ),
+    },
+)
+PRESENTER_ROUTE_POLICY_EXCEPTION_RECORD_REQUIREMENT = (
+    "Any new route-side presenter exception must be recorded in this contract and in "
+    "the Jira task that introduced it, with proof that Python remains support-only."
+)
 
 CORE_SUPPORT_POLICY_CONTRACTS = (
     {
@@ -399,6 +439,15 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
                 re.IGNORECASE,
             ),
         },
+    },
+    {
+        "name": "presenter_route_policy_authority_surface",
+        "path": "src/backend/server/routes/von_routes.py",
+        "presenter_route_policy_contract": True,
+        "intentional_exceptions": PRESENTER_ROUTE_POLICY_INTENTIONAL_EXCEPTIONS,
+        "exception_record_requirement": (
+            PRESENTER_ROUTE_POLICY_EXCEPTION_RECORD_REQUIREMENT
+        ),
     },
 )
 
@@ -888,6 +937,132 @@ def _scan_allowed_regex_backstop_scope(
     return violations
 
 
+def _call_keyword_constant(call: ast.Call, keyword_name: str) -> Any:
+    for keyword in call.keywords:
+        if keyword.arg != keyword_name:
+            continue
+        value = keyword.value
+        if isinstance(value, ast.Constant):
+            return value.value
+    return None
+
+
+def _scan_presenter_route_policy_contract(
+    *,
+    tree: ast.AST,
+    relative_path: str,
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    def _append_violation(
+        *,
+        line: int,
+        pattern: str,
+        symbol: str | None = None,
+    ) -> None:
+        key = (str(pattern), str(symbol or ""), int(line))
+        if key in seen:
+            return
+        seen.add(key)
+        payload = {
+            "path": relative_path,
+            "line": int(line),
+            "pattern": str(pattern),
+        }
+        if symbol:
+            payload["symbol"] = str(symbol)
+        violations.append(payload)
+
+    def _is_annotate_python_decision_event_call(node: ast.Call) -> bool:
+        if isinstance(node.func, ast.Name):
+            return node.func.id == "annotate_python_decision_event"
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr == "annotate_python_decision_event"
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            literal = node.value
+            line = int(getattr(node, "lineno", 0) or 0)
+            if literal in PRESENTER_ROUTE_FALLBACK_SOURCE_VALUES:
+                _append_violation(
+                    line=line,
+                    pattern="route_authored_presenter_fallback_source_literal",
+                    symbol=literal,
+                )
+            if literal in PRESENTER_ROUTE_FALLBACK_REASON_CODES:
+                _append_violation(
+                    line=line,
+                    pattern="route_authored_presenter_fallback_reason_code_literal",
+                    symbol=literal,
+                )
+            continue
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if PRESENTER_ROUTE_AUTHORED_TEXT_BUILDER_PATTERN.search(node.name):
+                _append_violation(
+                    line=int(getattr(node, "lineno", 0) or 0),
+                    pattern="route_authored_presenter_text_builder_symbol",
+                    symbol=node.name,
+                )
+            continue
+
+        if not isinstance(node, ast.Call):
+            continue
+        if not _is_annotate_python_decision_event_call(node):
+            continue
+
+        line = int(getattr(node, "lineno", 0) or 0)
+        decision_class = _call_keyword_constant(node, "decision_class")
+        function_name = _call_keyword_constant(node, "function")
+        possible_inappropriate = _call_keyword_constant(
+            node,
+            "possible_inappropriate_python_code_use",
+        )
+        string_literals = set(_collect_string_literals(node))
+
+        if isinstance(decision_class, str):
+            if decision_class in PRESENTER_ROUTE_FALLBACK_DECISION_CLASSES:
+                _append_violation(
+                    line=line,
+                    pattern="route_authored_presenter_fallback_decision_event",
+                    symbol=decision_class,
+                )
+
+        if isinstance(
+            function_name, str
+        ) and PRESENTER_ROUTE_AUTHORED_TEXT_BUILDER_PATTERN.search(function_name):
+            _append_violation(
+                line=line,
+                pattern="route_authored_presenter_text_builder_event",
+                symbol=function_name,
+            )
+
+        fallback_shape_seen = (
+            (
+                isinstance(decision_class, str)
+                and decision_class in PRESENTER_ROUTE_FALLBACK_DECISION_CLASSES
+            )
+            or (
+                isinstance(function_name, str)
+                and PRESENTER_ROUTE_AUTHORED_TEXT_BUILDER_PATTERN.search(function_name)
+            )
+            or bool(
+                string_literals.intersection(PRESENTER_ROUTE_FALLBACK_SOURCE_VALUES)
+                or string_literals.intersection(PRESENTER_ROUTE_FALLBACK_REASON_CODES)
+            )
+        )
+        if possible_inappropriate is True and fallback_shape_seen:
+            _append_violation(
+                line=line,
+                pattern="route_authored_presenter_possible_inappropriate_fallback",
+                symbol=str(decision_class or function_name or "presenter_fallback"),
+            )
+
+    return violations
+
+
 def _scan_direct_instance_create_callsites(project_root: Path) -> dict[str, Any]:
     backend_root = project_root / "src" / "backend"
     callsites: list[dict[str, Any]] = []
@@ -1231,6 +1406,13 @@ def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
                         allowed_helper_functions=allowed_regex_helper_functions,
                     )
                 )
+            if contract.get("presenter_route_policy_contract") is True:
+                contract_violations.extend(
+                    _scan_presenter_route_policy_contract(
+                        tree=tree,
+                        relative_path=relative_path,
+                    )
+                )
         contract_violations = sorted(
             contract_violations,
             key=lambda item: (
@@ -1240,14 +1422,21 @@ def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
                 str(item.get("call") or ""),
             ),
         )
-        contracts.append(
-            {
-                "name": str(contract["name"]),
-                "path": relative_path,
-                "status": "ok" if not contract_violations else "violation",
-                "violations": contract_violations,
-            }
-        )
+        contract_detail = {
+            "name": str(contract["name"]),
+            "path": relative_path,
+            "status": "ok" if not contract_violations else "violation",
+            "violations": contract_violations,
+        }
+        if "intentional_exceptions" in contract:
+            contract_detail["intentional_exceptions"] = list(
+                copy.deepcopy(contract.get("intentional_exceptions") or [])
+            )
+        if "exception_record_requirement" in contract:
+            contract_detail["exception_record_requirement"] = str(
+                contract.get("exception_record_requirement") or ""
+            )
+        contracts.append(contract_detail)
         violations.extend(contract_violations)
     return {
         "contract_count": len(contracts),

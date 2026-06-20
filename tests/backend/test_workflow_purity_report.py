@@ -34,6 +34,40 @@ def _write(relative_path: str, text: str, *, root: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_zero_baseline(root: Path) -> Path:
+    baseline_path = (
+        root / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return baseline_path
+
+
 def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     tmp_path: Path,
 ) -> None:
@@ -1329,6 +1363,136 @@ def test_build_workflow_purity_report_detects_screen_backfill_guardrail_drift(
     }
 
 
+def test_build_workflow_purity_report_detects_presenter_route_policy_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/server/routes/von_routes.py",
+        (
+            "def _build_presenter_follow_up_summary_from_tool_messages(tool_messages):\n"
+            "    return 'route-authored presenter wording'\n\n"
+            "def route_fallback(auxiliary_llm_calls):\n"
+            "    screen_backfill_source = 'response_text_plus_follow_up_summary'\n"
+            "    reason_code = 'response_text_supplemented_with_follow_up_summary'\n"
+            "    auxiliary_llm_calls.append(\n"
+            "        annotate_python_decision_event(\n"
+            "            {\n"
+            "                'type': 'presenter_screen_backfill',\n"
+            "                'stage': 'screen_backfill',\n"
+            "                'source': screen_backfill_source,\n"
+            "            },\n"
+            "            stage='screen_backfill',\n"
+            "            component='presenter_routes',\n"
+            "            function='_build_presenter_follow_up_summary_from_tool_messages',\n"
+            "            decision_class='presenter_fallback',\n"
+            "            decision_source='python_route_fallback',\n"
+            "            changed_outcome=True,\n"
+            "            reason_code=reason_code,\n"
+            "            possible_inappropriate_python_code_use=True,\n"
+            "        )\n"
+            "    )\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = _write_zero_baseline(tmp_path)
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 6
+    patterns = {
+        item["pattern"]
+        for item in report["details"]["support_surface_policy_contracts"]["violations"]
+    }
+    assert patterns == {
+        "route_authored_presenter_fallback_decision_event",
+        "route_authored_presenter_fallback_reason_code_literal",
+        "route_authored_presenter_fallback_source_literal",
+        "route_authored_presenter_possible_inappropriate_fallback",
+        "route_authored_presenter_text_builder_event",
+        "route_authored_presenter_text_builder_symbol",
+    }
+
+
+def test_build_workflow_purity_report_allows_presenter_support_plumbing(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/server/routes/von_routes.py",
+        (
+            "def route_support(auxiliary_llm_calls):\n"
+            "    auxiliary_llm_calls.append(\n"
+            "        annotate_python_decision_event(\n"
+            "            {\n"
+            "                'type': 'presenter_screen_backfill',\n"
+            "                'stage': 'screen_backfill',\n"
+            "                'source': 'represented_screen_prompt',\n"
+            "                'prompt_concept_ids': ['#V#von_screen_content_prompt_for_witbrock'],\n"
+            "            },\n"
+            "            stage='screen_backfill',\n"
+            "            component='presenter_routes',\n"
+            "            function='_presenter_llm_screen_synthesis',\n"
+            "            decision_class='presenter_support_invocation',\n"
+            "            decision_source='represented_prompt_authority',\n"
+            "            changed_outcome=True,\n"
+            "            reason_code='screen_backfill_prompt_invoked',\n"
+            "            possible_inappropriate_python_code_use=False,\n"
+            "        )\n"
+            "    )\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/server/routes/generate_route_support.py",
+        (
+            "def _build_presenter_screen_backfill_context(**kwargs):\n"
+            "    return [{'role': 'user', 'content': kwargs}], {'context_source': 'route_structured_support_payload'}\n\n"
+            "def _build_presenter_screen_backfill_authority_gate_event(**kwargs):\n"
+            "    return {'decision_class': 'presenter_authority_gate'}\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = _write_zero_baseline(tmp_path)
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 0
+    contracts = report["details"]["support_surface_policy_contracts"]["contracts"]
+    presenter_contract = next(
+        item
+        for item in contracts
+        if item["name"] == "presenter_route_policy_authority_surface"
+    )
+    assert presenter_contract["intentional_exceptions"] == [
+        {
+            "decision_class": "presenter_detector",
+            "justification": (
+                "Structural detection of unusable screen candidates only; it must not "
+                "author presenter wording or fallback responses."
+            ),
+        },
+        {
+            "decision_class": "presenter_support_safety_net",
+            "justification": (
+                "Narrow fail-closed suppression of unsupported represented-prompt claims; "
+                "it must not author replacement presenter wording."
+            ),
+        },
+    ]
+    assert (
+        presenter_contract["exception_record_requirement"]
+        == "Any new route-side presenter exception must be recorded in this contract and in "
+        "the Jira task that introduced it, with proof that Python remains support-only."
+    )
+
+
 def test_build_workflow_purity_report_detects_annotation_and_workflow_creation_drift(
     tmp_path: Path,
 ) -> None:
@@ -1482,9 +1646,7 @@ def test_build_workflow_purity_report_ratchets_monolith_line_counts(
     assert counters["monolith_line_count_von_routes"] == 0
 
     ratchet_detail = report["details"]["monolith_line_ratchet"]
-    tracked = {
-        entry["path"]: entry for entry in ratchet_detail["files"]
-    }
+    tracked = {entry["path"]: entry for entry in ratchet_detail["files"]}
     orchestrator_entry = tracked[
         "src/backend/integrations/internal_mcp/orchestrator.py"
     ]
