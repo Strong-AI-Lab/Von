@@ -1363,6 +1363,20 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                             "request_id": "req-diag-1",
                             "generated_at_utc": "2026-04-01T00:00:03Z",
                             "prompt_preview": "Show the turn diagnostics",
+                            "turn_context_handoff_decision": {
+                                "mode": "task_state_summary",
+                                "summary": "Use the current diagnostics task state.",
+                                "routing_evidence_scope": "summary_only",
+                                "expected_outcome_scope": "summary_only",
+                                "answer_scope": "summary_only",
+                            },
+                            "turn_context_handoff_mode": "task_state_summary",
+                            "turn_context_handoff_summary": (
+                                "Use the current diagnostics task state."
+                            ),
+                            "turn_context_handoff_messages": [],
+                            "turn_context_handoff_lineage": ["history_index:0"],
+                            "turn_context_handoff_risks": [],
                             "workflow_selection": {
                                 "selected_workflow_id": "#V#chat_assistant_workflow"
                             },
@@ -1432,6 +1446,12 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
     assert result["workflow_routing_diagnostics"]["schema_version"] == (
         "workflow_routing_diagnostics.v1"
     )
+    assert result["context_adjudication"]["mode"] == "task_state_summary"
+    assert result["context_adjudication"]["summary"] == (
+        "Use the current diagnostics task state."
+    )
+    assert result["context_adjudication"]["routing_evidence_scope"] == "summary_only"
+    assert result["context_adjudication"]["lineage"] == ["history_index:0"]
     assert result["mcp_access"]["turn_execution_get_diagnostics"]["tool_name"] == (
         "turn_execution_get_diagnostics"
     )

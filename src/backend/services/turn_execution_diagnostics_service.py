@@ -15,6 +15,9 @@ from .conversation_scope_binding_service import (
 from .debug_payload_store import hydrate_debug_payload_blob_refs
 from .turn_decision_attribution_service import build_turn_decision_attribution
 from .turn_response_surface_service import build_turn_response_surface_reconciliation
+from .turn_context_adjudication_projection_service import (
+    build_turn_context_adjudication_projection,
+)
 from .turn_execution_record_service import (
     build_workflow_routing_diagnostics,
     get_turn_execution_records_collection,
@@ -1337,6 +1340,41 @@ def _normalise_embedded_diagnostics_payload(
     return payload
 
 
+def _attach_context_adjudication_projection(
+    payload: dict[str, Any],
+    *,
+    llm_debug: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+) -> None:
+    if isinstance(payload.get("context_adjudication"), Mapping):
+        return
+
+    execution = (
+        turn_record.get("execution")
+        if isinstance(turn_record, Mapping)
+        else None
+    )
+    projection = build_turn_context_adjudication_projection(
+        (
+            ("diagnostics_payload", payload),
+            (
+                "chat_history.llm_debug_data",
+                llm_debug if isinstance(llm_debug, Mapping) else None,
+            ),
+            (
+                "turn_execution_record",
+                turn_record if isinstance(turn_record, Mapping) else None,
+            ),
+            (
+                "turn_execution_record.execution",
+                execution if isinstance(execution, Mapping) else None,
+            ),
+        )
+    )
+    if isinstance(projection, Mapping):
+        payload["context_adjudication"] = dict(projection)
+
+
 def get_turn_execution_diagnostics_payload(
     *,
     request_id: str,
@@ -1470,6 +1508,11 @@ def get_turn_execution_diagnostics_payload(
         target_message=response_surface_target_message,
         turn_record=turn_record,
         diagnostics=payload,
+    )
+    _attach_context_adjudication_projection(
+        payload,
+        llm_debug=llm_debug if isinstance(llm_debug, Mapping) else None,
+        turn_record=turn_record if isinstance(turn_record, Mapping) else None,
     )
     payload["mcp_access"] = _build_turn_diagnostics_mcp_access(
         request_id=request_id_value,

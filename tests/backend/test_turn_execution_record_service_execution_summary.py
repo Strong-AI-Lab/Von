@@ -24,6 +24,54 @@ _KR_REQUIRED_TOOLS = [
 ]
 
 
+def test_turn_record_projects_context_adjudication_handoff() -> None:
+    record = build_turn_execution_record(
+        request_id="req-context-adjudication",
+        session_id="session-context-adjudication",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="The interface Gmail access check passes. Are you sure?",
+        response_text="I do not have a token-refresh tool available.",
+        interaction_timestamp_utc="2026-06-20T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_seeking",
+            "source": "selector",
+        },
+        turn_execution_diagnostics={
+            "turn_context_handoff_decision": {
+                "mode": "no_prior_context",
+                "summary": "Use only the current Gmail token-refresh request.",
+                "routing_evidence_scope": "current_request_only",
+                "expected_outcome_scope": "current_request_only",
+                "answer_scope": "current_request_only",
+            },
+            "turn_context_handoff_mode": "no_prior_context",
+            "turn_context_handoff_summary": (
+                "Use only the current Gmail token-refresh request."
+            ),
+            "turn_context_handoff_messages": [],
+            "turn_context_handoff_lineage": ["history_index:5"],
+            "turn_context_handoff_omitted_context_reasons": [
+                "Earlier scholarly-paper topic is irrelevant."
+            ],
+            "turn_context_handoff_risks": [],
+        },
+    )
+
+    projection = record["context_adjudication"]
+    assert projection["mode"] == "no_prior_context"
+    assert projection["summary"] == "Use only the current Gmail token-refresh request."
+    assert projection["expected_outcome_scope"] == "current_request_only"
+    assert projection["lineage"] == ["history_index:5"]
+    assert record["execution"]["context_adjudication"] == projection
+    assert record["execution"]["summary"]["context_adjudication_observed"] is True
+    assert record["execution"]["summary"]["context_adjudication_mode"] == (
+        "no_prior_context"
+    )
+
+
 def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry() -> (
     None
 ):

@@ -61,6 +61,9 @@ from src.backend.services.turn_decision_attribution_service import (
     aggregate_turn_decision_attributions,
     build_turn_decision_attribution,
 )
+from src.backend.services.turn_context_adjudication_projection_service import (
+    build_turn_context_adjudication_projection,
+)
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:31b"
@@ -3195,6 +3198,13 @@ def _build_summary(
             response_text=response_text,
         )
     )
+    context_adjudication = build_turn_context_adjudication_projection(
+        (
+            ("turn_execution_diagnostics", diagnostics),
+            ("llm_debug_data", llm_debug_data),
+            ("workflow_routing_diagnostics", routing),
+        )
+    )
     summary = {
         "status": "ok",
         "guidance": {
@@ -3244,6 +3254,11 @@ def _build_summary(
             "workflow_routing_diagnostics": routing,
             "selector_telemetry_completeness": _selector_telemetry_completeness(
                 routing
+            ),
+            "context_adjudication": (
+                dict(context_adjudication)
+                if isinstance(context_adjudication, Mapping)
+                else None
             ),
         },
         "evaluation": dict(evaluation),

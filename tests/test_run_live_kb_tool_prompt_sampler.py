@@ -1786,6 +1786,13 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
             "model": "gpt-5.4-nano",
             "tool_invocations": [{"tool": "search_knowledge_base"}],
             "turn_execution_diagnostics": {
+                "turn_context_handoff_decision": {
+                    "mode": "no_prior_context",
+                    "summary": "The prompt is self-contained.",
+                },
+                "turn_context_handoff_mode": "no_prior_context",
+                "turn_context_handoff_summary": "The prompt is self-contained.",
+                "turn_context_handoff_messages": [],
                 "workflow_routing_diagnostics": {
                     "dispatch": {
                         "dispatch_workflow_id": "#V#tool_calling_workflow",
@@ -1850,6 +1857,10 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
     assert summary["telemetry"]["tool_history"] == []
     assert summary["telemetry"]["observed_tools"] == ["search_knowledge_base"]
     assert summary["telemetry"]["tool_count"] == 1
+    assert summary["telemetry"]["context_adjudication"]["mode"] == "no_prior_context"
+    assert summary["telemetry"]["context_adjudication"]["summary"] == (
+        "The prompt is self-contained."
+    )
     model_report = summary["model_portfolio_evaluation"]
     assert model_report["schema_version"] == "model_portfolio_replay_report.v1"
     assert model_report["replay_set_id"] == "JVNAUTOSCI-1894"

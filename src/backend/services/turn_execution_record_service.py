@@ -49,6 +49,9 @@ from .tool_metadata_service import (
 from .turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
 )
+from .turn_context_adjudication_projection_service import (
+    build_turn_context_adjudication_projection,
+)
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -9182,6 +9185,44 @@ def build_turn_execution_record(
         execution_summary_with_contract[
             "requested_evidence_unresolved_resolver_chain_count"
         ] = len(requested_evidence_lineage.get("unresolved_resolver_chains") or [])
+    context_adjudication_projection = build_turn_context_adjudication_projection(
+        (
+            (
+                "turn_execution_diagnostics",
+                turn_execution_diagnostics
+                if isinstance(turn_execution_diagnostics, Mapping)
+                else None,
+            ),
+            (
+                "selected_workflow_trace",
+                selected_workflow_trace_payload
+                if isinstance(selected_workflow_trace_payload, Mapping)
+                else None,
+            ),
+            (
+                "completion_report",
+                completion_report_payload
+                if isinstance(completion_report_payload, Mapping)
+                else None,
+            ),
+        )
+    )
+    if isinstance(context_adjudication_projection, Mapping):
+        execution_summary_with_contract["context_adjudication_observed"] = True
+        context_adjudication_mode = _safe_str(
+            context_adjudication_projection.get("mode")
+        )
+        if context_adjudication_mode:
+            execution_summary_with_contract["context_adjudication_mode"] = (
+                context_adjudication_mode
+            )
+        context_adjudication_source = _safe_str(
+            context_adjudication_projection.get("source")
+        )
+        if context_adjudication_source:
+            execution_summary_with_contract["context_adjudication_source"] = (
+                context_adjudication_source
+            )
     execution_summary_with_contract["final_answer_synthesis_observed"] = bool(
         final_answer_synthesis
     )
@@ -9293,6 +9334,11 @@ def build_turn_execution_record(
                 if isinstance(requested_evidence_lineage, Mapping)
                 else None
             ),
+            "context_adjudication": (
+                dict(context_adjudication_projection)
+                if isinstance(context_adjudication_projection, Mapping)
+                else None
+            ),
             "required_prompt_tools": (
                 list(effective_required_prompt_tools)
                 if effective_required_prompt_tools
@@ -9318,6 +9364,11 @@ def build_turn_execution_record(
             "workflow_stage_path": workflow_stage_path,
             "selected_workflow_trace": selected_workflow_trace_payload,
         },
+        "context_adjudication": (
+            dict(context_adjudication_projection)
+            if isinstance(context_adjudication_projection, Mapping)
+            else None
+        ),
         "postcondition_checks": postcondition_checks,
         "critic": {
             "enabled": True,
