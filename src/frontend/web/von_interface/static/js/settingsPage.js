@@ -56,6 +56,7 @@ import {
   clearStoredOllamaSelection,
   getEffectiveLocalModelPreference,
   getStoredOpenAiSelectedModel,
+  normaliseLocalModelName,
   setLocalPremiumModelUseEnabled,
   setStoredOllamaSelection,
   setStoredOpenAiSelectedModel,
@@ -3352,7 +3353,9 @@ document.getElementById('loadOllamaModelsButton')?.addEventListener('click', loa
 document.getElementById('refreshOllamaModelsButton')?.addEventListener('click', refreshOllamaModelDropdown);
 
 // Other event listeners
-document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', verifyOpenAiApiKey);
+document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', () => {
+  verifyOpenAiApiKey();
+});
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 
@@ -4308,7 +4311,9 @@ async function verifyOpenAiApiKey(savedModel = null) {
   const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar').value;
   const statusMessage = document.getElementById('openaiStatusMessage');
   const modelsContainer = document.getElementById('openaiModelsContainer');
-  const preferredModel = savedModel || getStoredOpenAiSelectedModel() || null;
+  const preferredModel = normaliseLocalModelName(savedModel)
+    || getStoredOpenAiSelectedModel()
+    || null;
 
   setInlineStatusMessage(
     statusMessage,
@@ -4329,7 +4334,9 @@ async function verifyOpenAiApiKey(savedModel = null) {
       modelsContainer.classList.remove('hidden');
 
       renderOpenAIModelOptions('openaiModelSelect', response.models || [], preferredModel);
-      const selectedOpenAiModel = document.getElementById('openaiModelSelect')?.value;
+      const selectedOpenAiModel = normaliseLocalModelName(
+        document.getElementById('openaiModelSelect')?.value,
+      );
       if (selectedOpenAiModel) {
         setStoredOpenAiSelectedModel(selectedOpenAiModel);
       }

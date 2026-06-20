@@ -4,6 +4,7 @@ import {
   clearRetryableLoadState,
   describeRetryableLoadFailure
 } from './utils/retryableLoadState.js';
+import { normaliseLocalModelName } from './utils/localModelPreferences.js';
 
 // Settings management functions
 export async function loadAvailableModels() {
@@ -58,7 +59,10 @@ function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
   select.innerHTML = '<option value="">Select an OpenAI Model</option>';
 
   if (Array.isArray(models) && models.length > 0) {
-    models.forEach(modelName => {
+    models.forEach(rawModelName => {
+      const modelName = normaliseLocalModelName(rawModelName);
+      if (!modelName) return;
+
       const option = document.createElement('option');
       option.value = modelName;
       option.textContent = modelName;
@@ -68,15 +72,16 @@ function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
     select.innerHTML = '<option value="">No OpenAI models available</option>';
   }
 
-  if (selectedModel) {
-    select.value = selectedModel;
-    if (select.value !== selectedModel) {
+  const selectedOpenAiModel = normaliseLocalModelName(selectedModel);
+  if (selectedOpenAiModel) {
+    select.value = selectedOpenAiModel;
+    if (select.value !== selectedOpenAiModel) {
       const currentOption = document.createElement('option');
-      currentOption.value = selectedModel;
-      currentOption.textContent = `${selectedModel} (current effective model; unavailable in loaded list)`;
+      currentOption.value = selectedOpenAiModel;
+      currentOption.textContent = `${selectedOpenAiModel} (current effective model; unavailable in loaded list)`;
       currentOption.dataset.currentEffective = 'true';
       select.appendChild(currentOption);
-      select.value = selectedModel;
+      select.value = selectedOpenAiModel;
     }
   }
 }
