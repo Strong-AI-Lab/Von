@@ -244,10 +244,14 @@ except Exception:
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
+    from mcp.types import Icon, Tool, TextContent
 except ImportError:
     print("Error: MCP package not installed. Run: pdm add mcp", file=sys.stderr)
     sys.exit(1)
+
+von_mcp_icons = importlib.import_module(
+    "src.backend.mcp_server.icon_metadata"
+).von_mcp_icons
 
 
 def _bind_imports(module_name: str, names: list[str]) -> None:
@@ -484,7 +488,9 @@ _bind_imports(
 )
 
 # Create MCP server instance
-app = Server("vontology-mcp")
+_VON_MCP_ICONS = von_mcp_icons(project_root)
+
+app = Server("vontology-mcp", icons=_VON_MCP_ICONS)
 
 
 _LOG = logging.getLogger(__name__)
@@ -539,10 +545,12 @@ def _tool_cache_path() -> Path:
 
 
 def _tool_to_cache_payload(tool: Tool) -> dict[str, Any]:
+    icons = getattr(tool, "icons", None) or []
     return {
         "name": str(getattr(tool, "name", "")),
         "description": str(getattr(tool, "description", "")),
         "inputSchema": getattr(tool, "inputSchema", {}) or {},
+        "icons": [icon.model_dump(by_alias=True, exclude_none=True) for icon in icons],
     }
 
 
@@ -554,7 +562,34 @@ def _tool_from_surface_payload(tool_payload: dict[str, Any]) -> Tool:
         name=str(tool_payload["name"]),
         description=str(tool_payload.get("description") or ""),
         inputSchema=input_schema,
+        icons=_VON_MCP_ICONS,
     )
+
+
+def _parse_icon_payloads(raw_icons: Any) -> list[Icon]:
+    if not isinstance(raw_icons, list):
+        return []
+
+    icons: list[Icon] = []
+    for raw_icon in raw_icons:
+        if not isinstance(raw_icon, dict):
+            continue
+        src = raw_icon.get("src")
+        if not isinstance(src, str) or not src.strip():
+            continue
+        sizes = raw_icon.get("sizes")
+        icons.append(
+            Icon(
+                src=src.strip(),
+                mimeType=(
+                    raw_icon.get("mimeType")
+                    if isinstance(raw_icon.get("mimeType"), str)
+                    else None
+                ),
+                sizes=sizes if isinstance(sizes, list) else None,
+            )
+        )
+    return icons
 
 
 def _parse_tool_payload_list(raw_tools: Any) -> list[Tool]:
@@ -567,6 +602,7 @@ def _parse_tool_payload_list(raw_tools: Any) -> list[Tool]:
         name = raw.get("name")
         description = raw.get("description")
         input_schema = raw.get("inputSchema")
+        icons = _parse_icon_payloads(raw.get("icons")) or _VON_MCP_ICONS
         if not isinstance(name, str) or not name.strip():
             continue
         if not isinstance(input_schema, dict):
@@ -576,6 +612,7 @@ def _parse_tool_payload_list(raw_tools: Any) -> list[Tool]:
                 name=name.strip(),
                 description=str(description or ""),
                 inputSchema=input_schema,
+                icons=icons,
             )
         )
     return tools

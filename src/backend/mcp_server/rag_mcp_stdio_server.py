@@ -57,6 +57,10 @@ except ImportError:
     print("Error: MCP package not installed. Run: pdm add mcp", file=sys.stderr)
     raise
 
+von_mcp_icons = importlib.import_module(
+    "src.backend.mcp_server.icon_metadata"
+).von_mcp_icons
+
 # Absolute imports (required when executed as a script)
 internal_catalogue = importlib.import_module(
     "src.backend.integrations.internal_mcp.catalogue"
@@ -68,7 +72,9 @@ SURFACE_VONRAG_STDIO = tool_contract_registry_module.SURFACE_VONRAG_STDIO
 get_surface_tool_payloads = tool_contract_registry_module.get_surface_tool_payloads
 
 
-app = Server("vonrag-mcp")
+_VON_MCP_ICONS = von_mcp_icons(project_root)
+
+app = Server("vonrag-mcp", icons=_VON_MCP_ICONS)
 
 
 def _json_text(payload: Any) -> TextContent:
@@ -126,6 +132,7 @@ def _tool_from_surface_payload(tool_payload: dict[str, Any]) -> Tool:
         name=str(tool_payload["name"]),
         description=str(tool_payload.get("description") or ""),
         inputSchema=input_schema,
+        icons=_VON_MCP_ICONS,
     )
 
 
@@ -176,4 +183,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
