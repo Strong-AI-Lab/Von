@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +33,13 @@ from .models import (
     WorkflowInstanceStatus,
     WorkflowSchedule,
 )
+from .worker_identity import (
+    build_claim_provenance,
+    get_configured_min_worker_build,
+    normalise_worker_build_identity,
+    worker_build_match_tokens,
+    worker_satisfies_required_build,
+)
 from .vontology_schedule_repository import VontologyScheduleRepository
 
 logger = logging.getLogger(__name__)
@@ -40,6 +47,7 @@ logger = logging.getLogger(__name__)
 WORKFLOW_INSTANCES_COLLECTION = "workflow_instances"
 WORKFLOW_SCHEDULES_COLLECTION = "workflow_schedules"
 WORKFLOW_EVENT_BINDINGS_COLLECTION = "workflow_event_bindings"
+WORKFLOW_WORKERS_COLLECTION = "workflow_workers"
 
 # Default lock TTL: 5 minutes
 DEFAULT_LOCK_TTL_SECONDS = 300
@@ -61,6 +69,13 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "created_at": 1,
     "started_at": 1,
     "completed_at": 1,
+    "locked_by": 1,
+    "lock_expires_at": 1,
+    "claimed_at": 1,
+    "claimed_by_build": 1,
+    "min_worker_build": 1,
+    "claim_ineligible_reason": 1,
+    "claim_ineligible_detected_at": 1,
     "progress_current": 1,
     "progress_total": 1,
     "progress_message": 1,
@@ -194,6 +209,24 @@ def _ensure_indexes() -> None:
                 [("workflow_id", ASCENDING), ("created_at", DESCENDING)],
                 name="workflow_created",
             )
+        if "min_worker_build_status_created" not in existing:
+            instances_coll.create_index(
+                [
+                    ("min_worker_build", ASCENDING),
+                    ("status", ASCENDING),
+                    ("created_at", ASCENDING),
+                ],
+                name="min_worker_build_status_created",
+            )
+        if "claimed_build_status" not in existing:
+            instances_coll.create_index(
+                [
+                    ("claimed_by_build.git_short_commit", ASCENDING),
+                    ("status", ASCENDING),
+                    ("lock_expires_at", ASCENDING),
+                ],
+                name="claimed_build_status",
+            )
 
         # Event-driven observability: find workflow instances for a source event.
         if "source_event_lookup" not in existing:
@@ -271,6 +304,32 @@ def _ensure_indexes() -> None:
                 [("binding_id", ASCENDING)],
                 unique=True,
                 name="binding_id_unique",
+            )
+
+        # Durable worker registry collection
+        workers_coll = db[WORKFLOW_WORKERS_COLLECTION]
+        worker_existing = [idx["name"] for idx in workers_coll.list_indexes()]
+
+        if "worker_id_unique" not in worker_existing:
+            workers_coll.create_index(
+                [("worker_id", ASCENDING)],
+                unique=True,
+                name="worker_id_unique",
+            )
+
+        if "last_seen_desc" not in worker_existing:
+            workers_coll.create_index(
+                [("last_seen", DESCENDING)],
+                name="last_seen_desc",
+            )
+
+        if "worker_build_last_seen" not in worker_existing:
+            workers_coll.create_index(
+                [
+                    ("build.git_short_commit", ASCENDING),
+                    ("last_seen", DESCENDING),
+                ],
+                name="worker_build_last_seen",
             )
 
     except OperationFailure as e:
@@ -435,6 +494,11 @@ class WorkflowInstanceManager:
         """Get the workflow_event_bindings collection."""
         db = get_db()
         return db[WORKFLOW_EVENT_BINDINGS_COLLECTION] if db is not None else None
+
+    def _get_workers_collection(self) -> Collection | None:
+        """Get the workflow_workers collection."""
+        db = get_db()
+        return db[WORKFLOW_WORKERS_COLLECTION] if db is not None else None
 
     def _broadcast_instance(self, instance: WorkflowInstance) -> None:
         try:
@@ -1044,6 +1108,241 @@ class WorkflowInstanceManager:
         ]
 
     # -------------------------------------------------------------------------
+    # Worker build governance
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _normalise_build_requirement(value: object) -> list[str]:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+            requirements: list[str] = []
+            for item in value:
+                cleaned = str(item or "").strip()
+                if cleaned and cleaned not in requirements:
+                    requirements.append(cleaned)
+            return requirements
+        return []
+
+    @staticmethod
+    def _build_claim_filter(
+        worker_build_identity: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return a query fragment for instance-level worker-build gates."""
+        tokens = list(worker_build_match_tokens(worker_build_identity))
+        allowed_without_requirement: list[dict[str, Any]] = [
+            {"min_worker_build": {"$exists": False}},
+            {"min_worker_build": None},
+            {"min_worker_build": ""},
+            {"min_worker_build": []},
+        ]
+        if tokens:
+            allowed_without_requirement.append({"min_worker_build": {"$in": tokens}})
+        return {"$or": allowed_without_requirement}
+
+    @staticmethod
+    def _with_claim_build_filter(
+        claim_query: dict[str, Any],
+        worker_build_identity: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "$and": [
+                claim_query,
+                WorkflowInstanceManager._build_claim_filter(worker_build_identity),
+            ]
+        }
+
+    @staticmethod
+    def _instance_build_requirements(
+        doc: Mapping[str, Any],
+        *,
+        cluster_required_build: str | None,
+    ) -> list[str]:
+        requirements: list[str] = []
+        if cluster_required_build:
+            requirements.append(cluster_required_build)
+        for requirement in WorkflowInstanceManager._normalise_build_requirement(
+            doc.get("min_worker_build")
+        ):
+            if requirement not in requirements:
+                requirements.append(requirement)
+        return requirements
+
+    @staticmethod
+    def _claim_satisfies_build_requirements(
+        claim_identity: Mapping[str, Any] | None,
+        requirements: list[str],
+    ) -> bool:
+        if not requirements:
+            return True
+        if not isinstance(claim_identity, Mapping):
+            return False
+        return all(
+            worker_satisfies_required_build(claim_identity, requirement)
+            for requirement in requirements
+        )
+
+    def upsert_worker_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        worker_build_identity: Mapping[str, Any] | None,
+        active_instance_ids: list[str] | None = None,
+        state: str = "running",
+    ) -> bool:
+        """Upsert durable-worker liveness and build provenance."""
+        worker_id_clean = str(worker_id or "").strip()
+        if not worker_id_clean:
+            return False
+
+        coll = self._get_workers_collection()
+        if coll is None:
+            return False
+
+        now = datetime.now(timezone.utc)
+        build = normalise_worker_build_identity(
+            worker_build_identity,
+            worker_id=worker_id_clean,
+        )
+        active_ids = [
+            str(instance_id)
+            for instance_id in (active_instance_ids or [])
+            if str(instance_id or "").strip()
+        ]
+        update = {
+            "$set": {
+                "worker_id": worker_id_clean,
+                "hostname": build.get("hostname"),
+                "pid": build.get("pid"),
+                "build": build,
+                "last_seen": now,
+                "state": str(state or "running"),
+                "active_instance_ids": active_ids,
+                "active_instance_count": len(active_ids),
+            },
+            "$setOnInsert": {
+                "first_seen": now,
+            },
+        }
+        result = coll.update_one(
+            {"worker_id": worker_id_clean},
+            update,
+            upsert=True,
+        )
+        return result.modified_count > 0 or result.upserted_id is not None
+
+    def mark_worker_stopped(
+        self,
+        *,
+        worker_id: str,
+        worker_build_identity: Mapping[str, Any] | None,
+        active_instance_ids: list[str] | None = None,
+    ) -> bool:
+        """Mark a durable worker as stopped in the registry."""
+        return self.upsert_worker_heartbeat(
+            worker_id=worker_id,
+            worker_build_identity=worker_build_identity,
+            active_instance_ids=active_instance_ids,
+            state="stopped",
+        )
+
+    def list_worker_heartbeats(
+        self,
+        *,
+        max_age_seconds: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return recent durable-worker registry rows for operator diagnostics."""
+        coll = self._get_workers_collection()
+        if coll is None:
+            return []
+
+        query: dict[str, Any] = {}
+        if isinstance(max_age_seconds, int) and max_age_seconds > 0:
+            query["last_seen"] = {
+                "$gte": datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+            }
+        cursor = (
+            coll.find(query, {"_id": 0})
+            .sort("last_seen", DESCENDING)
+            .limit(max(1, min(int(limit), 200)))
+        )
+        return [dict(doc) for doc in cursor]
+
+    def release_ineligible_worker_claims(
+        self,
+        *,
+        required_worker_build: str | None = None,
+        limit: int = 100,
+    ) -> int:
+        """Pause running claims whose stamped worker build is not eligible."""
+        cluster_required_build = (
+            str(required_worker_build).strip()
+            if isinstance(required_worker_build, str) and required_worker_build.strip()
+            else get_configured_min_worker_build()
+        )
+        coll = self._get_instances_collection()
+        if coll is None:
+            return 0
+
+        query: dict[str, Any] = {
+            "status": WorkflowInstanceStatus.RUNNING.value,
+            "locked_by": {"$nin": [None, SUPERVISED_HOLD_LOCK_HOLDER]},
+        }
+        if not cluster_required_build:
+            query["min_worker_build"] = {"$nin": [None, "", []]}
+
+        cursor = coll.find(query).limit(max(1, min(int(limit), 1000)))
+        now = datetime.now(timezone.utc)
+        released = 0
+        for doc in cursor:
+            requirements = self._instance_build_requirements(
+                doc,
+                cluster_required_build=cluster_required_build,
+            )
+            claim_identity = (
+                doc.get("claimed_by_build")
+                if isinstance(doc.get("claimed_by_build"), Mapping)
+                else None
+            )
+            if self._claim_satisfies_build_requirements(
+                claim_identity,
+                requirements,
+            ):
+                continue
+
+            result = coll.update_one(
+                {
+                    "instance_id": doc.get("instance_id"),
+                    "locked_by": doc.get("locked_by"),
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                },
+                {
+                    "$set": {
+                        "status": WorkflowInstanceStatus.PAUSED.value,
+                        "locked_by": None,
+                        "lock_expires_at": None,
+                        "claim_ineligible_reason": "worker_build_requirement_not_satisfied",
+                        "claim_ineligible_detected_at": now,
+                        "ineligible_claimed_by_build": claim_identity,
+                        "ineligible_required_worker_builds": requirements,
+                        "progress_message": "paused: worker build ineligible",
+                        "progress_updated_at": now,
+                    }
+                },
+            )
+            if result.modified_count > 0:
+                released += 1
+
+        if released:
+            logger.warning(
+                "[durable_workflow] Released %d ineligible worker claim(s)",
+                released,
+            )
+        return released
+
+    # -------------------------------------------------------------------------
     # Locking for distributed workers
     # -------------------------------------------------------------------------
 
@@ -1053,6 +1352,7 @@ class WorkflowInstanceManager:
         *,
         workflow_ids: list[str] | None = None,
         priority_only: bool = False,
+        worker_build_identity: Mapping[str, Any] | None = None,
     ) -> WorkflowInstance | None:
         """Atomically find and claim a pending/resumable instance.
 
@@ -1063,6 +1363,8 @@ class WorkflowInstanceManager:
             worker_id: Identifier for the claiming worker.
             workflow_ids: Optional list of workflow IDs to filter by.
             priority_only: When true, only claim fresh user-turn priority work.
+            worker_build_identity: Optional build identity for claim provenance
+                and generic minimum-build gates.
 
         Returns:
             The claimed instance, or None if none available.
@@ -1071,8 +1373,32 @@ class WorkflowInstanceManager:
         if coll is None:
             return None
 
+        worker_id_clean = str(worker_id or "").strip()
+        if not worker_id_clean:
+            return None
+        normalised_build_identity = normalise_worker_build_identity(
+            worker_build_identity,
+            worker_id=worker_id_clean,
+        )
+        configured_min_build = get_configured_min_worker_build()
+        if configured_min_build and not worker_satisfies_required_build(
+            normalised_build_identity,
+            configured_min_build,
+        ):
+            logger.warning(
+                "[durable_workflow] Worker %s is not eligible to claim: "
+                "required_build=%s",
+                worker_id_clean,
+                configured_min_build,
+            )
+            return None
+
         now = datetime.now(timezone.utc)
         lock_expires = now + timedelta(seconds=self._lock_ttl)
+        claim_provenance = build_claim_provenance(
+            normalised_build_identity,
+            worker_id=worker_id_clean,
+        )
 
         # Query: pending instances OR running with expired lock.
         # Mirror/telemetry instances (auto_claim_enabled=False) are executed
@@ -1087,10 +1413,11 @@ class WorkflowInstanceManager:
                     "status": WorkflowInstanceStatus.RUNNING.value,
                     "lock_expires_at": {"$lt": now},
                 },
-            ]
+            ],
         }
         if workflow_ids:
             query["workflow_id"] = {"$in": workflow_ids}
+        query = self._with_claim_build_filter(query, normalised_build_identity)
 
         priority_workflow_ids = [
             "#V#conversation_turn_execution_workflow",
@@ -1136,9 +1463,13 @@ class WorkflowInstanceManager:
                 {
                     "$set": {
                         "status": WorkflowInstanceStatus.RUNNING.value,
-                        "locked_by": worker_id,
+                        "locked_by": worker_id_clean,
                         "lock_expires_at": lock_expires,
                         "started_at": now,
+                        "claimed_at": now,
+                        "claimed_by_build": claim_provenance,
+                        "claim_ineligible_reason": None,
+                        "claim_ineligible_detected_at": None,
                         "progress_message": "running",
                         "progress_updated_at": now,
                     }
@@ -1154,8 +1485,12 @@ class WorkflowInstanceManager:
                     {
                         "$set": {
                             "status": WorkflowInstanceStatus.RUNNING.value,
-                            "locked_by": worker_id,
+                            "locked_by": worker_id_clean,
                             "lock_expires_at": lock_expires,
+                            "claimed_at": now,
+                            "claimed_by_build": claim_provenance,
+                            "claim_ineligible_reason": None,
+                            "claim_ineligible_detected_at": None,
                             "progress_message": "running",
                             "progress_updated_at": now,
                         }
@@ -1199,10 +1534,13 @@ class WorkflowInstanceManager:
                 return None
             logger.info(
                 "[durable_workflow] Worker %s claimed instance %s",
-                worker_id,
+                worker_id_clean,
                 instance.instance_id,
             )
-            self._record_durable_episode_start(instance=instance, worker_id=worker_id)
+            self._record_durable_episode_start(
+                instance=instance,
+                worker_id=worker_id_clean,
+            )
             self._broadcast_instance(instance)
             return instance
         return None
@@ -1300,14 +1638,18 @@ class WorkflowInstanceManager:
                     field="workflow_data",
                     instance_id=instance_id,
                     namespace=(
-                        workflow_data.get("namespace")
-                        or workflow_data.get("user_namespace")
-                    )
-                    if isinstance(workflow_data, dict)
-                    else None,
-                    workflow_id=workflow_data.get("workflow_id")
-                    if isinstance(workflow_data, dict)
-                    else None,
+                        (
+                            workflow_data.get("namespace")
+                            or workflow_data.get("user_namespace")
+                        )
+                        if isinstance(workflow_data, dict)
+                        else None
+                    ),
+                    workflow_id=(
+                        workflow_data.get("workflow_id")
+                        if isinstance(workflow_data, dict)
+                        else None
+                    ),
                 ),
             }
         }
@@ -1446,9 +1788,9 @@ class WorkflowInstanceManager:
                 outputs,
                 field="outputs",
                 instance_id=instance_id,
-                workflow_id=outputs.get("workflow_id")
-                if isinstance(outputs, dict)
-                else None,
+                workflow_id=(
+                    outputs.get("workflow_id") if isinstance(outputs, dict) else None
+                ),
             )
         if final_state is not None:
             update["$set"]["current_state"] = final_state
@@ -1556,9 +1898,9 @@ class WorkflowInstanceManager:
                 outputs,
                 field="outputs",
                 instance_id=instance_id,
-                workflow_id=outputs.get("workflow_id")
-                if isinstance(outputs, dict)
-                else None,
+                workflow_id=(
+                    outputs.get("workflow_id") if isinstance(outputs, dict) else None
+                ),
             )
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id

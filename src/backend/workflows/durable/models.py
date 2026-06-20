@@ -218,6 +218,11 @@ class WorkflowInstance:
     # Locking (for distributed workers)
     locked_by: str | None = None
     lock_expires_at: datetime | None = None
+    claimed_at: datetime | None = None
+    claimed_by_build: dict[str, Any] | None = None
+    min_worker_build: str | None = None
+    claim_ineligible_reason: str | None = None
+    claim_ineligible_detected_at: datetime | None = None
 
     # Inputs/outputs
     inputs: dict[str, Any] = field(default_factory=dict)
@@ -296,6 +301,11 @@ class WorkflowInstance:
             "progress_updated_at": self.progress_updated_at,
             "locked_by": self.locked_by,
             "lock_expires_at": self.lock_expires_at,
+            "claimed_at": self.claimed_at,
+            "claimed_by_build": self.claimed_by_build,
+            "min_worker_build": self.min_worker_build,
+            "claim_ineligible_reason": self.claim_ineligible_reason,
+            "claim_ineligible_detected_at": self.claim_ineligible_detected_at,
             "inputs": self.inputs,
             "outputs": self.outputs,
             "error": self.error,
@@ -338,6 +348,15 @@ class WorkflowInstance:
             progress_updated_at=doc.get("progress_updated_at"),
             locked_by=doc.get("locked_by"),
             lock_expires_at=doc.get("lock_expires_at"),
+            claimed_at=doc.get("claimed_at"),
+            claimed_by_build=(
+                doc.get("claimed_by_build")
+                if isinstance(doc.get("claimed_by_build"), dict)
+                else None
+            ),
+            min_worker_build=doc.get("min_worker_build"),
+            claim_ineligible_reason=doc.get("claim_ineligible_reason"),
+            claim_ineligible_detected_at=doc.get("claim_ineligible_detected_at"),
             inputs=doc.get("inputs", {}),
             outputs=doc.get("outputs"),
             error=doc.get("error"),
@@ -382,6 +401,19 @@ class WorkflowInstance:
             "created_at": cls._status_datetime_to_iso(doc.get("created_at")),
             "started_at": cls._status_datetime_to_iso(doc.get("started_at")),
             "completed_at": cls._status_datetime_to_iso(doc.get("completed_at")),
+            "locked_by": doc.get("locked_by"),
+            "lock_expires_at": cls._status_datetime_to_iso(doc.get("lock_expires_at")),
+            "claimed_at": cls._status_datetime_to_iso(doc.get("claimed_at")),
+            "claimed_by_build": (
+                doc.get("claimed_by_build")
+                if isinstance(doc.get("claimed_by_build"), dict)
+                else None
+            ),
+            "min_worker_build": doc.get("min_worker_build"),
+            "claim_ineligible_reason": doc.get("claim_ineligible_reason"),
+            "claim_ineligible_detected_at": cls._status_datetime_to_iso(
+                doc.get("claim_ineligible_detected_at")
+            ),
             "progress": {
                 "current": doc.get("progress_current"),
                 "total": doc.get("progress_total"),
@@ -412,6 +444,13 @@ class WorkflowInstance:
                 "created_at": self.created_at,
                 "started_at": self.started_at,
                 "completed_at": self.completed_at,
+                "locked_by": self.locked_by,
+                "lock_expires_at": self.lock_expires_at,
+                "claimed_at": self.claimed_at,
+                "claimed_by_build": self.claimed_by_build,
+                "min_worker_build": self.min_worker_build,
+                "claim_ineligible_reason": self.claim_ineligible_reason,
+                "claim_ineligible_detected_at": self.claim_ineligible_detected_at,
                 "progress_current": self.progress_current,
                 "progress_total": self.progress_total,
                 "progress_message": self.progress_message,

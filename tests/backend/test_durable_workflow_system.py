@@ -49,6 +49,7 @@ def reset_mock_db(monkeypatch):
             db.drop_collection("workflow_instances")
             db.drop_collection("workflow_schedules")
             db.drop_collection("workflow_event_bindings")
+            db.drop_collection("workflow_workers")
             db.drop_collection("concepts")
             db.drop_collection("text_relations")
             db.drop_collection("text_values")
@@ -1171,6 +1172,185 @@ class TestWorkflowInstanceManager:
         assert claimed.locked_by == "worker-1"
         assert claimed.lock_expires_at is not None
 
+    def test_find_and_claim_stamps_worker_build_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worker claims should persist build provenance for diagnostics."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT", raising=False)
+        manager = WorkflowInstanceManager()
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        claimed = manager.find_and_claim_instance(
+            "worker-build-stamp",
+            worker_build_identity={
+                "version": "v20260620_0100_backend+gabcdef123456",
+                "git_short_commit": "abcdef123456",
+                "git_commit": "abcdef1234567890abcdef1234567890abcdef12",
+                "hostname": "worker-host",
+                "pid": 4242,
+            },
+        )
+
+        assert claimed is not None
+        assert claimed.instance_id == instance_id
+        assert claimed.claimed_at is not None
+        assert claimed.claimed_by_build is not None
+        assert claimed.claimed_by_build["worker_id"] == "worker-build-stamp"
+        assert claimed.claimed_by_build["git_short_commit"] == "abcdef123456"
+        assert claimed.claimed_by_build["hostname"] == "worker-host"
+        assert "abcdef1" in claimed.claimed_by_build["match_tokens"]
+        assert "gabcdef1" in claimed.claimed_by_build["match_tokens"]
+        status_dict = claimed.to_status_dict()
+        assert status_dict["locked_by"] == "worker-build-stamp"
+        assert status_dict["claimed_by_build"]["git_short_commit"] == "abcdef123456"
+
+    def test_find_and_claim_skips_unmatched_min_worker_build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Instances with a required build should fail closed for other workers."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT", raising=False)
+        manager = WorkflowInstanceManager()
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {"$set": {"min_worker_build": "abcdef1"}},
+        )
+
+        claimed = manager.find_and_claim_instance(
+            "worker-old-build",
+            worker_build_identity={
+                "version": "vold_backend+g123456789abc",
+                "git_short_commit": "123456789abc",
+            },
+        )
+
+        assert claimed is None
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.PENDING
+        assert instance.locked_by is None
+
+    def test_find_and_claim_allows_matching_min_worker_build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A required build token can be satisfied by a Git-prefix token."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT", raising=False)
+        manager = WorkflowInstanceManager()
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {"$set": {"min_worker_build": "abcdef1"}},
+        )
+
+        claimed = manager.find_and_claim_instance(
+            "worker-new-build",
+            worker_build_identity={
+                "version": "v20260620_0100_backend+gabcdef123456",
+                "git_short_commit": "abcdef123456",
+            },
+        )
+
+        assert claimed is not None
+        assert claimed.instance_id == instance_id
+        assert claimed.locked_by == "worker-new-build"
+
+    def test_release_ineligible_worker_claims_flags_and_pauses_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The stale-claim reaper should release claims from ineligible builds."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT", raising=False)
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "locked_by": "worker-old-build",
+                    "lock_expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+                    "claimed_by_build": {
+                        "schema_version": "durable_worker_claim_provenance.v1",
+                        "worker_id": "worker-old-build",
+                        "git_short_commit": "123456789abc",
+                        "match_tokens": ["1234567", "123456789abc"],
+                    },
+                    "min_worker_build": "abcdef1",
+                }
+            },
+        )
+
+        released = manager.release_ineligible_worker_claims()
+
+        assert released == 1
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.PAUSED
+        assert instance.locked_by is None
+        assert (
+            instance.claim_ineligible_reason == "worker_build_requirement_not_satisfied"
+        )
+
+    def test_worker_heartbeat_registry_records_build_identity(self) -> None:
+        """Worker registry rows should expose worker id, build, and liveness."""
+        manager = WorkflowInstanceManager()
+
+        success = manager.upsert_worker_heartbeat(
+            worker_id="worker-registry-test",
+            worker_build_identity={
+                "version": "v20260620_0100_backend+gabcdef123456",
+                "git_short_commit": "abcdef123456",
+                "hostname": "registry-host",
+                "pid": 5150,
+            },
+            active_instance_ids=["instance-a"],
+            state="running",
+        )
+
+        assert success is True
+        workers = manager.list_worker_heartbeats()
+        assert len(workers) == 1
+        assert workers[0]["worker_id"] == "worker-registry-test"
+        assert workers[0]["hostname"] == "registry-host"
+        assert workers[0]["active_instance_ids"] == ["instance-a"]
+        assert workers[0]["build"]["git_short_commit"] == "abcdef123456"
+
     def test_claim_and_terminal_updates_record_workflow_episodes(
         self, monkeypatch
     ) -> None:
@@ -1229,11 +1409,7 @@ class TestWorkflowInstanceManager:
         assert collection is not None
         collection.update_one(
             {"instance_id": stale_conversation_instance_id},
-            {
-                "$set": {
-                    "created_at": datetime.now(timezone.utc) - timedelta(days=2)
-                }
-            },
+            {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(days=2)}},
         )
         background_instance_id = manager.create_instance(
             "#V#episode_evaluation_workflow",

@@ -24,6 +24,7 @@ from .failed_output_diagnostics import (
     build_failed_workflow_outputs,
 )
 from .models import WorkflowInstance
+from .worker_identity import build_worker_build_identity
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class DurableWorkflowWorker:
                 process-global live-request-load signal.
         """
         self._worker_id = worker_id or self._generate_worker_id()
+        self._worker_build_identity = build_worker_build_identity(self._worker_id)
         self._instance_manager = instance_manager
         self._registry = registry
         self._definition_loader = definition_loader
@@ -184,9 +186,54 @@ class DurableWorkflowWorker:
         return self._worker_id
 
     @property
+    def worker_build_identity(self) -> dict[str, Any]:
+        """Return the worker build identity stamped on claims."""
+        return dict(self._worker_build_identity)
+
+    @property
     def is_running(self) -> bool:
         """Return True if the worker is running."""
         return self._running
+
+    def _active_instance_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._current_instances.keys())
+
+    def _record_worker_heartbeat(self, *, state: str = "running") -> None:
+        upsert = getattr(self._instance_manager, "upsert_worker_heartbeat", None)
+        if not callable(upsert):
+            return
+        try:
+            upsert(
+                worker_id=self._worker_id,
+                worker_build_identity=self._worker_build_identity,
+                active_instance_ids=self._active_instance_ids(),
+                state=state,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[durable_worker] Worker heartbeat skipped for %s: %s",
+                self._worker_id,
+                exc,
+            )
+
+    def _record_worker_stopped(self) -> None:
+        mark_stopped = getattr(self._instance_manager, "mark_worker_stopped", None)
+        if callable(mark_stopped):
+            try:
+                mark_stopped(
+                    worker_id=self._worker_id,
+                    worker_build_identity=self._worker_build_identity,
+                    active_instance_ids=self._active_instance_ids(),
+                )
+                return
+            except Exception as exc:
+                logger.debug(
+                    "[durable_worker] Worker stopped marker skipped for %s: %s",
+                    self._worker_id,
+                    exc,
+                )
+        self._record_worker_heartbeat(state="stopped")
 
     def set_callbacks(
         self,
@@ -214,6 +261,7 @@ class DurableWorkflowWorker:
         self._running = True
         self._shutdown_event.clear()
         logger.info("[durable_worker] Worker %s starting", self._worker_id)
+        self._record_worker_heartbeat(state="starting")
 
         # Start heartbeat thread
         heartbeat_thread = threading.Thread(
@@ -229,6 +277,7 @@ class DurableWorkflowWorker:
             self._running = False
             self._shutdown_event.set()
             self._wait_for_current_instances()
+            self._record_worker_stopped()
             logger.info("[durable_worker] Worker %s stopped", self._worker_id)
 
     def start_background(self) -> threading.Thread:
@@ -314,6 +363,7 @@ class DurableWorkflowWorker:
             instance = self._instance_manager.find_and_claim_instance(
                 self._worker_id,
                 priority_only=True,
+                worker_build_identity=self._worker_build_identity,
             )
             if instance is None:
                 break
@@ -336,10 +386,16 @@ class DurableWorkflowWorker:
             if not self._running:
                 break
 
-            instance = self._instance_manager.find_and_claim_instance(self._worker_id)
+            instance = self._instance_manager.find_and_claim_instance(
+                self._worker_id,
+                worker_build_identity=self._worker_build_identity,
+            )
             if instance is None:
                 break
             _start_instance(instance)
+
+        if started_count or general_slots:
+            self._record_worker_heartbeat()
 
     def _process_instance(self, instance: WorkflowInstance) -> None:
         """Process a single workflow instance.
@@ -505,8 +561,8 @@ class DurableWorkflowWorker:
             if not self._running:
                 break
 
-            with self._lock:
-                instance_ids = list(self._current_instances.keys())
+            instance_ids = self._active_instance_ids()
+            self._record_worker_heartbeat()
 
             for instance_id in instance_ids:
                 try:
