@@ -7,6 +7,12 @@ from typing import Protocol
 
 from src.backend.services.prompt_template_service import _render_template
 
+_REPRESENTED_SCREEN_BACKFILL_PROMPT = (
+    "Represented screen backfill prompt for tests.\n\n"
+    "Return exactly one <screen> block and follow the Vontology-authored "
+    "screen-backfill policy."
+)
+
 
 class _LLMProtocol(Protocol):
     def generate(self, prompt, context, model) -> str:  # pragma: no cover
@@ -125,6 +131,22 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.PromptTemplateService.render_prompt",
         _render_prompt_stub,
+    )
+
+    def _resolve_prompt_text_stub(self, concept_ids, *, fallback=None, **_kwargs):
+        ids = tuple(concept_ids or ())
+        if "#V#von_screen_content_prompt_for_witbrock" in ids:
+            return (
+                "#V#von_screen_content_prompt_for_witbrock",
+                _REPRESENTED_SCREEN_BACKFILL_PROMPT,
+            )
+        if isinstance(fallback, str) and fallback.strip():
+            return (None, fallback.strip())
+        return (None, None)
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.resolve_prompt_text",
+        _resolve_prompt_text_stub,
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes._set_tool_progress",
@@ -249,6 +271,20 @@ def _find_aux_event(
             f"Missing aux event: {event_type} with reason_code={reason_code}"
         )
     raise AssertionError(f"Missing aux event: {event_type}")
+
+
+def _screen_backfill_context_payload(call: dict) -> dict:
+    assert call["prompt"] == _REPRESENTED_SCREEN_BACKFILL_PROMPT
+    context = call["context"]
+    assert len(context) == 1
+    assert context[0]["role"] == "user"
+    payload = json.loads(context[0]["content"])
+    assert payload["schema_version"] == "presenter_screen_backfill_context.v1"
+    assert payload["stage_concept_id"] == "#V#screen_backfill_stage"
+    assert payload["screen_prompt_concept_ids"] == [
+        "#V#von_screen_content_prompt_for_witbrock"
+    ]
+    return payload
 
 
 def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkeypatch):
@@ -897,7 +933,52 @@ def test_generate_backfills_screen_when_only_spoken_tag_present(monkeypatch):
     assert llm_debug.get("spoken_backfill_second_pass_attempted") is False
 
     assert len(llm.calls) == 2
-    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
+    payload = _screen_backfill_context_payload(llm.calls[1])
+    assert payload["backfill_reason"] == "missing_screen"
+    assert payload["model_response"] == "<spoken>Short talk track.</spoken>"
+
+
+def test_presenter_screen_backfill_fails_closed_when_represented_prompt_missing(
+    monkeypatch,
+):
+    llm = _StubLLM("<spoken>Short talk track.</spoken>")
+    app = _make_app(monkeypatch, llm)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.resolve_prompt_text",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "no_op"
+    assert (
+        screen_backfill_event["source_path"]
+        == "represented_screen_prompt_unavailable"
+    )
+    assert (
+        screen_backfill_event["suppression_reason"]
+        == "represented_screen_prompt_unavailable"
+    )
+    authority_gate_event = _find_aux_event(
+        llm_debug,
+        "presenter_screen_backfill",
+        reason_code="screen_backfill_prompt_unavailable",
+    )
+    assert authority_gate_event["decision_class"] == "presenter_authority_gate"
+    assert authority_gate_event["decision_source"] == "represented_prompt_resolution"
+    assert authority_gate_event["possible_inappropriate_python_code_use"] is False
+    assert len(llm.calls) == 1
 
 
 def test_presenter_mode_reconstructs_tool_messages_from_invocations_when_missing(
@@ -1184,7 +1265,7 @@ def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkey
 
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "success"
-    assert screen_backfill_event["source_path"] == "llm_synthesis"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
     detector_event = _find_aux_event(
         llm_debug,
         "presenter_detector",
@@ -1199,8 +1280,13 @@ def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkey
     assert spoken_backfill_event["source_path"] == "llm_synthesis"
 
     assert len(llm.calls) == 3
-    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
-    assert "internal execution-status text" in llm.calls[1]["context"][1]["content"]
+    payload = _screen_backfill_context_payload(llm.calls[1])
+    serialised_screen_call = json.dumps(llm.calls[1], sort_keys=True)
+    assert "internal execution-status text" not in serialised_screen_call
+    assert "Execution status:" in payload["model_response"]
+    assert payload["rejected_candidate_reasons"][
+        "response_candidate_internal_status"
+    ] is True
     assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
@@ -1689,15 +1775,20 @@ def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypa
     llm_debug = body["llm_debug"]
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "success"
-    assert screen_backfill_event["source_path"] == "llm_synthesis"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
     assert spoken_backfill_event["source_path"] == "llm_synthesis"
 
     assert len(llm.calls) == 3
-    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
-    assert "internal execution-status text" in llm.calls[1]["context"][1]["content"]
+    payload = _screen_backfill_context_payload(llm.calls[1])
+    serialised_screen_call = json.dumps(llm.calls[1], sort_keys=True)
+    assert "internal execution-status text" not in serialised_screen_call
+    assert raw_failure_text in payload["model_response"]
+    assert payload["rejected_candidate_reasons"][
+        "response_candidate_internal_status"
+    ] is True
     assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
@@ -1748,14 +1839,23 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     body = resp.get_json()
 
     screen_text = body["response_channels"]["screen"]
-    assert "Write activity (authoritative):" in screen_text
-    assert "Relationship writes detected" in screen_text
+    assert "Tool results:" in screen_text
     assert "Description updated: YES" not in screen_text
     assert "Description updated: NO" not in screen_text
 
     llm_debug = body["llm_debug"]
     assert llm_debug.get("screen_backfill_second_pass_attempted") is True
     assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "failure"
+    assert (
+        screen_backfill_event["source_path"]
+        == "represented_screen_prompt_suppressed_claim"
+    )
+    assert (
+        screen_backfill_event["suppression_reason"]
+        == "description_claim_without_tool_evidence_suppressed"
+    )
     tool_dump_detector = _find_aux_event(
         llm_debug,
         "presenter_detector",
@@ -1765,7 +1865,9 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     assert tool_dump_detector["context"] == "response_candidate_reuse"
 
     assert len(llm.calls) == 2
-    assert llm.calls[0]["prompt"] == "Generate <screen> display content"
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    assert payload["tool_evidence_summary"]
+    assert payload["rejected_candidate_reasons"]["response_candidate_tool_dump"] is True
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
 
 

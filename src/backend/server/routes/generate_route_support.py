@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass
-from contextlib import nullcontext
-from typing import Any, Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     default_tool_message_threshold_bytes,
 )
+from src.backend.services.python_decision_authority_service import (
+    annotate_python_decision_event,
+)
 
 from ...workflows import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+
+SCREEN_BACKFILL_STAGE_CONCEPT_ID = "#V#screen_backfill_stage"
+SCREEN_BACKFILL_STAGE_PROMPT_IDS = ("#V#von_screen_content_prompt_for_witbrock",)
 
 
 def _is_agent_test_instance() -> bool:
@@ -25,6 +33,212 @@ class _GenerateConversationTurnInstanceState:
     instance_id: str | None = None
     created_new: bool | None = None
     finalised: bool = False
+
+
+def _normalise_prompt_concept_ids(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, Sequence):
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        concept_id = value.strip()
+        if not concept_id or concept_id in seen:
+            continue
+        seen.add(concept_id)
+        ordered.append(concept_id)
+    return ordered
+
+
+def _build_presenter_screen_backfill_context(
+    *,
+    prompt_concept_ids: Sequence[str],
+    backfill_reason: str | None,
+    user_request: str,
+    model_response: str,
+    tool_evidence_summary: str | None,
+    existing_spoken: str | None,
+    required_screen_json_fence: str | None,
+    response_candidate_internal_status: bool,
+    response_candidate_tool_dump: bool,
+    response_candidate_duplicates_spoken: bool,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    prompt_ids = _normalise_prompt_concept_ids(prompt_concept_ids)
+    if not prompt_ids:
+        prompt_ids = list(SCREEN_BACKFILL_STAGE_PROMPT_IDS)
+    payload = {
+        "schema_version": "presenter_screen_backfill_context.v1",
+        "stage_concept_id": SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+        "screen_prompt_concept_ids": prompt_ids,
+        "backfill_reason": backfill_reason,
+        "user_request": user_request,
+        "model_response": model_response,
+        "tool_evidence_summary": tool_evidence_summary,
+        "existing_spoken": existing_spoken,
+        "required_screen_json_fence": required_screen_json_fence,
+        "rejected_candidate_reasons": {
+            "response_candidate_internal_status": bool(
+                response_candidate_internal_status
+            ),
+            "response_candidate_tool_dump": bool(response_candidate_tool_dump),
+            "response_candidate_duplicates_spoken": bool(
+                response_candidate_duplicates_spoken
+            ),
+        },
+    }
+    context_messages = [
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+                default=str,
+            ),
+        }
+    ]
+    context_telemetry = {
+        "schema_version": "presenter_screen_backfill_context_lineage.v1",
+        "stage_concept_id": SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+        "prompt_concept_ids": prompt_ids,
+        "context_payload_schema": "presenter_screen_backfill_context.v1",
+        "context_source": "route_structured_support_payload",
+    }
+    return context_messages, context_telemetry
+
+
+def _build_presenter_screen_backfill_authority_gate_event(
+    *, prompt_concept_ids: Sequence[str], source: str
+) -> dict[str, Any]:
+    return annotate_python_decision_event(
+        {
+            "type": "presenter_screen_backfill",
+            "stage": "screen_backfill",
+            "stage_concept_id": SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+            "requested_prompt_concept_ids": _normalise_prompt_concept_ids(
+                prompt_concept_ids
+            ),
+            "source": source,
+        },
+        stage="screen_backfill",
+        component="presenter_routes",
+        function="_presenter_screen_backfill_authority_gate",
+        decision_class="presenter_authority_gate",
+        decision_source="represented_prompt_resolution",
+        changed_outcome=True,
+        reason_code="screen_backfill_prompt_unavailable",
+        possible_inappropriate_python_code_use=False,
+    )
+
+
+def _invoke_presenter_screen_backfill_prompt(
+    *,
+    orchestrator: Any,
+    llm_client: Any,
+    represented_screen_prompt: str,
+    context_messages: Sequence[Mapping[str, Any]],
+    context_telemetry: Mapping[str, Any],
+    model_name: str,
+    request_language: str,
+    user_concept_id: str | None,
+    org_concept_id: str | None,
+    llm_calls_log: list[dict[str, Any]],
+    auxiliary_llm_calls: list[dict[str, Any]],
+    record_stage_llm_call: Callable[..., None],
+    emit_stage_progress: Callable[[Mapping[str, Any]], None],
+    infer_provider: Callable[[str | None], str | None],
+) -> tuple[Any, str]:
+    screen_model_used = model_name
+    screen_context_messages = [dict(message) for message in context_messages]
+
+    if orchestrator is not None and hasattr(orchestrator, "_run_llm_with_fallbacks"):
+        try:
+            policy_state, registry_snapshot = orchestrator._load_workflow_model_policy(
+                request_language
+            )
+            synthesis_response, screen_model_used, _ = orchestrator._run_llm_with_fallbacks(
+                stage="screen_backfill",
+                prompt=represented_screen_prompt,
+                context=screen_context_messages,
+                default_client=llm_client,
+                default_model=model_name,
+                policy_state=policy_state,
+                registry_snapshot=(
+                    registry_snapshot if isinstance(registry_snapshot, Mapping) else None
+                ),
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls_log,
+                aux_log=auxiliary_llm_calls,
+                record_llm_call=record_stage_llm_call,
+                emit_progress=emit_stage_progress,
+                context_telemetry=context_telemetry,
+                workflow_stage_id=SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+            )
+            return synthesis_response, screen_model_used
+        except Exception:
+            pass
+
+    llm_start = time.perf_counter()
+    emit_stage_progress(
+        {"status": "llm_call_start", "stage": "screen_backfill", "model": model_name}
+    )
+    synthesis_response = llm_client.generate(
+        prompt=represented_screen_prompt,
+        context=screen_context_messages,
+        model=model_name,
+    )
+    screen_duration_ms = (time.perf_counter() - llm_start) * 1000.0
+    emit_stage_progress(
+        {
+            "status": "llm_call_chunk",
+            "stage": "screen_backfill",
+            "model": model_name,
+            "chunks": 1,
+            "duration_ms": int(screen_duration_ms),
+        }
+    )
+    emit_stage_progress(
+        {
+            "status": "llm_call_end",
+            "stage": "screen_backfill",
+            "model": model_name,
+            "duration_ms": int(screen_duration_ms),
+            "success": True,
+            "error": None,
+        }
+    )
+    prompt_ids = _normalise_prompt_concept_ids(
+        context_telemetry.get("prompt_concept_ids")
+    )
+    record_stage_llm_call(
+        call_type="llm.generate",
+        model_name=model_name,
+        duration_ms=screen_duration_ms,
+        usage=None,
+        note="Screen backfill represented prompt invocation.",
+        stage="screen_backfill",
+        workflow_stage_id=SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+        provider=infer_provider(model_name),
+        prompt={
+            "text": represented_screen_prompt,
+            "char_count": len(represented_screen_prompt),
+            "is_truncated": False,
+            "prompt_concept_ids": prompt_ids,
+            "context_messages": screen_context_messages,
+            "context_telemetry": dict(context_telemetry),
+        },
+        response={
+            "text": str(synthesis_response),
+            "char_count": len(str(synthesis_response)),
+            "is_truncated": False,
+        },
+    )
+    return synthesis_response, model_name
 
 
 def _append_generate_conversation_turn_instance_event(
@@ -489,14 +703,17 @@ def _persist_generate_turn_messages(
 ) -> list[dict[str, Any]]:
     def _maybe_span(
         *, operation_name: str, attributes: Mapping[str, Any] | None = None
-    ):
+    ) -> AbstractContextManager[Any]:
         span_fn = getattr(timing_recorder, "span", None)
         if callable(span_fn):
-            return span_fn(
-                stage_id="response_finalising",
-                operation_kind="chat_history_persistence",
-                operation_name=operation_name,
-                attributes=attributes,
+            return cast(
+                AbstractContextManager[Any],
+                span_fn(
+                    stage_id="response_finalising",
+                    operation_kind="chat_history_persistence",
+                    operation_name=operation_name,
+                    attributes=attributes,
+                ),
             )
         return nullcontext()
 

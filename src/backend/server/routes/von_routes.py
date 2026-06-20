@@ -140,11 +140,17 @@ from ...workflows.llm_call_telemetry import (
     stamp_llm_call_timestamps as _stamp_llm_call_timestamps,
 )
 from .generate_route_support import (
+    SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+    SCREEN_BACKFILL_STAGE_PROMPT_IDS,
     _GenerateConversationTurnInstanceState,
+    _build_presenter_screen_backfill_authority_gate_event,
+    _build_presenter_screen_backfill_context,
     _build_generate_error_body,
     _build_generate_error_debug_info,
     _build_generate_success_body,
     _finalise_generate_conversation_turn_instance,
+    _invoke_presenter_screen_backfill_prompt,
+    _normalise_prompt_concept_ids,
     _persist_generate_turn_messages,
     _submit_generate_conversation_turn_instance,
 )
@@ -11431,6 +11437,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         narration_prompt_fragments = []
         screen_prompt_text = None
         screen_prompt_fragments = []
+        screen_prompt_source = None
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
@@ -11439,6 +11446,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "behaviour_prompt_concept_ids": [],
             "narration_prompt_concept_ids": [],
             "screen_prompt_concept_ids": [],
+            "screen_prompt_source": None,
+            "screen_prompt_chars": 0,
         }
         if user_concept_id:
             _emit_context_setup_progress(
@@ -11541,6 +11550,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 screen_prompt_text = (
                     screen_prompt_text.strip() if screen_prompt_text else None
                 )
+                if screen_prompt_text:
+                    screen_prompt_source = "user_specific_screen_prompt"
 
                 if dynamic_instructions:
                     user_prompt_debug["loaded"] = True
@@ -11559,6 +11570,37 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 user_prompt_debug["error"] = str(e)
             _check_background_cancellation("user prompt fragments")
+
+        if not screen_prompt_text:
+            try:
+                resolved_screen_prompt_id, resolved_screen_prompt_text = (
+                    PromptTemplateService(default_max_chars=24000).resolve_prompt_text(
+                        SCREEN_BACKFILL_STAGE_PROMPT_IDS,
+                        fallback=None,
+                        max_chars=24000,
+                    )
+                )
+                if isinstance(resolved_screen_prompt_text, str) and (
+                    resolved_screen_prompt_text.strip()
+                ):
+                    screen_prompt_text = resolved_screen_prompt_text.strip()
+                    screen_prompt_source = "represented_screen_backfill_stage_prompt"
+                    screen_prompt_ids = _normalise_prompt_concept_ids(
+                        user_prompt_debug.get("screen_prompt_concept_ids")
+                    )
+                    if (
+                        isinstance(resolved_screen_prompt_id, str)
+                        and resolved_screen_prompt_id.strip()
+                        and resolved_screen_prompt_id.strip() not in screen_prompt_ids
+                    ):
+                        screen_prompt_ids.append(resolved_screen_prompt_id.strip())
+                    user_prompt_debug["screen_prompt_concept_ids"] = screen_prompt_ids
+            except Exception as e:
+                user_prompt_debug["screen_prompt_error"] = type(e).__name__
+
+        if screen_prompt_text:
+            user_prompt_debug["screen_prompt_source"] = screen_prompt_source
+            user_prompt_debug["screen_prompt_chars"] = len(screen_prompt_text)
 
         deterministic_introspection_enabled = _deterministic_introspection_enabled()
 
@@ -12884,6 +12926,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_backfill_error_class = None
         screen_backfill_applied = False
         screen_backfill_screen_tag_present: bool | None = None
+        screen_backfill_authority_unavailable = False
         needs_screen_backfill = False
         required_screen_json_fence = None
         screen_fence_compat_enabled = get_display_elements_screen_fence_compat_enabled(
@@ -13203,208 +13246,114 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 if screen_candidate is None and allow_llm_screen_synthesis:
                     try:
-                        if has_tool_messages:
-                            synthesis_system = (
-                                "You are Von. Create the on-screen response for the chat UI. "
-                                "Return ONLY one block: <screen>...</screen>. "
-                                "Do not include <spoken>. Do not include JSON. "
-                                "Use New Zealand English spelling. "
-                                "Use only the supplied user request, represented screen prompt, model response, and tool/evidence summary."
+                        represented_screen_prompt = (
+                            screen_prompt_text.strip()
+                            if isinstance(screen_prompt_text, str)
+                            and screen_prompt_text.strip()
+                            else None
+                        )
+                        screen_prompt_ids_for_backfill = _normalise_prompt_concept_ids(
+                            user_prompt_debug.get("screen_prompt_concept_ids")
+                        )
+                        if not screen_prompt_ids_for_backfill:
+                            screen_prompt_ids_for_backfill = list(
+                                SCREEN_BACKFILL_STAGE_PROMPT_IDS
                             )
-                            synthesis_user = (
-                                "User request:\n"
-                                f"{prompt_text}\n\n"
-                                "Model response (may be incomplete; NOT authoritative for tool-backed changes):\n"
-                                f"{response_text}\n\n"
-                                + (
-                                    "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
-                                    "(Applies ONLY to <screen> formatting; it must not override tool-grounded facts.)\n"
-                                    + str(screen_prompt_text).strip()
-                                    + "\n\n"
-                                    if isinstance(screen_prompt_text, str)
-                                    and screen_prompt_text.strip()
-                                    else ""
-                                )
-                                + "Tool/evidence summary:\n"
-                                f"{tool_blob}\n"
-                                + (
-                                    "- The model response contains internal execution diagnostics. Rewrite them into user-facing screen content. "
-                                    "Do not copy raw labels like 'Execution status', 'Blocking effect IDs', 'Unresolved preconditions', "
-                                    "or 'Failure codes' unless the user explicitly asked for diagnostics.\n"
-                                    if response_candidate_internal_status
-                                    else ""
+
+                        if not represented_screen_prompt:
+                            screen_backfill_authority_unavailable = True
+                            screen_backfill_source = (
+                                "represented_screen_prompt_unavailable"
+                            )
+                            auxiliary_llm_calls.append(
+                                _build_presenter_screen_backfill_authority_gate_event(
+                                    prompt_concept_ids=screen_prompt_ids_for_backfill,
+                                    source=screen_backfill_source,
                                 )
                             )
                         else:
-                            synthesis_system = (
-                                "You are Von. Create the on-screen response for the chat UI. "
-                                "Return ONLY one block: <screen>...</screen>. "
-                                "Do not include <spoken>. Do not include JSON. "
-                                "Use New Zealand English spelling. "
-                                "Use only the user request and the model response as sources. "
-                                "Do not invent facts beyond what is stated there."
-                            )
-                            synthesis_user = (
-                                "User request:\n"
-                                f"{prompt_text}\n\n"
-                                "Model response (may be incomplete; use it as content to display):\n"
-                                f"{response_text}\n\n"
-                                + (
-                                    "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
-                                    "(Applies ONLY to <screen> formatting.)\n"
-                                    + str(screen_prompt_text).strip()
-                                    + "\n\n"
-                                    if isinstance(screen_prompt_text, str)
-                                    and screen_prompt_text.strip()
-                                    else ""
-                                )
-                                + (
-                                    "Important:\n"
-                                    "- The model response is internal execution-status text, not final user-facing screen copy.\n"
-                                    "- Rewrite it into a concise user-facing screen answer that explains what happened.\n"
-                                    "- Do not repeat raw labels like 'Execution status', 'Blocking effect IDs', "
-                                    "'Unresolved preconditions', or 'Failure codes' unless the user explicitly asked for diagnostics.\n"
-                                    if response_candidate_internal_status
-                                    else ""
-                                )
+                            (
+                                screen_context_messages,
+                                screen_context_telemetry,
+                            ) = _build_presenter_screen_backfill_context(
+                                prompt_concept_ids=screen_prompt_ids_for_backfill,
+                                backfill_reason=screen_backfill_second_pass_reason,
+                                user_request=prompt_text,
+                                model_response=response_text,
+                                tool_evidence_summary=(
+                                    tool_blob if has_tool_messages else None
+                                ),
+                                existing_spoken=spoken_text,
+                                required_screen_json_fence=required_screen_json_fence,
+                                response_candidate_internal_status=bool(
+                                    response_candidate_internal_status
+                                ),
+                                response_candidate_tool_dump=bool(
+                                    response_candidate_tool_dump
+                                ),
+                                response_candidate_duplicates_spoken=bool(
+                                    response_candidate_duplicates_spoken
+                                ),
                             )
 
-                        synthesis_response = None
-                        if orchestrator is not None and hasattr(
-                            orchestrator, "_run_llm_with_fallbacks"
-                        ):
-                            try:
-                                policy_state, registry_snapshot = (
-                                    orchestrator._load_workflow_model_policy(
-                                        request_language
-                                    )
+                            synthesis_response, screen_model_used = (
+                                _invoke_presenter_screen_backfill_prompt(
+                                    orchestrator=orchestrator,
+                                    llm_client=llm_client,
+                                    represented_screen_prompt=represented_screen_prompt,
+                                    context_messages=screen_context_messages,
+                                    context_telemetry=screen_context_telemetry,
+                                    model_name=model_name,
+                                    request_language=request_language,
+                                    user_concept_id=user_concept_id,
+                                    org_concept_id=org_concept_id,
+                                    llm_calls_log=llm_interaction["calls"],
+                                    auxiliary_llm_calls=auxiliary_llm_calls,
+                                    record_stage_llm_call=_record_stage_llm_call,
+                                    emit_stage_progress=_emit_stage_progress,
+                                    infer_provider=_infer_provider,
                                 )
-                                synthesis_response, screen_model_used, _ = (
-                                    orchestrator._run_llm_with_fallbacks(
-                                        stage="screen_backfill",
-                                        prompt="Generate <screen> display content",
-                                        context=[
-                                            {
-                                                "role": "system",
-                                                "content": synthesis_system,
-                                            },
-                                            {"role": "user", "content": synthesis_user},
-                                        ],
-                                        default_client=llm_client,
-                                        default_model=model_name,
-                                        policy_state=policy_state,
-                                        registry_snapshot=(
-                                            registry_snapshot
-                                            if isinstance(registry_snapshot, Mapping)
-                                            else None
-                                        ),
-                                        user_concept_id=user_concept_id,
-                                        org_concept_id=org_concept_id,
-                                        llm_calls_log=llm_interaction["calls"],
-                                        aux_log=auxiliary_llm_calls,
-                                        record_llm_call=_record_stage_llm_call,
-                                        emit_progress=_emit_stage_progress,
-                                    )
-                                )
-                                screen_backfill_model_id = screen_model_used
-                            except Exception:
-                                synthesis_response = None
-                        if synthesis_response is None:
-                            llm_start = time.perf_counter()
-                            screen_model_used = model_name
+                            )
                             screen_backfill_model_id = screen_model_used
-                            _emit_stage_progress(
-                                {
-                                    "status": "llm_call_start",
-                                    "stage": "screen_backfill",
-                                    "model": screen_model_used,
-                                }
-                            )
-                            synthesis_response = _llm_generate_screen_backfill(
-                                llm_client,
-                                synthesis_system,
-                                synthesis_user,
-                                screen_model_used,
-                            )
-                            screen_duration_ms = (
-                                time.perf_counter() - llm_start
-                            ) * 1000.0
-                            _emit_stage_progress(
-                                {
-                                    "status": "llm_call_chunk",
-                                    "stage": "screen_backfill",
-                                    "model": screen_model_used,
-                                    "chunks": 1,
-                                    "duration_ms": int(screen_duration_ms),
-                                }
-                            )
-                            _emit_stage_progress(
-                                {
-                                    "status": "llm_call_end",
-                                    "stage": "screen_backfill",
-                                    "model": screen_model_used,
-                                    "duration_ms": int(screen_duration_ms),
-                                    "success": True,
-                                    "error": None,
-                                }
-                            )
-                            _record_stage_llm_call(
-                                call_type="llm.generate",
-                                model_name=screen_model_used,
-                                duration_ms=screen_duration_ms,
-                                usage=None,
-                                note="Screen backfill synthesis (legacy).",
-                                stage="screen_backfill",
-                                provider=_infer_provider(screen_model_used),
-                                prompt={
-                                    "text": (
-                                        "System:\n"
-                                        f"{synthesis_system}\n\nUser:\n{synthesis_user}"
-                                    ),
-                                    "char_count": len(
-                                        "System:\n"
-                                        f"{synthesis_system}\n\nUser:\n{synthesis_user}"
-                                    ),
-                                    "is_truncated": False,
-                                },
-                                response={
-                                    "text": str(synthesis_response),
-                                    "char_count": len(str(synthesis_response)),
-                                    "is_truncated": False,
-                                },
-                            )
 
-                        screen_candidate = _extract_screen_only(str(synthesis_response))
-                        if not screen_candidate:
-                            raw = str(synthesis_response).strip()
-                            if raw:
-                                screen_candidate = raw
-                        if screen_candidate:
-                            screen_backfill_source = "llm_synthesis"
-                            auxiliary_llm_calls.append(
-                                annotate_python_decision_event(
-                                    {
-                                        "type": "presenter_screen_backfill",
-                                        "stage": "screen_backfill",
-                                        "source": "llm_synthesis",
-                                        "diagnostic_rewrite": response_candidate_internal_status,
-                                    },
-                                    stage="screen_backfill",
-                                    component="presenter_routes",
-                                    function="_presenter_llm_screen_synthesis",
-                                    decision_class="presenter_fallback",
-                                    decision_source="llm_synthesis",
-                                    changed_outcome=True,
-                                    reason_code=(
-                                        "diagnostic_ledger_rewritten"
-                                        if response_candidate_internal_status
-                                        else "screen_synthesised_from_tools"
-                                    ),
-                                    possible_inappropriate_python_code_use=bool(
-                                        response_candidate_internal_status
-                                    ),
-                                )
+                            screen_candidate = _extract_screen_only(
+                                str(synthesis_response)
                             )
+                            if screen_candidate:
+                                screen_backfill_source = "represented_screen_prompt"
+                                auxiliary_llm_calls.append(
+                                    annotate_python_decision_event(
+                                        {
+                                            "type": "presenter_screen_backfill",
+                                            "stage": "screen_backfill",
+                                            "stage_concept_id": (
+                                                SCREEN_BACKFILL_STAGE_CONCEPT_ID
+                                            ),
+                                            "source": screen_backfill_source,
+                                            "prompt_concept_ids": list(
+                                                screen_prompt_ids_for_backfill
+                                            ),
+                                        },
+                                        stage="screen_backfill",
+                                        component="presenter_routes",
+                                        function="_presenter_llm_screen_synthesis",
+                                        decision_class=(
+                                            "presenter_support_invocation"
+                                        ),
+                                        decision_source=(
+                                            "represented_prompt_authority"
+                                        ),
+                                        changed_outcome=True,
+                                        reason_code=(
+                                            "screen_backfill_prompt_invoked"
+                                        ),
+                                        possible_inappropriate_python_code_use=False,
+                                    )
+                                )
+                            else:
+                                screen_backfill_source = (
+                                    "represented_screen_prompt_invalid_output"
+                                )
                     except Exception as exc:
                         screen_backfill_error_class = type(exc).__name__
                         screen_candidate = None
@@ -13414,7 +13363,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # the deterministic evidence summary instead.
                 if (
                     screen_candidate
-                    and screen_backfill_source == "llm_synthesis"
+                    and screen_backfill_source
+                    in {"llm_synthesis", "represented_screen_prompt"}
                     and not description_write_seen
                     and isinstance(screen_candidate, str)
                 ):
@@ -13431,12 +13381,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         for p in description_claim_patterns
                     ):
                         screen_candidate = None
+                        screen_backfill_source = (
+                            "represented_screen_prompt_suppressed_claim"
+                        )
                         auxiliary_llm_calls.append(
                             annotate_python_decision_event(
                                 {
                                     "type": "presenter_screen_backfill",
                                     "stage": "screen_backfill",
-                                    "source": "llm_synthesis",
+                                    "source": screen_backfill_source,
                                     "suppressed_claim": "description_write_without_tool_evidence",
                                 },
                                 stage="screen_backfill",
@@ -13450,7 +13403,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             )
                         )
 
-                if not screen_candidate:
+                if not screen_candidate and not allow_llm_screen_synthesis:
                     fallback_summary = supplementary_screen_summary or (
                         _build_presenter_screen_summary_from_tool_messages(
                             tool_messages,
@@ -13550,10 +13503,25 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         elif screen_backfill_applied:
             screen_backfill_status = (
                 "success"
-                if screen_backfill_source == "llm_synthesis"
+                if screen_backfill_source
+                in {"llm_synthesis", "represented_screen_prompt"}
                 else "fallback_success"
             )
             screen_backfill_suppression_reason = None
+        elif screen_backfill_authority_unavailable:
+            screen_backfill_status = "no_op"
+            screen_backfill_suppression_reason = "represented_screen_prompt_unavailable"
+            screen_backfill_error_class = None
+        elif screen_backfill_source == "represented_screen_prompt_invalid_output":
+            screen_backfill_status = "failure"
+            screen_backfill_suppression_reason = (
+                "represented_screen_prompt_invalid_output"
+            )
+        elif screen_backfill_source == "represented_screen_prompt_suppressed_claim":
+            screen_backfill_status = "failure"
+            screen_backfill_suppression_reason = (
+                "description_claim_without_tool_evidence_suppressed"
+            )
         elif screen_backfill_error_class:
             screen_backfill_status = "failure"
             screen_backfill_suppression_reason = "model_error"
@@ -18837,17 +18805,6 @@ def _perform_legacy_spoken_backfill(
         spoken_backfill_status,
         spoken_backfill_suppression_reason,
         latency,
-    )
-
-
-def _llm_generate_screen_backfill(llm_client, system, user, model):
-    return llm_client.generate(
-        prompt="Generate <screen> display content",
-        context=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        model=model,
     )
 
 
