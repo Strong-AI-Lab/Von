@@ -37,17 +37,32 @@ function normaliseActiveSource(value) {
   return value === 'openai' || value === 'ollama' ? value : null;
 }
 
-function normaliseModelName(value) {
-  const trimmed = String(value || '').trim();
+function isObjectStringArtifact(value) {
+  return /^\[object\s+[^\]]+\](?:\s|$)/i.test(value);
+}
+
+export function normaliseLocalModelName(value) {
+  if (value == null) return null;
+
+  if (typeof value !== 'string') {
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      value = String(value);
+    } else {
+      return null;
+    }
+  }
+
+  const trimmed = value.trim();
+  if (isObjectStringArtifact(trimmed)) return null;
   return trimmed || null;
 }
 
 function normaliseOllamaSelection(selection) {
   if (!selection || typeof selection !== 'object') return null;
 
-  const value = normaliseModelName(selection.value);
-  const model = normaliseModelName(selection.model);
-  const host = normaliseModelName(selection.host);
+  const value = normaliseLocalModelName(selection.value);
+  const model = normaliseLocalModelName(selection.model);
+  const host = normaliseLocalModelName(selection.host);
 
   if (!value && !model) return null;
 
@@ -66,7 +81,7 @@ function buildCanonicalLocalModelPreference({
   const canonical = {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: normaliseActiveSource(activeSource),
-    openaiModel: normaliseModelName(openaiModel),
+    openaiModel: normaliseLocalModelName(openaiModel),
     ollamaSelection: normaliseOllamaSelection(ollamaSelection),
   };
 
@@ -82,10 +97,8 @@ function cloneLocalModelPreference(preference) {
   return {
     schemaVersion: preference.schemaVersion || LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: preference.activeSource || null,
-    openaiModel: preference.openaiModel || null,
-    ollamaSelection: preference.ollamaSelection
-      ? { ...preference.ollamaSelection }
-      : null,
+    openaiModel: normaliseLocalModelName(preference.openaiModel),
+    ollamaSelection: normaliseOllamaSelection(preference.ollamaSelection),
   };
 }
 
@@ -100,7 +113,7 @@ function normaliseStoredLocalModelPreference(stored) {
 }
 
 function readLegacyLocalModelPreference() {
-  const openaiModel = normaliseModelName(readStoredString(LS_OPENAI_SELECTED_MODEL));
+  const openaiModel = normaliseLocalModelName(readStoredString(LS_OPENAI_SELECTED_MODEL));
   const ollamaSelection = normaliseOllamaSelection(readStoredJson(LS_OLLAMA_SELECTION));
 
   let activeSource = null;
@@ -161,7 +174,7 @@ function persistLocalModelPreference(preference) {
 }
 
 function buildOpenAiRequestedLlm(modelName) {
-  const model = normaliseModelName(modelName);
+  const model = normaliseLocalModelName(modelName);
   if (!model) return null;
 
   return {
@@ -219,20 +232,29 @@ function buildEffectiveLocalModelPreference(preference) {
 }
 
 export function getStoredLocalModelPreference() {
-  const stored = normaliseStoredLocalModelPreference(
-    readStoredJson(LS_LOCAL_MODEL_PREFERENCE),
-  );
+  const rawStored = readStoredJson(LS_LOCAL_MODEL_PREFERENCE);
+  const stored = normaliseStoredLocalModelPreference(rawStored);
   if (stored) {
+    const legacyOpenAiModel = readStoredString(LS_OPENAI_SELECTED_MODEL);
+    const legacyOpenAiModelClean = normaliseLocalModelName(legacyOpenAiModel);
+    const legacyOpenAiModelMismatched = !!legacyOpenAiModel
+      && legacyOpenAiModelClean !== (stored.openaiModel || null);
+    if (JSON.stringify(rawStored) !== JSON.stringify(stored) || legacyOpenAiModelMismatched) {
+      persistLocalModelPreference(stored);
+    }
     return stored;
   }
 
   const migrated = readLegacyLocalModelPreference();
-  if (!migrated) {
-    return null;
+  if (migrated) {
+    persistLocalModelPreference(migrated);
+    return migrated;
   }
 
-  persistLocalModelPreference(migrated);
-  return migrated;
+  if (rawStored) {
+    persistLocalModelPreference(null);
+  }
+  return null;
 }
 
 export function getEffectiveLocalModelPreference() {
@@ -273,7 +295,7 @@ export function setStoredOpenAiSelectedModel(modelName) {
     openaiModel: null,
     ollamaSelection: null,
   };
-  next.openaiModel = normaliseModelName(modelName);
+  next.openaiModel = normaliseLocalModelName(modelName);
   persistLocalModelPreference(next);
 }
 

@@ -112,6 +112,68 @@ describe('local model preferences', () => {
         expect(resolveLocalRequestedLlm()).toBeNull();
     });
 
+    test('does not persist browser events as selected OpenAI models', async () => {
+        const {
+            getStoredLocalModelPreference,
+            getStoredOpenAiSelectedModel,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredOpenAiSelectedModel,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenAiSelectedModel('gpt-5.4-mini');
+        setLocalPremiumModelUseEnabled(true);
+        setStoredOpenAiSelectedModel(new Event('click'));
+
+        expect(getStoredOpenAiSelectedModel()).toBe('');
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: null,
+            ollamaSelection: null,
+        });
+        expect(localStorage.getItem('von:openaiSelectedModel')).toBeNull();
+        expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: null,
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toBeNull();
+    });
+
+    test('cleans object-string OpenAI model artefacts from stored browser preferences', async () => {
+        const {
+            getStoredLocalModelPreference,
+            getStoredOpenAiSelectedModel,
+            resolveLocalRequestedLlm,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: '[object PointerEvent]',
+            ollamaSelection: null,
+        }));
+        localStorage.setItem('von:openaiSelectedModel', '[object PointerEvent]');
+
+        expect(getStoredOpenAiSelectedModel()).toBe('');
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: null,
+            ollamaSelection: null,
+        });
+        expect(localStorage.getItem('von:openaiSelectedModel')).toBeNull();
+        expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: null,
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toBeNull();
+    });
+
     test('marks disabled premium with no Ollama selection as an unavailable local model state', async () => {
         const {
             applyLocalModelPreferenceOverlay,

@@ -1244,6 +1244,12 @@ For local browser acceptance work, the implemented pseudouser path from
   available, disabled, or blocked by non-localhost conditions, and it shows the
   configured pseudouser identity that will be used.
 
+If an older local Settings session shows `[object PointerEvent]` as the OpenAI
+premium model, clear the browser localStorage keys `von:localModelPreference`
+and `von:openaiSelectedModel`, then reopen Settings > Premium Models and verify
+the API key again. Current frontend code also ignores and cleans those corrupted
+values on read, but manual cleanup is useful when validating stale tabs.
+
 ### 7.6 Env-gated live arXiv acceptance
 
 - The paper-representation workflow now has an env-gated live acceptance lane in
