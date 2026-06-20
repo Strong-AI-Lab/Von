@@ -8608,213 +8608,6 @@ def _format_represented_progress_fact_line(fact: Mapping[str, Any]) -> str | Non
     return f"- {label}: `{status}`{suffix}."
 
 
-def _build_presenter_screen_summary_from_tool_messages(
-    tool_messages: list[dict],
-    *,
-    projection_telemetry: dict[str, Any] | None = None,
-) -> str | None:
-    """Deterministic, user-facing summary of tool activity.
-
-    This deliberately avoids embedding raw JSON payloads so it can safely appear
-    in the main chat transcript.
-    """
-
-    if not tool_messages:
-        return None
-
-    import json
-
-    lines: list[str] = []
-    lines.append("Tool activity diagnostics:")
-
-    description_write_seen = False
-    relationship_write_seen = False
-    names_write_seen = False
-    concept_create_seen = False
-    nested_workflow_evidence_seen = False
-    nested_workflow_lines: list[str] = []
-    nested_line_seen: set[str] = set()
-    surfaceable_artefact_lines: list[str] = []
-    surfaceable_artefact_line_seen: set[str] = set()
-    represented_contract_ids: list[str] = []
-    represented_contract_seen: set[str] = set()
-    represented_projection_events: list[dict[str, Any]] = []
-    surfaceable_projection_events: list[dict[str, Any]] = []
-
-    index = 0
-    for msg in tool_messages:
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-
-        parsed = None
-        try:
-            parsed = json.loads(content)
-        except Exception:
-            parsed = None
-
-        if not isinstance(parsed, dict):
-            index += 1
-            lines.append(f"{index}. Tool result (unstructured)")
-            continue
-
-        tool_name = parsed.get("tool") or parsed.get("method") or "tool"
-        status = parsed.get("status")
-        error = parsed.get("error")
-        payload = parsed.get("payload")
-
-        tool_name_text = tool_name.strip() if isinstance(tool_name, str) else ""
-        tool_name_lower = tool_name_text.lower()
-        payload_dict = payload if isinstance(payload, dict) else {}
-
-        if "description" in tool_name_lower:
-            description_write_seen = True
-        predicate = payload_dict.get("predicate")
-        if isinstance(predicate, str) and predicate.strip() in {
-            "hasDescription",
-            "has_description",
-            "#V#hasDescription",
-        }:
-            description_write_seen = True
-        description_value = payload_dict.get("description")
-        if isinstance(description_value, str) and description_value.strip():
-            description_write_seen = True
-
-        if tool_name_lower in {"add_relationship", "remove_relationship"}:
-            relationship_write_seen = True
-        if tool_name_lower in {"add_names", "add_name"}:
-            names_write_seen = True
-        if tool_name_lower in {"create_concepts", "create_concept"}:
-            concept_create_seen = True
-
-        index += 1
-        entry = f"{index}. {tool_name}"
-        if status:
-            entry += f" — {status}"
-        lines.append(entry)
-        if error:
-            lines.append(f"   Error: {error}")
-
-        # Pull out a few common, safe identifiers to help the user.
-        if isinstance(payload, dict):
-            for key in ("concept_id", "identifier", "id", "url", "arxiv_id"):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    lines.append(f"   {key}: {value.strip()}")
-            if tool_name_lower in {"create_concepts", "create_concept"}:
-                concept_labels = _extract_created_concept_labels_from_payload(payload)
-                if concept_labels:
-                    lines.append(f"   created: {', '.join(concept_labels)}")
-
-            surfaceable_evidence = _extract_surfaceable_artefact_tool_evidence(
-                payload,
-                max_lines=12,
-            )
-            surfaceable_telemetry = surfaceable_evidence.get("telemetry")
-            if isinstance(surfaceable_telemetry, Mapping):
-                surfaceable_projection_events.append(dict(surfaceable_telemetry))
-            for surfaceable_line in surfaceable_evidence.get("lines", []):
-                _append_unique_presenter_line(
-                    surfaceable_artefact_lines,
-                    surfaceable_artefact_line_seen,
-                    surfaceable_line,
-                    limit=12,
-                )
-
-            nested_evidence = _extract_nested_workflow_tool_evidence(
-                tool_name_text, payload
-            )
-            nested_workflow_evidence_seen = nested_workflow_evidence_seen or bool(
-                nested_evidence.get("workflow_evidence_seen")
-            )
-            for contract_id in nested_evidence.get("contract_ids") or []:
-                if (
-                    isinstance(contract_id, str)
-                    and contract_id not in represented_contract_seen
-                ):
-                    represented_contract_seen.add(contract_id)
-                    represented_contract_ids.append(contract_id)
-            telemetry = nested_evidence.get("telemetry")
-            if isinstance(telemetry, Mapping):
-                represented_projection_events.append(dict(telemetry))
-            for nested_line in nested_evidence.get("progress_lines", []):
-                _append_unique_presenter_line(
-                    nested_workflow_lines,
-                    nested_line_seen,
-                    nested_line,
-                    limit=12,
-                )
-
-    if index == 0:
-        return None
-
-    if surfaceable_artefact_lines:
-        lines.append("")
-        lines.append("Surfaceable artefact handles:")
-        lines.extend(surfaceable_artefact_lines)
-
-    write_activity_seen = any(
-        (
-            description_write_seen,
-            relationship_write_seen,
-            names_write_seen,
-            concept_create_seen,
-        )
-    )
-    lines.append("")
-    if write_activity_seen:
-        lines.append("Write activity (authoritative):")
-        if description_write_seen:
-            lines.append(
-                "- Description updated: YES (evidence present in tool results)"
-            )
-        if relationship_write_seen:
-            lines.append("- Relationship writes detected")
-        if names_write_seen:
-            lines.append("- Name writes detected")
-        if concept_create_seen:
-            lines.append("- Concept creation detected")
-    elif surfaceable_artefact_lines:
-        lines.append("Write activity notes:")
-        lines.append(
-            "- No top-level write-tool ledger entries were detected; use the artefact handles above as the primary durable-result evidence."
-        )
-    elif nested_workflow_evidence_seen and nested_workflow_lines:
-        lines.append("Top-level write-tool summary was unavailable.")
-        lines.append(
-            "- Use the represented workflow progress facts below for any durable-effect claims."
-        )
-    elif nested_workflow_evidence_seen:
-        lines.append("Nested workflow payloads included no represented progress facts.")
-        lines.append(
-            "- No direct top-level write-tool summary was available; do not infer completion or durable effects from this fallback."
-        )
-    else:
-        lines.append("No write activity was detected in the tool results.")
-
-    if nested_workflow_lines:
-        lines.append("")
-        lines.append("Represented workflow progress facts:")
-        lines.extend(nested_workflow_lines)
-
-    if isinstance(projection_telemetry, dict):
-        projection_telemetry.update(
-            {
-                "schema_version": "presenter_nested_workflow_progress_projection.v1",
-                "contract_ids": represented_contract_ids,
-                "projection_events": represented_projection_events,
-                "fact_count": len(nested_workflow_lines),
-                "workflow_evidence_seen": bool(nested_workflow_evidence_seen),
-                "surfaceable_artefact_handle_count": len(surfaceable_artefact_lines),
-                "surfaceable_projection_events": surfaceable_projection_events,
-            }
-        )
-
-    return "\n".join(lines).strip() or None
-
-
 def _latest_workflow_execution_summary_from_aux_calls(
     aux_calls: Any,
 ) -> dict[str, Any] | None:
@@ -8864,232 +8657,6 @@ def _coerce_non_negative_int(value: Any) -> int:
     except Exception:
         return 0
     return max(0, parsed)
-
-
-def _workflow_execution_summary_has_progress(
-    execution_summary: Mapping[str, Any] | None,
-) -> bool:
-    if not isinstance(execution_summary, Mapping):
-        return False
-    if any(
-        _coerce_non_negative_int(execution_summary.get(key)) > 0
-        for key in (
-            "action_started_count",
-            "action_completed_count",
-            "action_success_count",
-            "action_failure_count",
-            "terminal_effect_count",
-            "durable_side_effect_count",
-            "runtime_event_count",
-            "step_result_envelope_count",
-        )
-    ):
-        return True
-    return any(
-        bool(_progress_str(execution_summary.get(key)))
-        for key in (
-            "workflow_id",
-            "workflow_instance_id",
-            "terminal_status",
-            "final_state",
-            "workflow_instance_status",
-        )
-    )
-
-
-def _build_presenter_workflow_execution_follow_up_summary(
-    workflow_execution_summary: Mapping[str, Any] | None,
-    *,
-    completion_gate: Mapping[str, Any] | None = None,
-) -> str | None:
-    if not _workflow_execution_summary_has_progress(workflow_execution_summary):
-        return None
-
-    summary = workflow_execution_summary or {}
-    completion_gate_map = (
-        completion_gate if isinstance(completion_gate, Mapping) else {}
-    )
-    requires_follow_up = bool(completion_gate_map.get("requires_follow_up", False))
-    safe_to_claim_completion = bool(
-        completion_gate_map.get("safe_to_claim_completion", not requires_follow_up)
-    )
-
-    workflow_id = _progress_str(summary.get("workflow_id"))
-    workflow_instance_id = _progress_str(summary.get("workflow_instance_id"))
-    terminal_status = _progress_str(summary.get("terminal_status"))
-    final_state = _progress_str(summary.get("final_state"))
-    completed = summary.get("completed")
-    effective_completed = summary.get("effective_completed")
-    action_success_count = _coerce_non_negative_int(summary.get("action_success_count"))
-    action_failure_count = _coerce_non_negative_int(summary.get("action_failure_count"))
-    action_unknown_count = _coerce_non_negative_int(summary.get("action_unknown_count"))
-    action_completed_count = _coerce_non_negative_int(
-        summary.get("action_completed_count")
-    )
-    terminal_effect_count = _coerce_non_negative_int(
-        summary.get("terminal_effect_count")
-    )
-    durable_side_effect_count = _coerce_non_negative_int(
-        summary.get("durable_side_effect_count")
-    )
-
-    if terminal_status:
-        outcome = f"The selected workflow reached terminal status `{terminal_status}`."
-    elif isinstance(completed, bool):
-        outcome = (
-            "The selected workflow reported completion."
-            if completed
-            else "The selected workflow reported that it did not complete."
-        )
-    else:
-        outcome = "The selected workflow produced execution evidence."
-
-    lines = ["Workflow-backed outcome:", outcome]
-    detail_bits: list[str] = []
-    if workflow_id:
-        detail_bits.append(f"workflow `{workflow_id}`")
-    if workflow_instance_id:
-        detail_bits.append(f"instance `{workflow_instance_id}`")
-    if final_state:
-        detail_bits.append(f"final state `{final_state}`")
-    if isinstance(effective_completed, bool):
-        detail_bits.append(f"effective completed: {str(effective_completed).lower()}")
-    if detail_bits:
-        lines.append(f"- {'; '.join(detail_bits)}")
-
-    action_bits: list[str] = []
-    if action_completed_count > 0:
-        action_bits.append(f"{action_completed_count} completed")
-    if action_success_count > 0:
-        action_bits.append(f"{action_success_count} succeeded")
-    if action_failure_count > 0:
-        action_bits.append(f"{action_failure_count} failed")
-    if action_unknown_count > 0:
-        action_bits.append(f"{action_unknown_count} unknown")
-    if action_bits:
-        lines.append(f"- Actions: {', '.join(action_bits)}")
-    lines.append(f"- Terminal effects observed: {terminal_effect_count}")
-    lines.append(f"- Durable side effects observed: {durable_side_effect_count}")
-
-    if requires_follow_up or not safe_to_claim_completion:
-        lines.append("")
-        lines.append(
-            "Verification still needs follow-up before Von should claim the user task is complete."
-        )
-        blocking_failure_codes: list[str] = []
-        for item in completion_gate_map.get("blocking_failure_codes", []):
-            blocking_failure_code = _progress_str(item)
-            if blocking_failure_code:
-                blocking_failure_codes.append(blocking_failure_code)
-        if blocking_failure_codes:
-            lines.append(
-                "- Blocking failure codes: " + ", ".join(blocking_failure_codes)
-            )
-        unresolved_preconditions = completion_gate_map.get("unresolved_preconditions")
-        if isinstance(unresolved_preconditions, list):
-            unresolved_bits: list[str] = []
-            for item in unresolved_preconditions:
-                if not isinstance(item, Mapping):
-                    continue
-                effect_type = _progress_str(item.get("effect_type"))
-                status = _progress_str(item.get("status"))
-                status_reason = _progress_str(item.get("status_reason"))
-                bit = " ".join(value for value in (effect_type, status) if value)
-                if status_reason:
-                    bit = f"{bit}: {status_reason}" if bit else status_reason
-                if bit:
-                    unresolved_bits.append(bit)
-            if unresolved_bits:
-                lines.append("- Unresolved evidence: " + "; ".join(unresolved_bits[:4]))
-
-    return "\n".join(lines).strip()
-
-
-def _build_presenter_follow_up_summary_from_tool_messages(
-    tool_messages: list[dict],
-    *,
-    completion_gate: Mapping[str, Any] | None = None,
-    auxiliary_llm_calls: list[dict[str, Any]] | None = None,
-    workflow_execution_summary: Mapping[str, Any] | None = None,
-) -> str | None:
-    """Build one shared presenter summary basis for incomplete tool turns."""
-
-    tool_summary = _build_presenter_screen_summary_from_tool_messages(tool_messages)
-    if workflow_execution_summary is None:
-        workflow_execution_summary = _latest_workflow_execution_summary_from_aux_calls(
-            auxiliary_llm_calls
-        )
-    workflow_summary = _build_presenter_workflow_execution_follow_up_summary(
-        workflow_execution_summary,
-        completion_gate=completion_gate,
-    )
-    if not isinstance(completion_gate, Mapping):
-        return (
-            "\n\n".join(item for item in (workflow_summary, tool_summary) if item)
-            or None
-        )
-
-    requires_follow_up = bool(completion_gate.get("requires_follow_up", False))
-    safe_to_claim_completion = bool(
-        completion_gate.get("safe_to_claim_completion", not requires_follow_up)
-    )
-    if not requires_follow_up and safe_to_claim_completion:
-        return (
-            "\n\n".join(item for item in (workflow_summary, tool_summary) if item)
-            or None
-        )
-
-    if workflow_summary:
-        lines = [workflow_summary]
-    else:
-        lines = [
-            "I ran tools for this request, but I do not have a reliable final answer yet.",
-            "This turn still needs follow-up before it should be treated as complete.",
-        ]
-
-    decision_reason = _progress_str(completion_gate.get("decision_reason"))
-    decision_reason_is_internal_status = _looks_like_internal_status_diagnostic(
-        decision_reason
-    )
-    decision_reason_is_overbroad_mutation_status = bool(
-        workflow_summary
-        and decision_reason
-        and decision_reason.strip().lower()
-        in {
-            "required mutation was not executed.",
-            "mutation attempt failed or was blocked.",
-        }
-    )
-    if decision_reason and decision_reason_is_internal_status:
-        _append_presenter_detector_event(
-            auxiliary_llm_calls,
-            function_name="_build_presenter_follow_up_summary_from_tool_messages",
-            detector="internal_status_diagnostic",
-            context="follow_up_decision_reason",
-            reason_code="follow_up_decision_reason_suppressed",
-            preview=decision_reason,
-        )
-    if decision_reason and decision_reason_is_overbroad_mutation_status:
-        _append_presenter_detector_event(
-            auxiliary_llm_calls,
-            function_name="_build_presenter_follow_up_summary_from_tool_messages",
-            detector="workflow_execution_reconciled",
-            context="follow_up_decision_reason",
-            reason_code="overbroad_mutation_status_replaced_by_workflow_evidence",
-            preview=decision_reason,
-        )
-    if (
-        decision_reason
-        and not decision_reason_is_internal_status
-        and not decision_reason_is_overbroad_mutation_status
-    ):
-        lines.append(decision_reason)
-
-    if tool_summary:
-        lines.append("")
-        lines.append(tool_summary)
-
-    return "\n\n".join(line.strip() for line in lines if line and line.strip())
 
 
 def _build_tool_messages_prompt_blob(
@@ -12825,6 +12392,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
         completion_gate_summary = _latest_turn_completion_gate(auxiliary_llm_calls)
+        completion_gate_blocks_response_reuse = False
         if isinstance(response_text, str) and isinstance(
             completion_gate_summary, Mapping
         ):
@@ -12836,10 +12404,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "safe_to_claim_completion", not gate_requires_follow_up
                 )
             )
+            completion_gate_blocks_response_reuse = (
+                gate_requires_follow_up or not gate_safe_to_claim_completion
+            )
             if gate_safe_to_claim_completion and not gate_requires_follow_up:
                 response_text = strip_completion_ledger_suffix(response_text)
 
         presenter_channels = _extract_presenter_channels(response_text)
+        if completion_gate_blocks_response_reuse and isinstance(
+            presenter_channels, dict
+        ):
+            presenter_channels = {
+                key: value
+                for key, value in presenter_channels.items()
+                if key != "screen"
+            }
 
         # Publish a compact background result as soon as the supervised
         # workflow has produced the response. The rest of this route still
@@ -13129,44 +12708,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     else False
                 )
 
-                def _append_operational_summary(
-                    base_text: str,
-                    summary_text: str | None,
-                ) -> str:
-                    cleaned_base = str(base_text or "").strip()
-                    cleaned_summary = str(summary_text or "").strip()
-                    if not cleaned_summary:
-                        return cleaned_base
-                    if not cleaned_base:
-                        return cleaned_summary
-                    if cleaned_summary in cleaned_base:
-                        return cleaned_base
-                    return f"{cleaned_base}\n\nOperational summary:\n{cleaned_summary}"
-
                 screen_candidate = None
                 screen_backfill_source = None
-                follow_up_screen_summary = None
-                supplementary_screen_summary = None
-                tool_summary_projection_telemetry: dict[str, Any] = {}
-                if has_tool_messages and isinstance(completion_gate_summary, Mapping):
-                    requires_follow_up = bool(
-                        completion_gate_summary.get("requires_follow_up", False)
+                workflow_execution_summary_for_backfill = (
+                    _latest_workflow_execution_summary_from_aux_calls(
+                        auxiliary_llm_calls
                     )
-                    safe_to_claim_completion = bool(
-                        completion_gate_summary.get(
-                            "safe_to_claim_completion", not requires_follow_up
-                        )
-                    )
-                    if requires_follow_up or not safe_to_claim_completion:
-                        follow_up_screen_summary = (
-                            _build_presenter_follow_up_summary_from_tool_messages(
-                                tool_messages,
-                                completion_gate=completion_gate_summary,
-                                auxiliary_llm_calls=auxiliary_llm_calls,
-                            )
-                        )
-                if follow_up_screen_summary:
-                    supplementary_screen_summary = follow_up_screen_summary
+                )
                 response_candidate = _strip_presenter_tags(response_text)
                 response_candidate_internal_status = (
                     _looks_like_internal_status_diagnostic(response_candidate)
@@ -13212,34 +12760,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     and not response_candidate_duplicates_spoken
                     and not response_candidate_tool_dump
                     and not response_candidate_internal_status
+                    and not completion_gate_blocks_response_reuse
                 ):
-                    screen_candidate = _append_operational_summary(
-                        response_candidate,
-                        supplementary_screen_summary,
-                    )
-                    screen_backfill_source = (
-                        "response_text_plus_follow_up_summary"
-                        if supplementary_screen_summary
-                        else "response_text"
-                    )
-                    if supplementary_screen_summary:
-                        auxiliary_llm_calls.append(
-                            annotate_python_decision_event(
-                                {
-                                    "type": "presenter_screen_backfill",
-                                    "stage": "screen_backfill",
-                                    "source": "response_text_plus_follow_up_summary",
-                                },
-                                stage="screen_backfill",
-                                component="presenter_routes",
-                                function="_build_presenter_follow_up_summary_from_tool_messages",
-                                decision_class="presenter_fallback",
-                                decision_source="structural_pattern_detection",
-                                changed_outcome=True,
-                                reason_code="response_text_supplemented_with_follow_up_summary",
-                                possible_inappropriate_python_code_use=True,
-                            )
-                        )
+                    screen_candidate = response_candidate.strip()
+                    screen_backfill_source = "response_text"
                 allow_llm_screen_synthesis = os.getenv(
                     "VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "1"
                 ).lower() in {"1", "true"}
@@ -13293,6 +12817,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 ),
                                 response_candidate_duplicates_spoken=bool(
                                     response_candidate_duplicates_spoken
+                                ),
+                                completion_gate=(
+                                    completion_gate_summary
+                                    if isinstance(completion_gate_summary, Mapping)
+                                    else None
+                                ),
+                                workflow_execution_summary=(
+                                    workflow_execution_summary_for_backfill
+                                ),
+                                response_candidate_blocked_by_completion_gate=(
+                                    completion_gate_blocks_response_reuse
                                 ),
                             )
 
@@ -13403,54 +12938,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             )
                         )
 
-                if not screen_candidate and not allow_llm_screen_synthesis:
-                    fallback_summary = supplementary_screen_summary or (
-                        _build_presenter_screen_summary_from_tool_messages(
-                            tool_messages,
-                            projection_telemetry=tool_summary_projection_telemetry,
-                        )
-                    )
-                    if fallback_summary:
-                        screen_candidate = _append_operational_summary(
-                            "",
-                            fallback_summary,
-                        )
-                        screen_backfill_source = (
-                            "follow_up_summary"
-                            if supplementary_screen_summary
-                            else "tool_summary"
-                        )
-                        reason_code = (
-                            "tool_backed_follow_up_summary"
-                            if supplementary_screen_summary
-                            else "tool_activity_summary_fallback"
-                        )
-                        auxiliary_llm_calls.append(
-                            annotate_python_decision_event(
-                                {
-                                    "type": "presenter_screen_backfill",
-                                    "stage": "screen_backfill",
-                                    "source": screen_backfill_source,
-                                    "represented_evidence_projection": (
-                                        dict(tool_summary_projection_telemetry)
-                                        if tool_summary_projection_telemetry
-                                        else None
-                                    ),
-                                },
-                                stage="screen_backfill",
-                                component="presenter_routes",
-                                function=(
-                                    "_build_presenter_follow_up_summary_from_tool_messages"
-                                    if supplementary_screen_summary
-                                    else "_build_presenter_screen_summary_from_tool_messages"
-                                ),
-                                decision_class="presenter_fallback",
-                                decision_source="structural_pattern_detection",
-                                changed_outcome=True,
-                                reason_code=reason_code,
-                                possible_inappropriate_python_code_use=True,
-                            )
-                        )
+                if (
+                    not screen_candidate
+                    and not allow_llm_screen_synthesis
+                    and completion_gate_blocks_response_reuse
+                ):
+                    screen_backfill_source = "represented_screen_prompt_disabled"
 
                 if screen_candidate:
                     if screen_fence_compat_enabled:
@@ -13466,15 +12959,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     base_channels["screen"] = str(screen_candidate).strip()
                     if screen_backfill_source == "response_text":
                         base_channels["format"] = "screen_backfill_from_response_v1"
-                    elif (
-                        screen_backfill_source == "response_text_plus_follow_up_summary"
-                    ):
+                    elif screen_backfill_source == "represented_screen_prompt":
                         base_channels["format"] = (
-                            "screen_backfill_from_response_with_operational_summary_v1"
-                        )
-                    elif screen_backfill_source == "follow_up_summary":
-                        base_channels["format"] = (
-                            "screen_backfill_from_follow_up_summary_v1"
+                            "screen_backfill_from_represented_prompt_v1"
                         )
                     else:
                         base_channels["format"] = "screen_backfill_from_tools_v1"
@@ -13512,6 +12999,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             screen_backfill_status = "no_op"
             screen_backfill_suppression_reason = "represented_screen_prompt_unavailable"
             screen_backfill_error_class = None
+        elif screen_backfill_source == "represented_screen_prompt_disabled":
+            screen_backfill_status = "no_op"
+            screen_backfill_suppression_reason = "represented_screen_prompt_disabled"
         elif screen_backfill_source == "represented_screen_prompt_invalid_output":
             screen_backfill_status = "failure"
             screen_backfill_suppression_reason = (
@@ -13848,7 +13338,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             if isinstance(presenter_channels, dict)
                             else {}
                         )
-                        base_channels["screen"] = screen_text
+                        if not completion_gate_blocks_response_reuse:
+                            base_channels["screen"] = screen_text
                         base_channels["spoken"] = spoken_fallback
                         existing_format = base_channels.get("format")
                         # Preserve formats that describe *how the screen* was produced.

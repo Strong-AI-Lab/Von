@@ -182,8 +182,8 @@ def test_completion_ledger_injection_annotation_envelope() -> None:
     assert event["ledger_replaced_empty_response"] is True
 
 
-def test_presenter_fallback_uses_structural_pattern_detection() -> None:
-    """Presenter fallback decision_source is structural, not semantic."""
+def test_presenter_screen_backfill_invocation_uses_represented_prompt_authority() -> None:
+    """Presenter screen wording belongs to the represented prompt authority."""
     from src.backend.services.python_decision_authority_service import (
         annotate_python_decision_event,
     )
@@ -192,27 +192,21 @@ def test_presenter_fallback_uses_structural_pattern_detection() -> None:
         {
             "type": "presenter_screen_backfill",
             "stage": "screen_backfill",
-            "source": "follow_up_summary",
+            "source": "represented_screen_prompt",
         },
         stage="screen_backfill",
         component="presenter_routes",
-        function="_build_presenter_follow_up_summary_from_tool_messages",
-        decision_class="presenter_fallback",
-        decision_source="structural_pattern_detection",
+        function="_presenter_llm_screen_synthesis",
+        decision_class="presenter_support_invocation",
+        decision_source="represented_prompt_authority",
         changed_outcome=True,
-        reason_code="tool_backed_follow_up_summary",
-        possible_inappropriate_python_code_use=True,
+        reason_code="screen_backfill_prompt_invoked",
+        possible_inappropriate_python_code_use=False,
     )
 
-    assert event["decision_source"] == "structural_pattern_detection"
-    assert event["possible_inappropriate_python_code_use"] is True
-    # structural_pattern_detection is NOT in _PROMPT_SEMANTIC_DECISION_SOURCES
-    # but we explicitly set possible_inappropriate=True because it changes
-    # user-visible meaning
-    from src.backend.services.python_decision_authority_service import (
-        _PROMPT_SEMANTIC_DECISION_SOURCES,
-    )
-    assert "structural_pattern_detection" not in _PROMPT_SEMANTIC_DECISION_SOURCES
+    assert event["decision_source"] == "represented_prompt_authority"
+    assert event["possible_inappropriate_python_code_use"] is False
+    assert event["decision_class"] == "presenter_support_invocation"
 
 
 def test_llm_screen_synthesis_annotation_envelope() -> None:

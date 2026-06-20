@@ -924,7 +924,7 @@ def test_generate_backfills_screen_when_only_spoken_tag_present(monkeypatch):
     assert body["response_channels"] == {
         "screen": "Expanded on-screen answer with detail.",
         "spoken": "Short talk track.",
-        "format": "screen_backfill_from_tools_v1",
+        "format": "screen_backfill_from_represented_prompt_v1",
     }
 
     llm_debug = body["llm_debug"]
@@ -986,9 +986,12 @@ def test_presenter_mode_reconstructs_tool_messages_from_invocations_when_missing
 ):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
-
-    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    llm = _StubLLMSequence(
+        [
+            "<screen>Represented follow-up screen.</screen>",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
     app = _make_app(monkeypatch, llm)
 
     aux_llm_calls = (
@@ -1037,15 +1040,28 @@ def test_presenter_mode_reconstructs_tool_messages_from_invocations_when_missing
     body = resp.get_json()
 
     screen_text = body["response_channels"]["screen"]
-    assert "I ran tools for this request" in screen_text
-    assert "Tool activity diagnostics:" in screen_text
-    assert "gmail_get_message" in screen_text
+    assert screen_text == "Represented follow-up screen."
+    assert "I ran tools for this request" not in screen_text
+    assert "Tool activity diagnostics:" not in screen_text
 
     llm_debug = body["llm_debug"]
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
-    assert screen_backfill_event["status"] == "fallback_success"
-    assert screen_backfill_event["source_path"] == "follow_up_summary"
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
     assert screen_backfill_event["input_summary"]["tool_message_count"] == 1
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    assert payload["completion_gate"]["requires_follow_up"] is True
+    assert payload["completion_gate"]["safe_to_claim_completion"] is False
+    assert payload["completion_gate"]["blocking_effect_ids"] == [
+        "effect_email_resolution_1"
+    ]
+    assert (
+        payload["rejected_candidate_reasons"][
+            "response_candidate_blocked_by_completion_gate"
+        ]
+        is True
+    )
+    assert "gmail_get_message" in payload["tool_evidence_summary"]
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
@@ -1057,9 +1073,12 @@ def test_presenter_mode_uses_workflow_execution_evidence_for_follow_up_screen(
 ):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
-
-    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    llm = _StubLLMSequence(
+        [
+            "<screen>Represented workflow follow-up screen.</screen>",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
     app = _make_app(monkeypatch, llm)
 
     aux_llm_calls = (
@@ -1124,11 +1143,9 @@ def test_presenter_mode_uses_workflow_execution_evidence_for_follow_up_screen(
     body = resp.get_json()
 
     screen_text = body["response_channels"]["screen"]
-    assert "Workflow-backed outcome:" in screen_text
-    assert "terminal status `completed`" in screen_text
-    assert "instance `instance-123`" in screen_text
-    assert "Verification still needs follow-up" in screen_text
-    assert "required_tool_not_planned" in screen_text
+    assert screen_text == "Represented workflow follow-up screen."
+    assert "Workflow-backed outcome:" not in screen_text
+    assert "Verification still needs follow-up" not in screen_text
     assert "I do not yet have a complete workflow-backed answer" not in screen_text
     assert "Required mutation was not executed" not in screen_text
 
@@ -1136,7 +1153,34 @@ def test_presenter_mode_uses_workflow_execution_evidence_for_follow_up_screen(
         body["llm_debug"],
         "screen_backfill",
     )
-    assert screen_backfill_event["source_path"] == "follow_up_summary"
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    assert payload["workflow_execution"] == {
+        "schema_version": "workflow_execution_presenter_context.v1",
+        "workflow_id": "#V#example_workflow",
+        "workflow_instance_id": "instance-123",
+        "completed": True,
+        "effective_completed": True,
+        "terminal_status": "completed",
+        "final_state": "#V#workflow_done",
+        "action_completed_count": 11,
+        "action_success_count": 11,
+        "action_failure_count": 0,
+        "terminal_effect_count": 0,
+        "durable_side_effect_count": 0,
+    }
+    assert payload["completion_gate"]["blocking_failure_codes"] == [
+        "required_tool_not_planned",
+        "mutation_succeeded_readback_missing",
+    ]
+    assert payload["completion_gate"]["unresolved_preconditions"] == [
+        {
+            "effect_type": "required_evidence",
+            "status": "not_executed",
+            "status_reason": "Required read-back evidence was missing.",
+        }
+    ]
 
 
 def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
@@ -1422,14 +1466,19 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
     assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
 
 
-def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
+def test_presenter_mode_sends_follow_up_facts_to_represented_screen_prompt(
     monkeypatch,
 ):
     import json
 
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    llm = _StubLLMSequence(
+        [
+            "<screen>Represented paper-status follow-up.</screen>",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
     app = _make_app(monkeypatch, llm)
 
     tool_messages = [
@@ -1485,20 +1534,15 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
 
     screen_text = body["response_channels"]["screen"]
     assert body["response"] == screen_text
+    assert screen_text == "Represented paper-status follow-up."
     assert body["response_channels"]["spoken"] == "Short talk track."
-    assert body["response_channels"]["format"].startswith("screen_backfill_")
-    assert "Plain response without presenter tags." in screen_text
-    assert "Operational summary:" in screen_text
     assert (
-        "This turn still needs follow-up before it should be treated as complete."
-        in screen_text
+        body["response_channels"]["format"]
+        == "screen_backfill_from_represented_prompt_v1"
     )
-    assert (
-        "The tool path did not complete the requested paper-status analysis."
-        in screen_text
-    )
-    assert "Tool activity diagnostics:" in screen_text
-    assert "search_concepts — ok" in screen_text
+    assert "Plain response without presenter tags." not in screen_text
+    assert "Operational summary:" not in screen_text
+    assert "Tool activity diagnostics:" not in screen_text
 
     llm_debug = body["llm_debug"]
     assert llm_debug.get("screen_backfill_second_pass_attempted") is True
@@ -1507,24 +1551,37 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
     assert llm_debug.get("spoken_backfill_second_pass_reason") == "missing_spoken"
 
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
-    assert screen_backfill_event["status"] == "fallback_success"
-    assert (
-        screen_backfill_event["source_path"] == "response_text_plus_follow_up_summary"
-    )
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
     assert spoken_backfill_event["source_path"] == "llm_synthesis"
 
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
+    assert len(llm.calls) == 2
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    assert payload["model_response"] == "Plain response without presenter tags."
+    assert payload["completion_gate"] == {
+        "schema_version": "turn_completion_gate_presenter_context.v1",
+        "decision": "escalation_required",
+        "decision_reason": (
+            "The tool path did not complete the requested paper-status analysis."
+        ),
+        "requires_follow_up": True,
+        "safe_to_claim_completion": False,
+        "blocking_effect_ids": ["effect_paper_representation_1"],
+    }
     assert (
-        "I ran tools for this request, but I do not have a reliable final answer yet."
-        in llm.calls[0]["context"][1]["content"]
+        payload["rejected_candidate_reasons"][
+            "response_candidate_blocked_by_completion_gate"
+        ]
+        is True
     )
+    assert "search_concepts" in payload["tool_evidence_summary"]
+    assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
 
 
-def test_presenter_mode_fails_closed_without_represented_nested_progress_facts(
+def test_presenter_mode_fails_closed_when_follow_up_prompt_is_disabled(
     monkeypatch,
 ):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
@@ -1617,22 +1674,27 @@ def test_presenter_mode_fails_closed_without_represented_nested_progress_facts(
 
     assert resp.status_code == 200
     body = resp.get_json()
-    screen_text = body["response_channels"]["screen"]
+    channels = body["response_channels"]
+    screen_text = channels.get("screen") if isinstance(channels, dict) else None
 
-    assert "Nested workflow payloads included no represented progress facts" in screen_text
-    assert "Representation/read-back verified" not in screen_text
-    assert "#V#paper_nested" not in screen_text
-    assert "`gmail_modify_labels` reported gmail_api_error" not in screen_text
-    assert "Profile scopes do not include gmail.modify" not in screen_text
-    assert "required workflow_execute-based" not in screen_text
+    assert not screen_text
+    screen_backfill_event = _find_transformation_event(
+        body["llm_debug"],
+        "screen_backfill",
+    )
+    assert screen_backfill_event["status"] == "no_op"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt_disabled"
+    assert (
+        screen_backfill_event["suppression_reason"]
+        == "represented_screen_prompt_disabled"
+    )
+    assert channels.get("screen") is None
 
 
 def test_presenter_mode_surfaces_represented_nested_progress_facts(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
-
-    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    llm = _StubLLMSequence(["<screen>Represented progress screen.</screen>"])
     app = _make_app(monkeypatch, llm)
 
     progress_facts = [
@@ -1696,9 +1758,7 @@ def test_presenter_mode_surfaces_represented_nested_progress_facts(monkeypatch):
         }
     ]
     orchestrator_result = OrchestratorResult(
-        response_text=(
-            "I ran tools for this request, but I do not have a reliable final answer yet."
-        ),
+        response_text="<spoken>Short talk track.</spoken>",
         extra_messages=tool_messages,
         tool_invocations=(),
         aux_llm_calls=(),
@@ -1715,26 +1775,25 @@ def test_presenter_mode_surfaces_represented_nested_progress_facts(monkeypatch):
     body = resp.get_json()
     screen_text = body["response_channels"]["screen"]
 
-    assert "Represented workflow progress facts:" in screen_text
-    assert "Represented read-back: `#V#paper_nested`" in screen_text
-    assert "#V#represented_readback_fact" in screen_text
-    assert "Label mutation blocker" in screen_text
-    assert "Profile scopes do not include gmail.modify" in screen_text
+    assert screen_text == "Represented progress screen."
     assert "#V#not_policy" not in screen_text
     assert "Representation/read-back verified" not in screen_text
     assert "`gmail_modify_labels` reported gmail_api_error" not in screen_text
 
-    backfill_event = _find_aux_event(
+    screen_backfill_event = _find_transformation_event(
         body["llm_debug"],
-        "presenter_screen_backfill",
-        reason_code="tool_activity_summary_fallback",
+        "screen_backfill",
     )
-    projection = backfill_event["represented_evidence_projection"]
-    assert projection["contract_ids"] == [
-        "#V#represented_readback_fact",
-        "#V#label_mutation_blocker_fact",
-    ]
-    assert projection["fact_count"] == 2
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    tool_evidence_summary = payload["tool_evidence_summary"]
+    assert "REPRESENTED WORKFLOW PROGRESS FACTS:" in tool_evidence_summary
+    assert "Represented read-back: `#V#paper_nested`" in tool_evidence_summary
+    assert "#V#represented_readback_fact" in tool_evidence_summary
+    assert "Label mutation blocker" in tool_evidence_summary
+    assert "Profile scopes do not include gmail.modify" in tool_evidence_summary
+    assert "#V#not_policy" not in tool_evidence_summary
 
 
 def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypatch):
@@ -1871,16 +1930,14 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
 
 
-def test_presenter_mode_tool_summary_fallback_surfaces_verified_artefact_handle(
+def test_presenter_mode_passes_verified_artefact_handle_to_represented_prompt(
     monkeypatch,
 ):
     import json
 
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    monkeypatch.setenv("VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "0")
-
-    llm = _StubLLM("<spoken>Short talk track.</spoken>")
+    llm = _StubLLM("<screen>Represented dataset screen.</screen>")
     app = _make_app(monkeypatch, llm)
 
     tool_payload = {
@@ -1912,75 +1969,50 @@ def test_presenter_mode_tool_summary_fallback_surfaces_verified_artefact_handle(
     body = resp.get_json()
 
     screen_text = body["response_channels"]["screen"]
-    assert "Surfaceable artefact handles:" in screen_text
-    assert "Verified dataset concept: #V#symmetry_dataset_representation" in screen_text
-    assert "Write activity notes:" in screen_text
+    assert screen_text == "Represented dataset screen."
+    assert "Surfaceable artefact handles:" not in screen_text
     assert "No write activity was detected" not in screen_text
     assert "Description updated: NO" not in screen_text
-
-
-def test_follow_up_summary_suppresses_internal_status_reason_with_detector_event():
-    from src.backend.server.routes.von_routes import (
-        _build_presenter_follow_up_summary_from_tool_messages,
+    screen_backfill_event = _find_transformation_event(
+        body["llm_debug"],
+        "screen_backfill",
+    )
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "represented_screen_prompt"
+    payload = _screen_backfill_context_payload(llm.calls[0])
+    tool_evidence_summary = payload["tool_evidence_summary"]
+    assert "SURFACEABLE ARTEFACT HANDLES" in tool_evidence_summary
+    assert (
+        "Verified dataset concept: #V#symmetry_dataset_representation"
+        in tool_evidence_summary
     )
 
-    aux_llm_calls: list[dict] = []
-    summary = _build_presenter_follow_up_summary_from_tool_messages(
-        [],
+
+def test_screen_backfill_context_projects_completion_and_workflow_facts():
+    from src.backend.server.routes.generate_route_support import (
+        _build_presenter_screen_backfill_context,
+    )
+
+    context_messages, context_telemetry = _build_presenter_screen_backfill_context(
+        prompt_concept_ids=("#V#von_screen_content_prompt_for_witbrock",),
+        backfill_reason="missing_screen",
+        user_request="Run the represented workflow",
+        model_response=(
+            "Execution status: requested mutation was not executed. "
+            "Failure codes: paper_representation_not_executed."
+        ),
+        tool_evidence_summary="TOOL EXECUTION (authoritative):\n- workflow_execute",
+        existing_spoken=None,
+        required_screen_json_fence=None,
+        response_candidate_internal_status=True,
+        response_candidate_tool_dump=False,
+        response_candidate_duplicates_spoken=False,
         completion_gate={
-            "requires_follow_up": True,
-            "safe_to_claim_completion": False,
-            "decision_reason": (
-                "Execution status: requested mutation was not executed. "
-                "Failure codes: paper_representation_not_executed."
-            ),
-        },
-        auxiliary_llm_calls=aux_llm_calls,
-    )
-
-    assert isinstance(summary, str)
-    assert "Execution status:" not in summary
-    detector_event = next(
-        entry
-        for entry in aux_llm_calls
-        if entry.get("type") == "presenter_detector"
-        and entry.get("reason_code") == "follow_up_decision_reason_suppressed"
-    )
-    assert detector_event["detector"] == "internal_status_diagnostic"
-    assert detector_event["context"] == "follow_up_decision_reason"
-
-
-def test_follow_up_summary_reconciles_completed_workflow_execution_with_open_verification():
-    from src.backend.server.routes.von_routes import (
-        _build_presenter_follow_up_summary_from_tool_messages,
-    )
-
-    aux_llm_calls: list[dict] = [
-        {
-            "type": "workflow_execution",
-            "workflow_id": "#V#example_workflow",
-            "execution_summary": {
-                "workflow_id": "#V#example_workflow",
-                "workflow_instance_id": "instance-123",
-                "completed": True,
-                "effective_completed": True,
-                "terminal_status": "completed",
-                "final_state": "#V#workflow_done",
-                "action_completed_count": 11,
-                "action_success_count": 11,
-                "action_failure_count": 0,
-                "terminal_effect_count": 0,
-                "durable_side_effect_count": 0,
-            },
-        }
-    ]
-
-    summary = _build_presenter_follow_up_summary_from_tool_messages(
-        [],
-        completion_gate={
+            "decision": "escalation_required",
             "requires_follow_up": True,
             "safe_to_claim_completion": False,
             "decision_reason": "Required mutation was not executed.",
+            "blocking_effect_ids": ["effect_required_tool_obligations_1"],
             "blocking_failure_codes": [
                 "required_tool_not_planned",
                 "mutation_succeeded_readback_missing",
@@ -1993,26 +2025,55 @@ def test_follow_up_summary_reconciles_completed_workflow_execution_with_open_ver
                 }
             ],
         },
-        auxiliary_llm_calls=aux_llm_calls,
+        workflow_execution_summary={
+            "workflow_id": "#V#example_workflow",
+            "workflow_instance_id": "instance-123",
+            "completed": True,
+            "effective_completed": True,
+            "terminal_status": "completed",
+            "final_state": "#V#workflow_done",
+            "action_completed_count": 11,
+            "action_success_count": 11,
+            "action_failure_count": 0,
+            "terminal_effect_count": 0,
+            "durable_side_effect_count": 0,
+        },
+        response_candidate_blocked_by_completion_gate=True,
     )
 
-    assert isinstance(summary, str)
-    assert "Workflow-backed outcome:" in summary
-    assert "terminal status `completed`" in summary
-    assert "instance `instance-123`" in summary
-    assert "11 completed" in summary
-    assert "Durable side effects observed: 0" in summary
-    assert "Verification still needs follow-up" in summary
-    assert "required_tool_not_planned" in summary
-    assert "Required mutation was not executed" not in summary
-    detector_event = next(
-        entry
-        for entry in aux_llm_calls
-        if entry.get("type") == "presenter_detector"
-        and entry.get("reason_code")
-        == "overbroad_mutation_status_replaced_by_workflow_evidence"
+    payload = json.loads(context_messages[0]["content"])
+    assert payload["completion_gate"]["blocking_failure_codes"] == [
+        "required_tool_not_planned",
+        "mutation_succeeded_readback_missing",
+    ]
+    assert payload["completion_gate"]["unresolved_preconditions"] == [
+        {
+            "effect_type": "required_evidence",
+            "status": "not_executed",
+            "status_reason": "Required read-back evidence was missing.",
+        }
+    ]
+    assert payload["workflow_execution"]["workflow_id"] == "#V#example_workflow"
+    assert payload["workflow_execution"]["workflow_instance_id"] == "instance-123"
+    assert payload["workflow_execution"]["terminal_status"] == "completed"
+    assert payload["workflow_execution"]["durable_side_effect_count"] == 0
+    assert (
+        payload["rejected_candidate_reasons"][
+            "response_candidate_blocked_by_completion_gate"
+        ]
+        is True
     )
-    assert detector_event["detector"] == "workflow_execution_reconciled"
+    serialised_payload = json.dumps(payload)
+    assert "Workflow-backed outcome:" not in serialised_payload
+    assert "Verification still needs follow-up" not in serialised_payload
+    assert "I ran tools for this request" not in serialised_payload
+    assert context_telemetry["completion_gate_present"] is True
+    assert context_telemetry["completion_gate_requires_follow_up"] is True
+    assert context_telemetry["workflow_execution_present"] is True
+    assert (
+        context_telemetry["workflow_execution_workflow_id"]
+        == "#V#example_workflow"
+    )
 
 
 def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeypatch):
@@ -2253,11 +2314,11 @@ def test_tool_messages_prompt_blob_surfaces_generic_verified_concept_handle():
     assert "source=dataset_concept_id" in blob
 
 
-def test_presenter_screen_summary_includes_create_concepts_canonical_ids():
+def test_presenter_tool_prompt_blob_includes_create_concepts_canonical_ids():
     import json
 
     from src.backend.server.routes.von_routes import (
-        _build_presenter_screen_summary_from_tool_messages,
+        _build_tool_messages_prompt_blob,
     )
 
     tool_messages = [
@@ -2283,7 +2344,7 @@ def test_presenter_screen_summary_includes_create_concepts_canonical_ids():
         }
     ]
 
-    summary = _build_presenter_screen_summary_from_tool_messages(tool_messages)
+    summary = _build_tool_messages_prompt_blob(tool_messages)
 
     assert isinstance(summary, str)
     assert "Planck Mission (#V#planck_mission)" in summary

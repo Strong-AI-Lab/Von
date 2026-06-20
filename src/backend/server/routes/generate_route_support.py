@@ -53,6 +53,152 @@ def _normalise_prompt_concept_ids(values: Any) -> list[str]:
     return ordered
 
 
+def _compact_presenter_context_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, bool | int | float):
+        return value
+    return None
+
+
+def _compact_presenter_context_scalar_list(
+    value: Any,
+    *,
+    limit: int = 24,
+) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return []
+    compacted: list[Any] = []
+    seen: set[str] = set()
+    for item in value:
+        scalar = _compact_presenter_context_scalar(item)
+        if scalar is None:
+            continue
+        dedupe_key = str(scalar)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        compacted.append(scalar)
+        if len(compacted) >= limit:
+            break
+    return compacted
+
+
+def _compact_presenter_context_mapping(
+    value: Any,
+    *,
+    scalar_fields: Sequence[str],
+    list_fields: Sequence[str] = (),
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    compacted: dict[str, Any] = {}
+    for field in scalar_fields:
+        if field not in value:
+            continue
+        scalar = _compact_presenter_context_scalar(value.get(field))
+        if scalar is not None:
+            compacted[field] = scalar
+    for field in list_fields:
+        if field not in value:
+            continue
+        scalar_list = _compact_presenter_context_scalar_list(value.get(field))
+        if scalar_list:
+            compacted[field] = scalar_list
+    return compacted
+
+
+def _compact_presenter_unresolved_preconditions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return []
+    compacted: list[dict[str, Any]] = []
+    for item in value:
+        entry = _compact_presenter_context_mapping(
+            item,
+            scalar_fields=(
+                "effect_id",
+                "effect_type",
+                "status",
+                "status_reason",
+                "failure_code",
+                "workflow_id",
+                "workflow_instance_id",
+                "tool_name",
+                "predicate",
+                "concept_id",
+                "contract_id",
+            ),
+            list_fields=("failure_codes", "required_tools", "evidence_keys"),
+        )
+        if entry:
+            compacted.append(entry)
+        if len(compacted) >= 12:
+            break
+    return compacted
+
+
+def _compact_completion_gate_for_presenter_context(
+    completion_gate: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    compacted = _compact_presenter_context_mapping(
+        completion_gate,
+        scalar_fields=(
+            "decision",
+            "decision_reason",
+            "requires_follow_up",
+            "safe_to_claim_completion",
+            "workflow_id",
+            "workflow_instance_id",
+        ),
+        list_fields=("blocking_effect_ids", "blocking_failure_codes"),
+    )
+    if isinstance(completion_gate, Mapping):
+        unresolved = _compact_presenter_unresolved_preconditions(
+            completion_gate.get("unresolved_preconditions")
+        )
+        if unresolved:
+            compacted["unresolved_preconditions"] = unresolved
+    if not compacted:
+        return None
+    compacted["schema_version"] = "turn_completion_gate_presenter_context.v1"
+    return compacted
+
+
+def _compact_workflow_execution_for_presenter_context(
+    workflow_execution_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    compacted = _compact_presenter_context_mapping(
+        workflow_execution_summary,
+        scalar_fields=(
+            "workflow_id",
+            "workflow_instance_id",
+            "completed",
+            "effective_completed",
+            "terminal_status",
+            "final_state",
+            "workflow_instance_status",
+            "action_started_count",
+            "action_completed_count",
+            "action_success_count",
+            "action_failure_count",
+            "action_unknown_count",
+            "terminal_effect_count",
+            "durable_side_effect_count",
+            "runtime_event_count",
+            "step_result_envelope_count",
+        ),
+    )
+    if not compacted:
+        return None
+    compacted["schema_version"] = "workflow_execution_presenter_context.v1"
+    return compacted
+
+
 def _build_presenter_screen_backfill_context(
     *,
     prompt_concept_ids: Sequence[str],
@@ -65,10 +211,19 @@ def _build_presenter_screen_backfill_context(
     response_candidate_internal_status: bool,
     response_candidate_tool_dump: bool,
     response_candidate_duplicates_spoken: bool,
+    completion_gate: Mapping[str, Any] | None = None,
+    workflow_execution_summary: Mapping[str, Any] | None = None,
+    response_candidate_blocked_by_completion_gate: bool = False,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     prompt_ids = _normalise_prompt_concept_ids(prompt_concept_ids)
     if not prompt_ids:
         prompt_ids = list(SCREEN_BACKFILL_STAGE_PROMPT_IDS)
+    completion_gate_context = _compact_completion_gate_for_presenter_context(
+        completion_gate
+    )
+    workflow_execution_context = _compact_workflow_execution_for_presenter_context(
+        workflow_execution_summary
+    )
     payload = {
         "schema_version": "presenter_screen_backfill_context.v1",
         "stage_concept_id": SCREEN_BACKFILL_STAGE_CONCEPT_ID,
@@ -87,7 +242,12 @@ def _build_presenter_screen_backfill_context(
             "response_candidate_duplicates_spoken": bool(
                 response_candidate_duplicates_spoken
             ),
+            "response_candidate_blocked_by_completion_gate": bool(
+                response_candidate_blocked_by_completion_gate
+            ),
         },
+        "completion_gate": completion_gate_context,
+        "workflow_execution": workflow_execution_context,
     }
     context_messages = [
         {
@@ -107,6 +267,17 @@ def _build_presenter_screen_backfill_context(
         "prompt_concept_ids": prompt_ids,
         "context_payload_schema": "presenter_screen_backfill_context.v1",
         "context_source": "route_structured_support_payload",
+        "completion_gate_present": bool(completion_gate_context),
+        "completion_gate_requires_follow_up": bool(
+            completion_gate_context
+            and completion_gate_context.get("requires_follow_up") is True
+        ),
+        "workflow_execution_present": bool(workflow_execution_context),
+        "workflow_execution_workflow_id": (
+            workflow_execution_context.get("workflow_id")
+            if isinstance(workflow_execution_context, Mapping)
+            else None
+        ),
     }
     return context_messages, context_telemetry
 

@@ -2835,8 +2835,8 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
             "transformations": [
                 {
                     "transform_name": "screen_backfill",
-                    "status": "fallback_success",
-                    "source_path": "response_text_plus_follow_up_summary",
+                    "status": "success",
+                    "source_path": "represented_screen_prompt",
                     "latency_ms": 44,
                     "model_id": "gpt-4.1-mini",
                     "input_summary": {
@@ -2846,7 +2846,7 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
                     "output_summary": {
                         "applied": True,
                         "presenter_format": (
-                            "screen_backfill_from_response_with_operational_summary_v1"
+                            "screen_backfill_from_represented_prompt_v1"
                         ),
                     },
                 },
@@ -2928,8 +2928,8 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
     assert by_stage["tool_plan"]["tool_execution"]["planned_count"] == 2
     assert by_stage["screen_backfill"]["response_transformation"] == {
         "transform_name": "screen_backfill",
-        "status": "fallback_success",
-        "source_path": "response_text_plus_follow_up_summary",
+        "status": "success",
+        "source_path": "represented_screen_prompt",
         "latency_ms": 44,
         "model_id": "gpt-4.1-mini",
         "suppression_reason": None,
@@ -2941,7 +2941,7 @@ def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads
         "output_summary": {
             "applied": True,
             "presenter_format": (
-                "screen_backfill_from_response_with_operational_summary_v1"
+                "screen_backfill_from_represented_prompt_v1"
             ),
         },
     }
