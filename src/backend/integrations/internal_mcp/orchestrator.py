@@ -2985,6 +2985,7 @@ class _ModelCandidate:
     raw: str
     source: str
     host: str | None = None
+    model_parameters: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -15185,6 +15186,71 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _parse_policy_model_candidate(value: Any) -> _ModelCandidate | None:
+        if isinstance(value, Mapping):
+            provider_value = value.get("provider")
+            provider = (
+                str(provider_value).strip().lower()
+                if isinstance(provider_value, str) and provider_value.strip()
+                else None
+            )
+            model_value = (
+                value.get("model")
+                or value.get("model_id")
+                or value.get("request_model")
+                or value.get("requested_model")
+            )
+            if not isinstance(model_value, str) or not model_value.strip():
+                return None
+            host = (
+                str(value.get("host")).strip()
+                if isinstance(value.get("host"), str) and str(value.get("host")).strip()
+                else None
+            )
+            candidate_ref = model_value.strip()
+            if provider and ":" not in candidate_ref and "://" not in candidate_ref:
+                candidate_ref = f"{provider}:{candidate_ref}"
+            parsed = InternalMCPChatOrchestrator._parse_policy_model_candidate(
+                candidate_ref
+            )
+            if parsed is None:
+                return None
+            try:
+                from src.backend.services.model_parameter_service import (
+                    MODEL_PARAMETERS_KEY,
+                    normalise_model_parameters_for_storage,
+                )
+
+                raw_parameters = value.get(MODEL_PARAMETERS_KEY)
+                if raw_parameters is None:
+                    raw_parameters = value.get("modelParameters")
+                if raw_parameters is None:
+                    raw_parameters = value.get("parameters")
+                model_parameters = normalise_model_parameters_for_storage(
+                    raw_parameters,
+                    provider=parsed.provider or provider,
+                    model=parsed.model,
+                )
+            except Exception:
+                model_parameters = {}
+            raw_payload = {
+                "provider": parsed.provider or provider,
+                "model": parsed.model,
+                "host": host or parsed.host,
+            }
+            if model_parameters:
+                raw_payload["model_parameters"] = model_parameters
+            try:
+                raw = json.dumps(raw_payload, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                raw = candidate_ref
+            return _ModelCandidate(
+                provider=parsed.provider or provider,
+                model=parsed.model,
+                raw=raw,
+                source="policy",
+                host=host or parsed.host,
+                model_parameters=model_parameters or None,
+            )
         if not isinstance(value, str):
             return None
 
@@ -15267,6 +15333,21 @@ class InternalMCPChatOrchestrator:
         value: Any,
         registry_snapshot: Mapping[str, Any] | None,
     ) -> Any:
+        if isinstance(value, Mapping):
+            candidate = dict(value)
+            model_value = (
+                candidate.get("model")
+                or candidate.get("model_id")
+                or candidate.get("request_model")
+                or candidate.get("requested_model")
+            )
+            resolved_model = InternalMCPChatOrchestrator._resolve_registry_model_candidate(
+                model_value,
+                registry_snapshot,
+            )
+            if isinstance(resolved_model, str) and resolved_model.strip():
+                candidate["model"] = resolved_model.strip()
+            return candidate
         if not isinstance(value, str):
             return value
 
@@ -15308,9 +15389,9 @@ class InternalMCPChatOrchestrator:
     @staticmethod
     def _normalise_model_candidate_identity(
         candidate: _ModelCandidate | None,
-    ) -> tuple[str | None, str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
         if candidate is None:
-            return (None, None, None, None)
+            return (None, None, None, None, None)
         raw = (
             candidate.raw.strip().lower()
             if isinstance(candidate.raw, str) and candidate.raw.strip()
@@ -15330,7 +15411,19 @@ class InternalMCPChatOrchestrator:
             if isinstance(candidate.host, str) and candidate.host.strip()
             else None
         )
-        return (raw, provider, model, host)
+        try:
+            from src.backend.services.model_parameter_service import (
+                stable_model_parameters_key,
+            )
+
+            params_key = stable_model_parameters_key(
+                candidate.model_parameters,
+                provider=provider,
+                model=model,
+            )
+        except Exception:
+            params_key = ""
+        return (raw, provider, model, host, params_key or None)
 
     @classmethod
     def _model_candidates_match(
@@ -15340,12 +15433,8 @@ class InternalMCPChatOrchestrator:
     ) -> bool:
         left_identity = cls._normalise_model_candidate_identity(left)
         right_identity = cls._normalise_model_candidate_identity(right)
-        if (
-            left_identity[0]
-            and right_identity[0]
-            and left_identity[0] == right_identity[0]
-        ):
-            return True
+        if left_identity[0] and right_identity[0] and left_identity[0] == right_identity[0]:
+            return left_identity[-1] == right_identity[-1]
         return left_identity[1:] == right_identity[1:]
 
     @staticmethod
@@ -15464,6 +15553,7 @@ class InternalMCPChatOrchestrator:
         policy_stage: str | None,
         selected_candidate: _ModelCandidate | None,
         default_model: str | None,
+        default_model_parameters: Mapping[str, Any] | None = None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None,
         workflow_id: str | None = None,
@@ -15480,12 +15570,21 @@ class InternalMCPChatOrchestrator:
             metadata["requested_model"] = requested_model
         if requested_provider:
             metadata["requested_provider"] = requested_provider
+        if isinstance(default_model_parameters, Mapping) and default_model_parameters:
+            metadata["requested_model_parameters"] = dict(default_model_parameters)
         if isinstance(workflow_id, str) and workflow_id.strip():
             metadata["workflow_id"] = workflow_id.strip()
         metadata["prefer_default_model"] = bool(prefer_default_model)
 
         if selected_candidate is None:
             return metadata
+        if (
+            isinstance(selected_candidate.model_parameters, Mapping)
+            and selected_candidate.model_parameters
+        ):
+            metadata["effective_model_parameters"] = dict(
+                selected_candidate.model_parameters
+            )
 
         effective_stage = policy_stage or stage
         primary_candidate: _ModelCandidate | None = None
@@ -15586,6 +15685,7 @@ class InternalMCPChatOrchestrator:
         *,
         stage: str,
         default_model: Optional[str],
+        default_model_parameters: Mapping[str, Any] | None = None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
         workflow_id: Optional[str] = None,
@@ -15594,6 +15694,25 @@ class InternalMCPChatOrchestrator:
         prefer_default_model: bool = False,
     ) -> list[_ModelCandidate]:
         default_model = self._normalise_llm_model_name(default_model)
+        try:
+            from src.backend.services.model_parameter_service import (
+                MODEL_PARAMETERS_KEY,
+                normalise_model_parameters_for_storage,
+                stable_model_parameters_key,
+            )
+        except Exception:
+            MODEL_PARAMETERS_KEY = "model_parameters"  # type: ignore[assignment]
+            normalise_model_parameters_for_storage = None  # type: ignore[assignment]
+            stable_model_parameters_key = None  # type: ignore[assignment]
+        default_provider = self._infer_provider_from_model_reference(default_model)
+        if callable(normalise_model_parameters_for_storage):
+            active_model_parameters = normalise_model_parameters_for_storage(
+                default_model_parameters,
+                provider=default_provider,
+                model=default_model,
+            )
+        else:
+            active_model_parameters = {}
         candidates: list[_ModelCandidate] = []
         enabled_candidates: list[_ModelCandidate] = []
         active_llm_candidate = _ModelCandidate(
@@ -15602,6 +15721,7 @@ class InternalMCPChatOrchestrator:
             raw="active_llm",
             source="active_llm",
             host=None,
+            model_parameters=active_model_parameters or None,
         )
         try:
             from src.backend.services.settings_service import (
@@ -15625,6 +15745,15 @@ class InternalMCPChatOrchestrator:
             host = str(entry.get("host") or "").strip() or None
             if not provider or not model:
                 continue
+            model_parameters = (
+                normalise_model_parameters_for_storage(
+                    entry.get(MODEL_PARAMETERS_KEY),
+                    provider=provider,
+                    model=model,
+                )
+                if callable(normalise_model_parameters_for_storage)
+                else {}
+            )
             raw = f"{provider}:{model}"
             enabled_candidates.append(
                 _ModelCandidate(
@@ -15633,6 +15762,7 @@ class InternalMCPChatOrchestrator:
                     raw=raw,
                     source="enabled_settings",
                     host=host,
+                    model_parameters=model_parameters or None,
                 )
             )
 
@@ -15693,7 +15823,7 @@ class InternalMCPChatOrchestrator:
         # host means "the active/default client host"; treat it as a wildcard
         # for duplicate detection rather than as a distinct fallback target.
         seen_hosts_by_model: dict[
-            tuple[str | None, str | None], set[str | None]
+            tuple[str | None, str | None, str | None], set[str | None]
         ] = {}
         unique: list[_ModelCandidate] = []
         for candidate in candidates:
@@ -15711,7 +15841,16 @@ class InternalMCPChatOrchestrator:
                 if isinstance(candidate.host, str) and candidate.host.strip()
                 else None
             )
-            model_key = (provider_for_identity, normalised_model)
+            params_key = (
+                stable_model_parameters_key(
+                    candidate.model_parameters,
+                    provider=provider_for_identity,
+                    model=normalised_model,
+                )
+                if callable(stable_model_parameters_key)
+                else ""
+            )
+            model_key = (provider_for_identity, normalised_model, params_key or None)
             seen_hosts = seen_hosts_by_model.get(model_key)
             if seen_hosts is not None:
                 if (
@@ -16389,6 +16528,8 @@ class InternalMCPChatOrchestrator:
             "host": candidate.host,
             "source": candidate.source,
         }
+        if isinstance(candidate.model_parameters, Mapping) and candidate.model_parameters:
+            telemetry["model_parameters"] = dict(candidate.model_parameters)
 
         if candidate.source == "active_llm":
             client = default_client
@@ -16828,6 +16969,7 @@ class InternalMCPChatOrchestrator:
         context: Optional[Sequence[Mapping[str, Any]]],
         default_client: Any,
         default_model: Optional[str],
+        default_model_parameters: Mapping[str, Any] | None = None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None,
         user_concept_id: Optional[str],
@@ -16870,6 +17012,7 @@ class InternalMCPChatOrchestrator:
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
             default_model=default_model,
+            default_model_parameters=default_model_parameters,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
             workflow_id=workflow_id,
@@ -16982,6 +17125,15 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
+            model_parameters = (
+                dict(candidate.model_parameters)
+                if isinstance(candidate.model_parameters, Mapping)
+                and candidate.model_parameters
+                else None
+            )
+            if model_parameters:
+                attempt_meta["model_parameters"] = model_parameters
+                attempt_meta["effective_model_parameters"] = model_parameters
             if timeout_override_sec is not None:
                 attempt_meta["timeout_override_sec"] = timeout_override_sec
 
@@ -17127,12 +17279,14 @@ class InternalMCPChatOrchestrator:
                 )
             llm_start = time.perf_counter()
             try:
+                generate_kwargs: dict[str, Any] = {
+                    "context": cast(Optional[List[Dict[str, Any]]], context),
+                    "model": model_name,
+                }
+                if model_parameters:
+                    generate_kwargs["llm_params"] = model_parameters
                 response = self._invoke_with_llm_heartbeat(
-                    call=lambda: client.generate(
-                        prompt,
-                        context=cast(Optional[List[Dict[str, Any]]], context),
-                        model=model_name,
-                    ),
+                    call=lambda: client.generate(prompt, **generate_kwargs),
                     stage_name=stage,
                     model_name=model_name,
                     emit_progress=_progress_cb,
@@ -17366,6 +17520,7 @@ class InternalMCPChatOrchestrator:
                     policy_stage=candidate_stage,
                     selected_candidate=candidate,
                     default_model=default_model,
+                    default_model_parameters=default_model_parameters,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
                     workflow_id=workflow_id,
@@ -17614,6 +17769,7 @@ class InternalMCPChatOrchestrator:
                 policy_stage=candidate_stage,
                 selected_candidate=None,
                 default_model=default_model,
+                default_model_parameters=default_model_parameters,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
                 workflow_id=workflow_id,
@@ -18188,6 +18344,15 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
+            model_parameters = (
+                dict(candidate.model_parameters)
+                if isinstance(candidate.model_parameters, Mapping)
+                and candidate.model_parameters
+                else None
+            )
+            if model_parameters:
+                attempt_meta["model_parameters"] = model_parameters
+                attempt_meta["effective_model_parameters"] = model_parameters
             if timeout_override_sec is not None:
                 attempt_meta["timeout_override_sec"] = timeout_override_sec
 
@@ -18291,6 +18456,8 @@ class InternalMCPChatOrchestrator:
             structured_call_kwargs: dict[str, Any] = {}
             if provider == "openai":
                 structured_call_kwargs["parallel_tool_calls"] = False
+                if model_parameters:
+                    structured_call_kwargs["llm_params"] = model_parameters
                 if len(required_available_tool_names) == 1:
                     structured_call_kwargs["tool_choice"] = {
                         "type": "function",
@@ -36051,6 +36218,7 @@ class InternalMCPChatOrchestrator:
         context: Optional[Sequence[Mapping[str, Any]]],
         llm_client: Any,
         model: Optional[str],
+        model_parameters: Mapping[str, Any] | None = None,
         user_namespace: Optional[str] = None,
         gmail_profile: Optional[str] = None,
         auxiliary_system_prompt: str | None = None,
@@ -36682,12 +36850,26 @@ class InternalMCPChatOrchestrator:
                 prefer_default_model=prefer_default_model,
             )
 
+        try:
+            from ...services.model_parameter_service import (
+                normalise_model_parameters_for_storage,
+            )
+
+            normalised_model_parameters = normalise_model_parameters_for_storage(
+                model_parameters,
+                provider=self._infer_provider_from_model_reference(model),
+                model=model,
+            )
+        except Exception:
+            normalised_model_parameters = {}
+
         env = _run_supervised_setup_step(
             "Build workflow execution environment",
             lambda: WorkflowEnvironment(
                 llm_client=llm_client,
                 gateway=self._gateway,
                 model=model,
+                model_parameters=normalised_model_parameters or None,
                 user_namespace=user_namespace,
                 auxiliary_system_prompt=auxiliary_system_prompt,
                 max_tool_invocations=self._max_tool_invocations,
@@ -36767,6 +36949,7 @@ class InternalMCPChatOrchestrator:
             "user_prompt": prompt,
             "prompt_for_requirements": prompt,
             "requested_model": model,
+            "requested_model_parameters": normalised_model_parameters or None,
             "model_execution_budget_policy": (
                 model_budget_policy.as_telemetry()
                 if model_budget_policy is not None

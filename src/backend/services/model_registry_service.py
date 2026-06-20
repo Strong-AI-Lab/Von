@@ -23,6 +23,7 @@ PRED_HAS_MODEL_ID = "#V#has_model_id"
 PRED_HAS_API_SURFACE = "#V#has_api_surface"
 PRED_HAS_PARAMETER_ACTION = "#V#has_parameter_action"
 PRED_HAS_FIXED_PARAMETER_VALUE = "#V#has_fixed_parameter_value"
+PRED_HAS_ALLOWED_PARAMETER_VALUE = "#V#has_allowed_parameter_value"
 
 MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION = "model_stage_suitability_evidence.v1"
 MODEL_STAGE_CERTIFICATION_DECISION_SCHEMA_VERSION = (
@@ -291,6 +292,15 @@ def _resolve_parameter_constraint_from_graph(
         "fixed_value": _get_first_text(
             constraint_concept_id, predicate=PRED_HAS_FIXED_PARAMETER_VALUE
         ),
+        "allowed_values": [
+            str(row.get("text")).strip()
+            for row in _get_text_rows(
+                constraint_concept_id,
+                predicate=PRED_HAS_ALLOWED_PARAMETER_VALUE,
+                limit=50,
+            )
+            if isinstance(row.get("text"), str) and str(row.get("text")).strip()
+        ],
     }
 
 
@@ -646,6 +656,7 @@ def resolve_model_parameter_policy(
                 "parameter": parameter_name,
                 "action": constraint.get("action"),
                 "fixed_value": constraint.get("fixed_value"),
+                "allowed_values": list(constraint.get("allowed_values") or []),
                 "constraint_concept_id": constraint.get("constraint_concept_id"),
                 "parameter_concept_id": constraint.get("parameter_concept_id"),
                 "profile_concept_id": constraint.get("profile_concept_id"),
@@ -708,6 +719,15 @@ def sanitise_model_parameter_value(
         return None
     if action == PARAMETER_ACTION_FIXED_VALUE:
         return _coerce_fixed_parameter_value(policy.get("fixed_value"), value)
+    allowed_values = policy.get("allowed_values")
+    if isinstance(allowed_values, Sequence) and not isinstance(allowed_values, str):
+        allowed = {
+            str(item).strip().lower()
+            for item in allowed_values
+            if isinstance(item, str) and str(item).strip()
+        }
+        if allowed and str(value).strip().lower() not in allowed:
+            return None
     return value
 
 

@@ -30,6 +30,34 @@ describe('local model preferences', () => {
         });
     });
 
+    test('stores OpenAI reasoning effort with the selected premium model', async () => {
+        const {
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setLocalPremiumModelUseEnabled,
+            setStoredOpenAiModelParameters,
+            setStoredOpenAiSelectedModel,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenAiSelectedModel('gpt-5.5');
+        setStoredOpenAiModelParameters({ reasoning: { effort: 'low' } });
+        setLocalPremiumModelUseEnabled(true);
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: 'gpt-5.5',
+            openaiModelParameters: { reasoning_effort: 'low' },
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'openai',
+            model: 'gpt-5.5',
+            requestModel: 'openai:gpt-5.5',
+            model_parameters: { reasoning_effort: 'low' },
+        });
+    });
+
     test('prefers the locally selected Ollama model when premium use is disabled locally', async () => {
         const {
             getStoredLocalModelPreference,

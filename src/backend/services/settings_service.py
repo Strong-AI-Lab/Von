@@ -17,6 +17,11 @@ from .mongo_observability_service import (
     build_mongo_operation_comment,
     observe_mongo_operation,
 )
+from .model_parameter_service import (
+    MODEL_PARAMETERS_KEY,
+    normalise_model_parameters_for_storage,
+    stable_model_parameters_key,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -211,49 +216,62 @@ _MUTATION_AUTHORITY_LEVEL_USER_PREFIX = (
 _RUNTIME_MODEL_SETTING_MODES = {"inherit", "explicit", "disabled"}
 
 
-def _normalise_llm_setting_entry(raw: Any) -> dict[str, str] | None:
+def _normalise_llm_setting_entry(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     provider = str(raw.get("provider") or "").strip().lower()
     model = str(raw.get("model") or "").strip()
     if not provider or not model:
         return None
-    normalised: dict[str, str] = {
+    normalised: dict[str, Any] = {
         "provider": provider,
         "model": model,
     }
     host = str(raw.get("host") or "").strip()
     if host:
         normalised["host"] = host
+    raw_parameters = raw.get(MODEL_PARAMETERS_KEY)
+    if raw_parameters is None:
+        raw_parameters = raw.get("modelParameters")
+    model_parameters = normalise_model_parameters_for_storage(
+        raw_parameters,
+        provider=provider,
+        model=model,
+    )
+    if model_parameters:
+        normalised[MODEL_PARAMETERS_KEY] = model_parameters
     return normalised
 
 
 def _dedupe_llm_setting_entries(
     entries: Sequence[Mapping[str, Any]],
-) -> list[dict[str, str]]:
-    deduped: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for entry in entries:
-        provider = str(entry.get("provider") or "").strip().lower()
-        model = str(entry.get("model") or "").strip()
-        host = str(entry.get("host") or "").strip()
-        if not provider or not model:
+        normalised = _normalise_llm_setting_entry(dict(entry))
+        if normalised is None:
             continue
-        key = (provider, model, host)
+        provider = str(normalised.get("provider") or "").strip().lower()
+        model = str(normalised.get("model") or "").strip()
+        host = str(normalised.get("host") or "").strip()
+        params_key = stable_model_parameters_key(
+            normalised.get(MODEL_PARAMETERS_KEY),
+            provider=provider,
+            model=model,
+        )
+        key = (provider, model, host, params_key)
         if key in seen:
             continue
         seen.add(key)
-        payload = {"provider": provider, "model": model}
-        if host:
-            payload["host"] = host
-        deduped.append(payload)
+        deduped.append(normalised)
     return deduped
 
 
-def _normalise_llm_setting_list(raw: Any) -> list[dict[str, str]]:
+def _normalise_llm_setting_list(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
-    entries: list[dict[str, str]] = []
+    entries: list[dict[str, Any]] = []
     for item in raw:
         entry = _normalise_llm_setting_entry(item)
         if entry is not None:
@@ -315,6 +333,9 @@ def _normalise_runtime_model_setting_for_storage(
     host = str(normalised.get("host") or "").strip()
     if host:
         payload["host"] = host
+    model_parameters = normalised.get(MODEL_PARAMETERS_KEY)
+    if isinstance(model_parameters, Mapping) and model_parameters:
+        payload[MODEL_PARAMETERS_KEY] = dict(model_parameters)
     return payload
 
 
@@ -600,7 +621,7 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
         return False
 
 
-def get_server_default_llm_setting() -> Optional[dict[str, str]]:
+def get_server_default_llm_setting() -> Optional[dict[str, Any]]:
     raw = get_setting(SERVER_DEFAULT_LLM_SETTING_NAME)
     return _normalise_llm_setting_entry(raw)
 
@@ -813,7 +834,7 @@ def _merge_primary_into_enabled_llms(
     *,
     primary: Mapping[str, Any] | None,
     enabled: Sequence[Mapping[str, Any]] | None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     merged = list(enabled or [])
     primary_entry = _normalise_llm_setting_entry(primary)
     if primary_entry is None:
@@ -832,7 +853,7 @@ def set_user_enabled_llm_settings(
     return update_setting(_build_user_enabled_llm_setting_name(user_concept_id), normalised)
 
 
-def get_user_enabled_llm_settings(user_concept_id: str) -> list[dict[str, str]]:
+def get_user_enabled_llm_settings(user_concept_id: str) -> list[dict[str, Any]]:
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
         return []
     raw = get_setting(_build_user_enabled_llm_setting_name(user_concept_id))
@@ -850,27 +871,42 @@ def set_org_enabled_llm_settings(
     return update_setting(_build_org_enabled_llm_setting_name(org_concept_id), normalised)
 
 
-def get_org_enabled_llm_settings(org_concept_id: str) -> list[dict[str, str]]:
+def get_org_enabled_llm_settings(org_concept_id: str) -> list[dict[str, Any]]:
     if not isinstance(org_concept_id, str) or not org_concept_id.strip():
         return []
     raw = get_setting(_build_org_enabled_llm_setting_name(org_concept_id))
     return _normalise_llm_setting_list(raw)
 
 
-def set_user_llm_setting(user_concept_id: str, provider: str, model_name: str) -> bool:
+def set_user_llm_setting(
+    user_concept_id: str,
+    provider: str,
+    model_name: str,
+    model_parameters: Mapping[str, Any] | None = None,
+) -> bool:
     if not all(
         isinstance(x, str) and x for x in (user_concept_id, provider, model_name)
     ):
         logger.error("set_user_llm_setting requires non-empty string arguments")
         return False
+    payload = _normalise_llm_setting_entry(
+        {
+            "provider": provider,
+            "model": model_name,
+            MODEL_PARAMETERS_KEY: model_parameters or {},
+        }
+    )
+    if payload is None:
+        logger.error("set_user_llm_setting received invalid provider/model payload")
+        return False
     ok = update_setting(
         _build_user_llm_setting_name(user_concept_id),
-        {"provider": provider, "model": model_name},
+        payload,
     )
     if not ok:
         return False
     merged_enabled = _merge_primary_into_enabled_llms(
-        primary={"provider": provider, "model": model_name},
+        primary=payload,
         enabled=get_user_enabled_llm_settings(user_concept_id),
     )
     set_user_enabled_llm_settings(user_concept_id, merged_enabled)
@@ -884,7 +920,7 @@ def get_user_llm_setting(user_concept_id: str):
     if raw is not None and not isinstance(raw, dict):
         logger.warning("User LLM setting malformed (not dict); ignoring")
         return None
-    return raw
+    return _normalise_llm_setting_entry(raw) if raw is not None else None
 
 
 def set_user_mutation_authority_level(user_concept_id: str, level: str) -> bool:
@@ -917,20 +953,35 @@ def get_user_mutation_authority_level(user_concept_id: str) -> str | None:
     return normalise_mutation_authority_level(raw)
 
 
-def set_org_llm_setting(org_concept_id: str, provider: str, model_name: str) -> bool:
+def set_org_llm_setting(
+    org_concept_id: str,
+    provider: str,
+    model_name: str,
+    model_parameters: Mapping[str, Any] | None = None,
+) -> bool:
     if not all(
         isinstance(x, str) and x for x in (org_concept_id, provider, model_name)
     ):
         logger.error("set_org_llm_setting requires non-empty string arguments")
         return False
+    payload = _normalise_llm_setting_entry(
+        {
+            "provider": provider,
+            "model": model_name,
+            MODEL_PARAMETERS_KEY: model_parameters or {},
+        }
+    )
+    if payload is None:
+        logger.error("set_org_llm_setting received invalid provider/model payload")
+        return False
     ok = update_setting(
         _build_org_llm_setting_name(org_concept_id),
-        {"provider": provider, "model": model_name},
+        payload,
     )
     if not ok:
         return False
     merged_enabled = _merge_primary_into_enabled_llms(
-        primary={"provider": provider, "model": model_name},
+        primary=payload,
         enabled=get_org_enabled_llm_settings(org_concept_id),
     )
     set_org_enabled_llm_settings(org_concept_id, merged_enabled)
@@ -944,7 +995,7 @@ def get_org_llm_setting(org_concept_id: str):
     if raw is not None and not isinstance(raw, dict):
         logger.warning("Org LLM setting malformed (not dict); ignoring")
         return None
-    return raw
+    return _normalise_llm_setting_entry(raw) if raw is not None else None
 
 
 def resolve_llm_setting(
@@ -973,7 +1024,7 @@ def resolve_llm_setting(
 def resolve_enabled_llm_settings(
     user_concept_id: str | None = None,
     org_concept_id: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Resolve ordered enabled LLM candidates with precedence user > organisation.
 
     The first item is always the effective primary selection for backwards

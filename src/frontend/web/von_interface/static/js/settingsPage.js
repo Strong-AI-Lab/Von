@@ -55,10 +55,13 @@ import {
 import {
   clearStoredOllamaSelection,
   getEffectiveLocalModelPreference,
+  getStoredOpenAiModelParameters,
   getStoredOpenAiSelectedModel,
+  normaliseModelParameters,
   normaliseLocalModelName,
   setLocalPremiumModelUseEnabled,
   setStoredOllamaSelection,
+  setStoredOpenAiModelParameters,
   setStoredOpenAiSelectedModel,
 } from './utils/localModelPreferences.js';
 
@@ -877,6 +880,7 @@ function appendUniquePersistedLlmSelection(selections, entry) {
     candidate.provider === canonical.provider
     && candidate.model === canonical.model
     && (candidate.host || null) === (canonical.host || null)
+    && stableModelParametersKey(candidate.model_parameters) === stableModelParametersKey(canonical.model_parameters)
   );
   if (!exists) selections.push(canonical);
 }
@@ -889,8 +893,14 @@ function buildPersistedLlmSelections({
 
   const openaiModel = String(openaiModelSelect?.value || '').trim();
   if (openaiModel) {
+    const openaiModelParameters = readOpenAiModelParametersFromUi();
     setStoredOpenAiSelectedModel(openaiModel);
-    appendUniquePersistedLlmSelection(selections, { provider: 'openai', model: openaiModel });
+    setStoredOpenAiModelParameters(openaiModelParameters);
+    appendUniquePersistedLlmSelection(selections, {
+      provider: 'openai',
+      model: openaiModel,
+      ...(openaiModelParameters ? { model_parameters: openaiModelParameters } : {}),
+    });
   }
 
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference?.ollamaSelection || null;
@@ -922,7 +932,8 @@ function resolvePersistedActiveLlm(
         return candidate
           && candidate.provider === requested.provider
           && candidate.model === requested.model
-          && (candidate.host || null) === (requested.host || null);
+          && (candidate.host || null) === (requested.host || null)
+          && stableModelParametersKey(candidate.model_parameters) === stableModelParametersKey(requested.model_parameters);
       })
       : null;
     return matchingEnabled ? { ...matchingEnabled } : requested;
@@ -941,6 +952,72 @@ function setInlineStatusMessage(element, text, tone = null) {
   element.style.display = element.textContent ? 'block' : 'none';
 }
 
+function readOpenAiModelParametersFromUi() {
+  const effort = String(document.getElementById('openaiReasoningEffortSelect')?.value || '').trim();
+  return normaliseModelParameters(effort ? { reasoning_effort: effort } : null);
+}
+
+function applyOpenAiReasoningEffortControls(capability) {
+  const container = document.getElementById('openaiReasoningEffortContainer');
+  const selectEl = document.getElementById('openaiReasoningEffortSelect');
+  if (!container || !selectEl) return;
+
+  const reasoning = capability?.parameters?.reasoning_effort || null;
+  const supported = !!reasoning?.supported;
+  container.classList.toggle('hidden', !supported);
+  selectEl.disabled = !supported;
+  if (!supported) {
+    selectEl.value = '';
+    setStoredOpenAiModelParameters(null);
+    return;
+  }
+
+  const allowedValues = (
+    Array.isArray(reasoning.allowed_values) && reasoning.allowed_values.length
+      ? reasoning.allowed_values
+      : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
+  ).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  const current = getStoredOpenAiModelParameters()?.reasoning_effort || '';
+  selectEl.replaceChildren();
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = 'provider default';
+  selectEl.append(defaultOption);
+  for (const value of allowedValues) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) continue;
+    const option = document.createElement('option');
+    option.value = token;
+    option.textContent = token;
+    selectEl.append(option);
+  }
+  selectEl.value = current && allowedValues.includes(current) ? current : '';
+  setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
+}
+
+async function refreshOpenAiReasoningEffortControls() {
+  const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+  if (!selectedModel) {
+    applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
+    return null;
+  }
+  try {
+    const response = await fetch(
+      `/api/settings/model_parameters/capabilities?provider=openai&model=${encodeURIComponent(selectedModel)}&api_surface=responses`,
+      { cache: 'no-store' },
+    );
+    const capability = await response.json();
+    if (response.ok && capability?.success !== false) {
+      applyOpenAiReasoningEffortControls(capability);
+      return capability;
+    }
+  } catch (error) {
+    console.warn('Failed to refresh OpenAI model parameter controls', error);
+  }
+  applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
+  return null;
+}
+
 function updateOpenAiModelStatusMessage() {
   const statusEl = document.getElementById('openaiModelStatusMessage');
   const toggleEl = document.getElementById('enableOpenAiPremiumToggle');
@@ -949,6 +1026,9 @@ function updateOpenAiModelStatusMessage() {
 
   const premiumEnabled = !!toggleEl?.checked;
   const selectedModel = String(selectEl?.value || getStoredOpenAiSelectedModel() || '').trim();
+  const selectedModelParameters = readOpenAiModelParametersFromUi()
+    || getStoredOpenAiModelParameters()
+    || null;
 
   if (!selectedModel) {
     setInlineStatusMessage(
@@ -961,7 +1041,12 @@ function updateOpenAiModelStatusMessage() {
     return;
   }
 
-  if (latestOpenAiModelProbe && latestOpenAiModelProbe.model === selectedModel) {
+  if (
+    latestOpenAiModelProbe
+    && latestOpenAiModelProbe.model === selectedModel
+    && stableModelParametersKey(latestOpenAiModelProbe.model_parameters)
+      === stableModelParametersKey(selectedModelParameters)
+  ) {
     if (latestOpenAiModelProbe.usable) {
       const prefix = premiumEnabled
         ? `${selectedModel} is usable.`
@@ -1057,6 +1142,7 @@ function notifyLocalModelPreferenceChanged() {
 async function testSelectedOpenAiModel() {
   const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar')?.value;
   const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+  const modelParameters = readOpenAiModelParametersFromUi();
   const statusEl = document.getElementById('openaiModelStatusMessage');
 
   if (!selectedModel) {
@@ -1066,16 +1152,19 @@ async function testSelectedOpenAiModel() {
   }
 
   setStoredOpenAiSelectedModel(selectedModel);
+  setStoredOpenAiModelParameters(modelParameters);
   setInlineStatusMessage(statusEl, `Testing ${selectedModel}...`, null);
 
   try {
     const response = await postJson('/api/settings/openai/test_model', {
       api_key_env_var: apiKeyEnvVar,
       model: selectedModel,
+      ...(modelParameters ? { model_parameters: modelParameters } : {}),
     });
     latestOpenAiModelProbe = {
       usable: !!response?.usable,
       model: String(response?.model || selectedModel),
+      model_parameters: normaliseModelParameters(response?.model_parameters) || modelParameters,
       reason: String(response?.reason || '').trim(),
       failure_kind: String(response?.failure_kind || '').trim() || null,
     };
@@ -1091,6 +1180,7 @@ async function testSelectedOpenAiModel() {
     latestOpenAiModelProbe = {
       usable: false,
       model: selectedModel,
+      model_parameters: modelParameters,
       reason: restartHint || message || 'Premium model test failed.',
       failure_kind: restartHint ? 'server_restart_required' : 'request_failed',
     };
@@ -1214,6 +1304,8 @@ function resolveActiveLlmFromSelections(
     && entry?.provider === currentResolved.provider
     && entry?.model === currentResolved.model
     && (entry?.host || null) === (currentResolved.host || null)
+    && stableModelParametersKey(entry?.model_parameters)
+      === stableModelParametersKey(currentResolved.model_parameters)
   );
   if (matchesCurrent) return { ...matchesCurrent };
 
@@ -1226,17 +1318,28 @@ function buildCanonicalLlmEntry(raw) {
   const model = String(raw.model || '').trim();
   if (!provider || !model) return null;
   const host = String(raw.host || '').trim();
-  return host
+  const modelParameters = normaliseModelParameters(raw.model_parameters || raw.modelParameters || null);
+  const entry = host
     ? { provider, model, host }
     : { provider, model };
+  if (modelParameters) entry.model_parameters = modelParameters;
+  return entry;
+}
+
+function stableModelParametersKey(raw) {
+  return JSON.stringify(normaliseModelParameters(raw) || {});
 }
 
 function formatLlmEntry(entry) {
   const canonical = buildCanonicalLlmEntry(entry);
   if (!canonical) return '—';
-  return canonical.host
+  const parameterText = canonical.model_parameters?.reasoning_effort
+    ? ` (${canonical.model_parameters.reasoning_effort} effort)`
+    : '';
+  const base = canonical.host
     ? `${canonical.provider}:${canonical.model} @ ${canonical.host}`
     : `${canonical.provider}:${canonical.model}`;
+  return `${base}${parameterText}`;
 }
 
 function readExplicitServerDefaultLlmFormEntry() {
@@ -3186,6 +3289,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
     const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
     setStoredOpenAiSelectedModel(selectedModel);
+    await refreshOpenAiReasoningEffortControls();
+    latestOpenAiModelProbe = null;
+    updateOpenAiModelStatusMessage();
+    refreshActiveSettingsConcernGuidance();
+    await testSelectedOpenAiModel();
+    await saveAllSettings();
+    notifyLocalModelPreferenceChanged();
+  });
+  document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
+    setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
@@ -3661,6 +3774,7 @@ async function loadAndDisplaySettings() {
         await populateOpenAIModelDropdown('openaiModelSelect', preferredOpenAiModel);
         const oac = document.getElementById('openaiModelsContainer');
         if (oac) { oac.style.display = 'block'; oac.classList.remove('hidden'); }
+        await refreshOpenAiReasoningEffortControls();
       } catch (error) {
         console.log('Could not directly load OpenAI models, will need verification:', error.message);
       }
@@ -4143,6 +4257,8 @@ async function saveAllSettings() {
         !payload?.resolved_llm
         || payload.resolved_llm.provider !== activeLlm.provider
         || payload.resolved_llm.model !== activeLlm.model
+        || stableModelParametersKey(payload.resolved_llm.model_parameters)
+          !== stableModelParametersKey(activeLlm.model_parameters)
       )
     ) {
       throw new Error('Model change did not take effect for the current context.');
@@ -4340,6 +4456,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
       if (selectedOpenAiModel) {
         setStoredOpenAiSelectedModel(selectedOpenAiModel);
       }
+      await refreshOpenAiReasoningEffortControls();
       latestOpenAiModelProbe = null;
       updateOpenAiModelStatusMessage();
     } else {

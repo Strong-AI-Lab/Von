@@ -457,6 +457,7 @@ def _build_generate_conversation_turn_instance_inputs(
     request_gmail_profile: str | None,
     request_language: str,
     requested_model: str | None,
+    requested_model_parameters: Mapping[str, Any] | None,
     requested_client_type: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
@@ -470,6 +471,11 @@ def _build_generate_conversation_turn_instance_inputs(
         "gmail_profile": request_gmail_profile,
         "preferred_language": request_language,
         "requested_model": requested_model,
+        "requested_model_parameters": (
+            dict(requested_model_parameters)
+            if isinstance(requested_model_parameters, Mapping)
+            else None
+        ),
         "requested_client_type": requested_client_type,
         "prompt": prompt_text if isinstance(prompt_text, str) else "",
         "user_prompt": prompt_text if isinstance(prompt_text, str) else "",
@@ -550,6 +556,9 @@ def _build_generate_conversation_turn_instance_outputs(
     if isinstance(llm_interaction_payload, Mapping):
         outputs["llm_interaction"] = {
             "requested_model": llm_interaction_payload.get("requested_model"),
+            "requested_model_parameters": llm_interaction_payload.get(
+                "requested_model_parameters"
+            ),
             "orchestrator_used": llm_interaction_payload.get("orchestrator_used"),
             "duration_ms": llm_interaction_payload.get("duration_ms"),
             "orchestrator_duration_ms": llm_interaction_payload.get(
@@ -575,6 +584,7 @@ def _submit_generate_conversation_turn_instance(
     request_gmail_profile: str | None,
     request_language: str,
     requested_model: str | None,
+    requested_model_parameters: Mapping[str, Any] | None,
     requested_client_type: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
@@ -673,6 +683,7 @@ def _submit_generate_conversation_turn_instance(
                 request_gmail_profile=request_gmail_profile,
                 request_language=request_language,
                 requested_model=requested_model,
+                requested_model_parameters=requested_model_parameters,
                 requested_client_type=requested_client_type,
                 prompt_text=prompt_text,
                 workflow_discovery_result=workflow_discovery_result,

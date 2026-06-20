@@ -97,7 +97,7 @@ def _resolve_instance_runtime_model_context(
     *,
     context: Mapping[str, Any],
     inputs: Mapping[str, Any],
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, dict[str, Any]]:
     requested_model = (
         _coerce_non_empty_text(context.get("requested_model"))
         or _coerce_non_empty_text(inputs.get("requested_model"))
@@ -117,7 +117,25 @@ def _resolve_instance_runtime_model_context(
         requested_model,
         client_type=inferred_client_type,
     )
-    return normalised_requested_model, inferred_client_type
+    raw_parameters = (
+        context.get("requested_model_parameters")
+        or inputs.get("requested_model_parameters")
+        or context.get("model_parameters")
+        or inputs.get("model_parameters")
+    )
+    try:
+        from ...services.model_parameter_service import (
+            normalise_model_parameters_for_storage,
+        )
+
+        model_parameters = normalise_model_parameters_for_storage(
+            raw_parameters,
+            provider=inferred_client_type,
+            model=normalised_requested_model,
+        )
+    except Exception:
+        model_parameters = {}
+    return normalised_requested_model, inferred_client_type, model_parameters
 
 
 @dataclass
@@ -246,9 +264,11 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         )
         from .registry_factory import _get_or_build_durable_mcp_gateway
 
-        requested_model, requested_client_type = _resolve_instance_runtime_model_context(
-            context=context,
-            inputs=instance.inputs,
+        requested_model, requested_client_type, requested_model_parameters = (
+            _resolve_instance_runtime_model_context(
+                context=context,
+                inputs=instance.inputs,
+            )
         )
         effective_model = requested_model or get_active_model_name(
             user_concept_id=instance.user_id,
@@ -258,6 +278,8 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             context.setdefault("requested_model", requested_model)
         if requested_client_type:
             context.setdefault("requested_client_type", requested_client_type)
+        if requested_model_parameters:
+            context.setdefault("requested_model_parameters", requested_model_parameters)
 
         llm_client = get_llm_client(
             client_type=requested_client_type,
@@ -268,6 +290,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             llm_client=llm_client,
             gateway=_get_or_build_durable_mcp_gateway(),
             model=effective_model,
+            model_parameters=requested_model_parameters or None,
             user_namespace=instance.namespace,
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
@@ -289,6 +312,10 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                 trace.metadata["requested_model_override_applied"] = True
             if requested_client_type:
                 trace.metadata["requested_client_type"] = requested_client_type
+            if requested_model_parameters:
+                trace.metadata["requested_model_parameters"] = dict(
+                    requested_model_parameters
+                )
             resolved_provider = resolve_provider_from_model_concept(default_model)
             if resolved_provider is None:
                 lowered_model = default_model.lower()

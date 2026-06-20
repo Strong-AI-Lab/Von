@@ -24,6 +24,10 @@ import requests
 
 from ..services.llm_api_key_resolution import get_gemini_api_key
 from ..services.settings_service import get_openai_env_var, resolve_llm_setting
+from ..services.model_parameter_service import (
+    openai_chat_completions_kwargs_from_model_parameters,
+    openai_responses_kwargs_from_model_parameters,
+)
 from .model_defaults import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OLLAMA_MODEL,
@@ -309,6 +313,37 @@ def to_openai_messages(conv: Sequence[LLMMessage]) -> List[Dict[str, str]]:
             role = "user"
         out.append({"role": role, "content": m["content"]})
     return out
+
+
+def _read_response_field(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(field_name)
+    return getattr(value, field_name, None)
+
+
+def _extract_openai_responses_text(response: Any) -> Optional[str]:
+    direct_text = _read_response_field(response, "output_text")
+    if isinstance(direct_text, str) and direct_text.strip():
+        return direct_text.strip()
+
+    output = _read_response_field(response, "output")
+    if not isinstance(output, Sequence) or isinstance(output, (str, bytes)):
+        return None
+    chunks: list[str] = []
+    for item in output:
+        content = _read_response_field(item, "content")
+        if isinstance(content, str) and content.strip():
+            chunks.append(content.strip())
+            continue
+        if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+            continue
+        for part in content:
+            text = _read_response_field(part, "text")
+            if not isinstance(text, str):
+                text = _read_response_field(part, "output_text")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text.strip())
+    return "\n".join(chunks).strip() or None
 
 
 def to_ollama_messages(conv: Sequence[LLMMessage]) -> List[Dict[str, str]]:
@@ -677,6 +712,8 @@ class LLMInterface(ABC):
         context: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         system_message: Optional[str] = None,
+        llm_params: Optional[Dict[str, Any]] = None,
+        **provider_options: Any,
     ) -> LLMResponse:
         """Generate response with structured tool calling support (JVNAUTOSCI-799).
 
@@ -689,6 +726,8 @@ class LLMInterface(ABC):
             context: Prior conversation history
             model: Model name override
             system_message: System-level instructions
+            llm_params: Model-parameter bundle for provider-boundary translation
+            **provider_options: Provider-specific structured-call options
 
         Returns:
             LLMResponse with text and/or structured tool calls
@@ -707,11 +746,15 @@ class LLMInterface(ABC):
         # Default implementation delegates to structured_tool_calling module
         config = self._get_structured_client_config(model)
         client = get_structured_client(config)
+        structured_options = dict(provider_options)
+        if llm_params:
+            structured_options["llm_params"] = dict(llm_params)
         return client.generate_with_tools_sync(
             prompt=prompt,
             available_tools=available_tools,
             system_message=system_message,
             context=self._convert_context_for_structured_client(context),
+            **structured_options,
         )
 
     def _should_use_structured_calling(self) -> bool:
@@ -1608,6 +1651,41 @@ class OpenAIClient(LLMInterface):
         try:
             conv = build_conversation(prompt, context)
             messages = to_openai_messages(conv)
+            responses_params = openai_responses_kwargs_from_model_parameters(
+                llm_params or {},
+                model=target_model,
+            )
+            if responses_params:
+                response = self.client.responses.create(  # type: ignore[attr-defined]
+                    model=target_model,
+                    input=messages,  # type: ignore[arg-type]
+                    **responses_params,
+                )
+                logger.debug(f"OpenAI Responses raw response: {response}")
+                actual_model = getattr(response, "model", None) or target_model
+                content = _extract_openai_responses_text(response)
+                if not content:
+                    raise RuntimeError(
+                        f"OpenAI {target_model} Responses payload contained no text"
+                    )
+                if (
+                    model is not None
+                    and isinstance(actual_model, str)
+                    and actual_model != target_model
+                ):
+                    logger.warning(
+                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                    )
+                    warnings.warn(
+                        f"Model mismatch - Requested: {target_model}, Used: {actual_model}"
+                    )
+                if _should_log_llm_io():
+                    logger.debug(
+                        "[LLM RESPONSE][OpenAI][%s]: %s",
+                        actual_model,
+                        _truncate_for_log(content),
+                    )
+                return content
 
             openai_params = {}
             if llm_params:

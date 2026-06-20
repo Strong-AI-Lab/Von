@@ -62,6 +62,10 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
             "#V#openai_gpt5_mini_temperature_omit_constraint",
             mod.PRED_HAS_FIXED_PARAMETER_VALUE,
         ): ["1.0"],
+        (
+            "#V#openai_gpt5_mini_temperature_omit_constraint",
+            mod.PRED_HAS_ALLOWED_PARAMETER_VALUE,
+        ): ["1.0"],
     }
 
     monkeypatch.setattr(
@@ -97,6 +101,7 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     assert constraint["parameter"] == "temperature"
     assert constraint["action"] == "omit"
     assert constraint["fixed_value"] == "1.0"
+    assert constraint["allowed_values"] == ["1.0"]
 
 
 def test_runtime_parameter_policy_uses_graph_registry_snapshot(monkeypatch) -> None:
@@ -165,4 +170,64 @@ def test_runtime_parameter_policy_uses_graph_registry_snapshot(monkeypatch) -> N
             api_surface="chat_completions",
         )
         == 0.7
+    )
+
+
+def test_runtime_parameter_policy_rejects_values_outside_graph_allowed_set(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_registry_service as mod
+
+    snapshot = {
+        "source": "vontology_graph",
+        "models": [
+            {
+                "model_id": "gpt-5.5",
+                "provider": "openai",
+                "concept_id": "#V#openai_gpt55",
+                "registry_entry_id": "#V#openai_gpt55_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#openai_gpt55_responses_profile",
+                        "api_surface": "responses",
+                        "parameter_constraints": [
+                            {
+                                "constraint_concept_id": "#V#openai_gpt55_effort_constraint",
+                                "parameter_concept_id": "#V#reasoning_effort_parameter",
+                                "parameter": "reasoning_effort",
+                                "action": "allow",
+                                "allowed_values": ["low", "medium"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        mod,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+    assert (
+        mod.sanitise_model_parameter_value(
+            model="gpt-5.5",
+            provider="openai",
+            parameter="reasoning_effort",
+            value="low",
+            api_surface="responses",
+        )
+        == "low"
+    )
+    assert (
+        mod.sanitise_model_parameter_value(
+            model="gpt-5.5",
+            provider="openai",
+            parameter="reasoning_effort",
+            value="xhigh",
+            api_surface="responses",
+        )
+        is None
     )

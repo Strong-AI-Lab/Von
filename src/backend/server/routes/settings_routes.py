@@ -82,6 +82,12 @@ from ...services.mongo_observability_service import (
     build_mongo_cost_guardrail_report,
     observe_mongo_operation,
 )
+from ...services.model_parameter_service import (
+    MODEL_PARAMETERS_KEY,
+    build_model_parameter_capabilities,
+    normalise_model_parameters_for_storage,
+    openai_responses_kwargs_from_model_parameters,
+)
 from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
@@ -996,11 +1002,33 @@ def save_all_settings():
             if scope in ("user", "organisation") and concept_id and provider and model:
                 llm_scope = scope
                 llm_scope_concept_id = concept_id
-                ok = (
-                    set_user_llm_setting(concept_id, provider, model)
-                    if scope == "user"
-                    else set_org_llm_setting(concept_id, provider, model)
+                model_parameters = normalise_model_parameters_for_storage(
+                    llm_data.get(MODEL_PARAMETERS_KEY) or llm_data.get("modelParameters"),
+                    provider=provider,
+                    model=model,
                 )
+                if scope == "user":
+                    ok = (
+                        set_user_llm_setting(
+                            concept_id,
+                            provider,
+                            model,
+                            model_parameters=model_parameters,
+                        )
+                        if model_parameters
+                        else set_user_llm_setting(concept_id, provider, model)
+                    )
+                else:
+                    ok = (
+                        set_org_llm_setting(
+                            concept_id,
+                            provider,
+                            model,
+                            model_parameters=model_parameters,
+                        )
+                        if model_parameters
+                        else set_org_llm_setting(concept_id, provider, model)
+                    )
                 if not ok:
                     return (
                         jsonify(
@@ -1443,10 +1471,33 @@ def set_llm_override():
             and isinstance(provider, str)
             and isinstance(model, str)
         )
+        model_parameters = normalise_model_parameters_for_storage(
+            data.get(MODEL_PARAMETERS_KEY) or data.get("modelParameters"),
+            provider=provider,
+            model=model,
+        )
         if scope == "user":
-            ok = set_user_llm_setting(concept_id, provider, model)
+            ok = (
+                set_user_llm_setting(
+                    concept_id,
+                    provider,
+                    model,
+                    model_parameters=model_parameters,
+                )
+                if model_parameters
+                else set_user_llm_setting(concept_id, provider, model)
+            )
         else:
-            ok = set_org_llm_setting(concept_id, provider, model)
+            ok = (
+                set_org_llm_setting(
+                    concept_id,
+                    provider,
+                    model,
+                    model_parameters=model_parameters,
+                )
+                if model_parameters
+                else set_org_llm_setting(concept_id, provider, model)
+            )
         if not ok:
             return (
                 jsonify({"status": "error", "message": "Failed to persist override"}),
@@ -1587,6 +1638,39 @@ def get_openai_models():
                 ),
                 500,
             )
+
+
+@settings_bp.route("/model_parameters/capabilities", methods=["GET"])
+def get_model_parameter_capabilities():
+    provider = str(request.args.get("provider") or "").strip().lower()
+    model = str(request.args.get("model") or "").strip()
+    api_surface = str(request.args.get("api_surface") or "responses").strip()
+    include_registry = str(request.args.get("include_registry") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not provider or not model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "error": "provider and model are required",
+                "parameters": {},
+            },
+            400,
+        )
+    return _jsonify_no_store(
+        {
+            "success": True,
+            **build_model_parameter_capabilities(
+                provider=provider,
+                model=model,
+                api_surface=api_surface or "responses",
+                include_registry=include_registry,
+            ),
+        }
+    )
 
 
 # --- Per-user preference (language & organisation) storage via concept relationships ---
@@ -3117,6 +3201,17 @@ def test_openai_model():
         from ...languagemodels.llm_interface import resolve_openai_model_name
 
         resolved_model = resolve_openai_model_name(requested_model) or requested_model
+        model_parameters = normalise_model_parameters_for_storage(
+            payload.get(MODEL_PARAMETERS_KEY) or payload.get("modelParameters"),
+            provider="openai",
+            model=resolved_model,
+            api_surface="responses",
+        )
+        parameter_capabilities = build_model_parameter_capabilities(
+            provider="openai",
+            model=resolved_model,
+            api_surface="responses",
+        )
         client = OpenAIClient(api_key_env_var=api_key_env_var)
 
         try:
@@ -3134,6 +3229,8 @@ def test_openai_model():
                     "success": True,
                     "usable": False,
                     "model": resolved_model,
+                    MODEL_PARAMETERS_KEY: model_parameters,
+                    "model_parameter_capabilities": parameter_capabilities,
                     "failure_kind": "model_unavailable",
                     "reason": (
                         f"{resolved_model} is not present in the models available to "
@@ -3143,10 +3240,15 @@ def test_openai_model():
             )
 
         try:
+            response_kwargs = openai_responses_kwargs_from_model_parameters(
+                model_parameters,
+                model=resolved_model,
+            )
             client.client.responses.create(
                 model=resolved_model,
                 input="Reply exactly with OK.",
                 max_output_tokens=8,
+                **response_kwargs,
             )
         except Exception as responses_exc:
             try:
@@ -3172,6 +3274,8 @@ def test_openai_model():
                         "success": True,
                         "usable": False,
                         "model": resolved_model,
+                        MODEL_PARAMETERS_KEY: model_parameters,
+                        "model_parameter_capabilities": parameter_capabilities,
                         "failure_kind": failure_kind,
                         "reason": reason,
                     }
@@ -3182,6 +3286,8 @@ def test_openai_model():
                 "success": True,
                 "usable": True,
                 "model": resolved_model,
+                MODEL_PARAMETERS_KEY: model_parameters,
+                "model_parameter_capabilities": parameter_capabilities,
                 "failure_kind": None,
                 "reason": "The selected premium model completed a live probe successfully.",
             }

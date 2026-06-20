@@ -53,6 +53,7 @@ class WorkflowEnvironment:
     llm_client: Any
     gateway: Any | None = None
     model: str | None = None
+    model_parameters: Mapping[str, Any] | None = None
     user_namespace: str | None = None
     auxiliary_system_prompt: str | None = None
     max_tool_invocations: int | None = None
