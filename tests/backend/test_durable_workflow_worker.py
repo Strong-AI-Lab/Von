@@ -54,6 +54,8 @@ class _PollManagerStub:
     def __init__(self, general_instances: list[WorkflowInstance]) -> None:
         self.general_instances = general_instances
         self.calls: list[dict[str, Any]] = []
+        self.heartbeat_calls: list[dict[str, Any]] = []
+        self.stopped_calls: list[dict[str, Any]] = []
 
     def find_and_claim_instance(
         self,
@@ -61,12 +63,14 @@ class _PollManagerStub:
         *,
         workflow_ids: list[str] | None = None,
         priority_only: bool = False,
+        worker_build_identity: dict[str, Any] | None = None,
     ) -> WorkflowInstance | None:
         self.calls.append(
             {
                 "worker_id": worker_id,
                 "workflow_ids": workflow_ids,
                 "priority_only": priority_only,
+                "worker_build_identity": worker_build_identity,
             }
         )
         if priority_only:
@@ -74,6 +78,15 @@ class _PollManagerStub:
         if not self.general_instances:
             return None
         return self.general_instances.pop(0)
+
+    def upsert_worker_heartbeat(self, **kwargs: Any) -> bool:
+        self.heartbeat_calls.append(dict(kwargs))
+        return True
+
+    def mark_worker_stopped(self, **kwargs: Any) -> bool:
+        self.stopped_calls.append(dict(kwargs))
+        return True
+
 
 def _build_instance() -> WorkflowInstance:
     instance = WorkflowInstance.create(
@@ -126,8 +139,15 @@ def test_worker_reserves_capacity_for_priority_claims(
         False,
         False,
     ]
+    assert all(
+        call["worker_build_identity"]["worker_id"] == "worker-1548"
+        for call in manager.calls
+    )
     assert len(worker._current_instances) == 4
     assert len(manager.general_instances) == 1
+    assert manager.heartbeat_calls
+    assert manager.heartbeat_calls[-1]["worker_id"] == "worker-1548"
+    assert len(manager.heartbeat_calls[-1]["active_instance_ids"]) == 4
 
 
 def test_worker_defers_general_claims_under_live_load(

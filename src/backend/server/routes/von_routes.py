@@ -25,6 +25,9 @@ from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICA
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.models import WorkflowInstanceStatus
+from ...workflows.durable.claim_diagnostics import (
+    build_workflow_instance_claim_diagnostics,
+)
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
@@ -5949,6 +5952,7 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     if not isinstance(request_id, str) or not request_id.strip():
         request_id = getattr(instance, "source_event_id", None)
 
+    claim_diagnostics = build_workflow_instance_claim_diagnostics(instance)
     llm_debug: dict[str, Any] = {
         "response": response_text,
         "request_id": request_id,
@@ -5959,6 +5963,7 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
         or str(getattr(instance, "status", "") or ""),
         "workflow_instance_current_state": getattr(instance, "current_state", None),
         "background_result_source": "durable_conversation_turn_instance",
+        **claim_diagnostics,
     }
     for key in (
         "workflow_discovery",
@@ -5984,6 +5989,7 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
         "rag_trace": None,
         "background_result_source": "durable_conversation_turn_instance",
         "workflow_instance_id": getattr(instance, "instance_id", None),
+        **claim_diagnostics,
     }
 
 

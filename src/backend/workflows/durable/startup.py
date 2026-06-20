@@ -237,6 +237,17 @@ def recover_orphaned_instances(
     return count
 
 
+def release_ineligible_worker_claims(
+    *,
+    required_worker_build: str | None = None,
+) -> int:
+    """Release running claims whose worker build does not satisfy governance."""
+    manager = get_instance_manager()
+    return manager.release_ineligible_worker_claims(
+        required_worker_build=required_worker_build,
+    )
+
+
 def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
     """Get the status of the durable workflow system.
 
@@ -248,11 +259,12 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
     Returns:
         Dict with status information.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from ...db.mongo_client import get_db
     from .instance_manager import (
         WORKFLOW_INSTANCES_COLLECTION,
         WORKFLOW_SCHEDULES_COLLECTION,
+        WORKFLOW_WORKERS_COLLECTION,
     )
 
     db = get_db()
@@ -261,6 +273,7 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
         "worker_running": _worker is not None and _worker.is_running,
         "scheduler_running": _scheduler is not None and _scheduler.is_running,
         "worker_id": _worker.worker_id if _worker else None,
+        "worker_build_identity": _worker.worker_build_identity if _worker else None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -268,6 +281,7 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
         try:
             instances_coll = db[WORKFLOW_INSTANCES_COLLECTION]
             schedules_coll = db[WORKFLOW_SCHEDULES_COLLECTION]
+            workers_coll = db[WORKFLOW_WORKERS_COLLECTION]
 
             # Count instances by status
             pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
@@ -287,6 +301,16 @@ def get_system_status(*, include_counts: bool = True) -> dict[str, Any]:
             status["schedules"] = {
                 "total": schedules_coll.count_documents({}),
                 "enabled": schedules_coll.count_documents({"enabled": True}),
+            }
+            status["workers"] = {
+                "known": workers_coll.count_documents({}),
+                "recent": workers_coll.count_documents(
+                    {
+                        "last_seen": {
+                            "$gte": datetime.now(timezone.utc) - timedelta(minutes=10)
+                        }
+                    }
+                ),
             }
         except Exception as e:
             status["error"] = str(e)

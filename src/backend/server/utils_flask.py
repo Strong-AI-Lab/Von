@@ -426,6 +426,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..workflows.durable.startup import (
             start_worker_and_scheduler,
             recover_orphaned_instances,
+            release_ineligible_worker_claims,
             get_system_status,
         )
         from ..services.paper_representation_workflow_vontology_service import (
@@ -526,6 +527,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.info(
                 "[durable_workflows] Recovered %d orphaned instances.", recovered
             )
+        released_ineligible_claims = release_ineligible_worker_claims()
+        if released_ineligible_claims > 0:
+            app_logger.warning(
+                "[durable_workflows] Released %d ineligible worker claim(s).",
+                released_ineligible_claims,
+            )
 
         result = start_worker_and_scheduler(
             registry=_durable_action_registry,
@@ -542,6 +549,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["startup_queue_ready"] = {
             "stage": "before_canonical_bootstraps",
             "recovered_orphaned_instances": recovered,
+            "released_ineligible_worker_claims": released_ineligible_claims,
         }
 
         entity_workflow_bootstrap_report = _run_workflow_family_bootstrap(
