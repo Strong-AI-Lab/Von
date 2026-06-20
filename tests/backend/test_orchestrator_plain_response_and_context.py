@@ -82,6 +82,17 @@ def test_plain_response_has_routing_info(monkeypatch):
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
     ]
+    selected_boundary = next(
+        (
+            entry
+            for entry in dispatch_boundaries
+            if entry.get("boundary") == "execution_mode_selected"
+        ),
+        None,
+    )
+    assert selected_boundary is not None
+    assert selected_boundary.get("selected_execution_mode") == "direct_response"
+    assert selected_boundary.get("selected_execution_mode_authority_source")
     assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
     assert dispatch_boundaries[-1].get("selected_execution_mode") == "direct_response"
 

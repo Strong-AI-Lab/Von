@@ -84,6 +84,12 @@ from src.backend.services.selected_workflow_handoff_service import (
     workflow_result_tool_invocations,
     workflow_required_tools_from_contract as _workflow_required_tools_from_contract_support,
 )
+from src.backend.services.workflow_execution_mode_resolution_service import (
+    SelectedWorkflowExecutionModeResolution,
+    normalise_declared_workflow_execution_mode,
+    resolve_declared_workflow_execution_mode_from_metadata,
+    resolve_selected_workflow_execution_mode,
+)
 from ...workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -4225,16 +4231,13 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _normalise_declared_workflow_execution_mode(value: Any) -> str | None:
-        text = str(value or "").strip().lower().replace("-", "_")
-        if text in {"custom_workflow", "direct_response", "tool_pipeline"}:
-            return text
-        return None
+        return normalise_declared_workflow_execution_mode(value)
 
-    def _selected_workflow_declared_execution_mode(
+    def _selected_workflow_metadata(
         self,
         *,
         selected_workflow_id: str | None,
-    ) -> str | None:
+    ) -> Mapping[str, Any] | None:
         workflow_id_text = (
             selected_workflow_id.strip()
             if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
@@ -4242,52 +4245,67 @@ class InternalMCPChatOrchestrator:
         )
         if not workflow_id_text:
             return None
-
         _registration, workflow_definition = (
             self._resolve_workflow_registration_and_definition(workflow_id_text)
         )
         metadata = getattr(workflow_definition, "metadata", None)
-        if not isinstance(metadata, Mapping):
-            return None
+        return metadata if isinstance(metadata, Mapping) else None
 
-        for source in (
-            metadata,
-            metadata.get("routing_profile"),
-            metadata.get("workflow_execution_contract"),
-        ):
-            if not isinstance(source, Mapping):
-                continue
-            for key in (
-                "execution_mode",
-                "selected_execution_mode",
-                "dispatch_execution_mode",
-            ):
-                execution_mode = self._normalise_declared_workflow_execution_mode(
-                    source.get(key)
-                )
-                if execution_mode:
-                    return execution_mode
-        return None
+    def _selected_workflow_declared_execution_mode_resolution(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> SelectedWorkflowExecutionModeResolution:
+        return resolve_declared_workflow_execution_mode_from_metadata(
+            self._selected_workflow_metadata(
+                selected_workflow_id=selected_workflow_id
+            )
+        )
+
+    def _selected_workflow_declared_execution_mode(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> str | None:
+        return self._selected_workflow_declared_execution_mode_resolution(
+            selected_workflow_id=selected_workflow_id
+        ).execution_mode
 
     def _selected_workflow_prefers_direct_response(
         self,
         *,
         selected_workflow_id: str | None,
     ) -> bool:
-        cleaned_workflow_id = (
-            selected_workflow_id.strip()
-            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
-            else None
+        return (
+            self._selected_workflow_execution_mode_resolution(
+                selected_workflow_id=selected_workflow_id
+            ).execution_mode
+            == "direct_response"
         )
-        if not cleaned_workflow_id:
-            return False
-        if cleaned_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID:
-            return True
-        if cleaned_workflow_id == CHAT_NARRATION_WORKFLOW_ID:
-            return True
-        return self._selected_workflow_uses_action_contract(
-            selected_workflow_id=cleaned_workflow_id,
-            required_action_ids=_TURN_EXECUTION_NARRATION_ACTION_IDS,
+
+    def _selected_workflow_execution_mode_resolution(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> SelectedWorkflowExecutionModeResolution:
+        return resolve_selected_workflow_execution_mode(
+            selected_workflow_id=selected_workflow_id,
+            workflow_metadata_resolver=lambda workflow_id: (
+                self._selected_workflow_metadata(
+                    selected_workflow_id=workflow_id
+                )
+            ),
+            action_contract_matches=lambda workflow_id, required_action_ids: (
+                self._selected_workflow_uses_action_contract(
+                    selected_workflow_id=workflow_id,
+                    required_action_ids=required_action_ids,
+                )
+            ),
+            tool_pipeline_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
+            narration_action_ids=_TURN_EXECUTION_NARRATION_ACTION_IDS,
+            tool_calling_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            chat_assistant_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+            chat_narration_workflow_id=CHAT_NARRATION_WORKFLOW_ID,
         )
 
     def _selected_workflow_execution_mode(
@@ -4295,35 +4313,9 @@ class InternalMCPChatOrchestrator:
         *,
         selected_workflow_id: str | None,
     ) -> str | None:
-        cleaned_workflow_id = (
-            selected_workflow_id.strip()
-            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
-            else None
-        )
-        if not cleaned_workflow_id:
-            return None
-        if cleaned_workflow_id == TOOL_CALLING_WORKFLOW_ID:
-            return "tool_pipeline"
-        if cleaned_workflow_id in {
-            CHAT_ASSISTANT_WORKFLOW_ID,
-            CHAT_NARRATION_WORKFLOW_ID,
-        }:
-            return "direct_response"
-        declared_execution_mode = self._selected_workflow_declared_execution_mode(
-            selected_workflow_id=cleaned_workflow_id
-        )
-        if declared_execution_mode:
-            return declared_execution_mode
-        if self._selected_workflow_uses_action_contract(
-            selected_workflow_id=cleaned_workflow_id,
-            required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
-        ):
-            return "tool_pipeline"
-        if self._selected_workflow_prefers_direct_response(
-            selected_workflow_id=cleaned_workflow_id
-        ):
-            return "direct_response"
-        return "custom_workflow"
+        return self._selected_workflow_execution_mode_resolution(
+            selected_workflow_id=selected_workflow_id
+        ).execution_mode
 
     # -------------------------------------------------------------------
     # Generic MCP tool invocation action (Phase 3.1)
@@ -35052,6 +35044,9 @@ class InternalMCPChatOrchestrator:
                     )
 
         if isinstance(routing_info, WorkflowRoutingInfo):
+            preflight_selected_execution_mode = self._selected_workflow_execution_mode(
+                selected_workflow_id=selected_workflow_id
+            )
             preflight_selection_state = _WorkflowDispatchSelectionState(
                 selected_workflow_id=selected_workflow_id,
                 selected_workflow_id_text=selected_workflow_id,
@@ -35060,21 +35055,17 @@ class InternalMCPChatOrchestrator:
                     selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
                 ),
                 selector_requests_custom_workflow=(
-                    selected_workflow_id not in _SELECTOR_GENERIC_WORKFLOW_IDS
+                    selected_workflow_id is not None
+                    and preflight_selected_execution_mode == "custom_workflow"
                 ),
                 selected_uses_narration_contract=(
                     selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
                 ),
                 selected_prefers_direct_response=(
-                    self._selected_workflow_prefers_direct_response(
-                        selected_workflow_id=selected_workflow_id
-                    )
+                    preflight_selected_execution_mode == "direct_response"
                 ),
                 selected_uses_tool_pipeline_contract=(
-                    self._selected_workflow_execution_mode(
-                        selected_workflow_id=selected_workflow_id
-                    )
-                    == "tool_pipeline"
+                    preflight_selected_execution_mode == "tool_pipeline"
                 ),
                 routing_info=routing_info,
             )
@@ -35282,8 +35273,14 @@ class InternalMCPChatOrchestrator:
             and data.get("selected_workflow_id").strip()
             else None
         )
-        selected_execution_mode = self._selected_workflow_execution_mode(
-            selected_workflow_id=selected_workflow_id
+        selected_execution_mode_resolution = (
+            self._selected_workflow_execution_mode_resolution(
+                selected_workflow_id=selected_workflow_id
+            )
+        )
+        selected_execution_mode = selected_execution_mode_resolution.execution_mode
+        selected_execution_mode_authority_source = (
+            selected_execution_mode_resolution.authority_source
         )
         selected_workflow_trace_payload = (
             {
@@ -35310,6 +35307,11 @@ class InternalMCPChatOrchestrator:
             selected_workflow_trace_payload.setdefault(
                 "selected_execution_mode",
                 selected_execution_mode,
+            )
+        if selected_execution_mode_authority_source:
+            selected_workflow_trace_payload.setdefault(
+                "selected_execution_mode_authority_source",
+                selected_execution_mode_authority_source,
             )
         workflow_routing_payload = (
             {
@@ -35421,27 +35423,34 @@ class InternalMCPChatOrchestrator:
                 "selected_execution_mode": selected_execution_mode or "custom_workflow",
                 **selector_trace_progress_payload,
             }
+            if selected_execution_mode_authority_source:
+                event["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source
+                )
             if isinstance(final_state_value, str) and final_state_value.strip():
                 event["final_state"] = final_state_value.strip()
             if isinstance(completed_value, bool):
                 event["outcome"] = "success" if completed_value else "failure"
             if isinstance(error, str) and error.strip():
                 event["error"] = error.strip()
-            emit_progress(
-                {
-                    "status": status,
-                    "stage": "selected_workflow_execution",
-                    "phase": "selected_workflow_execution",
-                    "phase_label": "Selected workflow execution",
-                    "workflow_stage_id": "selected_workflow_execution",
-                    "selected_workflow_id": selected_workflow_id,
-                    "workflow_id": selected_workflow_id,
-                    "selected_execution_mode": selected_execution_mode
-                    or "custom_workflow",
-                    **selector_trace_progress_payload,
-                    "selected_workflow_execution_event": event,
-                }
-            )
+            progress_payload = {
+                "status": status,
+                "stage": "selected_workflow_execution",
+                "phase": "selected_workflow_execution",
+                "phase_label": "Selected workflow execution",
+                "workflow_stage_id": "selected_workflow_execution",
+                "selected_workflow_id": selected_workflow_id,
+                "workflow_id": selected_workflow_id,
+                "selected_execution_mode": selected_execution_mode
+                or "custom_workflow",
+                **selector_trace_progress_payload,
+                "selected_workflow_execution_event": event,
+            }
+            if selected_execution_mode_authority_source:
+                progress_payload["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source
+                )
+            emit_progress(progress_payload)
 
         def _append_dispatch_boundary(
             *,
@@ -35461,6 +35470,10 @@ class InternalMCPChatOrchestrator:
                     selected_execution_mode or "custom_workflow"
                 ),
             }
+            if selected_execution_mode_authority_source:
+                payload["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source
+                )
             if selected_workflow_id:
                 payload["selected_workflow_id"] = selected_workflow_id
                 payload["dispatch_workflow_id"] = selected_workflow_id
@@ -39485,11 +39498,19 @@ class InternalMCPChatOrchestrator:
             and routing_info.verdict.strip()
             else ""
         )
-        selected_uses_tool_pipeline_contract = (
-            self._selected_workflow_uses_action_contract(
-                selected_workflow_id=selected_workflow_id_text,
-                required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
+        selected_execution_mode_resolution = (
+            self._selected_workflow_execution_mode_resolution(
+                selected_workflow_id=selected_workflow_id_text
             )
+        )
+        selected_execution_mode = (
+            selected_execution_mode_resolution.execution_mode or "custom_workflow"
+        )
+        selected_execution_mode_authority_source = (
+            selected_execution_mode_resolution.authority_source
+        )
+        selected_uses_tool_pipeline_contract = (
+            selected_execution_mode == "tool_pipeline"
         )
         selected_uses_narration_contract = self._selected_workflow_uses_action_contract(
             selected_workflow_id=selected_workflow_id_text,
@@ -39501,9 +39522,7 @@ class InternalMCPChatOrchestrator:
         has_explicit_workflow_routing = isinstance(routing_info, WorkflowRoutingInfo)
         selected_prefers_direct_response = bool(
             has_explicit_workflow_routing
-            and self._selected_workflow_prefers_direct_response(
-                selected_workflow_id=selected_workflow_id_text
-            )
+            and selected_execution_mode == "direct_response"
         )
         selector_requests_narration = bool(
             has_explicit_workflow_routing
@@ -39515,8 +39534,7 @@ class InternalMCPChatOrchestrator:
         selector_requests_custom_workflow = bool(
             has_explicit_workflow_routing
             and selected_workflow_id_text
-            and not selected_prefers_direct_response
-            and not selected_uses_tool_pipeline_contract
+            and selected_execution_mode == "custom_workflow"
         )
         selection_state = _WorkflowDispatchSelectionState(
             selected_workflow_id=selected_workflow_id,
@@ -43875,6 +43893,15 @@ class InternalMCPChatOrchestrator:
                 )
             if cleaned_dispatch_workflow_id:
                 progress_payload["dispatch_workflow_id"] = cleaned_dispatch_workflow_id
+            selected_execution_mode_authority_source_value = (
+                _clean_boundary_scalar_text(
+                    payload.get("selected_execution_mode_authority_source")
+                )
+            )
+            if selected_execution_mode_authority_source_value:
+                progress_payload["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source_value
+                )
             selector_verdict_value = _clean_boundary_scalar_text(selector_verdict)
             if selector_verdict_value:
                 progress_payload["workflow_selector_verdict"] = selector_verdict_value
@@ -43897,6 +43924,20 @@ class InternalMCPChatOrchestrator:
                     selection_rationale_value
                 )
             _emit_progress_local(progress_payload)
+
+        def _execution_mode_authority_extra(
+            boundary_execution_mode: str,
+        ) -> dict[str, Any] | None:
+            if (
+                selected_execution_mode_authority_source
+                and boundary_execution_mode == selected_execution_mode
+            ):
+                return {
+                    "selected_execution_mode_authority_source": (
+                        selected_execution_mode_authority_source
+                    )
+                }
+            return None
 
         def _clean_text_sequence(value: Any) -> list[str]:
             if not isinstance(value, Sequence) or isinstance(
@@ -44061,6 +44102,11 @@ class InternalMCPChatOrchestrator:
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "workflow_dispatch",
             }
+            workflow_dispatch_data["selected_execution_mode"] = selected_execution_mode
+            if selected_execution_mode_authority_source:
+                workflow_dispatch_data["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source
+                )
 
             if isinstance(workflow_continuation_payload, Mapping) and bool(
                 workflow_continuation_payload.get("applied")
@@ -44114,6 +44160,9 @@ class InternalMCPChatOrchestrator:
         def _sync_selected_workflow_locals_from_state() -> None:
             nonlocal selected_workflow_id
             nonlocal selected_workflow_id_text
+            nonlocal selected_execution_mode_resolution
+            nonlocal selected_execution_mode
+            nonlocal selected_execution_mode_authority_source
             nonlocal selector_verdict
             nonlocal selector_requests_narration
             nonlocal selector_requests_custom_workflow
@@ -44126,21 +44175,35 @@ class InternalMCPChatOrchestrator:
             selected_workflow_id_text = (
                 dispatch_selection_state.selected_workflow_id_text
             )
+            selected_execution_mode_resolution = (
+                self._selected_workflow_execution_mode_resolution(
+                    selected_workflow_id=selected_workflow_id_text
+                )
+            )
+            selected_execution_mode = (
+                selected_execution_mode_resolution.execution_mode or "custom_workflow"
+            )
+            selected_execution_mode_authority_source = (
+                selected_execution_mode_resolution.authority_source
+            )
             selector_verdict = dispatch_selection_state.selector_verdict
             selector_requests_narration = (
                 dispatch_selection_state.selector_requests_narration
             )
             selector_requests_custom_workflow = (
-                dispatch_selection_state.selector_requests_custom_workflow
+                isinstance(dispatch_selection_state.routing_info, WorkflowRoutingInfo)
+                and selected_workflow_id_text is not None
+                and selected_execution_mode == "custom_workflow"
             )
             selected_uses_narration_contract = (
                 dispatch_selection_state.selected_uses_narration_contract
             )
-            selected_prefers_direct_response = (
-                dispatch_selection_state.selected_prefers_direct_response
+            selected_prefers_direct_response = bool(
+                isinstance(dispatch_selection_state.routing_info, WorkflowRoutingInfo)
+                and selected_execution_mode == "direct_response"
             )
             selected_uses_tool_pipeline_contract = (
-                dispatch_selection_state.selected_uses_tool_pipeline_contract
+                selected_execution_mode == "tool_pipeline"
             )
             routing_info = dispatch_selection_state.routing_info
 
@@ -44795,6 +44858,7 @@ class InternalMCPChatOrchestrator:
                 selected_execution_mode="direct_response",
                 selected_workflow_id=selected_workflow_id_text,
                 dispatch_workflow_id=selected_workflow_id_text,
+                extra=_execution_mode_authority_extra("direct_response"),
             )
             _emit_phase_transition_local(
                 self.PHASE_PLAIN_RESPONSE,
@@ -44934,6 +44998,7 @@ class InternalMCPChatOrchestrator:
                 selected_execution_mode="custom_workflow",
                 selected_workflow_id=selected_workflow_id_text,
                 dispatch_workflow_id=selected_workflow_id_text,
+                extra=_execution_mode_authority_extra("custom_workflow"),
             )
             try:
                 _emit_dispatch_boundary(
@@ -45155,6 +45220,7 @@ class InternalMCPChatOrchestrator:
             selected_execution_mode="tool_pipeline",
             selected_workflow_id=selected_workflow_id_text,
             dispatch_workflow_id=selected_workflow_id_text,
+            extra=_execution_mode_authority_extra("tool_pipeline"),
         )
         tool_dispatch_workflow_id = self._resolve_workflow_id_for_action_contract(
             required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
@@ -45261,6 +45327,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_discovery_result": workflow_discovery_result,
                 "workflow_routing": routing_info_payload,
                 "turn_memory_context_state": dict(turn_memory_context_state),
+                "selected_execution_mode": "tool_pipeline",
                 "selected_workflow_policy_memory_state": dict(
                     selected_workflow_policy_memory_state
                 ),
@@ -45316,6 +45383,13 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_escalation_signal": False,
                 "completion_gate_escalation_reason": None,
             }
+            if (
+                selected_execution_mode == "tool_pipeline"
+                and selected_execution_mode_authority_source
+            ):
+                tc_data["selected_execution_mode_authority_source"] = (
+                    selected_execution_mode_authority_source
+                )
             tool_pipeline_turn_contract = routing_turn_expected_outcome_contract
             if tool_pipeline_required_tools_from_custom_workflow:
                 tool_pipeline_turn_contract = (

@@ -1501,6 +1501,110 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality_before_to
     assert terminal_progress.get("workflow_selection_rationale")
 
 
+def test_selected_execution_mode_prefers_declared_metadata_over_builtin_and_contract(
+    monkeypatch,
+):
+    """Declared workflow metadata must outrank built-in IDs and action shape."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    tool_workflow_def = orchestrator._workflow_registry.get(TOOL_CALLING_WORKFLOW_ID)
+    assert tool_workflow_def is not None
+
+    metadata_declared_tool_workflow = WorkflowDefinition(
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        initial_state=tool_workflow_def.initial_state,
+        states=tool_workflow_def.states,
+        termination_states=tool_workflow_def.termination_states,
+        purpose="Metadata precedence test workflow.",
+        metadata={"execution_mode": "direct_response"},
+    )
+
+    def _resolve_workflow_registration_and_definition(
+        workflow_id: str | None,
+        **_kwargs: Any,
+    ):
+        assert workflow_id == TOOL_CALLING_WORKFLOW_ID
+        return None, metadata_declared_tool_workflow
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        _resolve_workflow_registration_and_definition,
+    )
+
+    resolution = orchestrator._selected_workflow_execution_mode_resolution(
+        selected_workflow_id=TOOL_CALLING_WORKFLOW_ID
+    )
+
+    assert resolution.execution_mode == "direct_response"
+    assert resolution.authority_source == "workflow_metadata.execution_mode"
+
+
+def test_selected_execution_mode_uses_builtin_default_only_after_metadata_and_contract(
+    monkeypatch,
+):
+    """Built-in workflow IDs remain support defaults when no authority declares mode."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    def _terminal_workflow(workflow_id: str) -> WorkflowDefinition:
+        return WorkflowDefinition(
+            workflow_id=workflow_id,
+            initial_state="complete",
+            states={
+                "complete": WorkflowStateSpec(
+                    state_id="complete",
+                    actions=(),
+                    terminal=True,
+                )
+            },
+            purpose="Built-in default test workflow.",
+            metadata={},
+        )
+
+    def _resolve_workflow_registration_and_definition(
+        workflow_id: str | None,
+        **_kwargs: Any,
+    ):
+        assert workflow_id in {
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        }
+        return None, _terminal_workflow(str(workflow_id))
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        _resolve_workflow_registration_and_definition,
+    )
+
+    tool_resolution = orchestrator._selected_workflow_execution_mode_resolution(
+        selected_workflow_id=TOOL_CALLING_WORKFLOW_ID
+    )
+    chat_resolution = orchestrator._selected_workflow_execution_mode_resolution(
+        selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID
+    )
+    narration_resolution = orchestrator._selected_workflow_execution_mode_resolution(
+        selected_workflow_id=CHAT_NARRATION_WORKFLOW_ID
+    )
+
+    assert tool_resolution.execution_mode == "tool_pipeline"
+    assert (
+        tool_resolution.authority_source
+        == "builtin_support_default:tool_calling_workflow"
+    )
+    assert chat_resolution.execution_mode == "direct_response"
+    assert (
+        chat_resolution.authority_source
+        == "builtin_support_default:chat_assistant_workflow"
+    )
+    assert narration_resolution.execution_mode == "direct_response"
+    assert (
+        narration_resolution.authority_source
+        == "builtin_support_default:chat_narration_workflow"
+    )
+
 
 def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(
     monkeypatch,
@@ -1546,6 +1650,12 @@ def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(
         call = {
             "workflow_id": workflow_id,
             "episode_stage": kwargs.get("data", {}).get("workflow_episode_stage"),
+            "selected_execution_mode": kwargs.get("data", {}).get(
+                "selected_execution_mode"
+            ),
+            "selected_execution_mode_authority_source": kwargs.get("data", {}).get(
+                "selected_execution_mode_authority_source"
+            ),
         }
         execute_calls.append(call)
         if call["episode_stage"] != "tool_calling":
@@ -1581,10 +1691,32 @@ def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(
     assert len(execute_calls) == 1
     assert execute_calls[0]["workflow_id"] == custom_workflow_id
     assert execute_calls[0]["episode_stage"] == "tool_calling"
+    assert execute_calls[0]["selected_execution_mode"] == "tool_pipeline"
+    assert (
+        execute_calls[0]["selected_execution_mode_authority_source"]
+        == "action_contract:tool_pipeline"
+    )
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    selected_boundary = next(
+        (
+            entry
+            for entry in dispatch_boundaries
+            if entry.get("boundary") == "execution_mode_selected"
+        ),
+        None,
+    )
+    assert selected_boundary is not None
+    assert selected_boundary.get("selected_execution_mode") == "tool_pipeline"
+    assert (
+        selected_boundary.get("selected_execution_mode_authority_source")
+        == "action_contract:tool_pipeline"
+    )
 
 
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-922 Phase 1.3: selector disabled → no classifier call.
 # ---------------------------------------------------------------------------
-
-
