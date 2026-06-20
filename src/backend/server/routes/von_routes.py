@@ -10930,9 +10930,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         result_summary="Parsing generate request metadata before session/context lookup.",
     )
 
-    # Get user/org context from request body (sent by frontend from localStorage)
+    # Untrusted body identity values are diagnostic only; authenticated/window
+    # session context below is the sole source for user/org identity.
     request_user_id = data.get("user_id")
-    request_org_id = data.get("org_id")
     request_language = data.get("language", "en-NZ")
     request_conversation_session_id_raw = data.get("conversation_session_id")
     request_conversation_session_id = None
@@ -11062,8 +11062,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if not user_concept_id:
             current_app.logger.info(
                 "[AUTH] No authenticated user for this request. RAG and user-scoped tools will be unavailable. "
-                "Client-provided user_id '%s' is ignored for security.",
-                request_user_id or "(none)",
+                "Client-provided user_id present=%s is ignored for security.",
+                bool(request_user_id),
             )
 
         # JVNAUTOSCI-1011: Use window session context if available
@@ -11620,46 +11620,45 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 progress_scope_key=progress_scope_key,
             )
 
-        effective_request_user_id = (
-            user_concept_id
+        authenticated_user_context_id = (
+            user_concept_id.strip()
             if isinstance(user_concept_id, str) and user_concept_id.strip()
-            else request_user_id
+            else None
         )
-        effective_request_org_id = (
-            org_concept_id
+        authenticated_org_context_id = (
+            org_concept_id.strip()
             if isinstance(org_concept_id, str) and org_concept_id.strip()
-            else request_org_id
+            else None
         )
 
-        # Try to get user name from concept if user_id provided
-        if effective_request_user_id:
+        # Build LLM-visible identity context only from server-derived auth scope.
+        if authenticated_user_context_id:
             _emit_context_setup_progress(
                 subtask="user concept lookup",
                 result_summary="Resolving the authenticated user's concept label.",
             )
             _check_background_cancellation("user concept lookup")
-            user_name = _prettify_concept_id_label(effective_request_user_id)
+            user_name = _prettify_concept_id_label(authenticated_user_context_id)
             system_message_parts.append(
-                f"Current user: {user_name} ({effective_request_user_id})"
+                f"Current user: {user_name} ({authenticated_user_context_id})"
             )
             current_app.logger.info(
-                f"User context: {user_name} ({effective_request_user_id})"
+                f"User context: {user_name} ({authenticated_user_context_id})"
             )
             _check_background_cancellation("user concept lookup")
 
-        # Try to get organization name from concept if org_id provided
-        if effective_request_org_id:
+        if authenticated_org_context_id:
             _emit_context_setup_progress(
                 subtask="organisation concept lookup",
                 result_summary="Resolving the active organisation concept label.",
             )
             _check_background_cancellation("organisation concept lookup")
-            org_name = _prettify_concept_id_label(effective_request_org_id)
+            org_name = _prettify_concept_id_label(authenticated_org_context_id)
             system_message_parts.append(
-                f"Organization: {org_name} ({effective_request_org_id})"
+                f"Organization: {org_name} ({authenticated_org_context_id})"
             )
             current_app.logger.info(
-                f"Organization context: {org_name} ({effective_request_org_id})"
+                f"Organization context: {org_name} ({authenticated_org_context_id})"
             )
             _check_background_cancellation("organisation concept lookup")
 

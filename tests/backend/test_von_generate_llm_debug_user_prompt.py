@@ -162,3 +162,109 @@ def test_generate_includes_user_prompt_debug_metadata(app):
     )
     assert "First prompt." in injected_msg.get("content", "")
     assert "Second prompt." in injected_msg.get("content", "")
+
+
+def _messages_text(messages):
+    return "\n".join(
+        str(msg.get("content", ""))
+        for msg in messages
+        if isinstance(msg, dict)
+    )
+
+
+def test_generate_ignores_body_identity_when_unauthenticated(app, monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {},
+    )
+
+    history_writes = []
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._add_chat_history_message",
+        lambda **kwargs: history_writes.append(kwargs),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Hello",
+            "conversation_session_id": "spoofed-body-session",
+            "user_id": "#V#spoofed_user",
+            "org_id": "#V#spoofed_org",
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    body = resp.get_json()
+    assert body["response"] == "ok"
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug["user_prompt"]["effective_user_concept_id"] is None
+    assert llm_debug["user_prompt"]["loaded"] is False
+    namespace_report = llm_debug["namespace_report"]
+    assert namespace_report["authenticated"] is False
+    assert namespace_report["user_concept_id"] is None
+    assert namespace_report["organisation_concept_id"] is None
+    assert namespace_report["namespace"] is None
+
+    llm_calls = app.config["TEST_LLM"].calls
+    assert len(llm_calls) == 1
+    sent_context_text = _messages_text(llm_calls[0]["context"])
+    assert "#V#spoofed_user" not in sent_context_text
+    assert "#V#spoofed_org" not in sent_context_text
+    assert "Current user:" not in sent_context_text
+    assert "Organization:" not in sent_context_text
+
+    stored_context_text = _messages_text(app.config["CONTEXT"])
+    assert "#V#spoofed_user" not in stored_context_text
+    assert "#V#spoofed_org" not in stored_context_text
+    assert history_writes == []
+
+
+def test_generate_prefers_authenticated_identity_over_body_identity(app, monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {
+            "organisation_id": "#V#test_org",
+            "chat_session_id": "authenticated-window-session",
+            "role": "member",
+            "namespace": "#V#test_user@test_org",
+            "source": "window_session",
+        },
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Hello",
+            "conversation_session_id": "authenticated-body-conflict",
+            "user_id": "#V#spoofed_user",
+            "org_id": "#V#spoofed_org",
+        },
+        headers={"X-Von-Window-Session": "window-identity"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    llm_debug = resp.get_json()["llm_debug"]
+    assert llm_debug["user_prompt"]["effective_user_concept_id"] == "#V#test_user"
+    namespace_report = llm_debug["namespace_report"]
+    assert namespace_report["authenticated"] is True
+    assert namespace_report["user_concept_id"] == "#V#test_user"
+    assert namespace_report["organisation_concept_id"] == "#V#test_org"
+    assert namespace_report["namespace"] == "#V#test_user@test_org"
+
+    llm_calls = app.config["TEST_LLM"].calls
+    assert len(llm_calls) == 1
+    sent_context_text = _messages_text(llm_calls[0]["context"])
+    assert "Current user:" in sent_context_text
+    assert "#V#test_user" in sent_context_text
+    assert "Organization:" in sent_context_text
+    assert "#V#test_org" in sent_context_text
+    assert "#V#spoofed_user" not in sent_context_text
+    assert "#V#spoofed_org" not in sent_context_text
