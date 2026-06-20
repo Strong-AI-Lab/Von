@@ -14,6 +14,9 @@ from ..client import (
     LLMClientConfig,
     resolve_safe_temperature_for_model,
 )
+from ....services.model_parameter_service import (
+    openai_chat_completions_kwargs_from_model_parameters,
+)
 from ....integrations.internal_mcp.tool_call_contracts import (
     validation_diagnostic,
 )
@@ -65,8 +68,17 @@ class OpenAIClient(LLMClient):
         try:
             request_kwargs = dict(kwargs)
             request_model = request_kwargs.pop("model", None) or self.config.model
+            llm_params = request_kwargs.pop("llm_params", None)
             if self.config.max_tokens is not None:
                 request_kwargs["max_tokens"] = self.config.max_tokens
+
+            if isinstance(llm_params, dict) and llm_params:
+                request_kwargs.update(
+                    openai_chat_completions_kwargs_from_model_parameters(
+                        llm_params,
+                        model=request_model,
+                    )
+                )
 
             # Only pass temperature if the model supports it and a value is set
             # Some models (e.g. gpt-5.2) only accept default temperature

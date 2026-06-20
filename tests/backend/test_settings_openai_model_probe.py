@@ -61,6 +61,57 @@ def test_openai_model_probe_chat_fallback_omits_temperature(monkeypatch) -> None
     assert "temperature" not in captured_completion_kwargs
 
 
+def test_openai_model_probe_passes_reasoning_effort_to_responses(
+    monkeypatch,
+) -> None:
+    import src.backend.server.routes.settings_routes as settings_routes
+
+    captured_responses_kwargs: dict[str, object] = {}
+
+    class _FakeResponses:
+        @staticmethod
+        def create(**kwargs):
+            captured_responses_kwargs.update(kwargs)
+            return types.SimpleNamespace(model="gpt-5.5")
+
+    class _FakeCompletions:
+        @staticmethod
+        def create(**_kwargs):  # pragma: no cover
+            raise AssertionError("chat fallback should not be used")
+
+    class _FakeOpenAIClient:
+        def __init__(self, *, api_key_env_var: str):
+            self.api_key_env_var = api_key_env_var
+            self.client = types.SimpleNamespace(
+                responses=_FakeResponses(),
+                chat=types.SimpleNamespace(
+                    completions=_FakeCompletions(),
+                ),
+            )
+
+        @staticmethod
+        def list_models() -> list[str]:
+            return ["gpt-5.5"]
+
+    monkeypatch.setattr(settings_routes, "OpenAIClient", _FakeOpenAIClient)
+    monkeypatch.setattr(settings_routes, "get_openai_env_var", lambda: "OPENAI_API_KEY")
+
+    response = _make_app().test_client().post(
+        "/api/settings/openai/test_model",
+        json={
+            "api_key_env_var": "OPENAI_API_KEY",
+            "model": "gpt-5.5",
+            "model_parameters": {"reasoning_effort": "low"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["usable"] is True
+    assert payload["model_parameters"] == {"reasoning_effort": "low"}
+    assert captured_responses_kwargs["reasoning"] == {"effort": "low"}
+
+
 def test_ollama_model_probe_uses_selected_host_and_model(monkeypatch) -> None:
     import src.backend.languagemodels.llm_interface as llm_interface
 

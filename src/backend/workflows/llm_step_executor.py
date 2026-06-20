@@ -2315,6 +2315,10 @@ def _run_gateway_llm_step_no_tools(
                 context=context_messages,
                 default_client=request.environment.llm_client,
                 default_model=request.environment.model,
+                default_model_parameters=(
+                    request.data.get("requested_model_parameters")
+                    or getattr(request.environment, "model_parameters", None)
+                ),
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
                 user_concept_id=user_concept_id,

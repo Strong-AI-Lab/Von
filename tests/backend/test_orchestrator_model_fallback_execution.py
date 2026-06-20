@@ -392,6 +392,84 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     )
 
 
+def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-5.5",
+        raw="openai:gpt-5.5",
+        source="enabled_settings",
+        model_parameters={"reasoning_effort": "low"},
+    )
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, _prompt: str, **kwargs: Any) -> str:
+            self.calls.append(dict(kwargs))
+            return "ok"
+
+    client = _RecordingClient()
+    monkeypatch.setattr(orchestrator, "_stage_model_candidates", lambda **_kwargs: [candidate])
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            "gpt-5.5",
+            {
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "model_parameters": {"reasoning_effort": "low"},
+            },
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None)
+    monkeypatch.setattr(orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call())
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="summary",
+        prompt="Summarise",
+        context=[],
+        default_client=object(),
+        default_model="gpt-5.5",
+        default_model_parameters={"reasoning_effort": "low"},
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+    )
+
+    assert response == "ok"
+    assert model_name == "gpt-5.5"
+    assert telemetry["model_parameters"] == {"reasoning_effort": "low"}
+    assert client.calls[0]["llm_params"] == {"reasoning_effort": "low"}
+    end_event = next(event for event in progress_events if event.get("status") == "llm_call_end")
+    assert end_event["effective_model_parameters"] == {"reasoning_effort": "low"}
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["effective_model_parameters"] == {"reasoning_effort": "low"}
+
+
 def test_run_llm_with_fallbacks_tries_next_candidate_after_response_validation_failure(
     monkeypatch,
 ) -> None:

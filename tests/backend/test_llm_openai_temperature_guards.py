@@ -159,3 +159,40 @@ def test_llm_interface_openai_generate_preserves_temperature_for_gpt4(
 
     assert result == "ok"
     assert captured_kwargs["temperature"] == 0.7
+
+
+def test_llm_interface_openai_generate_uses_responses_reasoning_effort(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    captured_responses_kwargs: dict[str, object] = {}
+
+    def _responses_create(**kwargs):
+        captured_responses_kwargs.update(kwargs)
+        return types.SimpleNamespace(output_text="ok", model="gpt-5.5")
+
+    def _chat_create(**_kwargs):  # pragma: no cover
+        raise AssertionError("chat completions should not be used for reasoning effort")
+
+    monkeypatch.setattr(
+        mod.openai,
+        "OpenAI",
+        lambda **_kwargs: types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=_responses_create),
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=_chat_create)
+            ),
+        ),
+    )
+
+    client = mod.OpenAIClient(api_key="test-key")
+    result = client.generate(
+        prompt="hello",
+        model="gpt-5.5",
+        llm_params={"model_parameters": {"reasoning_effort": "low"}},
+    )
+
+    assert result == "ok"
+    assert captured_responses_kwargs["model"] == "gpt-5.5"
+    assert captured_responses_kwargs["reasoning"] == {"effort": "low"}

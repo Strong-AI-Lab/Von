@@ -29798,6 +29798,7 @@ async function handleSendPrompt(options = {}) {
                 language: userContext.language,
                 gmail_profile: userContext.gmail_profile,
                 ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
+                ...(localRequestedLlm?.model_parameters ? { model_parameters: localRequestedLlm.model_parameters } : {}),
                 presenter_mode: presenterMode,
                 thinking_card_mode: getThinkingCardMode()
             })
@@ -30934,6 +30935,7 @@ function buildLlmDebugMetadata(debugData) {
 
         metadata.llm_interaction = {
             requested_model: llmInteraction.requested_model ?? null,
+            requested_model_parameters: llmInteraction.requested_model_parameters ?? null,
             orchestrator_used: llmInteraction.orchestrator_used ?? null,
             duration_ms: llmInteraction.duration_ms ?? null,
             server_elapsed_ms: llmInteraction.server_elapsed_ms ?? null,

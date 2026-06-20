@@ -66,6 +66,11 @@ from ...services.settings_service import (
     get_internal_mcp_tool_batch_cap,
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
+    resolve_llm_setting,
+)
+from ...services.model_parameter_service import (
+    MODEL_PARAMETERS_KEY,
+    normalise_model_parameters_for_storage,
 )
 from ...services.feature_flags import (
     get_display_elements_screen_fence_compat_enabled,
@@ -6291,7 +6296,7 @@ def _resolve_generate_requested_model(
     user_concept_id: str | None,
     org_concept_id: str | None,
     configured_model: Any,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, dict[str, Any]]:
     """Resolve the effective model name and optional explicit provider override.
 
     Precedence:
@@ -6330,6 +6335,7 @@ def _resolve_generate_requested_model(
 
     explicit_client_type = None
     model_name = None
+    active_llm_setting: Mapping[str, Any] | None = None
     if requested_model_name:
         requested_openai_model = _extract_openai_model_id(requested_model_name)
         requested_ollama_model = _extract_ollama_model_id(requested_model_name)
@@ -6353,6 +6359,18 @@ def _resolve_generate_requested_model(
             if not _looks_like_browser_object_model_reference(requested_model_name):
                 model_name = requested_model_name
     if not model_name:
+        try:
+            resolved_setting = resolve_llm_setting(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+        except Exception:
+            resolved_setting = None
+        if isinstance(resolved_setting, Mapping):
+            active_llm_setting = resolved_setting
+            active_provider = str(resolved_setting.get("provider") or "").strip().lower()
+            if active_provider in {"openai", "ollama", "gemini"}:
+                explicit_client_type = active_provider
         model_name = get_active_model_name(
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
@@ -6364,7 +6382,19 @@ def _resolve_generate_requested_model(
     ):
         model_name = configured_model.strip()
 
-    return model_name, explicit_client_type
+    raw_model_parameters = None
+    if isinstance(data, Mapping):
+        raw_model_parameters = data.get(MODEL_PARAMETERS_KEY)
+        if raw_model_parameters is None:
+            raw_model_parameters = data.get("modelParameters")
+    if raw_model_parameters is None and active_llm_setting is not None:
+        raw_model_parameters = active_llm_setting.get(MODEL_PARAMETERS_KEY)
+    requested_model_parameters = normalise_model_parameters_for_storage(
+        raw_model_parameters,
+        provider=explicit_client_type,
+        model=model_name,
+    )
+    return model_name, explicit_client_type, requested_model_parameters
 
 
 @von_bp.route("/api/task/result/<task_id>", methods=["GET"])
@@ -10955,11 +10985,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         result_summary="Resolving the requested model and local provider client.",
     )
     _check_background_cancellation("model client selection")
-    model_name, explicit_client_type = _resolve_generate_requested_model(
-        data,
-        user_concept_id=user_concept_id,
-        org_concept_id=org_concept_id,
-        configured_model=current_app.config.get("MODEL"),
+    model_name, explicit_client_type, requested_model_parameters = (
+        _resolve_generate_requested_model(
+            data,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            configured_model=current_app.config.get("MODEL"),
+        )
     )
 
     try:
@@ -12018,6 +12050,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         llm_interaction: dict = {
             "requested_model": model_name,
+            "requested_model_parameters": requested_model_parameters or None,
             "orchestrator_used": orchestrator is not None,
             "duration_ms": None,
             "usage": None,
@@ -12123,6 +12156,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 gateway=gateway,
                 auxiliary_llm_calls=auxiliary_llm_calls,
                 llm_interaction=llm_interaction,
+                model_parameters=requested_model_parameters or None,
             )
         else:
             try:
@@ -12213,6 +12247,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     request_gmail_profile=request_gmail_profile,
                     request_language=request_language,
                     requested_model=model_name,
+                    requested_model_parameters=requested_model_parameters,
                     requested_client_type=explicit_client_type,
                     prompt_text=prompt_text,
                     workflow_discovery_result=workflow_discovery_result,
@@ -12245,6 +12280,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     context=orchestrator_input_context,
                     llm_client=llm_client,
                     model=model_name,
+                    model_parameters=requested_model_parameters or None,
                     user_namespace=user_namespace,
                     gmail_profile=request_gmail_profile,
                     auxiliary_system_prompt=dynamic_instructions,
@@ -13320,7 +13356,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
                     narration_response = _llm_generate_spoken_backfill(
-                        llm_client, narration_system, narration_user, model_name
+                        llm_client,
+                        narration_system,
+                        narration_user,
+                        model_name,
+                        requested_model_parameters or None,
                     )
                     spoken_backfill_source = "llm_synthesis"
                     spoken_backfill_model_id = model_name
@@ -13778,7 +13818,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         llm_start = time.perf_counter()
                         try:
                             buttonify_response = _llm_generate_buttonify(
-                                llm_client, buttonify_prompt, buttonify_model_used
+                                llm_client,
+                                buttonify_prompt,
+                                buttonify_model_used,
+                                requested_model_parameters or None,
                             )
                             _record_stage_llm_call(
                                 call_type="llm.generate",
@@ -18054,6 +18097,7 @@ def _handle_orchestrator_missing_fallback(
     gateway,
     auxiliary_llm_calls,
     llm_interaction,
+    model_parameters=None,
 ) -> str:
     """Handle orchestrator missing fallback."""
     import time
@@ -18136,9 +18180,13 @@ def _handle_orchestrator_missing_fallback(
             )
         )
     llm_start_perf = time.perf_counter()
-    response_text = llm_client.generate(
-        prompt_text, context=enhanced_context, model=model_name
-    )
+    generate_kwargs = {"context": enhanced_context, "model": model_name}
+    if isinstance(model_parameters, Mapping) and model_parameters:
+        generate_kwargs["llm_params"] = dict(model_parameters)
+        fallback_entry_model_parameters = dict(model_parameters)
+    else:
+        fallback_entry_model_parameters = None
+    response_text = llm_client.generate(prompt_text, **generate_kwargs)
     llm_interaction["duration_ms"] = (time.perf_counter() - llm_start_perf) * 1000.0
     fallback_entry = {
         "type": "llm.generate",
@@ -18160,6 +18208,8 @@ def _handle_orchestrator_missing_fallback(
             "is_truncated": False,
         },
     }
+    if fallback_entry_model_parameters:
+        fallback_entry["model_parameters"] = fallback_entry_model_parameters
     _stamp_llm_call_timestamps(
         fallback_entry,
         duration_ms=llm_interaction["duration_ms"],
@@ -18299,23 +18349,29 @@ def _perform_legacy_spoken_backfill(
     )
 
 
-def _llm_generate_spoken_backfill(llm_client, system, user, model):
-    return llm_client.generate(
-        prompt="Generate <spoken> talk track",
-        context=[
+def _llm_generate_spoken_backfill(llm_client, system, user, model, model_parameters=None):
+    kwargs = {
+        "prompt": "Generate <spoken> talk track",
+        "context": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        model=model,
-    )
+        "model": model,
+    }
+    if isinstance(model_parameters, Mapping) and model_parameters:
+        kwargs["llm_params"] = dict(model_parameters)
+    return llm_client.generate(**kwargs)
 
 
-def _llm_generate_buttonify(llm_client, prompt, model):
-    return llm_client.generate(
-        prompt=prompt,
-        context=[],
-        model=model,
-    )
+def _llm_generate_buttonify(llm_client, prompt, model, model_parameters=None):
+    kwargs = {
+        "prompt": prompt,
+        "context": [],
+        "model": model,
+    }
+    if isinstance(model_parameters, Mapping) and model_parameters:
+        kwargs["llm_params"] = dict(model_parameters)
+    return llm_client.generate(**kwargs)
 
 
 def _contains_openai_quota_error(message: object) -> bool:

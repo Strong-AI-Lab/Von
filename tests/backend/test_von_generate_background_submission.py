@@ -281,8 +281,9 @@ def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeyp
         "get_active_model_name",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type = von_routes._resolve_generate_requested_model(
+    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
         {"model": "gpt-5.4-nano"},
         user_concept_id=None,
         org_concept_id=None,
@@ -291,6 +292,7 @@ def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeyp
 
     assert model_name == "gpt-5.4-nano"
     assert client_type == "openai"
+    assert model_parameters == {}
 
 
 def test_resolve_generate_requested_model_ignores_browser_object_request_model(
@@ -303,8 +305,9 @@ def test_resolve_generate_requested_model_ignores_browser_object_request_model(
         "get_active_model_name",
         lambda *args, **kwargs: "gpt-5.4-mini",
     )
+    monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type = von_routes._resolve_generate_requested_model(
+    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
         {"model": "openai:[object PointerEvent]"},
         user_concept_id="#V#test_user",
         org_concept_id=None,
@@ -313,6 +316,7 @@ def test_resolve_generate_requested_model_ignores_browser_object_request_model(
 
     assert model_name == "gpt-5.4-mini"
     assert client_type is None
+    assert model_parameters == {}
 
 
 def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit_request(
@@ -325,8 +329,9 @@ def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit
         "get_active_model_name",
         lambda *args, **kwargs: "gpt-5.4-mini",
     )
+    monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type = von_routes._resolve_generate_requested_model(
+    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
         {"model": "ollama:llama3.1:8b"},
         user_concept_id="#V#test_user",
         org_concept_id=None,
@@ -335,6 +340,7 @@ def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit
 
     assert model_name == "llama3.1:8b"
     assert client_type == "ollama"
+    assert model_parameters == {}
 
 
 def test_resolve_generate_requested_model_honours_explicit_provider_field(
@@ -347,8 +353,9 @@ def test_resolve_generate_requested_model_honours_explicit_provider_field(
         "get_active_model_name",
         lambda *args, **kwargs: "gpt-5.4-mini",
     )
+    monkeypatch.setattr(von_routes, "resolve_llm_setting", lambda **_kwargs: None)
 
-    model_name, client_type = von_routes._resolve_generate_requested_model(
+    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
         {"model": "gemma4:e4b", "model_provider": "ollama"},
         user_concept_id="#V#test_user",
         org_concept_id=None,
@@ -357,6 +364,39 @@ def test_resolve_generate_requested_model_honours_explicit_provider_field(
 
     assert model_name == "gemma4:e4b"
     assert client_type == "ollama"
+    assert model_parameters == {}
+
+
+def test_resolve_generate_requested_model_preserves_scoped_model_parameters(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_active_model_name",
+        lambda *args, **kwargs: "gpt-5.5",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "resolve_llm_setting",
+        lambda **_kwargs: {
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "model_parameters": {"reasoning_effort": "low"},
+        },
+    )
+
+    model_name, client_type, model_parameters = von_routes._resolve_generate_requested_model(
+        {},
+        user_concept_id="#V#test_user",
+        org_concept_id=None,
+        configured_model=None,
+    )
+
+    assert model_name == "gpt-5.5"
+    assert client_type == "openai"
+    assert model_parameters == {"reasoning_effort": "low"}
 
 
 def test_build_generate_conversation_turn_instance_inputs_preserves_requested_model() -> (
@@ -374,6 +414,7 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
         request_gmail_profile="profile-1",
         request_language="en-NZ",
         requested_model="gemma4:26b",
+        requested_model_parameters={"reasoning_effort": "low"},
         requested_client_type="ollama",
         prompt_text="What do you know about my current research interests?",
         workflow_discovery_result={"selected_workflow_id": "#V#concept_search"},
@@ -381,6 +422,7 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
     )
 
     assert payload["requested_model"] == "gemma4:26b"
+    assert payload["requested_model_parameters"] == {"reasoning_effort": "low"}
     assert payload["requested_client_type"] == "ollama"
     assert payload["prompt"] == "What do you know about my current research interests?"
     assert payload["user_prompt"] == (
@@ -422,6 +464,7 @@ def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
         request_gmail_profile=None,
         request_language="en-NZ",
         requested_model="gemma4:e4b",
+        requested_model_parameters=None,
         requested_client_type="ollama",
         prompt_text="Prompt",
         workflow_discovery_result=None,
@@ -467,6 +510,7 @@ def test_submit_generate_conversation_turn_instance_skips_background_reentry() -
         request_gmail_profile=None,
         request_language="en-NZ",
         requested_model="gemma4:e4b",
+        requested_model_parameters=None,
         requested_client_type="ollama",
         prompt_text="Prompt",
         workflow_discovery_result=None,

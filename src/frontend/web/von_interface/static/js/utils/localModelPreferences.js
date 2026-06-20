@@ -1,9 +1,11 @@
 const LS_LOCAL_MODEL_PREFERENCE = 'von:localModelPreference';
 const LS_OPENAI_SELECTED_MODEL = 'von:openaiSelectedModel';
+const LS_OPENAI_MODEL_PARAMETERS = 'von:openaiModelParameters';
 const LS_OLLAMA_SELECTION = 'von:ollamaSelection';
 const LS_PREMIUM_MODEL_USE_ENABLED = 'von:premiumModelUseEnabled';
 const LOCAL_MODEL_PREFERENCE_SCHEMA = 'localModelPreference.v1';
 const LOCAL_MODEL_UNAVAILABLE_REASON_NO_OLLAMA_MODEL = 'premium_disabled_no_ollama_model';
+const REASONING_EFFORT_VALUES = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 function readStoredJson(key) {
   try {
@@ -73,17 +75,38 @@ function normaliseOllamaSelection(selection) {
   };
 }
 
+export function normaliseModelParameters(value) {
+  if (!value || typeof value !== 'object') return null;
+  const params = {};
+  let effort = value.reasoning_effort ?? value.reasoningEffort ?? null;
+  if (effort == null && value.reasoning && typeof value.reasoning === 'object') {
+    effort = value.reasoning.effort ?? null;
+  }
+  if (typeof effort === 'string') {
+    const token = effort.trim().toLowerCase();
+    if (REASONING_EFFORT_VALUES.has(token)) {
+      params.reasoning_effort = token;
+    }
+  }
+  return Object.keys(params).length ? params : null;
+}
+
 function buildCanonicalLocalModelPreference({
   activeSource = null,
   openaiModel = null,
+  openaiModelParameters = null,
   ollamaSelection = null,
 } = {}) {
+  const normalisedParameters = normaliseModelParameters(openaiModelParameters);
   const canonical = {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: normaliseActiveSource(activeSource),
     openaiModel: normaliseLocalModelName(openaiModel),
     ollamaSelection: normaliseOllamaSelection(ollamaSelection),
   };
+  if (normalisedParameters) {
+    canonical.openaiModelParameters = normalisedParameters;
+  }
 
   if (!canonical.activeSource && !canonical.openaiModel && !canonical.ollamaSelection) {
     return null;
@@ -98,6 +121,9 @@ function cloneLocalModelPreference(preference) {
     schemaVersion: preference.schemaVersion || LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: preference.activeSource || null,
     openaiModel: normaliseLocalModelName(preference.openaiModel),
+    ...(normaliseModelParameters(preference.openaiModelParameters)
+      ? { openaiModelParameters: normaliseModelParameters(preference.openaiModelParameters) }
+      : {}),
     ollamaSelection: normaliseOllamaSelection(preference.ollamaSelection),
   };
 }
@@ -108,12 +134,19 @@ function normaliseStoredLocalModelPreference(stored) {
   return buildCanonicalLocalModelPreference({
     activeSource: stored.activeSource ?? stored.active_source ?? null,
     openaiModel: stored.openaiModel ?? stored.openai_model ?? null,
+    openaiModelParameters: (
+      stored.openaiModelParameters
+      ?? stored.openai_model_parameters
+      ?? stored.model_parameters
+      ?? null
+    ),
     ollamaSelection: stored.ollamaSelection ?? stored.ollama_selection ?? null,
   });
 }
 
 function readLegacyLocalModelPreference() {
   const openaiModel = normaliseLocalModelName(readStoredString(LS_OPENAI_SELECTED_MODEL));
+  const openaiModelParameters = normaliseModelParameters(readStoredJson(LS_OPENAI_MODEL_PARAMETERS));
   const ollamaSelection = normaliseOllamaSelection(readStoredJson(LS_OLLAMA_SELECTION));
 
   let activeSource = null;
@@ -132,6 +165,7 @@ function readLegacyLocalModelPreference() {
   return buildCanonicalLocalModelPreference({
     activeSource,
     openaiModel,
+    openaiModelParameters,
     ollamaSelection,
   });
 }
@@ -143,6 +177,12 @@ function mirrorLegacyKeys(preference) {
       localStorage.setItem(LS_OPENAI_SELECTED_MODEL, openaiModel);
     } else {
       localStorage.removeItem(LS_OPENAI_SELECTED_MODEL);
+    }
+    const openaiModelParameters = normaliseModelParameters(preference?.openaiModelParameters);
+    if (openaiModelParameters) {
+      localStorage.setItem(LS_OPENAI_MODEL_PARAMETERS, JSON.stringify(openaiModelParameters));
+    } else {
+      localStorage.removeItem(LS_OPENAI_MODEL_PARAMETERS);
     }
 
     if (preference?.ollamaSelection) {
@@ -173,15 +213,18 @@ function persistLocalModelPreference(preference) {
   return canonical;
 }
 
-function buildOpenAiRequestedLlm(modelName) {
+function buildOpenAiRequestedLlm(modelName, modelParameters = null) {
   const model = normaliseLocalModelName(modelName);
   if (!model) return null;
+  const params = normaliseModelParameters(modelParameters);
 
-  return {
+  const requested = {
     provider: 'openai',
     model,
     requestModel: `openai:${model}`,
   };
+  if (params) requested.model_parameters = params;
+  return requested;
 }
 
 function buildOllamaRequestedLlm(ollamaSelection) {
@@ -214,7 +257,10 @@ function buildEffectiveLocalModelPreference(preference) {
 
   let requestedLlm = null;
   if (canonical.activeSource === 'openai') {
-    requestedLlm = buildOpenAiRequestedLlm(canonical.openaiModel);
+    requestedLlm = buildOpenAiRequestedLlm(
+      canonical.openaiModel,
+      canonical.openaiModelParameters,
+    );
   } else if (canonical.activeSource === 'ollama') {
     requestedLlm = buildOllamaRequestedLlm(canonical.ollamaSelection);
   }
@@ -277,6 +323,7 @@ export function setLocalPremiumModelUseEnabled(enabled) {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: null,
     openaiModel: null,
+    openaiModelParameters: null,
     ollamaSelection: null,
   };
   next.activeSource = enabled ? 'openai' : 'ollama';
@@ -293,9 +340,32 @@ export function setStoredOpenAiSelectedModel(modelName) {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: null,
     openaiModel: null,
+    openaiModelParameters: null,
     ollamaSelection: null,
   };
   next.openaiModel = normaliseLocalModelName(modelName);
+  persistLocalModelPreference(next);
+}
+
+export function getStoredOpenAiModelParameters() {
+  return getEffectiveLocalModelPreference().openaiModelParameters || null;
+}
+
+export function setStoredOpenAiModelParameters(modelParameters) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    openaiModelParameters: null,
+    ollamaSelection: null,
+  };
+  const params = normaliseModelParameters(modelParameters);
+  if (params) {
+    next.openaiModelParameters = params;
+  } else {
+    delete next.openaiModelParameters;
+  }
   persistLocalModelPreference(next);
 }
 
@@ -309,6 +379,7 @@ export function setStoredOllamaSelection(selection) {
     schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
     activeSource: null,
     openaiModel: null,
+    openaiModelParameters: null,
     ollamaSelection: null,
   };
   next.ollamaSelection = normaliseOllamaSelection(selection);
@@ -351,6 +422,7 @@ export function applyLocalModelPreferenceOverlay(settings) {
       provider: localOverride.provider,
       model: localOverride.model,
       ...(localOverride.host ? { host: localOverride.host } : {}),
+      ...(localOverride.model_parameters ? { model_parameters: localOverride.model_parameters } : {}),
     },
   };
 }
