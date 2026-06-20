@@ -3290,6 +3290,10 @@ class InternalMCPChatOrchestrator:
         r"\b(?:call|use|run|invoke|execute)\s+`?([a-z_][a-z0-9_]*(?:_[a-z0-9_]+)+)`?\b",
         flags=re.IGNORECASE,
     )
+    _AGENT_TEST_LOCAL_RELATION_TOOLS: tuple[str, ...] = (
+        "get_text_relations_summary",
+        "get_text_relations",
+    )
     _PROMPT_URL_PATTERN = re.compile(r"\bhttps?://[^\s<>()\"']+", re.IGNORECASE)
     # NOTE: Concept verification intent (verify/check/confirm/exist) is now
     # workflow/LLM-owned — the selector and LLM decide when to call
@@ -8337,37 +8341,48 @@ class InternalMCPChatOrchestrator:
             }
         )
 
-    def _agent_test_local_relation_request(
+    def _agent_test_local_relation_authority(
         self,
         request: Any,
         data: Mapping[str, Any],
-    ) -> bool:
+    ) -> tuple[str, str, tuple[str, ...]] | None:
         if not _is_agent_test_instance():
-            return False
+            return None
         env = getattr(request, "environment", None)
         if env is None or not _explicit_model_request_uses_local_provider(
             llm_client=getattr(env, "llm_client", None),
             model=getattr(env, "model", None),
         ):
-            return False
-        prompt_text = " ".join(
-            str(value).strip()
-            for value in (
-                data.get("user_prompt"),
-                data.get("prompt_for_requirements"),
-                data.get("prompt"),
+            return None
+
+        explicit_sources: list[tuple[str, Any]] = [
+            (
+                "agent_test_replay_required_tools",
+                data.get("agent_test_replay_required_tools"),
+            ),
+            ("agent_test_required_tools", data.get("agent_test_required_tools")),
+            ("turn_expected_required_tools", data.get("turn_expected_required_tools")),
+            ("required_prompt_tools", data.get("required_prompt_tools")),
+        ]
+        contract_required_tools = self._build_turn_expected_outcome_contract_object(
+            data
+        ).required_tools
+        if contract_required_tools:
+            explicit_sources.append(
+                ("turn_expected_outcome_contract", contract_required_tools)
             )
-            if isinstance(value, str) and value.strip()
-        ).lower()
-        return any(
-            marker in prompt_text
-            for marker in (
-                "text relation",
-                "text relations",
-                "represented relation",
-                "represented relations",
-            )
-        )
+
+        relation_tool_lookup = {
+            tool_name.lower() for tool_name in self._AGENT_TEST_LOCAL_RELATION_TOOLS
+        }
+        for source, raw_tools in explicit_sources:
+            required_tools = self._ordered_unique_tool_names(raw_tools)
+            if not required_tools:
+                continue
+            for tool_name in required_tools:
+                if tool_name.lower() in relation_tool_lookup:
+                    return tool_name, source, required_tools
+        return None
 
     def _agent_test_relation_concept_id(
         self,
@@ -8532,8 +8547,10 @@ class InternalMCPChatOrchestrator:
         missing_tool_call_retry_stop_reason: str | None,
         missing_tool_call_recovery_outcome: str | None,
     ) -> WorkflowActionResult | None:
-        if not self._agent_test_local_relation_request(request, data):
+        relation_authority = self._agent_test_local_relation_authority(request, data)
+        if relation_authority is None:
             return None
+        relation_tool_name, relation_authority_source, required_tools = relation_authority
         retry_fields = self._agent_test_local_relation_retry_fields(
             missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
             missing_tool_call_retry_budget=missing_tool_call_retry_budget,
@@ -8555,7 +8572,12 @@ class InternalMCPChatOrchestrator:
                     "final_response": final_response,
                     "current_response": final_response,
                     "response": final_response,
-                    "required_prompt_tools": ["get_text_relations_summary"],
+                    "required_prompt_tools": list(required_tools),
+                    "agent_test_local_replay_support_only": True,
+                    "not_production_acceptance_evidence": True,
+                    "agent_test_local_relation_authority_source": (
+                        relation_authority_source
+                    ),
                     "result": False,
                     **retry_fields,
                 }
@@ -8563,7 +8585,7 @@ class InternalMCPChatOrchestrator:
         concept_id = self._agent_test_relation_concept_id(request, data)
         tool_call = {
             self._ACTION_FIELD: self._CALL_ACTION,
-            self._TOOL_FIELD: "get_text_relations_summary",
+            self._TOOL_FIELD: relation_tool_name,
             self._PAYLOAD_FIELD: {"concept_id": concept_id},
         }
         response = json.dumps(tool_call, ensure_ascii=True, sort_keys=True)
@@ -8573,9 +8595,13 @@ class InternalMCPChatOrchestrator:
                 {
                     "type": "agent_test_local_relation_tool_plan",
                     "stage": "tool_calling.plan",
-                    "tool": "get_text_relations_summary",
+                    "tool": relation_tool_name,
                     "concept_id": concept_id,
-                    "reason_code": "agent_test_explicit_local_relation_prompt",
+                    "authority_source": relation_authority_source,
+                    "required_tools": list(required_tools),
+                    "reason_code": "agent_test_explicit_required_tool_authority",
+                    "local_replay_support_only": True,
+                    "not_production_acceptance_evidence": True,
                 }
             )
         return WorkflowActionResult(
@@ -8588,7 +8614,10 @@ class InternalMCPChatOrchestrator:
                 "tool_call_model": getattr(
                     getattr(request, "environment", None), "model", None
                 ),
-                "required_prompt_tools": ["get_text_relations_summary"],
+                "required_prompt_tools": list(required_tools),
+                "agent_test_local_replay_support_only": True,
+                "not_production_acceptance_evidence": True,
+                "agent_test_local_relation_authority_source": relation_authority_source,
                 "result": True,
                 **retry_fields,
             }
@@ -8605,8 +8634,12 @@ class InternalMCPChatOrchestrator:
         missing_tool_call_retry_stop_reason: str | None,
         missing_tool_call_recovery_outcome: str | None,
     ) -> WorkflowActionResult | None:
-        if not self._agent_test_local_relation_request(request, data):
+        relation_authority = self._agent_test_local_relation_authority(request, data)
+        if relation_authority is None:
             return None
+        _relation_tool_name, relation_authority_source, required_tools = (
+            relation_authority
+        )
         invocation = self._agent_test_successful_relation_invocation(data)
         if invocation is None:
             return None
@@ -8622,7 +8655,11 @@ class InternalMCPChatOrchestrator:
                     "type": "agent_test_local_relation_backfill",
                     "stage": "tool_calling.backfill",
                     "tool": str(invocation.get("tool") or ""),
-                    "reason_code": "agent_test_explicit_local_post_evidence_response",
+                    "authority_source": relation_authority_source,
+                    "required_tools": list(required_tools),
+                    "reason_code": "agent_test_explicit_required_tool_authority",
+                    "local_replay_support_only": True,
+                    "not_production_acceptance_evidence": True,
                 }
             )
         return WorkflowActionResult(
@@ -8632,7 +8669,10 @@ class InternalMCPChatOrchestrator:
                 "final_response": final_response,
                 "current_response": final_response,
                 "response": final_response,
-                "required_prompt_tools": ["get_text_relations_summary"],
+                "required_prompt_tools": list(required_tools),
+                "agent_test_local_replay_support_only": True,
+                "not_production_acceptance_evidence": True,
+                "agent_test_local_relation_authority_source": relation_authority_source,
                 "result": False,
                 **self._agent_test_local_relation_retry_fields(
                     missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,

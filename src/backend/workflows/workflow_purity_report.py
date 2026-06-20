@@ -126,6 +126,9 @@ ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS = {
     "agent_test_local_selector_requested": (
         "retired_agent_test_prompt_lexical_selector_trigger"
     ),
+    "_agent_test_local_relation_request": (
+        "retired_agent_test_prompt_lexical_relation_tool_plan_helper"
+    ),
 }
 ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS = {
     "retired_prompt_semantic_regex_symbol": re.compile(
@@ -305,6 +308,12 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
             "agent_test_selector_prompt_substring_trigger": re.compile(
                 r"""['\"](?:text\s+relations?|represented\s+relations?)['\"]"""
                 r"""\s+in\s+prompt_text(?:\.lower\(\))?""",
+                re.IGNORECASE,
+            ),
+            "agent_test_relation_tool_plan_prompt_substring_trigger": re.compile(
+                r"""def\s+_agent_test_local_relation_request\b[\s\S]{0,2400}"""
+                r"""(?=[\s\S]{0,2400}(?:text\s+relations?|represented\s+relations?))"""
+                r"""(?=[\s\S]{0,2400}(?:marker\s+in\s+prompt_text|in\s+prompt_text))""",
                 re.IGNORECASE,
             ),
         },

@@ -265,6 +265,14 @@ def test_build_workflow_purity_report_flags_agent_test_lexical_replay_drift(
             "def prepare(prompt_text):\n"
             "    agent_test_local_selector_requested = 'text relation' in prompt_text.lower()\n"
             "    return agent_test_local_selector_requested\n"
+            "def _agent_test_local_relation_request(prompt_text):\n"
+            "    return any(\n"
+            "        marker in prompt_text\n"
+            "        for marker in (\n"
+            "            'text relation',\n"
+            "            'represented relations',\n"
+            "        )\n"
+            "    )\n"
         ),
         root=tmp_path,
     )
@@ -293,6 +301,8 @@ def test_build_workflow_purity_report_flags_agent_test_lexical_replay_drift(
     assert "agent_test_selector_prompt_substring_trigger" in patterns
     assert "retired_agent_test_prompt_lexical_required_tool_helper" in patterns
     assert "agent_test_prompt_text_required_tool_inference" in patterns
+    assert "retired_agent_test_prompt_lexical_relation_tool_plan_helper" in patterns
+    assert "agent_test_relation_tool_plan_prompt_substring_trigger" in patterns
 
 
 def test_build_workflow_purity_report_flags_baseline_regressions(

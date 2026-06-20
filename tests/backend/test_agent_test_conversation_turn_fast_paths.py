@@ -1330,6 +1330,7 @@ def test_agent_test_tool_calling_plan_uses_relation_summary(monkeypatch) -> None
             "prompt": "What text relations are used with the concept for Michael Witbrock?",
             "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
             "user_concept_id": "#V#michael_witbrock",
+            "turn_expected_required_tools": ["get_text_relations_summary"],
             "augmented_context": [],
             "policy_state": SimpleNamespace(enabled=False, policy=None),
             "model_for_stage": lambda _stage: "gemma4:e4b",
@@ -1353,6 +1354,81 @@ def test_agent_test_tool_calling_plan_uses_relation_summary(monkeypatch) -> None
         }
     ]
     assert result.outputs["required_prompt_tools"] == ["get_text_relations_summary"]
+    assert result.outputs["agent_test_local_replay_support_only"] is True
+    assert result.outputs["not_production_acceptance_evidence"] is True
+    assert result.outputs["agent_test_local_relation_authority_source"] == (
+        "turn_expected_required_tools"
+    )
+    assert request.data["aux_llm_calls"] == [
+        {
+            "type": "agent_test_local_relation_tool_plan",
+            "stage": "tool_calling.plan",
+            "tool": "get_text_relations_summary",
+            "concept_id": "#V#michael_witbrock",
+            "authority_source": "turn_expected_required_tools",
+            "required_tools": ["get_text_relations_summary"],
+            "reason_code": "agent_test_explicit_required_tool_authority",
+            "local_replay_support_only": True,
+            "not_production_acceptance_evidence": True,
+        }
+    ]
+
+
+def test_agent_test_tool_calling_plan_does_not_trigger_from_prompt_words(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "user_concept_id": "#V#michael_witbrock",
+            "aux_llm_calls": [],
+        },
+    )
+
+    result = orchestrator._agent_test_local_relation_plan_result(
+        request=request,
+        data=request.data,
+        missing_tool_call_retry_attempts=0,
+        missing_tool_call_retry_budget=1,
+        missing_tool_call_retry_suppressed=False,
+        missing_tool_call_retry_stop_reason=None,
+        missing_tool_call_recovery_outcome=None,
+    )
+
+    assert result is None
+    assert request.data["aux_llm_calls"] == []
+
+
+def test_agent_test_tool_calling_plan_ignores_explicit_authority_outside_agent_test(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_concept_id": "#V#michael_witbrock",
+            "turn_expected_required_tools": ["get_text_relations_summary"],
+            "aux_llm_calls": [],
+        },
+    )
+
+    result = orchestrator._agent_test_local_relation_plan_result(
+        request=request,
+        data=request.data,
+        missing_tool_call_retry_attempts=0,
+        missing_tool_call_retry_budget=1,
+        missing_tool_call_retry_suppressed=False,
+        missing_tool_call_retry_stop_reason=None,
+        missing_tool_call_recovery_outcome=None,
+    )
+
+    assert result is None
+    assert request.data["aux_llm_calls"] == []
 
 
 def test_agent_test_tool_calling_backfill_uses_relation_summary(monkeypatch) -> None:
@@ -1363,6 +1439,7 @@ def test_agent_test_tool_calling_backfill_uses_relation_summary(monkeypatch) -> 
         data={
             "prompt": "What text relations are used with the concept for Michael Witbrock?",
             "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "turn_expected_required_tools": ["get_text_relations_summary"],
             "augmented_context": [],
             "policy_state": SimpleNamespace(enabled=False, policy=None),
             "model_for_stage": lambda _stage: (_ for _ in ()).throw(
@@ -1400,6 +1477,50 @@ def test_agent_test_tool_calling_backfill_uses_relation_summary(monkeypatch) -> 
     assert result.status == "success"
     assert result.outputs["more_tool_calls"] is False
     assert result.outputs["required_prompt_tools"] == ["get_text_relations_summary"]
+    assert result.outputs["agent_test_local_replay_support_only"] is True
+    assert result.outputs["not_production_acceptance_evidence"] is True
+    assert result.outputs["agent_test_local_relation_authority_source"] == (
+        "turn_expected_required_tools"
+    )
     assert "hasName" in result.outputs["final_response"]
     assert "#V#has_email" in result.outputs["final_response"]
     assert "did not expose predicate names" not in result.outputs["final_response"]
+
+
+def test_agent_test_tool_calling_backfill_does_not_trigger_from_prompt_words(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "aux_llm_calls": [],
+            "invocations": [
+                {
+                    "tool": "get_text_relations_summary",
+                    "status": "ok",
+                    "payload": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {
+                        "concept_id": "#V#michael_witbrock",
+                        "predicates": ["hasName"],
+                    },
+                }
+            ],
+        },
+    )
+
+    result = orchestrator._agent_test_local_relation_backfill_result(
+        request=request,
+        data=request.data,
+        missing_tool_call_retry_attempts=0,
+        missing_tool_call_retry_budget=1,
+        missing_tool_call_retry_suppressed=False,
+        missing_tool_call_retry_stop_reason=None,
+        missing_tool_call_recovery_outcome=None,
+    )
+
+    assert result is None
+    assert request.data["aux_llm_calls"] == []
