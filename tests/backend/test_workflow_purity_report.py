@@ -256,6 +256,45 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     assert report["baseline"]["comparison"]["regression_detected"] is False
 
 
+def test_build_workflow_purity_report_flags_agent_test_lexical_replay_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/integrations/internal_mcp/orchestrator.py",
+        (
+            "def prepare(prompt_text):\n"
+            "    agent_test_local_selector_requested = 'text relation' in prompt_text.lower()\n"
+            "    return agent_test_local_selector_requested\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/llm_step_executor.py",
+        (
+            "def _agent_test_represented_relation_required_tools(request):\n"
+            "    prompt_text = request.data.get('prompt', '').lower()\n"
+            "    if 'represented relation' in prompt_text:\n"
+            "        return ['get_text_relations_summary']\n"
+            "    return []\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = _write_zero_baseline(tmp_path)
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    violations = report["details"]["support_surface_policy_contracts"]["violations"]
+    patterns = {item["pattern"] for item in violations}
+    assert "retired_agent_test_prompt_lexical_selector_trigger" in patterns
+    assert "agent_test_selector_prompt_substring_trigger" in patterns
+    assert "retired_agent_test_prompt_lexical_required_tool_helper" in patterns
+    assert "agent_test_prompt_text_required_tool_inference" in patterns
+
+
 def test_build_workflow_purity_report_flags_baseline_regressions(
     tmp_path: Path,
 ) -> None:

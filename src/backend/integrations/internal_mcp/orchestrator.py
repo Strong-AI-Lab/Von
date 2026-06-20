@@ -33566,17 +33566,16 @@ class InternalMCPChatOrchestrator:
             expected_outcome_contract=expected_outcome_contract,
         )
         discovery_query_input = discovery_query_text or prompt_text
-        agent_test_local_selector_requested = (
+        agent_test_selector_authority_source = (
+            "turn_expected_required_tools" if expected_required_tools else None
+        )
+        agent_test_local_selector_authority_available = (
             _is_agent_test_instance()
             and _explicit_model_request_uses_local_provider(
                 llm_client=env.llm_client,
                 model=getattr(env, "model", None),
             )
-            and (
-                bool(expected_required_tools)
-                or "text relation" in prompt_text.lower()
-                or "represented relation" in prompt_text.lower()
-            )
+            and agent_test_selector_authority_source is not None
         )
 
         def _build_agent_test_local_selector_outputs() -> dict[str, Any]:
@@ -33670,6 +33669,9 @@ class InternalMCPChatOrchestrator:
                 "matches": [dict(candidate) for candidate in discovery_matches],
                 "candidates": [dict(candidate) for candidate in discovery_candidates],
                 "agent_test_local_replay": True,
+                "agent_test_selector_authority_source": agent_test_selector_authority_source,
+                "local_replay_support_only": True,
+                "not_production_acceptance_evidence": True,
                 "required_tools": list(expected_required_tools),
                 "discovery_payload_origin": discovery_origin,
             }
@@ -33682,6 +33684,9 @@ class InternalMCPChatOrchestrator:
                 "stage": "selector_decision",
                 "base_context_source": "agent_test_local_replay",
                 "agent_test_local_replay": True,
+                "agent_test_selector_authority_source": agent_test_selector_authority_source,
+                "local_replay_support_only": True,
+                "not_production_acceptance_evidence": True,
                 "agent_test_registry_action_overlap_candidate_count": len(
                     represented_candidates
                 ),
@@ -33715,6 +33720,9 @@ class InternalMCPChatOrchestrator:
                 "selector_requested_prompt_ids": [],
                 "selector_prompt_provenance": {
                     "source": "agent_test_local_replay",
+                    "agent_test_selector_authority_source": agent_test_selector_authority_source,
+                    "local_replay_support_only": True,
+                    "not_production_acceptance_evidence": True,
                     "render_variables": {
                         "candidate_list": "\n".join(
                             f"- {candidate_id}: "
@@ -33896,7 +33904,7 @@ class InternalMCPChatOrchestrator:
                     discovery_candidate_count = max(
                         discovery_candidate_count, raw_count
                     )
-        if agent_test_local_selector_requested and discovery_candidate_count <= 0:
+        if agent_test_local_selector_authority_available and discovery_candidate_count <= 0:
             return _build_agent_test_local_selector_outputs()
 
         continuation_routing_context_text = None

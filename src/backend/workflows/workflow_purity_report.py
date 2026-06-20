@@ -123,10 +123,21 @@ ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS = {
     "_relation_grounding_requested_for_structured_planner": (
         "retired_structured_planner_text_scan_symbol"
     ),
+    "agent_test_local_selector_requested": (
+        "retired_agent_test_prompt_lexical_selector_trigger"
+    ),
 }
 ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS = {
     "retired_prompt_semantic_regex_symbol": re.compile(
         r"^_PROMPT_.*(?:INTENT|HINT|SEMANTIC|INFERENCE|ANALYTICAL).*_PATTERN$"
+    ),
+}
+AGENT_TEST_LLM_STEP_RETIRED_SYMBOLS = {
+    "_agent_test_represented_relation_required_tools": (
+        "retired_agent_test_prompt_lexical_required_tool_helper"
+    ),
+    "_agent_test_external_surface_required_tools": (
+        "retired_agent_test_prompt_lexical_required_tool_helper"
     ),
 }
 WORKFLOW_CAPABILITY_RETIRED_SYMBOL_PATTERNS = {
@@ -291,9 +302,27 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
                 r"Do\s+NOT\s+treat\s+cache\s+presence",
                 re.IGNORECASE,
             ),
+            "agent_test_selector_prompt_substring_trigger": re.compile(
+                r"""['\"](?:text\s+relations?|represented\s+relations?)['\"]"""
+                r"""\s+in\s+prompt_text(?:\.lower\(\))?""",
+                re.IGNORECASE,
+            ),
         },
         "banned_symbol_names": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS,
         "banned_symbol_patterns": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS,
+    },
+    {
+        "name": "agent_test_llm_step_local_replay_authority",
+        "path": "src/backend/workflows/llm_step_executor.py",
+        "forbidden_patterns": {
+            "agent_test_prompt_text_required_tool_inference": re.compile(
+                r"""(?:['\"](?:text\s+relations?|represented\s+relations?|gmail|arxiv)"""
+                r"""['\"]\s+in\s+prompt_text)|(?:re\.search\([^)\n]{0,200}"""
+                r"""prompt_text)|(?:prompt_text[^,\n]{0,160}re\.search\()""",
+                re.IGNORECASE,
+            ),
+        },
+        "banned_symbol_names": AGENT_TEST_LLM_STEP_RETIRED_SYMBOLS,
     },
     {
         "name": "workflow_capability_retrieval_authority",

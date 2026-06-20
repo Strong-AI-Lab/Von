@@ -278,6 +278,7 @@ def test_agent_test_expected_outcome_fast_path_marks_relation_tools(
             "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
             "requested_model": "gemma4:e4b",
             "selected_model_provider": "ollama",
+            "agent_test_replay_required_tools": ["get_text_relations_summary"],
         },
         llm_policy={"policy_stage": "planner"},
         validation_policy=_expected_outcome_validation_policy(),
@@ -292,6 +293,33 @@ def test_agent_test_expected_outcome_fast_path_marks_relation_tools(
     assert payload["required_tools"] == ["get_text_relations_summary"]
     assert "most specific represented workflow" in payload["selector_guidance"]
     assert "generic tool-calling workflow only" in payload["selector_guidance"]
+
+
+def test_agent_test_expected_outcome_fast_path_does_not_infer_prompt_tools(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+        },
+        llm_policy={"policy_stage": "planner"},
+        validation_policy=_expected_outcome_validation_policy(),
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="expected_outcome_inference",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    payload = result.outputs["validated_json"]
+    assert payload["required_tools"] == []
+    assert "most specific represented workflow" not in payload["selector_guidance"]
 
 
 def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
@@ -310,6 +338,12 @@ def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
             ),
             "requested_model": "gemma4:e4b",
             "selected_model_provider": "ollama",
+            "agent_test_replay_required_tools": [
+                "gmail_list_messages",
+                "gmail_get_message",
+                "get_paper_metadata",
+                "search_arxiv",
+            ],
         },
         llm_policy={"policy_stage": "planner"},
         validation_policy=_expected_outcome_validation_policy(),
@@ -372,6 +406,11 @@ def test_agent_test_selector_fast_path_routes_gmail_arxiv_prompt_to_tools(
             ),
             "requested_model": "gemma4:e4b",
             "selected_model_provider": "ollama",
+            "turn_expected_required_tools": [
+                "gmail_list_messages",
+                "gmail_get_message",
+                "search_arxiv",
+            ],
         },
         llm_policy={"policy_stage": "classifier"},
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -532,7 +571,117 @@ def test_agent_test_selector_preparation_uses_local_tool_candidate(
     assert calls
     assert outputs["selector_prompt_available"] is True
     assert outputs["selector_candidate_ids"] == [TOOL_CALLING_WORKFLOW_ID]
-    assert outputs["workflow_discovery_result"]["agent_test_local_replay"] is True
+    discovery = outputs["workflow_discovery_result"]
+    assert discovery["agent_test_local_replay"] is True
+    assert discovery["agent_test_selector_authority_source"] == (
+        "turn_expected_required_tools"
+    )
+    assert discovery["local_replay_support_only"] is True
+    assert discovery["not_production_acceptance_evidence"] is True
+    assert outputs["selector_prompt_provenance"]["local_replay_support_only"] is True
+
+
+def test_agent_test_selector_preparation_does_not_trigger_from_prompt_words(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+
+    def _empty_discovery(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "relation prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _empty_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace="#V#michael_witbrock",
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    discovery = outputs["workflow_discovery_result"]
+    assert discovery.get("agent_test_local_replay") is None
+    assert discovery.get("agent_test_selector_authority_source") is None
+    assert discovery["candidate_count"] == 0
+    assert discovery["match_count"] == 0
+    assert outputs["selector_prompt_id"] != "agent_test_local_replay_selector_prompt"
+
+
+def test_selector_preparation_does_not_use_agent_test_authority_outside_agent_test(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+
+    def _empty_discovery(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "relation prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        _empty_discovery,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": "What text relations are used with the concept for Michael Witbrock?",
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+                "turn_expected_required_tools": ["get_text_relations"],
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace="#V#michael_witbrock",
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert outputs["workflow_discovery_result"].get("agent_test_local_replay") is None
+    assert outputs["workflow_discovery_result"]["candidate_count"] == 0
+    assert outputs["workflow_discovery_result"]["match_count"] == 0
+    assert outputs["selector_prompt_id"] != "agent_test_local_replay_selector_prompt"
 
 
 def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
@@ -631,6 +780,11 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
     assert discovery["discovery_payload_origin"] == (
         "agent_test_local_replay_synthetic_action_overlap"
     )
+    assert discovery["agent_test_selector_authority_source"] == (
+        "turn_expected_required_tools"
+    )
+    assert discovery["local_replay_support_only"] is True
+    assert discovery["not_production_acceptance_evidence"] is True
     assert discovery["search_sources"] == [
         "agent_test_local_replay",
         "workflow_registry_action_overlap",

@@ -134,58 +134,34 @@ def _request_uses_agent_test_local_model(request: WorkflowActionRequest) -> bool
     return model_name.split(":", 1)[0].lower() not in _PREMIUM_MODEL_PROVIDER_PREFIXES
 
 
-def _agent_test_represented_relation_required_tools(
-    request: WorkflowActionRequest,
-) -> list[str]:
-    prompt_text = _context_string(
-        request.data.get("user_prompt")
-        or request.data.get("prompt")
-        or request.data.get("prompt_for_requirements")
-    ).lower()
-    if (
-        "text relation" in prompt_text
-        or "text relations" in prompt_text
-        or "represented relation" in prompt_text
-        or "represented relations" in prompt_text
-    ):
-        return ["get_text_relations_summary"]
-    return []
-
-
-def _agent_test_external_surface_required_tools(
-    request: WorkflowActionRequest,
-) -> list[str]:
-    prompt_text = _context_string(
-        request.data.get("user_prompt")
-        or request.data.get("prompt")
-        or request.data.get("prompt_for_requirements")
-    ).lower()
-    if not prompt_text:
+def _required_tools_from_contract_payload(value: Any) -> list[str]:
+    if not isinstance(value, Mapping):
         return []
-
-    required_tools: list[str] = []
-    gmail_requested = bool(
-        re.search(r"\b(?:gmail|e-?mail|mail|inbox|messages?)\b", prompt_text)
-        or re.search(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", prompt_text)
-    ) and bool(
-        re.search(r"\b(?:check|find|list|look|read|recent|retrieve|search)\b", prompt_text)
-    )
-    if gmail_requested:
-        required_tools.extend(["gmail_list_messages", "gmail_get_message"])
-
-    if "arxiv" in prompt_text:
-        if re.search(r"\b(?:metadata|title|paper|reference|references?|pdf|url|link)\b", prompt_text):
-            required_tools.append("get_paper_metadata")
-        if re.search(r"\b(?:search|find|lookup|look up|retrieve|recent|title)\b", prompt_text):
-            required_tools.append("search_arxiv")
-
-    return _merge_required_prompt_tools(required_tools)
+    required_tools = value.get("required_tools")
+    if required_tools is None:
+        fields = value.get("fields")
+        if isinstance(fields, Mapping):
+            required_tools = fields.get("required_tools")
+    return _coerce_tool_name_list(required_tools)
 
 
 def _agent_test_required_tools(request: WorkflowActionRequest) -> list[str]:
+    """Return explicit AgentTest replay authority, never prompt-derived policy."""
+
     return _merge_required_prompt_tools(
-        _agent_test_represented_relation_required_tools(request),
-        _agent_test_external_surface_required_tools(request),
+        request.data.get("agent_test_replay_required_tools"),
+        request.data.get("agent_test_required_tools"),
+        request.data.get("turn_expected_required_tools"),
+        request.data.get("required_prompt_tools"),
+        _required_tools_from_contract_payload(
+            request.data.get("turn_expected_outcome_contract")
+        ),
+        _required_tools_from_contract_payload(
+            request.data.get("turn_expected_outcome_profile")
+        ),
+        _required_tools_from_contract_payload(
+            request.data.get("turn_expected_outcome_contract_state")
+        ),
     )
 
 
