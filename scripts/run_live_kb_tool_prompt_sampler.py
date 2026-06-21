@@ -15,6 +15,8 @@ Use this sampler together with
 `docs/engineering/real_path_server_replay_and_telemetry_loop.md`.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -56,6 +58,11 @@ from src.backend.services.model_registry_service import (
 from src.backend.services import (
     replay_arm_planning_service,
     replay_experiment_observation_service,
+)
+from src.backend.services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+    AGENT_TEST_SELECTOR_REPLAY_MODE_FAST_PATH,
+    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
 )
 from src.backend.services.turn_decision_attribution_service import (
     aggregate_turn_decision_attributions,
@@ -2069,6 +2076,7 @@ def _run_generate_background(
     model: str | None,
     gmail_profile: str | None,
     presenter_mode: bool,
+    agent_test_selector_replay_mode: str | None,
     turn_expected_outcome_contract: Mapping[str, Any] | None,
     timeout_seconds: float,
     poll_interval_seconds: float,
@@ -2087,6 +2095,11 @@ def _run_generate_background(
         request_payload["gmail_profile"] = cleaned_gmail_profile
     if presenter_mode:
         request_payload["presenter_mode"] = True
+    cleaned_selector_replay_mode = _safe_text(agent_test_selector_replay_mode)
+    if cleaned_selector_replay_mode:
+        request_payload[AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY] = (
+            cleaned_selector_replay_mode
+        )
     if isinstance(turn_expected_outcome_contract, Mapping):
         request_payload["turn_expected_outcome_contract"] = dict(
             turn_expected_outcome_contract
@@ -2151,6 +2164,27 @@ def _run_generate_background(
         f"{base_url}/von/api/task/result/{task_id}",
     )
     generate_payload = _as_mapping(task_result_payload.get("result"))
+    diagnostic_settle_seconds = min(
+        60.0,
+        max(30.0, float(poll_interval_seconds) * 3.0),
+    )
+    diagnostic_settle_deadline = min(deadline, time.time() + diagnostic_settle_seconds)
+    while (
+        isinstance(generate_payload.get("llm_debug"), Mapping)
+        and not _as_mapping(
+            _as_mapping(generate_payload.get("llm_debug")).get(
+                "turn_execution_diagnostics"
+            )
+        )
+        and time.time() < diagnostic_settle_deadline
+    ):
+        time.sleep(max(float(poll_interval_seconds), 0.2))
+        task_result_payload = _request_json(
+            session,
+            "GET",
+            f"{base_url}/von/api/task/result/{task_id}",
+        )
+        generate_payload = _as_mapping(task_result_payload.get("result"))
     if not generate_payload:
         raise BackgroundGenerateTaskError(
             f"Background task result was empty: {task_result_payload!r}",
@@ -2240,6 +2274,56 @@ def _fetch_turn_debug(
         f"History debug lookup failed: {debug_payload!r}",
     )
     return _as_mapping(debug_payload.get("llm_debug_data"))
+
+
+def _resolve_turn_debug_data(
+    *,
+    session: requests.Session,
+    base_url: str,
+    session_id: str,
+    request_id: str,
+    response_text: str,
+    generate_payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    embedded_llm_debug = _as_mapping(generate_payload.get("llm_debug"))
+    embedded_diagnostics = _as_mapping(
+        embedded_llm_debug.get("turn_execution_diagnostics")
+    )
+    try:
+        history_location = _find_assistant_turn_history_location(
+            session=session,
+            base_url=base_url,
+            session_id=session_id,
+            request_id=request_id,
+            response_text=response_text,
+        )
+        history_index_raw = history_location.get("history_index")
+        if not isinstance(history_index_raw, int):
+            raise RuntimeError(
+                "History location did not include an integer history_index: "
+                f"{history_location!r}"
+            )
+        return (
+            dict(history_location),
+            _fetch_turn_debug(
+                session=session,
+                base_url=base_url,
+                session_id=session_id,
+                history_index=history_index_raw,
+            ),
+        )
+    except RuntimeError as exc:
+        if embedded_diagnostics:
+            return (
+                {
+                    "source": "background_task_result.llm_debug",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "history_lookup_error": str(exc),
+                },
+                dict(embedded_llm_debug),
+            )
+        raise
 
 
 def _collect_tool_names(
@@ -3413,6 +3497,7 @@ def _run_prompt_replay_arm(
     arm_metadata: Mapping[str, Any] | None,
     presenter_mode: bool,
     gmail_profile: str | None,
+    agent_test_selector_replay_mode: str | None,
 ) -> dict[str, Any]:
     session = requests.Session()
     session_name = _build_arm_session_name(
@@ -3439,6 +3524,7 @@ def _run_prompt_replay_arm(
         model=requested_model,
         gmail_profile=gmail_profile,
         presenter_mode=presenter_mode,
+        agent_test_selector_replay_mode=agent_test_selector_replay_mode,
         turn_expected_outcome_contract=(
             _build_turn_expected_outcome_contract_for_prompt_entry(prompt_entry)
         ),
@@ -3455,24 +3541,13 @@ def _run_prompt_replay_arm(
         or _safe_text(generate_payload.get("response_text"))
         or _safe_text(_as_mapping(generate_payload.get("llm_debug")).get("response"))
     )
-    history_location = _find_assistant_turn_history_location(
+    history_location, llm_debug_data = _resolve_turn_debug_data(
         session=session,
         base_url=base_url,
         session_id=session_id,
         request_id=request_id,
         response_text=response_text,
-    )
-    history_index_raw = history_location.get("history_index")
-    if not isinstance(history_index_raw, int):
-        raise RuntimeError(
-            "History location did not include an integer history_index: "
-            f"{history_location!r}"
-        )
-    llm_debug_data = _fetch_turn_debug(
-        session=session,
-        base_url=base_url,
-        session_id=session_id,
-        history_index=history_index_raw,
+        generate_payload=generate_payload,
     )
     evaluation = _evaluate_user_happiness(
         prompt_entry=prompt_entry,
@@ -3601,6 +3676,7 @@ def _run_replay_plan(
     prompt_variant_ids: Sequence[Any],
     presenter_mode: bool,
     gmail_profile: str | None,
+    agent_test_selector_replay_mode: str | None,
 ) -> tuple[dict[str, Any], bool]:
     if len(replay_arms) == 1:
         summary = _run_prompt_replay_arm(
@@ -3621,6 +3697,7 @@ def _run_replay_plan(
             ),
             presenter_mode=presenter_mode,
             gmail_profile=gmail_profile,
+            agent_test_selector_replay_mode=agent_test_selector_replay_mode,
         )
         should_user_be_happy = bool(
             _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
@@ -3644,6 +3721,7 @@ def _run_replay_plan(
             arm_metadata=arm,
             presenter_mode=presenter_mode,
             gmail_profile=gmail_profile,
+            agent_test_selector_replay_mode=agent_test_selector_replay_mode,
         )
         for arm in replay_arms
     ]
@@ -3813,6 +3891,7 @@ def _run_sampler_subprocess_replay_suite(
     session_name: str,
     presenter_mode: bool,
     allow_non_agent_test_server: bool,
+    allow_agent_test_selector_fast_path: bool,
     repeat_count: int,
     minimum_success_rate: float,
     process_timeout_seconds: float,
@@ -3854,6 +3933,8 @@ def _run_sampler_subprocess_replay_suite(
             command.append("--presenter-mode")
         if allow_non_agent_test_server:
             command.append("--allow-non-agent-test-server")
+        if allow_agent_test_selector_fast_path:
+            command.append("--allow-agent-test-selector-fast-path")
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -4001,6 +4082,7 @@ def _run_local_ollama_model_probe(
     seed: int | None,
     presenter_mode: bool,
     allow_non_agent_test_server: bool,
+    allow_agent_test_selector_fast_path: bool,
     repeat_count: int,
     screen_repeat_count: int,
     attempt_process_timeout_seconds: float,
@@ -4061,6 +4143,9 @@ def _run_local_ollama_model_probe(
                     session_name=f"{session_name} [{model_name}] screening",
                     presenter_mode=presenter_mode,
                     allow_non_agent_test_server=allow_non_agent_test_server,
+                    allow_agent_test_selector_fast_path=(
+                        allow_agent_test_selector_fast_path
+                    ),
                     repeat_count=max(int(screen_repeat_count), 1),
                     minimum_success_rate=minimum_success_rate,
                     process_timeout_seconds=attempt_process_timeout_seconds,
@@ -4080,6 +4165,9 @@ def _run_local_ollama_model_probe(
                         session_name=f"{session_name} [{model_name}] confirmation",
                         presenter_mode=presenter_mode,
                         allow_non_agent_test_server=allow_non_agent_test_server,
+                        allow_agent_test_selector_fast_path=(
+                            allow_agent_test_selector_fast_path
+                        ),
                         repeat_count=max(int(repeat_count), 1),
                         minimum_success_rate=minimum_success_rate,
                         process_timeout_seconds=attempt_process_timeout_seconds,
@@ -4147,6 +4235,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Allow the replay to target a server whose /health response does "
             "not report agent_test_instance=true. Use only when deliberately "
             "testing the interactive/user-facing server."
+        ),
+    )
+    parser.add_argument(
+        "--allow-agent-test-selector-fast-path",
+        action="store_true",
+        help=(
+            "Permit AgentTest selector_decision to use the deterministic local "
+            "selector shortcut. By default, acceptance replays exercise the "
+            "represented selector LLM path so candidate ranking is not hidden "
+            "by replay support code."
         ),
     )
     parser.add_argument(
@@ -4437,6 +4535,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_url = resolve_live_test_base_url(args.base_url)
     requested_model = _safe_text(args.model) or None
     requested_gmail_profile = _safe_text(args.gmail_profile) or None
+    agent_test_selector_replay_mode = (
+        AGENT_TEST_SELECTOR_REPLAY_MODE_FAST_PATH
+        if bool(args.allow_agent_test_selector_fast_path)
+        else AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+    )
     compare_models = [
         cleaned
         for entry in _as_list(args.compare_models)
@@ -4576,6 +4679,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_environment = {
         **run_environment,
         "model_policy": model_policy_report,
+        AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: agent_test_selector_replay_mode,
+        "agent_test_selector_fast_path_allowed": bool(
+            args.allow_agent_test_selector_fast_path
+        ),
     }
     repeat_count = max(int(args.repeat_count or 1), 1)
     minimum_success_rate = min(max(float(args.minimum_success_rate), 0.0), 1.0)
@@ -4595,6 +4702,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             presenter_mode=bool(args.presenter_mode),
             allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
+            allow_agent_test_selector_fast_path=bool(
+                args.allow_agent_test_selector_fast_path
+            ),
             repeat_count=repeat_count,
             screen_repeat_count=max(int(args.model_probe_screen_repeat_count or 1), 1),
             attempt_process_timeout_seconds=float(
@@ -4636,6 +4746,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt_variant_ids=prompt_variant_ids,
                 presenter_mode=bool(args.presenter_mode),
                 gmail_profile=requested_gmail_profile,
+                agent_test_selector_replay_mode=agent_test_selector_replay_mode,
             )
         except Exception as exc:
             summary = _build_failed_replay_attempt_summary(
@@ -4669,6 +4780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prompt_variant_ids=prompt_variant_ids,
                     presenter_mode=bool(args.presenter_mode),
                     gmail_profile=requested_gmail_profile,
+                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
                 )
                 attempt_summary = {
                     **attempt_summary,

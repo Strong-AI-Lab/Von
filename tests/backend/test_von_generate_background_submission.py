@@ -444,6 +444,7 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
         requested_model="gemma4:26b",
         requested_model_parameters={"reasoning_effort": "low"},
         requested_client_type="ollama",
+        agent_test_selector_replay_mode="represented_selector_llm",
         prompt_text="What do you know about my current research interests?",
         workflow_discovery_result={"selected_workflow_id": "#V#concept_search"},
         workflow_continuation_context={"applied": False},
@@ -452,6 +453,7 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
     assert payload["requested_model"] == "gemma4:26b"
     assert payload["requested_model_parameters"] == {"reasoning_effort": "low"}
     assert payload["requested_client_type"] == "ollama"
+    assert payload["agent_test_selector_replay_mode"] == "represented_selector_llm"
     assert payload["prompt"] == "What do you know about my current research interests?"
     assert payload["user_prompt"] == (
         "What do you know about my current research interests?"
@@ -494,6 +496,7 @@ def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
         requested_model="gemma4:e4b",
         requested_model_parameters=None,
         requested_client_type="ollama",
+        agent_test_selector_replay_mode=None,
         prompt_text="Prompt",
         workflow_discovery_result=None,
         workflow_continuation_context=None,
@@ -540,6 +543,7 @@ def test_submit_generate_conversation_turn_instance_skips_background_reentry() -
         requested_model="gemma4:e4b",
         requested_model_parameters=None,
         requested_client_type="ollama",
+        agent_test_selector_replay_mode=None,
         prompt_text="Prompt",
         workflow_discovery_result=None,
         workflow_continuation_context=None,

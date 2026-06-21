@@ -81,6 +81,9 @@ from ...services.feature_flags import (
 from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
+from ...services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+)
 from ...services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
     enforce_buttonify_prompt_contract,
@@ -10396,6 +10399,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             background_task_id = candidate_background_task_id
 
     presenter_mode_requested = bool(data.get("presenter_mode"))
+    raw_agent_test_selector_replay_mode = data.get(
+        AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY
+    )
+    agent_test_selector_replay_mode = (
+        raw_agent_test_selector_replay_mode.strip()
+        if isinstance(raw_agent_test_selector_replay_mode, str)
+        and raw_agent_test_selector_replay_mode.strip()
+        else None
+    )
 
     # JVNAUTOSCI-2130: Forward the thinking-card display mode so the orchestrator
     # can produce a partial-progress summary (instead of the canned "couldn't
@@ -12258,6 +12270,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     requested_model=model_name,
                     requested_model_parameters=requested_model_parameters,
                     requested_client_type=explicit_client_type,
+                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
                     prompt_text=prompt_text,
                     workflow_discovery_result=workflow_discovery_result,
                     workflow_continuation_context=workflow_continuation_context,
@@ -12302,6 +12315,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     org_concept_id=org_concept_id,
                     turn_memory_context=request_turn_memory_context,
                     turn_expected_outcome_contract=request_turn_expected_outcome_contract,
+                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
                     thinking_card_mode=thinking_card_mode,
                 )
                 llm_interaction["duration_ms"] = (

@@ -12,6 +12,9 @@ from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     default_tool_message_threshold_bytes,
 )
+from src.backend.services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+)
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
@@ -459,11 +462,12 @@ def _build_generate_conversation_turn_instance_inputs(
     requested_model: str | None,
     requested_model_parameters: Mapping[str, Any] | None,
     requested_client_type: str | None,
+    agent_test_selector_replay_mode: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "conversation_session_id": session_id,
         "turn_id": request_id,
         "namespace_source": namespace_source,
@@ -501,6 +505,13 @@ def _build_generate_conversation_turn_instance_inputs(
             else None
         ),
     }
+    if isinstance(agent_test_selector_replay_mode, str):
+        cleaned_selector_replay_mode = agent_test_selector_replay_mode.strip()
+        if cleaned_selector_replay_mode:
+            payload[AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY] = (
+                cleaned_selector_replay_mode
+            )
+    return payload
 
 
 def _build_generate_conversation_turn_instance_outputs(
@@ -586,6 +597,7 @@ def _submit_generate_conversation_turn_instance(
     requested_model: str | None,
     requested_model_parameters: Mapping[str, Any] | None,
     requested_client_type: str | None,
+    agent_test_selector_replay_mode: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
@@ -685,6 +697,7 @@ def _submit_generate_conversation_turn_instance(
                 requested_model=requested_model,
                 requested_model_parameters=requested_model_parameters,
                 requested_client_type=requested_client_type,
+                agent_test_selector_replay_mode=agent_test_selector_replay_mode,
                 prompt_text=prompt_text,
                 workflow_discovery_result=workflow_discovery_result,
                 workflow_continuation_context=workflow_continuation_context,

@@ -33,12 +33,29 @@ from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
 )
 from src.backend.workflows.llm_step_executor import execute_llm_step
+from src.backend.services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+)
+from src.backend.workflows.workflow_selector import WorkflowSelectionPrompt
 from src.backend.workflows.subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
 
 
 class _ExplodingLLM:
     def generate(self, *_args: Any, **_kwargs: Any) -> str:  # pragma: no cover
         raise AssertionError("AgentTest fast path should not call the LLM")
+
+
+class _CapturingLLM:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt: str, context=None, model=None) -> str:
+        self.calls.append(
+            {"prompt": prompt, "context": list(context or []), "model": model}
+        )
+        return self.response
 
 
 class _DummyGateway:
@@ -458,6 +475,75 @@ def test_agent_test_selector_fast_path_reuses_prepared_candidate(
     assert "selector-prepared candidate" in selector_payload["reasoning"]
 
 
+def test_agent_test_selector_represented_replay_mode_calls_selector_llm(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    llm = _CapturingLLM(
+        json.dumps(
+            {
+                "workflow_id": represented_workflow_id,
+                "confidence": 0.91,
+                "reasoning": "The represented selector prompt chose the candidate.",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm, model="gemma4:e4b"),
+        data={
+            "user_prompt": (
+                "Look in recent Gmail messages for arXiv papers and summarise "
+                "the useful evidence."
+            ),
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+            AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: (
+                AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+            ),
+            "selector_call_prompt_text": "Select workflow for this user request.",
+            "selector_context_messages": [
+                {
+                    "role": "system",
+                    "content": "Authoritative represented selector context.",
+                }
+            ],
+        },
+        llm_policy={
+            "policy_stage": "classifier",
+            "prompt_text_context_key": "selector_call_prompt_text",
+            "context_messages_context_key": "selector_context_messages",
+        },
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="selector_decision",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert llm.calls == [
+        {
+            "prompt": "Select workflow for this user request.",
+            "context": [
+                {
+                    "role": "system",
+                    "content": "Authoritative represented selector context.",
+                }
+            ],
+            "model": "gemma4:e4b",
+        }
+    ]
+    selector_payload = json.loads(result.outputs["final_response"])
+    assert selector_payload["workflow_id"] == represented_workflow_id
+    assert result.outputs["llm_step_envelope"]["selected_prompt_source"] == (
+        "context.prompt_text"
+    )
+
+
 def test_agent_test_selector_fast_path_prefers_discovery_order_over_policy_order(
     monkeypatch,
 ) -> None:
@@ -689,8 +775,8 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
 ) -> None:
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
-    represented_workflow_id = "#V#represented_lookup_workflow"
-    required_action_id = "represented.lookup"
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    required_action_id = "gmail_list_messages"
     registry = WorkflowRegistry()
     registry.register(
         WorkflowRegistration(
@@ -698,13 +784,13 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
             definition=_workflow_definition(
                 represented_workflow_id,
                 action_id=required_action_id,
-                purpose="Represented lookup workflow",
+                purpose="Scan Gmail messages for arXiv references.",
                 routing_profile={
                     "schema_version": "workflow_routing_profile.v1",
                     "role": "execution",
                 },
             ),
-            purpose="Represented lookup workflow",
+            purpose="Scan Gmail messages for arXiv references.",
             source="test",
         )
     )
@@ -796,6 +882,142 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
         required_action_id
     ]
     assert discovery["candidates"][1]["concept_id"] == TOOL_CALLING_WORKFLOW_ID
+
+
+def test_agent_test_selector_preparation_represented_mode_uses_selector_prompt(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    represented_workflow_id = "#V#zhan_gmail_arxiv_ingestion_workflow"
+    required_action_id = "gmail_list_messages"
+    registry = WorkflowRegistry()
+    registry.register(
+        WorkflowRegistration(
+            workflow_id=represented_workflow_id,
+            definition=_workflow_definition(
+                represented_workflow_id,
+                action_id=required_action_id,
+                purpose="Scan Gmail messages for arXiv references.",
+                routing_profile={
+                    "schema_version": "workflow_routing_profile.v1",
+                    "role": "execution",
+                },
+            ),
+            purpose="Scan Gmail messages for arXiv references.",
+            source="test",
+        )
+    )
+    registry.register(
+        WorkflowRegistration(
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            definition=_workflow_definition(
+                TOOL_CALLING_WORKFLOW_ID,
+                action_id="tool_calling.execute",
+                purpose="Generic tool workflow",
+            ),
+            purpose="Generic tool workflow",
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry = registry
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service.discover_workflows_for_turn_memoized",
+        lambda *_args, **_kwargs: {
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "query": "represented lookup prompt",
+            "match_count": 0,
+            "candidate_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda prompt: {"role": "user", "content": str(prompt)},
+    )
+    captured_selector_candidates: list[str] = []
+
+    def _prepare_selection_prompt(
+        *,
+        turn_text: str,
+        discovered_workflows,
+        continuation_routing_context_text=None,
+    ) -> WorkflowSelectionPrompt:
+        entries = tuple(dict(item) for item in discovered_workflows or ())
+        captured_selector_candidates.extend(
+            str(item.get("concept_id")).strip()
+            for item in entries
+            if isinstance(item.get("concept_id"), str)
+        )
+        return WorkflowSelectionPrompt(
+            prompt_id="#V#chat_turn_classifier_prompt",
+            prompt_text="Represented selector prompt with candidate list.",
+            discovered_workflow_ids=tuple(captured_selector_candidates),
+            candidate_entries=entries,
+            candidate_list_text="\n".join(captured_selector_candidates),
+            continuation_routing_context_text=continuation_routing_context_text,
+            requested_prompt_ids=("#V#chat_turn_classifier_prompt",),
+            prompt_provenance={
+                "prompt_mode": "rag_first_candidate_selector",
+                "render_variables": {
+                    "candidate_list": "\n".join(captured_selector_candidates)
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator._workflow_selector,
+        "prepare_selection_prompt",
+        _prepare_selection_prompt,
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "data": {
+                "user_prompt": (
+                    "Look in recent Gmail messages for arXiv references and "
+                    "retrieve paper evidence."
+                ),
+                "requested_model": "gemma4:e4b",
+                "selected_model_provider": "ollama",
+                AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: (
+                    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+                ),
+                "turn_expected_required_tools": [required_action_id],
+            },
+            "environment": WorkflowEnvironment(
+                llm_client=_ExplodingLLM(),
+                model="gemma4:e4b",
+                user_namespace="#V#michael_witbrock",
+            ),
+        },
+    )()
+
+    outputs = orchestrator._prepare_turn_selector_context_outputs(request)
+
+    assert outputs["selector_prompt_id"] != "agent_test_local_replay_selector_prompt"
+    assert outputs["selector_prompt_provenance"]["prompt_mode"] == (
+        "rag_first_candidate_selector"
+    )
+    assert outputs["selector_call_prompt_text"].startswith(
+        "Select workflow for this user request:"
+    )
+    assert represented_workflow_id in captured_selector_candidates
+    assert outputs["selector_authoritative_candidate_ids"] == [
+        represented_workflow_id
+    ]
+    assert represented_workflow_id in outputs["selector_candidate_ids"]
+    assert TOOL_CALLING_WORKFLOW_ID in outputs["selector_candidate_ids"]
+    assert outputs["selector_context_lineage"]["stage"] == "selector_decision"
+    discovery = outputs["workflow_discovery_result"]
+    assert discovery["agent_test_local_replay"] is True
+    assert discovery["discovery_payload_origin"] == (
+        "agent_test_local_replay_synthetic_action_overlap"
+    )
 
 
 def test_agent_test_selector_preparation_prefers_represented_discovery_candidate(

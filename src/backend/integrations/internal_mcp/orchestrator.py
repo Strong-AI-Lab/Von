@@ -78,6 +78,10 @@ from src.backend.services.conversation_turn_memory_context_service import (
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
+from src.backend.services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+    use_represented_selector_llm_for_agent_test_replay,
+)
 from src.backend.services.selected_workflow_handoff_service import (
     evaluate_selected_workflow_handoff,
     evaluate_workflow_required_effects_tool_policy as _evaluate_workflow_required_effects_tool_policy_support,
@@ -113,7 +117,6 @@ from ...workflows.workflow_side_effect_guardrails import (
 )
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
-    CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
@@ -17043,7 +17046,6 @@ class InternalMCPChatOrchestrator:
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
         last_failure_class: Optional[str] = None
-        last_failure_kind: Optional[str] = None
         total_candidates = len(candidates)
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
@@ -17225,7 +17227,6 @@ class InternalMCPChatOrchestrator:
                 }
                 errors.append(error_entry)
                 last_failure_class = probe_error_class
-                last_failure_kind = "provider_unreachable"
                 if _dead_cache is not None:
                     _dead_cache[cache_key] = {
                         "reason": "provider_unreachable",
@@ -17420,7 +17421,6 @@ class InternalMCPChatOrchestrator:
                     }
                     errors.append(error_entry)
                     last_failure_class = validation_error_class
-                    last_failure_kind = validation_failure_kind
                     fallback_attempts.append(
                         {
                             "attempt_no": attempt_no,
@@ -17734,7 +17734,6 @@ class InternalMCPChatOrchestrator:
                 }
                 errors.append(error_entry)
                 last_failure_class = exc_class
-                last_failure_kind = _fk
                 if terminal_dead and _dead_cache is not None:
                     _dead_cache[cache_key] = {
                         "reason": terminal_reason,
@@ -18262,7 +18261,6 @@ class InternalMCPChatOrchestrator:
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
         last_failure_class: Optional[str] = None
-        last_failure_kind: Optional[str] = None
         total_candidates = len(candidates)
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
@@ -18798,7 +18796,6 @@ class InternalMCPChatOrchestrator:
                         }
                     )
                     last_failure_class = validation_error_class
-                    last_failure_kind = validation_failure_kind
                     fallback_attempts.append(
                         {
                             "attempt_no": attempt_no,
@@ -19106,7 +19103,6 @@ class InternalMCPChatOrchestrator:
                     }
                 )
                 last_failure_class = exc_class
-                last_failure_kind = _fk
                 if terminal_dead and _dead_cache is not None:
                     _dead_cache[cache_key] = {
                         "reason": terminal_reason,
@@ -33784,8 +33780,23 @@ class InternalMCPChatOrchestrator:
             )
             and agent_test_selector_authority_source is not None
         )
+        agent_test_represented_selector_llm = (
+            use_represented_selector_llm_for_agent_test_replay(
+                data if isinstance(data, Mapping) else None
+            )
+        )
 
-        def _build_agent_test_local_selector_outputs() -> dict[str, Any]:
+        def _build_agent_test_local_selector_discovery_result(
+            *,
+            include_tool_fallback_in_discovery: bool = True,
+        ) -> tuple[
+            dict[str, Any],
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            list[str],
+            list[str],
+            str,
+        ]:
             if callable(progress_note):
                 progress_note(
                     "Use AgentTest selector defaults",
@@ -33842,16 +33853,14 @@ class InternalMCPChatOrchestrator:
                 if isinstance(candidate.get("concept_id"), str)
                 and str(candidate.get("concept_id")).strip()
             ]
-            recommended_workflow_id = (
-                selector_authoritative_candidate_ids[0]
-                if selector_authoritative_candidate_ids
-                else TOOL_CALLING_WORKFLOW_ID
-            )
-            discovery_candidates = (
-                selector_candidate_entries
-                if represented_candidates
-                else [tool_candidate]
-            )
+            if represented_candidates:
+                discovery_candidates = (
+                    selector_candidate_entries
+                    if include_tool_fallback_in_discovery
+                    else represented_candidates
+                )
+            else:
+                discovery_candidates = [tool_candidate]
             discovery_matches = (
                 represented_candidates if represented_candidates else [tool_candidate]
             )
@@ -33882,6 +33891,35 @@ class InternalMCPChatOrchestrator:
                 "required_tools": list(expected_required_tools),
                 "discovery_payload_origin": discovery_origin,
             }
+            # Persist the populated discovery payload onto request.data so it
+            # survives downstream code paths that bypass the action-output
+            # merge (failed-step branches, early-exit OrchestratorResults).
+            if isinstance(data, dict):
+                data["workflow_discovery_result"] = workflow_discovery_result
+                data["workflow_discovery"] = workflow_discovery_result
+            return (
+                workflow_discovery_result,
+                selector_candidate_entries,
+                selector_authoritative_candidate_entries,
+                selector_candidate_ids,
+                selector_authoritative_candidate_ids,
+                discovery_origin,
+            )
+
+        def _build_agent_test_local_selector_outputs() -> dict[str, Any]:
+            (
+                workflow_discovery_result,
+                selector_candidate_entries,
+                selector_authoritative_candidate_entries,
+                selector_candidate_ids,
+                selector_authoritative_candidate_ids,
+                discovery_origin,
+            ) = _build_agent_test_local_selector_discovery_result()
+            recommended_workflow_id = (
+                selector_authoritative_candidate_ids[0]
+                if selector_authoritative_candidate_ids
+                else TOOL_CALLING_WORKFLOW_ID
+            )
             selector_prompt_text = (
                 "For this AgentTest local replay, reuse the first authoritative "
                 "represented workflow candidate when one is present; otherwise "
@@ -33895,15 +33933,9 @@ class InternalMCPChatOrchestrator:
                 "local_replay_support_only": True,
                 "not_production_acceptance_evidence": True,
                 "agent_test_registry_action_overlap_candidate_count": len(
-                    represented_candidates
+                    selector_authoritative_candidate_entries
                 ),
             }
-            # Persist the populated discovery payload onto request.data so it
-            # survives downstream code paths that bypass the action-output
-            # merge (failed-step branches, early-exit OrchestratorResults).
-            if isinstance(data, dict):
-                data["workflow_discovery_result"] = workflow_discovery_result
-                data["workflow_discovery"] = workflow_discovery_result
             return {
                 **self._build_turn_expected_outcome_context_payload(data),
                 "workflow_discovery_result": workflow_discovery_result,
@@ -33955,12 +33987,11 @@ class InternalMCPChatOrchestrator:
                 "selector_candidate_ids": selector_candidate_ids,
                 "selector_excluded_candidate_entries": [],
                 "selector_excluded_candidate_ids": [],
-                "selector_discovered_workflow_ids": [
-                    str(candidate.get("concept_id")).strip()
-                    for candidate in discovery_matches
-                    if isinstance(candidate.get("concept_id"), str)
-                    and str(candidate.get("concept_id")).strip()
-                ],
+                "selector_discovered_workflow_ids": (
+                    selector_authoritative_candidate_ids
+                    if selector_authoritative_candidate_ids
+                    else [TOOL_CALLING_WORKFLOW_ID]
+                ),
                 "selector_context_messages": [
                     {"role": "system", "content": selector_prompt_text}
                 ],
@@ -33971,7 +34002,7 @@ class InternalMCPChatOrchestrator:
                     "recommended_workflow_id": recommended_workflow_id,
                     "guidance_mode": (
                         "agent_test_local_replay_action_overlap"
-                        if represented_candidates
+                        if selector_authoritative_candidate_entries
                         else "agent_test_local_replay"
                     ),
                 },
@@ -34111,8 +34142,18 @@ class InternalMCPChatOrchestrator:
                     discovery_candidate_count = max(
                         discovery_candidate_count, raw_count
                     )
-        if agent_test_local_selector_authority_available and discovery_candidate_count <= 0:
-            return _build_agent_test_local_selector_outputs()
+        if (
+            agent_test_local_selector_authority_available
+            and discovery_candidate_count <= 0
+        ):
+            if agent_test_represented_selector_llm:
+                workflow_discovery_result = (
+                    _build_agent_test_local_selector_discovery_result(
+                        include_tool_fallback_in_discovery=False
+                    )[0]
+                )
+            else:
+                return _build_agent_test_local_selector_outputs()
 
         continuation_routing_context_text = None
         raw_continuation_context = data.get("continuation_context")
@@ -34420,12 +34461,6 @@ class InternalMCPChatOrchestrator:
         emit_progress = (
             cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
             if callable(emit_progress_raw)
-            else None
-        )
-        check_cancellation_raw = data.get("check_cancellation")
-        check_cancellation = (
-            cast(Callable[[], None], check_cancellation_raw)
-            if callable(check_cancellation_raw)
             else None
         )
 
@@ -36233,6 +36268,7 @@ class InternalMCPChatOrchestrator:
         org_concept_id: Optional[str] = None,
         turn_memory_context: Mapping[str, Any] | None = None,
         turn_expected_outcome_contract: Mapping[str, Any] | None = None,
+        agent_test_selector_replay_mode: str | None = None,
         thinking_card_mode: str | None = None,
     ) -> OrchestratorResult:
         """Execute the current turn via the durable Master Turn Workflow.
@@ -36982,6 +37018,12 @@ class InternalMCPChatOrchestrator:
             "turn_memory_context_state": dict(turn_memory_context_state),
             "write_intent_context_reused": False,
             "gmail_profile": gmail_profile or self._default_gmail_profile,
+            AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: (
+                agent_test_selector_replay_mode.strip()
+                if isinstance(agent_test_selector_replay_mode, str)
+                and agent_test_selector_replay_mode.strip()
+                else None
+            ),
             "workflow_episode_source": "conversation_turn_supervised",
             "workflow_episode_stage": "conversation_turn",
             "prefer_default_model": prefer_default_model,

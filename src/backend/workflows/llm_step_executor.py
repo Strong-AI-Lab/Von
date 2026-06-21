@@ -20,6 +20,9 @@ from ..services.buttonify_service import (
     parse_buttonify_options_json,
     sanitise_buttonify_options,
 )
+from ..services.agent_test_replay_mode_service import (
+    use_represented_selector_llm_for_agent_test_replay,
+)
 from ..services.prompt_template_service import PromptTemplateService
 from ..services.required_tool_obligation_service import (
     OPERATION_MUTATION_WRITE,
@@ -364,6 +367,8 @@ def _agent_test_conversation_turn_fast_path_result(
         prompt_id = _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID
         response_text = _build_agent_test_expected_outcome_response(request)
     elif state_id == "selector_decision":
+        if use_represented_selector_llm_for_agent_test_replay(request.data):
+            return None
         prompt_id = _context_string(request.data.get("selector_prompt_id")) or None
         response_text = _build_agent_test_selector_response(request)
     elif state_id == "narration":

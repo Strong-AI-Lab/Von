@@ -12,6 +12,10 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     ProgressTracker,
     _WorkflowModelPolicyState,
 )
+from src.backend.services.agent_test_replay_mode_service import (
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+)
 from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
 )
@@ -272,6 +276,41 @@ def test_supervised_turn_leaves_missing_discovery_unset_for_workflow_owned_routi
     assert isinstance(workflow_data, dict)
     assert workflow_data.get("workflow_discovery_result") is None
     assert workflow_data.get("workflow_discovery") is None
+    assert result.response_text == "Done."
+
+
+def test_supervised_turn_passes_agent_test_selector_replay_mode_to_workflow_inputs(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done.", "completion_report": {"completed": True}},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Check Gmail access.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="qwen3:8b",
+        agent_test_selector_replay_mode=AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+    )
+
+    workflow_data = captured.get("data")
+    assert isinstance(workflow_data, dict)
+    assert workflow_data.get(AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY) == (
+        AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+    )
     assert result.response_text == "Done."
 
 
