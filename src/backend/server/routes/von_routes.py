@@ -10439,6 +10439,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         show_tool_use_progress = False
     if background_task_id is not None:
         show_tool_use_progress = False
+    # Background tasks still need the generic live-progress projection so
+    # cross-process MCP read tools can inspect the same in-flight turn.
+    project_live_progress = show_tool_use_progress or background_task_id is not None
     progress_updates_enabled = show_tool_use_progress or background_task_id is not None
 
     def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
@@ -10455,7 +10458,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             except Exception:
                 pass
 
-        if not show_tool_use_progress:
+        if not project_live_progress:
             return
 
         seen_scope_keys: set[str] = set()
@@ -10517,7 +10520,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         raise CancellationRequested(task_id=background_task_id)
 
     progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
-    if show_tool_use_progress:
+    if project_live_progress:
         _register_tool_progress_scope_aliases(
             request_id=request_id,
             primary_scope_key=progress_scope_key,
@@ -10691,7 +10694,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     _check_background_cancellation("authentication context")
 
-    if show_tool_use_progress:
+    if project_live_progress:
         _register_tool_progress_scope_aliases(
             request_id=request_id,
             primary_scope_key=progress_scope_key,
@@ -14412,7 +14415,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
         _refresh_llm_debug_timing_payload(llm_debug_info)
 
-        if show_tool_use_progress:
+        if progress_updates_enabled:
             turn_record_completion_gate = None
             turn_execution_record = llm_debug_info.get("turn_execution_record")
             if isinstance(turn_execution_record, Mapping):
@@ -14430,9 +14433,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 operation_kind="progress_update",
                 operation_name="stop_progress_heartbeat",
             ):
-                _stop_tool_progress_heartbeat(
-                    progress_heartbeat_stop_event, progress_heartbeat_thread
-                )
+                if show_tool_use_progress:
+                    _stop_tool_progress_heartbeat(
+                        progress_heartbeat_stop_event, progress_heartbeat_thread
+                    )
             final_progress_payload["timing_spans"] = turn_timing_recorder.spans()
             with turn_timing_recorder.span(
                 stage_id="response_finalising",

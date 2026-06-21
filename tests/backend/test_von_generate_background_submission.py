@@ -1,7 +1,25 @@
 from __future__ import annotations
 
+import pytest
 from flask import Flask, jsonify, request, session
 from typing import Any, cast
+
+from src.backend.services.tool_progress_store_service import (
+    reset_tool_progress_persistence_queue_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_live_progress_state():
+    import src.backend.server.routes.von_routes as von_routes
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+    reset_tool_progress_persistence_queue_for_tests()
+    yield
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+    reset_tool_progress_persistence_queue_for_tests()
 
 
 class _DummyLLM:
@@ -208,8 +226,13 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
     assert captured_payload["background_progress"] is True
 
 
-def test_background_generate_reentry_skips_ui_progress_persistence(monkeypatch):
+def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
+    monkeypatch,
+):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+    from src.backend.services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
 
     import src.backend.server.routes.von_routes as von_routes
 
@@ -227,13 +250,6 @@ def test_background_generate_reentry_skips_ui_progress_persistence(monkeypatch):
         "get_show_tool_use_during_thinking",
         lambda: True,
     )
-
-    def fail_ui_progress_persistence(*_args, **_kwargs) -> None:
-        raise AssertionError(
-            "background re-entry should use task-registry progress only"
-        )
-
-    monkeypatch.setattr(von_routes, "_set_tool_progress", fail_ui_progress_persistence)
 
     client = app.test_client()
     response = client.post(
@@ -254,6 +270,18 @@ def test_background_generate_reentry_skips_ui_progress_persistence(monkeypatch):
     assert task_registry.progress_updates
     assert task_registry.progress_updates[0][0] == "task-123"
     assert task_registry.progress_updates[0][1]["subtask"] == "request setup"
+
+    live_progress = get_turn_execution_live_progress_payload(
+        request_id="task-123",
+        window_session_id="window-123",
+    )
+    assert live_progress is not None
+    assert live_progress["success"] is True
+    assert live_progress["request_id"] == "task-123"
+    assert live_progress["resolved_scope_key"] == "anon:window:window-123"
+    assert live_progress["progress_source"] == "tool_progress_state"
+    assert live_progress["status"] == "thinking"
+    assert live_progress["stage"] == "context_build"
 
 
 def test_normalise_background_generate_result_preserves_json_payload() -> None:
