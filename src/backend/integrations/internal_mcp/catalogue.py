@@ -7308,6 +7308,12 @@ def _predicate_incidence_input_schema() -> Schema:
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
+        aliases={
+            "target_type": "instance_of",
+            "target_type_id": "instance_of",
+            "instance_type": "instance_of",
+            "instance_type_id": "instance_of",
+        },
         description=(
             "get_predicate_incidence input: exactly one of concept_id (entity mode; "
             "anchor entity concept ID such as '#V#michael_witbrock') or instance_of "

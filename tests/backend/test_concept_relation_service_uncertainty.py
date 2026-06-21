@@ -553,6 +553,124 @@ def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> 
     assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 2
     assert rows["#V#has_phd_supervisor"]["grounding_count"] == 1
     assert rows["#V#has_phd_supervisor"]["grounded_instance_count"] == 2
+    assert (
+        payload["predicate_incidence_query_diagnostics"]["retrieval_strategy"]
+        == "batched_subject_asserted"
+    )
+
+
+def test_get_predicate_incidence_type_mode_uses_batched_subject_path(
+    monkeypatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services import concept_relation_service as service
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#alice_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#member_of_organisation": ["#V#sail"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#bob_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#has_phd_supervisor": ["#V#michael_witbrock"],
+            },
+        }
+    )
+
+    def fail_per_instance_lookup(*_args, **_kwargs):
+        raise AssertionError("type-mode incidence should use the batched path")
+
+    monkeypatch.setattr(
+        service,
+        "find_relations_with_argument",
+        fail_per_instance_lookup,
+    )
+
+    payload = service.get_predicate_incidence(
+        instance_of="#V#sail_student",
+        direct_instances_only=True,
+        include_concept_preview=False,
+    )
+
+    rows = {row["predicate_concept_id"]: row for row in payload.get("predicates") or []}
+    assert rows["#V#member_of_organisation"]["relation_hit_count"] == 1
+    assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 1
+    assert (
+        payload["predicate_incidence_query_diagnostics"]["retrieval_strategy"]
+        == "batched_subject_asserted"
+    )
+
+
+def test_get_predicate_incidence_type_mode_batches_argument_type_counts(
+    monkeypatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services import concept_relation_service as service
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#alice_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#member_of_organisation": ["#V#sail"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#bob_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#member_of_organisation": ["#V#sail"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#sail",
+            "relationships": {"is_an_instance_of": ["#V#organisation"]},
+        }
+    )
+
+    def fail_per_hit_type_resolution(*_args, **_kwargs):
+        raise AssertionError("type-mode fast path should use batched type IDs")
+
+    monkeypatch.setattr(
+        service,
+        "_resolve_accessible_concept_type_ids",
+        fail_per_hit_type_resolution,
+    )
+
+    payload = service.get_predicate_incidence(
+        instance_of="#V#sail_student",
+        direct_instances_only=True,
+        include_argument_type_counts=True,
+        include_concept_preview=False,
+    )
+
+    row = next(
+        row
+        for row in payload.get("predicates") or []
+        if row.get("predicate_concept_id") == "#V#member_of_organisation"
+    )
+    counts = {
+        (entry["argument_role"], entry["type_concept_id"]): entry
+        for entry in row.get("argument_type_counts") or []
+    }
+    organisation = counts[("object", "#V#organisation")]
+    assert organisation["relation_hit_count"] == 2
+    assert organisation["concept_count"] == 1
+    assert (
+        payload["predicate_incidence_query_diagnostics"]["retrieval_strategy"]
+        == "batched_subject_asserted"
+    )
 
 
 def test_subject_relation_retrieval_filters_hidden_targets_under_access_control() -> (
@@ -613,6 +731,12 @@ def test_subject_relation_retrieval_filters_hidden_targets_under_access_control(
 
         assert [hit.get("target_value") for hit in hits] == ["#V#paper_public"]
         assert hits[0]["target_concept_preview"]["type_ids"] == ["#V#scholarly_article"]
+        relation_diagnostics = relation_payload["relation_query_diagnostics"]
+        assert relation_diagnostics["concept_id"] == "#V#alice"
+        assert relation_diagnostics["predicate_filter"] == ["#V#author_of"]
+        assert relation_diagnostics["resolved_argument_index"] == 1
+        assert relation_diagnostics["resolved_relation_kind"] == "binary"
+        assert relation_diagnostics["total_hits"] == 1
 
         incidence_payload = get_predicate_incidence(
             concept_id="#V#alice",
@@ -629,3 +753,11 @@ def test_subject_relation_retrieval_filters_hidden_targets_under_access_control(
         assert [grounding.get("concept_id") for grounding in groundings] == [
             "#V#paper_public"
         ]
+        incidence_diagnostics = incidence_payload[
+            "predicate_incidence_query_diagnostics"
+        ]
+        assert incidence_diagnostics["mode"] == "entity"
+        assert incidence_diagnostics["concept_id"] == "#V#alice"
+        assert incidence_diagnostics["argument_index"] == "subject"
+        assert incidence_diagnostics["relation_kind"] == "binary"
+        assert incidence_diagnostics["total_predicates"] == 1

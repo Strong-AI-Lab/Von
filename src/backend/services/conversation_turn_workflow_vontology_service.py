@@ -347,6 +347,7 @@ def _ensure_conversation_turn_prompt_support(
                 "gmail_list_profiles",
                 "gmail_list_messages",
                 "gmail_get_message",
+                "predicates, relation schema, usage, incidence",
             ),
         )
     ):

@@ -54,6 +54,22 @@ def test_expected_outcome_prompt_requires_represented_labels_to_write_and_readba
     ) in prompt_text
 
 
+def test_expected_outcome_prompt_binds_type_targets_for_predicate_schema_turns() -> (
+    None
+):
+    prompt_text = (
+        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "predicates, relation schema, usage, incidence" in lowered
+    assert "represented class/type" in lowered
+    assert "target_type_ids" in prompt_text
+    assert "get_predicate_incidence" in prompt_text
+    assert "instance_of" in prompt_text
+    assert "authenticated user" in lowered
+
+
 def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> None:
     prompt_text = (_SEED_DIR / "missing_tool_call_retry_prompt_seed.md").read_text(
         encoding="utf-8"

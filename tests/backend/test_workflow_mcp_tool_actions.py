@@ -6,7 +6,6 @@ from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
-    WorkflowActionRequest,
     WorkflowActionResult,
     WorkflowEnvironment,
 )
@@ -398,6 +397,106 @@ def test_turn_recovery_tool_batch_replaces_default_profile_and_strips_unknown_fi
     } >= {
         ("profile", "default_gmail_profile_placeholder_replacement"),
         ("include_labels", "removed_for_strict_tool_schema"),
+    }
+
+
+def test_turn_recovery_tool_batch_binds_predicate_target_alias_to_contract_type(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import registry_factory
+    from src.backend.workflows.durable.turn_execution_actions import (
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        register_turn_execution_actions,
+    )
+
+    predicate_schema = Schema(
+        required={},
+        optional={
+            "concept_id": (str, type(None)),
+            "instance_of": (str, type(None)),
+            "argument_index": (str, int, type(None)),
+            "relation_kind": (str, type(None)),
+            "include_argument_type_counts": (bool, type(None)),
+            "include_concept_preview": (bool, type(None)),
+            "limit": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+    )
+    gateway = _SchemaAwareGateway(
+        method_name="get_predicate_incidence",
+        category="read",
+        input_schema=predicate_schema,
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "mode": "type",
+            "instance_of": payload.get("instance_of"),
+            "total_predicates": 0,
+            "predicates": [],
+            "paging": {},
+        },
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
+
+    result = registry.execute(
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "get_predicate_incidence",
+                    "payload": {"target": "#V#scientific_paper"},
+                }
+            ]
+        },
+        context={
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "required_tools": ["get_predicate_incidence"],
+                "target_type_ids": ["#V#scientific_paper"],
+            }
+        },
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == [
+        (
+            "get_predicate_incidence",
+            {
+                "instance_of": "#V#scientific_paper",
+                "argument_index": "subject",
+                "relation_kind": "binary",
+                "include_argument_type_counts": True,
+                "include_concept_preview": False,
+                "limit": 12,
+                "namespace": "#V#tester",
+            },
+        )
+    ]
+    invocation = result.outputs["turn_recovery_tool_batch_execution"][
+        "tool_invocations"
+    ][0]
+    assert invocation["status"] == "ok"
+    assert invocation["payload"]["instance_of"] == "#V#scientific_paper"
+    assert "target" not in invocation["payload"]
+    assert {
+        (entry.get("field"), entry.get("source"))
+        for entry in invocation["payload_bindings"]
+        if isinstance(entry, dict)
+    } >= {
+        ("instance_of", "turn_expected_outcome.target_type_ids_alias"),
+        ("argument_index", "tool_metadata_default_payload"),
     }
 
 

@@ -373,6 +373,28 @@ def test_gmail_list_messages_input_schema_accepts_model_planning_hints():
     assert "limit" not in payload
 
 
+def test_predicate_incidence_input_schema_accepts_target_type_alias():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp.schemas import (
+        normalise_payload_aliases,
+        validate_payload,
+    )
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("get_predicate_incidence")
+    payload = {
+        "target_type": "#V#scientific_publication",
+        "relation_kind": "binary",
+    }
+
+    normalise_payload_aliases(method.input_schema, payload)
+    ok, errors = validate_payload(method.input_schema, payload)
+
+    assert ok, errors
+    assert payload["instance_of"] == "#V#scientific_publication"
+    assert "target_type" not in payload
+
+
 def test_gmail_list_messages_handler_accepts_limit_alias_and_planning_hints(
     monkeypatch,
 ):

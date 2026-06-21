@@ -631,10 +631,13 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "fetch_concept": {
         "salience": "medium",
         "category": "vontology",
-        "display_template": "Concept: {concept_id}",
+        "display_template": "Loaded: {name}",
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
         "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "required_fetch_or_focal_concept",
+        "target_concept_max_count": 5,
         "planner_hint": (
             "Use when you already know the concept ID and need grounded represented "
             "facts, predicates, or relationships for that specific concept."
@@ -643,11 +646,17 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "find_relations_with_argument": {
         "salience": "medium",
         "category": "vontology",
-        "display_template": "{count} relations",
+        "display_template": "{count} relation(s)",
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
+        "operation_category": "read",
+        "evidence_role": "verification",
         "evidence_kind": "relation_bearing",
         "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
+        "default_payload": {"limit": 20},
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
             "concept. This is relation-bearing evidence, not mere inventory."
@@ -707,9 +716,18 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "evidence_surface_family": "knowledge_base",
         "evidence_kind": "relation_bearing",
         "external_surface": False,
+        "required_tool_target_argument_names": ("concept_id", "instance_of"),
+        "required_tool_target_payload_field_names": ("concept_id", "instance_of"),
         "target_concept_argument_name": "concept_id",
         "target_concept_source": "focal_concept",
         "target_concept_max_count": 2,
+        "default_payload": {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "include_argument_type_counts": True,
+            "include_concept_preview": False,
+            "limit": 12,
+        },
     },
     "get_concept_usage_profile": {
         "salience": "medium",
@@ -727,32 +745,6 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "workflow-governed quality, description, or translation rumination. "
             "The workflow/profile supplies any non-trivial-use threshold."
         ),
-    },
-    "fetch_concept": {
-        "salience": "medium",
-        "category": "vontology",
-        "display_template": "Loaded: {name}",
-        "dispatch_surface_family": "knowledge_base",
-        "evidence_surface_family": "knowledge_base",
-        "external_surface": False,
-        "target_concept_argument_name": "concept_id",
-        "target_concept_source": "required_fetch_or_focal_concept",
-        "target_concept_max_count": 5,
-    },
-    "find_relations_with_argument": {
-        "salience": "medium",
-        "category": "vontology",
-        "display_template": "{count} relation(s)",
-        "dispatch_surface_family": "knowledge_base",
-        "evidence_surface_family": "knowledge_base",
-        "operation_category": "read",
-        "evidence_role": "verification",
-        "evidence_kind": "relation_bearing",
-        "external_surface": False,
-        "target_concept_argument_name": "concept_id",
-        "target_concept_source": "focal_concept",
-        "target_concept_max_count": 2,
-        "default_payload": {"limit": 20},
     },
     "read_paper": {
         "salience": "medium",

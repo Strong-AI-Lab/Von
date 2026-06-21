@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import (
     bypass_access_control,
     can_access_concept,
+    filter_accessible_concept_ids,
     should_enforce_access_control,
 )
 from .concept_predicate_metadata_service import get_relationship_kinds_set
@@ -312,6 +313,21 @@ def find_relations_with_argument(
     argument_filter = _coerce_argument_index(argument_index)
     relation_filter = _normalise_relation_kind_filter(relation_kind)
     predicate_terms = _normalise_predicate_terms(predicate_filter)
+    predicate_display_terms = _normalise_predicate_display_terms(predicate_filter)
+    query_diagnostics = {
+        "tool": "find_relations_with_argument",
+        "concept_id": resolved_concept_id,
+        "argument_index": argument_index,
+        "resolved_argument_index": argument_filter,
+        "predicate_filter": list(predicate_display_terms),
+        "relation_kind": relation_kind,
+        "resolved_relation_kind": relation_filter,
+        "limit": resolved_limit_value,
+        "offset": resolved_offset,
+        "sort_by": sort_by,
+        "include_text_snippets": bool(include_text_snippets),
+        "include_concept_preview": bool(include_concept_preview),
+    }
 
     include_structural = relation_filter in {"any", "binary"}
     include_text = relation_filter in {"any", "text"}
@@ -638,6 +654,14 @@ def find_relations_with_argument(
             "include_uncertain": include_uncertain_rows,
             "statuses": status_filter or None,
         },
+        "relation_query_diagnostics": {
+            **query_diagnostics,
+            "uncertainty_mode": mode_value,
+            "include_uncertain": include_uncertain_rows,
+            "uncertainty_statuses": status_filter or None,
+            "total_hits": len(sorted_hits),
+            "returned": len(paged_hits),
+        },
     }
 
 
@@ -765,6 +789,27 @@ def get_predicate_incidence(
                     role_expansion_options=role_expansion_options,
                 )
             ),
+            "predicate_incidence_query_diagnostics": {
+                "tool": "get_predicate_incidence",
+                "mode": "entity",
+                "concept_id": resolved_concept_id,
+                "argument_index": argument_index,
+                "predicate_filter": list(
+                    _normalise_predicate_display_terms(predicate_filter)
+                ),
+                "relation_kind": relation_kind,
+                "limit": resolved_limit_value,
+                "offset": resolved_offset,
+                "sort_by": resolved_sort_by,
+                "include_text_snippets": bool(include_text_snippets),
+                "include_concept_preview": bool(include_concept_preview),
+                "include_argument_type_counts": type_count_options.include,
+                "uncertainty_mode": diagnostics.get("mode"),
+                "include_uncertain": diagnostics.get("include_uncertain"),
+                "uncertainty_statuses": diagnostics.get("statuses"),
+                "total_predicates": len(sorted_rows),
+                "returned": len(paged_rows),
+            },
         }
 
     type_ids = _resolve_type_incidence_type_ids(
@@ -794,18 +839,37 @@ def get_predicate_incidence(
         "statuses": _normalise_uncertainty_statuses(uncertainty_statuses) or None,
     }
 
+    grouped_hits = _collect_type_subject_hits_for_incidence_fast(
+        instance_ids=instance_ids,
+        argument_index=argument_index,
+        predicate_filter=predicate_filter,
+        relation_kind=relation_kind,
+        include_text_snippets=include_text_snippets,
+        include_uncertain=include_uncertain,
+        uncertainty_mode=uncertainty_mode,
+        uncertainty_statuses=uncertainty_statuses,
+    )
+    retrieval_strategy = "batched_subject_asserted" if grouped_hits is not None else (
+        "per_instance_relation_lookup"
+    )
+    if grouped_hits is not None and type_count_options.include:
+        _attach_direct_type_ids_to_fast_incidence_hits(grouped_hits)
+
     for instance_id in instance_ids:
-        hits, _ = _collect_all_argument_hits_for_incidence(
-            concept_id=instance_id,
-            argument_index=argument_index,
-            predicate_filter=predicate_filter,
-            relation_kind=relation_kind,
-            include_text_snippets=include_text_snippets,
-            include_concept_preview=include_concept_preview,
-            include_uncertain=include_uncertain,
-            uncertainty_mode=uncertainty_mode,
-            uncertainty_statuses=uncertainty_statuses,
-        )
+        if grouped_hits is None:
+            hits, _ = _collect_all_argument_hits_for_incidence(
+                concept_id=instance_id,
+                argument_index=argument_index,
+                predicate_filter=predicate_filter,
+                relation_kind=relation_kind,
+                include_text_snippets=include_text_snippets,
+                include_concept_preview=include_concept_preview,
+                include_uncertain=include_uncertain,
+                uncertainty_mode=uncertainty_mode,
+                uncertainty_statuses=uncertainty_statuses,
+            )
+        else:
+            hits = grouped_hits.get(instance_id, [])
         _accumulate_predicate_incidence_rows(
             aggregated_by_predicate,
             hits=hits,
@@ -849,6 +913,31 @@ def get_predicate_incidence(
                 role_expansion_options=role_expansion_options,
             )
         ),
+        "predicate_incidence_query_diagnostics": {
+            "tool": "get_predicate_incidence",
+            "mode": "type",
+            "instance_of": resolved_instance_of,
+            "type_ids_considered": list(type_ids),
+            "instance_count_considered": len(instance_ids),
+            "direct_instances_only": bool(direct_instances_only),
+            "argument_index": argument_index,
+            "predicate_filter": list(
+                _normalise_predicate_display_terms(predicate_filter)
+            ),
+            "relation_kind": relation_kind,
+            "limit": resolved_limit_value,
+            "offset": resolved_offset,
+            "sort_by": resolved_sort_by,
+            "include_text_snippets": bool(include_text_snippets),
+            "include_concept_preview": bool(include_concept_preview),
+            "include_argument_type_counts": type_count_options.include,
+            "uncertainty_mode": diagnostics.get("mode"),
+            "include_uncertain": diagnostics.get("include_uncertain"),
+            "uncertainty_statuses": diagnostics.get("statuses"),
+            "retrieval_strategy": retrieval_strategy,
+            "total_predicates": len(sorted_rows),
+            "returned": len(paged_rows),
+        },
     }
 
 
@@ -960,6 +1049,252 @@ def _collect_all_argument_hits_for_incidence(
                 break
 
     return all_hits, diagnostics
+
+
+def _collect_type_subject_hits_for_incidence_fast(
+    *,
+    instance_ids: Sequence[str],
+    argument_index: Union[int, str, None],
+    predicate_filter: Optional[Sequence[str]],
+    relation_kind: Optional[str],
+    include_text_snippets: bool,
+    include_uncertain: bool,
+    uncertainty_mode: Optional[str],
+    uncertainty_statuses: Optional[Sequence[str]],
+) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    argument_filter = _coerce_argument_index(argument_index)
+    relation_filter = _normalise_relation_kind_filter(relation_kind)
+    mode_value, include_asserted_rows, include_uncertain_rows = (
+        _resolve_uncertainty_mode(
+            uncertainty_mode=uncertainty_mode,
+            include_uncertain=include_uncertain,
+        )
+    )
+    if (
+        not include_asserted_rows
+        or include_uncertain_rows
+        or _normalise_uncertainty_statuses(uncertainty_statuses)
+        or argument_filter not in (None, _ARG_INDEX_SUBJECT)
+        or relation_filter not in {"any", "binary", "text"}
+    ):
+        return None
+
+    _record_uncertainty_mode_usage(mode_value)
+    predicate_terms = _normalise_predicate_terms(predicate_filter)
+    grouped: Dict[str, List[Dict[str, Any]]] = {
+        instance_id: []
+        for instance_id in instance_ids
+        if isinstance(instance_id, str) and instance_id.strip()
+    }
+    if not grouped:
+        return grouped
+
+    include_structural = relation_filter in {"any", "binary"}
+    include_text = relation_filter in {"any", "text"}
+    enforce_access = should_enforce_access_control()
+
+    if include_structural:
+        with bypass_access_control():
+            cursor = list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": list(grouped)}},
+                    {"concept_id": 1, "relationships": 1, "updated_at": 1},
+                )
+            )
+        accessible_source_ids = (
+            filter_accessible_concept_ids(grouped)
+            if enforce_access
+            else set(grouped)
+        )
+        accessible_target_ids: set[str] | None = None
+        if enforce_access:
+            candidate_target_ids: List[str] = []
+            for doc in cursor:
+                source_id = doc.get("concept_id")
+                if not isinstance(source_id, str) or source_id not in accessible_source_ids:
+                    continue
+                relationships = doc.get("relationships")
+                if not isinstance(relationships, Mapping):
+                    continue
+                for predicate_id, raw_targets in relationships.items():
+                    if not _predicate_matches_terms(predicate_id, predicate_terms):
+                        continue
+                    candidate_target_ids.extend(_normalise_relationship_targets(raw_targets))
+            accessible_target_ids = filter_accessible_concept_ids(candidate_target_ids)
+        for doc in cursor:
+            source_id = doc.get("concept_id")
+            if not isinstance(source_id, str) or source_id not in grouped:
+                continue
+            if enforce_access and source_id not in accessible_source_ids:
+                continue
+            relationships = doc.get("relationships")
+            if not isinstance(relationships, Mapping):
+                continue
+            updated_at = _isoformat(doc.get("updated_at"))
+            for predicate_id, raw_targets in relationships.items():
+                if not _predicate_matches_terms(predicate_id, predicate_terms):
+                    continue
+                targets = _normalise_relationship_targets(raw_targets)
+                if accessible_target_ids is not None:
+                    targets = [
+                        target
+                        for target in targets
+                        if not (
+                            isinstance(target, str)
+                            and target.startswith("#")
+                            and target not in accessible_target_ids
+                        )
+                    ]
+                if not targets:
+                    continue
+                for target_index, target_value in enumerate(targets):
+                    matched_indexes = [_ARG_INDEX_SUBJECT]
+                    arg_target_index = _ARG_INDEX_FIRST_OBJECT + target_index
+                    if target_value == source_id:
+                        matched_indexes.append(arg_target_index)
+                    grouped[source_id].append(
+                        {
+                            "source_concept_id": source_id,
+                            "predicate_concept_id": predicate_id,
+                            "relation_kind": "binary",
+                            "argument_indexes": matched_indexes,
+                            "target_value": target_value,
+                            "target_concept_preview": None,
+                            "relation_metadata": {
+                                "relation_id": (
+                                    f"struct::{source_id}::{predicate_id}::"
+                                    f"{target_index}"
+                                ),
+                                "updated_at": updated_at,
+                                "match_type": "exact",
+                            },
+                            "access_granted": True,
+                            "follow_up_actions": _build_follow_up_actions(
+                                [target_value],
+                                exclude={source_id},
+                            ),
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        }
+                    )
+
+    if include_text:
+        rows_by_concept = get_texts_for_concepts(
+            list(grouped),
+            limit_per_concept=_MAX_LIMIT,
+        )
+        for source_id, rows in rows_by_concept.items():
+            if source_id not in grouped:
+                continue
+            for rel in rows:
+                predicate_id = rel.get("predicate")
+                if not _predicate_matches_terms(predicate_id, predicate_terms):
+                    continue
+                text_value = rel.get("text")
+                hit: Dict[str, Any] = {
+                    "source_concept_id": source_id,
+                    "predicate_concept_id": predicate_id,
+                    "relation_kind": "text",
+                    "argument_indexes": [_ARG_INDEX_SUBJECT],
+                    "target_value": text_value,
+                    "relation_metadata": {
+                        "relation_id": str(
+                            rel.get("relation_id")
+                            or f"text::{source_id}::{predicate_id}"
+                        ),
+                        "text_value_id": rel.get("text_value_id"),
+                        "lang": rel.get("lang"),
+                        "match_type": "exact",
+                    },
+                    "access_granted": True,
+                    "follow_up_actions": [],
+                    "score": 1.0,
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+                snippet = _make_argument_match_snippet(
+                    text=text_value,
+                    needle=source_id,
+                    include_snippets=include_text_snippets,
+                )
+                if snippet:
+                    hit["text_snippet"] = snippet
+                grouped[source_id].append(hit)
+
+    return grouped
+
+
+def _attach_direct_type_ids_to_fast_incidence_hits(
+    grouped_hits: Mapping[str, List[Dict[str, Any]]],
+) -> None:
+    target_ids: List[str] = []
+    for source_id, hits in grouped_hits.items():
+        for hit in hits:
+            target_id = _normalise_concept_id(hit.get("target_value"))
+            if not target_id or target_id == source_id:
+                continue
+            target_ids.append(target_id)
+    target_ids = list(dict.fromkeys(target_ids))
+    if not target_ids:
+        return
+
+    enforce_access = should_enforce_access_control()
+    accessible_target_ids = (
+        list(filter_accessible_concept_ids(target_ids))
+        if enforce_access
+        else list(target_ids)
+    )
+    type_ids_by_target: Dict[str, List[str]] = {
+        target_id: [] for target_id in accessible_target_ids
+    }
+    if accessible_target_ids:
+        with bypass_access_control():
+            cursor = list(
+                ConceptsRepository.find(
+                    {"concept_id": {"$in": accessible_target_ids}},
+                    {
+                        "concept_id": 1,
+                        "relationships.is_an_instance_of": 1,
+                        "relationships.#V#is_an_instance_of": 1,
+                    },
+                )
+            )
+        raw_type_ids_by_target: Dict[str, List[str]] = {}
+        raw_type_ids: List[str] = []
+        for doc in cursor:
+            target_id = doc.get("concept_id")
+            if not isinstance(target_id, str) or target_id not in type_ids_by_target:
+                continue
+            relationships = doc.get("relationships")
+            if not isinstance(relationships, Mapping):
+                continue
+            type_ids: List[str] = []
+            for predicate_id in ("is_an_instance_of", "#V#is_an_instance_of"):
+                type_ids.extend(
+                    _normalise_relationship_targets(relationships.get(predicate_id))
+                )
+            type_ids = list(dict.fromkeys(type_ids))
+            raw_type_ids_by_target[target_id] = type_ids
+            raw_type_ids.extend(type_ids)
+
+        accessible_type_ids = (
+            filter_accessible_concept_ids(raw_type_ids)
+            if enforce_access
+            else set(raw_type_ids)
+        )
+        for target_id, type_ids in raw_type_ids_by_target.items():
+            type_ids_by_target[target_id] = [
+                type_id for type_id in type_ids if type_id in accessible_type_ids
+            ]
+
+    for source_id, hits in grouped_hits.items():
+        for hit in hits:
+            target_id = _normalise_concept_id(hit.get("target_value"))
+            if not target_id or target_id == source_id:
+                continue
+            if target_id in type_ids_by_target:
+                hit["target_type_ids"] = list(type_ids_by_target[target_id])
 
 
 def _resolve_type_incidence_type_ids(
@@ -1082,26 +1417,31 @@ def _accumulate_predicate_incidence_rows(
         if any(index >= _ARG_INDEX_FIRST_OBJECT for index in indexes):
             row["object_argument_hit_count"] += 1
 
-        argument_entries = _extract_predicate_incidence_argument_entries(
-            hit,
-            anchor_concept_id=anchor_concept_id,
-            preview_cache=preview_cache,
-        )
-        if type_count_options.include:
-            _accumulate_predicate_incidence_argument_type_counts(
-                row,
-                argument_entries=argument_entries,
-                type_count_options=type_count_options,
-            )
-        if role_expansion_options.mode != _ROLE_EXPANSION_MODE_NONE:
-            _accumulate_predicate_incidence_role_expansion(
-                row,
-                argument_entries=argument_entries,
+        if (
+            type_count_options.include
+            or role_expansion_options.mode != _ROLE_EXPANSION_MODE_NONE
+        ):
+            argument_entries = _extract_predicate_incidence_argument_entries(
+                hit,
                 anchor_concept_id=anchor_concept_id,
-                predicate_concept_id=resolved_predicate_id,
                 preview_cache=preview_cache,
-                role_expansion_options=role_expansion_options,
             )
+            if type_count_options.include:
+                _accumulate_predicate_incidence_argument_type_counts(
+                    row,
+                    argument_entries=argument_entries,
+                    preview_cache=preview_cache,
+                    type_count_options=type_count_options,
+                )
+            if role_expansion_options.mode != _ROLE_EXPANSION_MODE_NONE:
+                _accumulate_predicate_incidence_role_expansion(
+                    row,
+                    argument_entries=argument_entries,
+                    anchor_concept_id=anchor_concept_id,
+                    predicate_concept_id=resolved_predicate_id,
+                    preview_cache=preview_cache,
+                    role_expansion_options=role_expansion_options,
+                )
 
         for grounding_key, grounding in _extract_predicate_incidence_groundings(
             hit,
@@ -1196,20 +1536,37 @@ def _extract_predicate_incidence_argument_entries(
     ) or _normalise_concept_id(hit.get("target_value"))
     if target_concept_id and target_concept_id != anchor_concept_id:
         resolved_preview = target_preview
-        if not isinstance(resolved_preview, Mapping):
-            resolved_preview = _resolve_concept_preview(
-                target_concept_id,
-                True,
-                preview_cache,
-            )
-        entries.append(
-            {
-                "argument_index": _ARG_INDEX_FIRST_OBJECT,
-                "argument_role": "object",
-                "concept_id": target_concept_id,
-                "concept_preview": resolved_preview,
-            }
+        raw_target_type_ids = hit.get("target_type_ids")
+        target_type_ids = (
+            [
+                str(type_id).strip()
+                for type_id in raw_target_type_ids
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
+            if isinstance(raw_target_type_ids, list)
+            else None
         )
+        if not isinstance(resolved_preview, Mapping):
+            if target_type_ids is not None:
+                resolved_preview = {
+                    "concept_id": target_concept_id,
+                    "type_ids": list(target_type_ids),
+                }
+            else:
+                resolved_preview = _resolve_concept_preview(
+                    target_concept_id,
+                    True,
+                    preview_cache,
+                )
+        entry = {
+            "argument_index": _ARG_INDEX_FIRST_OBJECT,
+            "argument_role": "object",
+            "concept_id": target_concept_id,
+            "concept_preview": resolved_preview,
+        }
+        if target_type_ids is not None:
+            entry["type_ids"] = list(target_type_ids)
+        entries.append(entry)
         return entries
 
     target_value = hit.get("target_value")
@@ -1238,6 +1595,7 @@ def _accumulate_predicate_incidence_argument_type_counts(
     row: Dict[str, Any],
     *,
     argument_entries: Sequence[Mapping[str, Any]],
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
     type_count_options: PredicateIncidenceTypeCountOptions,
 ) -> None:
     if not argument_entries:
@@ -1254,13 +1612,26 @@ def _accumulate_predicate_incidence_argument_type_counts(
                 row["_literal_argument_count"] += 1
             continue
         preview = entry.get("concept_preview")
-        if not isinstance(preview, Mapping):
-            row["_inaccessible_argument_count"] += 1
-            continue
-        type_ids = _resolve_accessible_concept_type_ids(concept_id)
+        raw_type_ids = entry.get("type_ids")
+        type_ids = (
+            [
+                str(type_id).strip()
+                for type_id in raw_type_ids
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
+            if isinstance(raw_type_ids, list)
+            else None
+        )
         if type_ids is None:
-            row["_inaccessible_argument_count"] += 1
-            continue
+            if not isinstance(preview, Mapping):
+                row["_inaccessible_argument_count"] += 1
+                continue
+            type_ids = _resolve_accessible_concept_type_ids(concept_id)
+            if type_ids is None:
+                row["_inaccessible_argument_count"] += 1
+                continue
+        elif not isinstance(preview, Mapping):
+            preview = {"concept_id": concept_id, "type_ids": list(type_ids)}
         if not type_ids:
             if type_count_options.include_untyped_bucket:
                 row["_untyped_argument_count"] += 1
@@ -1281,11 +1652,7 @@ def _accumulate_predicate_incidence_argument_type_counts(
                     "_concept_ids": set(),
                     "sample_concepts": [],
                 }
-                type_preview = _resolve_concept_preview(
-                    type_id,
-                    True,
-                    {},
-                )
+                type_preview = _resolve_concept_preview(type_id, True, preview_cache)
                 if isinstance(type_preview, Mapping):
                     bucket["type_preview"] = _compact_concept_sample(type_preview)
                 buckets[bucket_key] = bucket
@@ -2840,7 +3207,7 @@ def _collect_uncertain_argument_hits_for_targets(
     return hits
 
 
-def _normalise_predicate_terms(
+def _iter_predicate_filter_tokens(
     predicate_filter: Optional[Sequence[str]],
 ) -> List[str]:
     if predicate_filter is None:
@@ -2850,7 +3217,7 @@ def _normalise_predicate_terms(
         values = [predicate_filter]
     else:
         values = predicate_filter
-    terms: List[str] = []
+    tokens: List[str] = []
     for candidate in values:
         if not isinstance(candidate, str):
             continue
@@ -2864,10 +3231,22 @@ def _normalise_predicate_terms(
         else:
             split_tokens = [raw_token]
         for split_token in split_tokens:
-            token = split_token.strip().lower()
+            token = split_token.strip()
             if token:
-                terms.append(token)
-    return terms
+                tokens.append(token)
+    return tokens
+
+
+def _normalise_predicate_terms(
+    predicate_filter: Optional[Sequence[str]],
+) -> List[str]:
+    return [token.lower() for token in _iter_predicate_filter_tokens(predicate_filter)]
+
+
+def _normalise_predicate_display_terms(
+    predicate_filter: Optional[Sequence[str]],
+) -> List[str]:
+    return _iter_predicate_filter_tokens(predicate_filter)
 
 
 def _predicate_matches_terms(predicate_id: Any, terms: Sequence[str]) -> bool:

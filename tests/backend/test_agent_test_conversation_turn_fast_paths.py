@@ -1648,6 +1648,69 @@ def test_agent_test_tool_calling_plan_uses_relation_summary(monkeypatch) -> None
     ]
 
 
+def test_agent_test_relation_shortcut_stands_down_for_type_incidence_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+        data={
+            "prompt": "What are key predicates for scientific papers in Vontology?",
+            "user_prompt": (
+                "What are key predicates for scientific papers in Vontology?"
+            ),
+            "user_concept_id": "#V#michael_witbrock",
+            "required_prompt_tools": [
+                "get_text_relations_summary",
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "turn_expected_outcome_contract": {
+                "required_tools": [
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                ],
+                "target_type_ids": [
+                    "#V#scholarly_article",
+                    "#V#paper_on_arxiv",
+                ],
+            },
+            "aux_llm_calls": [],
+        },
+    )
+
+    result = orchestrator._agent_test_local_relation_plan_result(
+        request=request,
+        data=request.data,
+        missing_tool_call_retry_attempts=0,
+        missing_tool_call_retry_budget=1,
+        missing_tool_call_retry_suppressed=False,
+        missing_tool_call_retry_stop_reason=None,
+        missing_tool_call_recovery_outcome=None,
+    )
+
+    assert result is None
+    assert request.data["aux_llm_calls"] == [
+        {
+            "type": "agent_test_local_relation_shortcut_skipped",
+            "stage": "tool_calling.plan",
+            "reason_code": "type_targeted_predicate_incidence_contract",
+            "target_type_ids": [
+                "#V#scholarly_article",
+                "#V#paper_on_arxiv",
+            ],
+            "required_tools": [
+                "find_relations_with_argument",
+                "get_predicate_incidence",
+                "get_text_relations_summary",
+            ],
+            "local_replay_support_only": True,
+            "not_production_acceptance_evidence": True,
+        }
+    ]
+
+
 def test_agent_test_tool_calling_plan_does_not_trigger_from_prompt_words(
     monkeypatch,
 ) -> None:

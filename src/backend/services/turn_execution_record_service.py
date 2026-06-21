@@ -6625,6 +6625,7 @@ def _derive_required_evidence_target_concept_ids(
 ) -> list[str]:
     target_ids = [
         *resolved_turn_expected_outcome_contract.target_concept_ids,
+        *resolved_turn_expected_outcome_contract.target_type_ids,
         *_target_concept_ids_from_contract_surfaces(
             selected_workflow_trace,
             completion_report,
@@ -7097,6 +7098,7 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
 
     return _normalise_representation_target_tokens(
         payload.get("concept_id") if isinstance(payload, Mapping) else None,
+        payload.get("instance_of") if isinstance(payload, Mapping) else None,
         payload.get("file_copy_concept_id") if isinstance(payload, Mapping) else None,
         (
             payload.get("computer_file_copy_concept_id")
@@ -7107,6 +7109,7 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
         payload.get("source_url") if isinstance(payload, Mapping) else None,
         payload.get("arxiv_id") if isinstance(payload, Mapping) else None,
         arguments.get("concept_id") if isinstance(arguments, Mapping) else None,
+        arguments.get("instance_of") if isinstance(arguments, Mapping) else None,
         (
             arguments.get("file_copy_concept_id")
             if isinstance(arguments, Mapping)

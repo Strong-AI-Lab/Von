@@ -924,6 +924,99 @@ def test_missing_tool_call_retry_chains_predicate_incidence_after_resolution():
     ]
 
 
+def test_missing_tool_call_retry_binds_predicate_incidence_to_target_type():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "required_tools": ["get_predicate_incidence"],
+            "target_type_ids": ["#V#scientific_paper"],
+        },
+        missing_required_tools=["get_predicate_incidence"],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {
+                "argument_index": "subject",
+                "relation_kind": "binary",
+                "include_argument_type_counts": True,
+                "include_concept_preview": False,
+                "limit": 12,
+                "instance_of": "#V#scientific_paper",
+            },
+            "_retry_binding_source": "metadata_type_target_binding",
+            "_retry_target_concept_source": "turn_expected_outcome.target_type_ids",
+        }
+    ]
+
+
+def test_missing_tool_call_retry_does_not_bind_type_target_relations_to_actor():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "required_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "target_type_ids": ["#V#scientific_paper"],
+        },
+        missing_required_tools=[
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {
+                "argument_index": "subject",
+                "relation_kind": "binary",
+                "include_argument_type_counts": True,
+                "include_concept_preview": False,
+                "limit": 12,
+                "instance_of": "#V#scientific_paper",
+            },
+            "_retry_binding_source": "metadata_type_target_binding",
+            "_retry_target_concept_source": "turn_expected_outcome.target_type_ids",
+        }
+    ]
+
+
+def test_tool_progress_argument_summary_exposes_only_target_binding_fields():
+    summary = InternalMCPChatOrchestrator._build_tool_progress_argument_summary(
+        {
+            "instance_of": "  #V#scientific_paper  ",
+            "concept_id": "#V#michael_witbrock",
+            "predicate_filter": ["#V#author_of", "#V#cites"],
+            "argument_index": 0,
+            "limit": 25,
+            "body_text": "not safe for progress telemetry",
+        }
+    )
+
+    assert summary == {
+        "concept_id": "#V#michael_witbrock",
+        "instance_of": "#V#scientific_paper",
+        "predicate_filter": ["#V#author_of", "#V#cites"],
+        "argument_index": 0,
+        "limit": 25,
+        "target_concept_id": "#V#michael_witbrock",
+        "target_type_id": "#V#scientific_paper",
+    }
+
+
 def test_missing_tool_call_retry_searches_after_resolution_returns_no_target():
     orchestrator = _build_orchestrator_stub()
 

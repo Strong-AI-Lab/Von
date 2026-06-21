@@ -219,6 +219,7 @@ from src.backend.services.tool_metadata_service import (
     get_tool_identifier_binding_metadata,
     get_tool_metadata,
     get_tool_planner_hint,
+    get_tool_required_obligation_metadata,
     get_tool_salience,
     get_tool_target_concept_binding_metadata,
     is_tool_inventory_only_evidence,
@@ -3765,6 +3766,57 @@ class InternalMCPChatOrchestrator:
         if not clean_response:
             return notice
         return f"{notice}\n\n{clean_response}"
+
+    @staticmethod
+    def _build_tool_progress_argument_summary(
+        payload: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+
+        allowed_keys = (
+            "concept_id",
+            "instance_of",
+            "source_id",
+            "target_id",
+            "predicate_filter",
+            "argument_index",
+            "relation_kind",
+            "limit",
+            "offset",
+            "sort_by",
+            "uncertainty_mode",
+            "include_uncertain",
+            "direct_instances_only",
+        )
+        summary: dict[str, Any] = {}
+        for key in allowed_keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    summary[key] = cleaned[:200]
+            elif isinstance(value, bool):
+                summary[key] = value
+            elif isinstance(value, int):
+                summary[key] = value
+            elif isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                cleaned_values = [
+                    str(item).strip()[:200]
+                    for item in value
+                    if isinstance(item, (str, int, float)) and str(item).strip()
+                ]
+                if cleaned_values:
+                    summary[key] = cleaned_values[:5]
+        if "concept_id" in summary:
+            summary.setdefault("target_concept_id", summary["concept_id"])
+        if "instance_of" in summary:
+            summary.setdefault("target_type_id", summary["instance_of"])
+        return summary
 
     def set_progress_callback(
         self, callback: Callable[[Mapping[str, Any]], None] | None
@@ -8368,13 +8420,34 @@ class InternalMCPChatOrchestrator:
             ("turn_expected_required_tools", data.get("turn_expected_required_tools")),
             ("required_prompt_tools", data.get("required_prompt_tools")),
         ]
-        contract_required_tools = self._build_turn_expected_outcome_contract_object(
-            data
-        ).required_tools
+        contract_object = self._build_turn_expected_outcome_contract_object(data)
+        contract_required_tools = contract_object.required_tools
         if contract_required_tools:
             explicit_sources.append(
                 ("turn_expected_outcome_contract", contract_required_tools)
             )
+
+        if contract_object.target_type_ids:
+            all_required_tools = {
+                tool_name.lower()
+                for _source, raw_tools in explicit_sources
+                for tool_name in self._ordered_unique_tool_names(raw_tools)
+            }
+            if "get_predicate_incidence" in all_required_tools:
+                aux_llm_calls = data.get("aux_llm_calls")
+                if isinstance(aux_llm_calls, list):
+                    aux_llm_calls.append(
+                        {
+                            "type": "agent_test_local_relation_shortcut_skipped",
+                            "stage": "tool_calling.plan",
+                            "reason_code": "type_targeted_predicate_incidence_contract",
+                            "target_type_ids": list(contract_object.target_type_ids),
+                            "required_tools": sorted(all_required_tools),
+                            "local_replay_support_only": True,
+                            "not_production_acceptance_evidence": True,
+                        }
+                    )
+                return None
 
         relation_tool_lookup = {
             tool_name.lower() for tool_name in self._AGENT_TEST_LOCAL_RELATION_TOOLS
@@ -9448,22 +9521,28 @@ class InternalMCPChatOrchestrator:
             else:
                 payload = dict(payload)
             tool_request[self._PAYLOAD_FIELD] = payload
+            progress_argument_summary = self._build_tool_progress_argument_summary(
+                payload
+            )
 
             if callable(emit_progress):
-                emit_progress(
-                    {
-                        "status": "tool_call_start",
-                        "stage": self.PHASE_TOOL_EXECUTE,
-                        "tool": tool_name,
-                        "batch_size": current_batch_size,
-                        "tool_calls_done": max(0, iteration_count - 1),
-                        "tool_calls_cap": int(max_tool_invocations),
-                        "tool_calls_remaining": max(
-                            0, max_tool_invocations - iteration_count
-                        ),
-                        "call_id": call_id,
-                    }
-                )
+                progress_payload = {
+                    "status": "tool_call_start",
+                    "stage": self.PHASE_TOOL_EXECUTE,
+                    "tool": tool_name,
+                    "batch_size": current_batch_size,
+                    "tool_calls_done": max(0, iteration_count - 1),
+                    "tool_calls_cap": int(max_tool_invocations),
+                    "tool_calls_remaining": max(
+                        0, max_tool_invocations - iteration_count
+                    ),
+                    "call_id": call_id,
+                }
+                if progress_argument_summary:
+                    progress_payload["tool_argument_summary"] = dict(
+                        progress_argument_summary
+                    )
+                emit_progress(progress_payload)
 
             if allowed_tool_names and tool_name_key not in allowed_tool_names:
                 message = f"Tool '{tool_name}' is not allowed for this workflow step."
@@ -9481,21 +9560,24 @@ class InternalMCPChatOrchestrator:
                     blocked_record["call_id"] = call_id
                 invocations.append(blocked_record)
                 if callable(emit_progress):
-                    emit_progress(
-                        {
-                            "status": "tool_blocked",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, max_tool_invocations - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": message,
-                            "blocked_reason": "tool_not_allowed_for_llm_step",
-                        }
-                    )
+                    progress_payload = {
+                        "status": "tool_blocked",
+                        "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(
+                            0, max_tool_invocations - iteration_count
+                        ),
+                        "call_id": call_id,
+                        "error": message,
+                        "blocked_reason": "tool_not_allowed_for_llm_step",
+                    }
+                    if progress_argument_summary:
+                        progress_payload["tool_argument_summary"] = dict(
+                            progress_argument_summary
+                        )
+                    emit_progress(progress_payload)
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
                 continue
@@ -9711,22 +9793,25 @@ class InternalMCPChatOrchestrator:
                     blocked_record["call_id"] = call_id
                 invocations.append(blocked_record)
                 if callable(emit_progress):
-                    emit_progress(
-                        {
-                            "status": "tool_blocked",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, max_tool_invocations - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": message,
-                            "blocked_reason": tool_blocked_reason or None,
-                            "requires_confirmation": tool_requires_confirmation,
-                        }
-                    )
+                    progress_payload = {
+                        "status": "tool_blocked",
+                        "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(
+                            0, max_tool_invocations - iteration_count
+                        ),
+                        "call_id": call_id,
+                        "error": message,
+                        "blocked_reason": tool_blocked_reason or None,
+                        "requires_confirmation": tool_requires_confirmation,
+                    }
+                    if progress_argument_summary:
+                        progress_payload["tool_argument_summary"] = dict(
+                            progress_argument_summary
+                        )
+                    emit_progress(progress_payload)
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
                 continue
@@ -9759,6 +9844,9 @@ class InternalMCPChatOrchestrator:
                     payload=payload,
                     data=data,
                     tool_invocations=tuple(invocations),
+                )
+                progress_argument_summary = (
+                    self._build_tool_progress_argument_summary(payload)
                 )
 
                 result = self._gateway.invoke(tool_name, payload)
@@ -9934,6 +10022,10 @@ class InternalMCPChatOrchestrator:
                 }
                 if result_summary:
                     progress_info["result_summary"] = result_summary
+                if progress_argument_summary:
+                    progress_info["tool_argument_summary"] = dict(
+                        progress_argument_summary
+                    )
                 if logical_error:
                     progress_info["error"] = logical_error
                     if logical_error_code:
@@ -9962,20 +10054,23 @@ class InternalMCPChatOrchestrator:
                     error_record["call_id"] = call_id
                 invocations.append(error_record)
                 if callable(emit_progress):
-                    emit_progress(
-                        {
-                            "status": "tool_failed",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, max_tool_invocations - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": str(exc),
-                        }
-                    )
+                    progress_payload = {
+                        "status": "tool_failed",
+                        "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(
+                            0, max_tool_invocations - iteration_count
+                        ),
+                        "call_id": call_id,
+                        "error": str(exc),
+                    }
+                    if progress_argument_summary:
+                        progress_payload["tool_argument_summary"] = dict(
+                            progress_argument_summary
+                        )
+                    emit_progress(progress_payload)
                 self._logger.warning(
                     "[mcp_orchestrator] Tool %s failed: %s", tool_name, exc
                 )
@@ -14305,6 +14400,8 @@ class InternalMCPChatOrchestrator:
             payload["required_tools"] = list(contract_object.required_tools)
         if contract_object.target_concept_ids:
             payload["target_concept_ids"] = list(contract_object.target_concept_ids)
+        if contract_object.target_type_ids:
+            payload["target_type_ids"] = list(contract_object.target_type_ids)
         return payload
 
     @classmethod
@@ -27662,6 +27759,13 @@ class InternalMCPChatOrchestrator:
             "contract_target_concept_ids": (
                 "turn_expected_outcome.target_concept_ids",
             ),
+            "turn_expected_outcome.target_type_ids": (
+                "turn_expected_outcome.target_type_ids",
+            ),
+            "target_type_ids": ("turn_expected_outcome.target_type_ids",),
+            "contract_target_type_ids": (
+                "turn_expected_outcome.target_type_ids",
+            ),
             "missing_required_fetch_concept_ids": (
                 "missing_required_fetch_concept_ids",
             ),
@@ -27698,6 +27802,37 @@ class InternalMCPChatOrchestrator:
         tool_name: str,
         target_concept_sources: Mapping[str, Sequence[str]],
     ) -> list[_ToolCallRequest] | None:
+        obligation_metadata = get_tool_required_obligation_metadata(tool_name)
+        type_target_ids = cls._resolve_retry_binding_target_concept_ids(
+            target_concept_source="turn_expected_outcome.target_type_ids",
+            target_concept_sources=target_concept_sources,
+        )
+        if (
+            type_target_ids
+            and any(
+                argument_name.lower() == "instance_of"
+                for argument_name in obligation_metadata.target_argument_names
+            )
+        ):
+            tool_metadata = get_tool_metadata(tool_name)
+            default_payload = tool_metadata.default_payload or {}
+            forced_type_calls: list[_ToolCallRequest] = []
+            for target_id in type_target_ids:
+                payload: MutableMapping[str, Any] = dict(default_payload)
+                payload["instance_of"] = target_id
+                forced_type_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": payload,
+                        "_retry_binding_source": "metadata_type_target_binding",
+                        "_retry_target_concept_source": (
+                            "turn_expected_outcome.target_type_ids"
+                        ),
+                    }
+                )
+            return forced_type_calls or None
+
         binding = get_tool_target_concept_binding_metadata(tool_name)
         if binding is None:
             return None
@@ -28373,6 +28508,7 @@ class InternalMCPChatOrchestrator:
         if retry_actor_concept_id is None and predicate_incidence_follow_up_concept_ids:
             retry_actor_concept_id = predicate_incidence_follow_up_concept_ids[0]
         contract_target_concept_ids: list[str] = []
+        contract_target_type_ids: list[str] = []
         try:
             contract_object = (
                 turn_expected_outcome_contract
@@ -28390,8 +28526,16 @@ class InternalMCPChatOrchestrator:
                     if isinstance(item, str) and str(item).strip()
                 ]
             )
+            contract_target_type_ids = self._dedupe_preserving_order(
+                [
+                    str(item).strip()
+                    for item in (contract_object.target_type_ids or ())
+                    if isinstance(item, str) and str(item).strip()
+                ]
+            )
         except Exception:
             contract_target_concept_ids = []
+            contract_target_type_ids = []
         explicit_uncertainty_source_ids = self._dedupe_preserving_order(
             [
                 *contract_target_concept_ids,
@@ -28414,16 +28558,22 @@ class InternalMCPChatOrchestrator:
                 *missing_required_fetch_concept_ids,
             ]
         )
+        actor_focal_fallback_ids = (
+            []
+            if contract_target_type_ids and not contract_target_concept_ids
+            else ([retry_actor_concept_id] if retry_actor_concept_id else [])
+        )
         fallback_focal_concept_ids = self._dedupe_preserving_order(
             [
                 *predicate_incidence_follow_up_concept_ids,
                 *ontology_follow_up_concept_ids,
-                *([retry_actor_concept_id] if retry_actor_concept_id else []),
+                *actor_focal_fallback_ids,
             ]
         )
         focal_concept_ids = explicit_focal_concept_ids or fallback_focal_concept_ids
         target_concept_sources: Mapping[str, Sequence[str]] = {
             "turn_expected_outcome.target_concept_ids": contract_target_concept_ids,
+            "turn_expected_outcome.target_type_ids": contract_target_type_ids,
             "missing_required_fetch_concept_ids": missing_required_fetch_concept_ids,
             "authenticated_user_concept_id": (
                 [retry_actor_concept_id] if retry_actor_concept_id else []
@@ -28529,6 +28679,7 @@ class InternalMCPChatOrchestrator:
             has_prior_retry_invocations = bool(tool_invocations)
             only_actor_target_is_available = bool(retry_actor_concept_id) and not (
                 contract_target_concept_ids
+                or contract_target_type_ids
                 or missing_required_fetch_concept_ids
                 or predicate_incidence_follow_up_concept_ids
                 or ontology_follow_up_concept_ids

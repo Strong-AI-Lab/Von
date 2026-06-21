@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "29",
+  "seed_version": "30",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -4154,6 +4154,16 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_required_tools_to_turn_expected_required_tools",
                 "context_key": "turn_expected_required_tools",
                 "tool_output_field": "validated_json.required_tools"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_target_concept_ids_to_turn_expected_target_concept_ids",
+                "context_key": "turn_expected_target_concept_ids",
+                "tool_output_field": "validated_json.target_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_target_type_ids_to_turn_expected_target_type_ids",
+                "context_key": "turn_expected_target_type_ids",
+                "tool_output_field": "validated_json.target_type_ids"
               }
             ],
             "validation_policy": {
@@ -4164,7 +4174,9 @@
                 "precision_policy": "Prefer a concise answer with explicit uncertainty over unsupported specificity.",
                 "required_tools": [],
                 "reasoning": "Fallback defaults applied because the expected-outcome inference omitted one or more contract fields.",
-                "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence."
+                "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence.",
+                "target_concept_ids": [],
+                "target_type_ids": []
               },
               "output_format": "json_value",
               "required_json_fields": [
@@ -4174,7 +4186,9 @@
                 "selector_guidance",
                 "answering_guidance",
                 "reasoning",
-                "required_tools"
+                "required_tools",
+                "target_concept_ids",
+                "target_type_ids"
               ]
             },
             "writes_context_keys": [
@@ -4185,7 +4199,9 @@
               "turn_selector_guidance",
               "turn_answering_guidance",
               "turn_expected_outcome_reasoning",
-              "turn_expected_required_tools"
+              "turn_expected_required_tools",
+              "turn_expected_target_concept_ids",
+              "turn_expected_target_type_ids"
             ],
             "state_id": "expected_outcome_inference"
           },

@@ -1132,6 +1132,105 @@ def test_contract_required_gmail_profile_and_relation_tools_block_generic_chat()
     ]
 
 
+def test_target_type_required_evidence_rejects_other_target_success() -> None:
+    record = build_turn_execution_record(
+        request_id="req-target-type-required-evidence",
+        session_id="session-target-type-required-evidence",
+        namespace="#V#user@org",
+        actor_concept_id="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="What are key predicates for scientific papers in Vontology?",
+        response_text="Predicate incidence was inspected.",
+        interaction_timestamp_utc="2026-06-21T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "payload": {
+                    "success": True,
+                    "concept_id": "#V#michael_witbrock",
+                    "predicates": [],
+                },
+            }
+        ],
+        turn_expected_outcome_contract={
+            "required_tools": ["get_predicate_incidence"],
+            "target_type_ids": ["#V#scientific_paper"],
+        },
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is False
+    assert "prompt_required_evidence_get_predicate_incidence_wrong_target" in (
+        gate["blocking_failure_codes"]
+    )
+    effect = next(
+        item
+        for item in record["required_effects"]
+        if item["effect_id"] == (
+            "effect_prompt_required_evidence_get_predicate_incidence_1"
+        )
+    )
+    assert effect["targets"] == ["#V#scientific_paper"]
+    assert effect["status"] == "not_executed"
+    assert effect["failure_code"] == (
+        "prompt_required_evidence_get_predicate_incidence_wrong_target"
+    )
+
+
+def test_target_type_required_evidence_accepts_instance_of_target() -> None:
+    record = build_turn_execution_record(
+        request_id="req-target-type-instance-of-evidence",
+        session_id="session-target-type-instance-of-evidence",
+        namespace="#V#user@org",
+        actor_concept_id="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="What are key predicates for a represented type?",
+        response_text="Predicate incidence for the requested type was inspected.",
+        interaction_timestamp_utc="2026-06-21T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"instance_of": "#V#requested_type"},
+                "payload": {
+                    "success": True,
+                    "instance_of": "#V#requested_type",
+                    "predicates": [],
+                },
+            }
+        ],
+        turn_expected_outcome_contract={
+            "required_tools": ["get_predicate_incidence"],
+            "target_type_ids": ["#V#requested_type"],
+        },
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is True
+    effect = next(
+        item
+        for item in record["required_effects"]
+        if item["effect_id"] == (
+            "effect_prompt_required_evidence_get_predicate_incidence_1"
+        )
+    )
+    assert effect["status"] == "satisfied"
+
+
 def test_target_failed_required_reads_are_not_closed_by_later_other_target_success() -> (
     None
 ):

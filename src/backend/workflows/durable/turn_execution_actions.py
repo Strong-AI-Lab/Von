@@ -128,15 +128,154 @@ def _is_disallowed_direct_tool_batch_action(tool_name: str | None) -> bool:
     )
 
 
+def _normalise_recovery_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if cleaned.startswith("#V#"):
+        return cleaned
+    return None
+
+
+def _extract_recovery_target_type_ids(data: Mapping[str, Any]) -> list[str]:
+    containers: list[Mapping[str, Any]] = []
+    for key in (
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_contract",
+        "expected_outcome_contract_state",
+        "expected_outcome_contract",
+    ):
+        value = data.get(key)
+        if isinstance(value, Mapping):
+            containers.append(value)
+
+    selected_trace = data.get("selected_workflow_trace")
+    if isinstance(selected_trace, Mapping):
+        for key in (
+            "expected_outcome_contract_state",
+            "expected_outcome_contract",
+        ):
+            value = selected_trace.get(key)
+            if isinstance(value, Mapping):
+                containers.append(value)
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for container in containers:
+        raw_values = container.get("target_type_ids")
+        if not isinstance(raw_values, Sequence) or isinstance(
+            raw_values, (str, bytes, bytearray)
+        ):
+            continue
+        for raw_value in raw_values:
+            concept_id = _normalise_recovery_concept_id(raw_value)
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            ordered.append(concept_id)
+    return ordered
+
+
+def _apply_target_bound_tool_defaults(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    try:
+        from ...services.tool_metadata_service import get_tool_metadata
+
+        metadata = get_tool_metadata(tool_name)
+    except Exception:
+        metadata = None
+    default_payload = getattr(metadata, "default_payload", None)
+    if not isinstance(default_payload, Mapping):
+        return []
+
+    bindings: list[dict[str, Any]] = []
+    for key, value in default_payload.items():
+        if not isinstance(key, str) or key in payload:
+            continue
+        payload[key] = value
+        bindings.append(
+            {
+                "field": key,
+                "source": "tool_metadata_default_payload",
+                "value_present": True,
+            }
+        )
+    return bindings
+
+
+def _bind_recovery_payload_to_turn_contract(
+    *,
+    request: WorkflowActionRequest,
+    tool_name: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Repair ambiguous LLM-authored payload aliases using represented targets."""
+
+    if str(tool_name or "").strip().lower() != "get_predicate_incidence":
+        return []
+    if _normalise_recovery_concept_id(payload.get("concept_id")):
+        return []
+    if _normalise_recovery_concept_id(payload.get("instance_of")):
+        return []
+
+    target_type_ids = _extract_recovery_target_type_ids(request.data)
+    if not target_type_ids:
+        return []
+    target_type_lookup = {target.lower(): target for target in target_type_ids}
+    source_field = ""
+    source_value: str | None = None
+    for field_name in (
+        "target_type",
+        "target_type_id",
+        "instance_type",
+        "instance_type_id",
+        "target",
+    ):
+        candidate = _normalise_recovery_concept_id(payload.get(field_name))
+        if candidate and candidate.lower() in target_type_lookup:
+            source_field = field_name
+            source_value = target_type_lookup[candidate.lower()]
+            break
+    if not source_value:
+        return []
+
+    payload["instance_of"] = source_value
+    if source_field != "instance_of":
+        payload.pop(source_field, None)
+    bindings = [
+        {
+            "field": "instance_of",
+            "source": "turn_expected_outcome.target_type_ids_alias",
+            "source_field": source_field,
+            "value_present": True,
+        }
+    ]
+    bindings.extend(
+        _apply_target_bound_tool_defaults(tool_name=tool_name, payload=payload)
+    )
+    return bindings
+
+
 def _prepare_recovery_tool_payload(
     *,
     request: WorkflowActionRequest,
     tool_name: str,
     payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    contract_bindings = _bind_recovery_payload_to_turn_contract(
+        request=request,
+        tool_name=tool_name,
+        payload=payload,
+    )
     gateway = getattr(request.environment, "gateway", None)
     if gateway is None:
-        return apply_runtime_defaults_to_mcp_payload(
+        runtime_bindings = apply_runtime_defaults_to_mcp_payload(
             payload,
             tool_name=tool_name,
             input_schema=None,
@@ -145,6 +284,7 @@ def _prepare_recovery_tool_payload(
                 request.environment, "default_gmail_profile", None
             ),
         )
+        return [*contract_bindings, *runtime_bindings]
 
     try:
         available_tool_names = tuple(gateway.describe_methods().keys())
@@ -161,7 +301,7 @@ def _prepare_recovery_tool_payload(
         method_definition = gateway.get_method_definition(resolved_tool_name)
     except Exception:
         method_definition = None
-    return apply_runtime_defaults_to_mcp_payload(
+    runtime_bindings = apply_runtime_defaults_to_mcp_payload(
         payload,
         tool_name=resolved_tool_name,
         input_schema=getattr(method_definition, "input_schema", None),
@@ -171,6 +311,7 @@ def _prepare_recovery_tool_payload(
         ),
         strip_unknown_fields=True,
     )
+    return [*contract_bindings, *runtime_bindings]
 
 
 def _extract_tool_batch_result_payload(outputs: Mapping[str, Any]) -> Any:

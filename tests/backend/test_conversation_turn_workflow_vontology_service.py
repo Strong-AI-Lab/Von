@@ -139,6 +139,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         in expected_outcome_text
     )
     assert "predicate-filtered extent" in expected_outcome_text
+    assert "predicates, relation schema, usage, incidence" in expected_outcome_text
+    assert "represented class/type" in expected_outcome_text
+    assert "`target_type_ids`" in expected_outcome_text
+    assert "`get_predicate_incidence` with `instance_of`" in expected_outcome_text
     assert "simple represented artefact" in expected_outcome_text
     assert "`create_concepts`, `upsert_singleton_text_relation`" in (
         expected_outcome_text
@@ -1184,6 +1188,18 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "required_tools" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
+    assert "target_concept_ids" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "target_type_ids" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "target_concept_ids" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
+    assert "target_type_ids" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
     assert isinstance(expected_outcome_prompt_contract, dict)
     assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
@@ -1210,7 +1226,25 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         and mapping.get("tool_output_field") == "validated_json.required_tools"
         for mapping in expected_outcome_mappings
     )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_target_concept_ids"
+        and mapping.get("tool_output_field") == "validated_json.target_concept_ids"
+        for mapping in expected_outcome_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_target_type_ids"
+        and mapping.get("tool_output_field") == "validated_json.target_type_ids"
+        for mapping in expected_outcome_mappings
+    )
     assert "turn_expected_required_tools" in (
+        expected_outcome_metadata.get("writes_context_keys") or []
+    )
+    assert "turn_expected_target_concept_ids" in (
+        expected_outcome_metadata.get("writes_context_keys") or []
+    )
+    assert "turn_expected_target_type_ids" in (
         expected_outcome_metadata.get("writes_context_keys") or []
     )
 
