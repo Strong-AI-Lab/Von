@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -33,6 +34,7 @@ from ..workflows.workflow_definition_identity_service import (
     assess_workflow_id_hygiene,
     collect_workflow_action_ids,
 )
+from ..workflows.mcp_tool_bridge import candidate_internal_mcp_tool_names
 
 logger = logging.getLogger(__name__)
 
@@ -1330,6 +1332,142 @@ def _dedupe_capability_strings(values: Sequence[Any]) -> list[str]:
     return ordered
 
 
+def _normalise_contract_symbol_set(values: Sequence[Any] | None) -> set[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return set()
+    return {
+        str(value).strip()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    }
+
+
+@lru_cache(maxsize=2048)
+def _dispatch_surface_families_for_tool(tool_name: str) -> tuple[str, ...]:
+    clean_tool_name = str(tool_name or "").strip()
+    if not clean_tool_name:
+        return ()
+    try:
+        from .tool_metadata_service import get_tool_dispatch_surface_metadata
+
+        surface = get_tool_dispatch_surface_metadata(clean_tool_name)
+    except Exception:
+        surface = None
+    if surface is None:
+        return ()
+    families = _dedupe_capability_strings(
+        [
+            getattr(surface, "surface_family", None),
+            getattr(surface, "evidence_surface_family", None),
+        ]
+    )
+    return tuple(families)
+
+
+def _dispatch_surface_family_set(tool_names: Sequence[str]) -> set[str]:
+    families: set[str] = set()
+    for tool_name in tool_names:
+        families.update(_dispatch_surface_families_for_tool(tool_name))
+    return families
+
+
+def _entry_declared_tool_names(entry: "_CapabilityEntry") -> set[str]:
+    metadata = entry.metadata if isinstance(entry.metadata, Mapping) else {}
+    values: list[Any] = []
+    raw_tools = metadata.get("required_tools")
+    if isinstance(raw_tools, Sequence) and not isinstance(
+        raw_tools,
+        (str, bytes, bytearray),
+    ):
+        values.extend(raw_tools)
+    raw_action_ids = metadata.get("workflow_action_ids")
+    if isinstance(raw_action_ids, Sequence) and not isinstance(
+        raw_action_ids,
+        (str, bytes, bytearray),
+    ):
+        for action_id in raw_action_ids:
+            values.extend(candidate_internal_mcp_tool_names(str(action_id or "")))
+    return set(_dedupe_capability_strings(values))
+
+
+def _entry_declared_action_ids(entry: "_CapabilityEntry") -> set[str]:
+    metadata = entry.metadata if isinstance(entry.metadata, Mapping) else {}
+    raw_action_ids = metadata.get("workflow_action_ids")
+    if not isinstance(raw_action_ids, Sequence) or isinstance(
+        raw_action_ids,
+        (str, bytes, bytearray),
+    ):
+        return set()
+    return set(_dedupe_capability_strings(raw_action_ids))
+
+
+def _score_contract_capability_entry(
+    entry: "_CapabilityEntry",
+    *,
+    contract_tools: set[str],
+    contract_actions: set[str],
+) -> tuple[float, dict[str, Any]] | None:
+    declared_tools = _entry_declared_tool_names(entry)
+    declared_actions = _entry_declared_action_ids(entry)
+    tool_overlap = contract_tools.intersection(declared_tools)
+    action_overlap = contract_actions.intersection(declared_actions)
+    contract_families = _dispatch_surface_family_set(sorted(contract_tools))
+    declared_families = _dispatch_surface_family_set(sorted(declared_tools))
+    surface_overlap = contract_families.intersection(declared_families)
+
+    if not tool_overlap and not action_overlap and not surface_overlap:
+        return None
+
+    tool_coverage_ratio = (
+        len(tool_overlap) / len(contract_tools) if contract_tools else 0.0
+    )
+    action_coverage_ratio = (
+        len(action_overlap) / len(contract_actions) if contract_actions else 0.0
+    )
+    surface_coverage_ratio = (
+        len(surface_overlap) / len(contract_families) if contract_families else 0.0
+    )
+    exact_tool_coverage = bool(contract_tools and contract_tools.issubset(declared_tools))
+    exact_action_coverage = bool(
+        contract_actions and contract_actions.issubset(declared_actions)
+    )
+
+    score = 0.70
+    if exact_tool_coverage:
+        score += 0.20
+    else:
+        score += min(0.12, tool_coverage_ratio * 0.12)
+    if exact_action_coverage:
+        score += 0.07
+    else:
+        score += min(0.05, action_coverage_ratio * 0.05)
+    score += min(0.08, surface_coverage_ratio * 0.08)
+    if tool_overlap:
+        score += 0.03
+    if action_overlap:
+        score += 0.02
+    score = min(0.99, round(score, 4))
+
+    metadata = {
+        "schema_version": "workflow_contract_capability_match.v1",
+        "contract_required_tools": sorted(contract_tools),
+        "contract_required_actions": sorted(contract_actions),
+        "candidate_declared_tools": sorted(declared_tools),
+        "candidate_declared_actions": sorted(declared_actions),
+        "tool_overlap": sorted(tool_overlap),
+        "action_overlap": sorted(action_overlap),
+        "contract_tool_surface_families": sorted(contract_families),
+        "candidate_tool_surface_families": sorted(declared_families),
+        "tool_surface_family_overlap": sorted(surface_overlap),
+        "exact_tool_coverage": exact_tool_coverage,
+        "exact_action_coverage": exact_action_coverage,
+        "tool_coverage_ratio": round(tool_coverage_ratio, 4),
+        "action_coverage_ratio": round(action_coverage_ratio, 4),
+        "surface_coverage_ratio": round(surface_coverage_ratio, 4),
+    }
+    return score, metadata
+
+
 def _workflow_definition_capability_metadata(
     definition: Any | None,
     *,
@@ -2608,6 +2746,88 @@ def search_workflow_capabilities(
     if refreshed is index and refreshed.size == 0:
         return []
     return refreshed.search(query, max_results=max_results, min_score=min_score)
+
+
+def resolve_workflow_capabilities_for_contract(
+    *,
+    required_tools: Sequence[Any] | None = None,
+    required_actions: Sequence[Any] | None = None,
+    max_results: int = 10,
+    workflow_registry: Any | None = None,
+    exclude_ids: set[str] | None = None,
+    allow_registry_projection: bool = False,
+) -> List[WorkflowCapabilityMatch]:
+    """Resolve workflows whose represented capability metadata fits a turn contract.
+
+    This is a structural support surface for cold capability-index moments.  It
+    compares represented turn-contract tool/action requirements against the same
+    compact routing projection used by the capability index; it does not inspect
+    prompt prose or encode domain-specific routing choices.
+    """
+
+    contract_tools = _normalise_contract_symbol_set(required_tools)
+    contract_actions = _normalise_contract_symbol_set(required_actions)
+    if not contract_tools and not contract_actions:
+        return []
+
+    index = get_workflow_capability_index()
+    with index._lock:
+        entries = dict(index._entries)
+
+    entry_source = "process_capability_entries"
+    if not entries and workflow_registry is not None and allow_registry_projection:
+        try:
+            entries, _diagnostics = index._entries_from_registry(workflow_registry)
+            entry_source = "registry_routing_projection"
+        except Exception as exc:
+            logger.warning("workflow_contract_capability_projection_failed: %s", exc)
+            return []
+    elif not entries:
+        return []
+
+    excluded = {str(item).strip() for item in (exclude_ids or set()) if str(item).strip()}
+    scored_rows: list[tuple[float, str, _CapabilityEntry, dict[str, Any]]] = []
+    for workflow_id, entry in entries.items():
+        if workflow_id in excluded:
+            continue
+        scored = _score_contract_capability_entry(
+            entry,
+            contract_tools=contract_tools,
+            contract_actions=contract_actions,
+        )
+        if scored is None:
+            continue
+        score, contract_match = scored
+        contract_match["entry_source"] = entry_source
+        scored_rows.append((score, workflow_id, entry, contract_match))
+
+    scored_rows.sort(
+        key=lambda row: (
+            -row[0],
+            -len(row[3].get("tool_overlap") or []),
+            -len(row[3].get("action_overlap") or []),
+            -len(row[3].get("tool_surface_family_overlap") or []),
+            row[1],
+        )
+    )
+
+    results: List[WorkflowCapabilityMatch] = []
+    for score, workflow_id, entry, contract_match in scored_rows[
+        : max(1, int(max_results or 1))
+    ]:
+        metadata = dict(entry.metadata)
+        metadata["contract_capability_match"] = contract_match
+        results.append(
+            WorkflowCapabilityMatch(
+                workflow_id=workflow_id,
+                name=str(metadata.get("name") or _workflow_id_to_name(workflow_id)),
+                description=_build_workflow_capability_result_description(entry),
+                relevance_score=score,
+                source="contract_capability_metadata",
+                metadata=metadata,
+            )
+        )
+    return results
 
 
 def prewarm_workflow_capability_index(

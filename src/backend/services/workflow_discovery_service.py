@@ -36,6 +36,7 @@ from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .workflow_capability_service import (
     get_workflow_capability_index_runtime_state,
+    resolve_workflow_capabilities_for_contract,
     search_workflow_capabilities,
 )
 from ..workflows.workflow_definition_identity_service import assess_workflow_id_hygiene
@@ -1788,6 +1789,53 @@ def _search_workflow_capabilities(
         return []
 
 
+def _resolve_contract_capability_metadata_matches(
+    *,
+    contract_projection: Mapping[str, Any] | None,
+    workflow_registry: Any | None,
+    limit: int,
+    exclude_ids: set[str] | None = None,
+) -> list[WorkflowMatch]:
+    if not isinstance(contract_projection, Mapping):
+        return []
+    required_tools = contract_projection.get("required_tools")
+    required_actions = contract_projection.get("required_actions")
+    if (
+        not isinstance(required_tools, Sequence)
+        or isinstance(required_tools, (str, bytes, bytearray))
+    ) and (
+        not isinstance(required_actions, Sequence)
+        or isinstance(required_actions, (str, bytes, bytearray))
+    ):
+        return []
+    try:
+        cap_matches = resolve_workflow_capabilities_for_contract(
+            required_tools=required_tools,
+            required_actions=required_actions,
+            max_results=limit,
+            workflow_registry=workflow_registry,
+            exclude_ids=exclude_ids,
+        )
+    except Exception as exc:
+        logger.warning("Workflow contract capability resolution failed: %s", exc)
+        return []
+    results: list[WorkflowMatch] = []
+    for cap in cap_matches:
+        results.append(
+            WorkflowMatch(
+                concept_id=cap.workflow_id,
+                name=cap.name,
+                description=cap.description,
+                relevance_score=cap.relevance_score,
+                match_source=cap.source,
+                routing_index_metadata=(
+                    dict(cap.metadata) if isinstance(cap.metadata, dict) else None
+                ),
+            )
+        )
+    return results
+
+
 def discover_workflows(
     query: str,
     *,
@@ -2099,6 +2147,50 @@ def discover_workflows(
                 error=type(e).__name__,
             )
             logger.warning("Workflow capability index search failed: %s", e)
+
+    if not capability_matches_sufficient:
+        contract_metadata_started_at = time.perf_counter()
+        existing_candidate_ids = {
+            str(match.concept_id or "").strip()
+            for match in all_matches
+            if str(match.concept_id or "").strip()
+        }
+        contract_metadata_matches = _resolve_contract_capability_metadata_matches(
+            contract_projection=contract_projection,
+            workflow_registry=workflow_registry,
+            limit=max_results * 3,
+            exclude_ids=existing_candidate_ids,
+        )
+        contract_metadata_sufficient = _has_enough_capability_matches(
+            contract_metadata_matches,
+            threshold=relevance_threshold,
+            max_results=max_results,
+        )
+        if contract_metadata_matches:
+            search_sources.append("contract_capability_metadata")
+            all_matches.extend(contract_metadata_matches)
+            capability_matches_sufficient = contract_metadata_sufficient
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="contract_capability_metadata_resolution",
+            started_at=contract_metadata_started_at,
+            status="completed",
+            match_count=len(contract_metadata_matches),
+            sufficient=contract_metadata_sufficient,
+            field_count=len(contract_projection.get("fields_used") or []),
+            required_tool_count=len(contract_projection.get("required_tools") or []),
+            required_action_count=len(contract_projection.get("required_actions") or []),
+            entry_source=(
+                (
+                    contract_metadata_matches[0].routing_index_metadata
+                    if contract_metadata_matches
+                    else {}
+                )
+                or {}
+            )
+            .get("contract_capability_match", {})
+            .get("entry_source"),
+        )
 
     # Secondary authoritative search sources fill gaps the capability index misses.
     semantic_budget_remaining = _remaining_search_timeout_seconds(

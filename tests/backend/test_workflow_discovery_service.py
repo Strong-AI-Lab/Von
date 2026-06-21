@@ -1003,6 +1003,109 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service.resolve_workflow_capabilities_for_contract"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_contract_capability_metadata_resolves_before_slow_secondary_search(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        mock_contract_capabilities: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.return_value = []
+        mock_capability_state.return_value = {
+            "ready": False,
+            "build_in_progress": True,
+            "last_error": None,
+        }
+        mock_contract_capabilities.return_value = [
+            SimpleNamespace(
+                workflow_id="#V#general_mail_review_workflow",
+                name="General Mail Review Workflow",
+                description="Review mailbox messages through represented workflow actions.",
+                relevance_score=0.83,
+                source="contract_capability_metadata",
+                metadata={
+                    "routing_index_schema_version": (
+                        "workflow_routing_index_entry.v1"
+                    ),
+                    "has_authoritative_routing_text": True,
+                    "required_tools": ["gmail_list_messages"],
+                    "workflow_action_ids": ["gmail_list_messages"],
+                    "compact_executability": {
+                        "schema_version": "workflow_compact_executability.v1",
+                        "source": "vontology_workflow_graph_shape",
+                        "is_executable": True,
+                        "reason": "compact_graph_present",
+                        "has_initial_step": True,
+                        "step_count": 4,
+                    },
+                    "publication_lifecycle": {
+                        "schema_version": "workflow_publication_lifecycle.v1",
+                        "phase": "published",
+                        "published": True,
+                        "routing_eligible": True,
+                    },
+                    "contract_capability_match": {
+                        "schema_version": "workflow_contract_capability_match.v1",
+                        "entry_source": "process_capability_entries",
+                        "tool_surface_family_overlap": ["gmail"],
+                    },
+                },
+            )
+        ]
+        mock_semantic.side_effect = AssertionError(
+            "structural contract capability match should avoid slow secondary search"
+        )
+        mock_vontology.side_effect = AssertionError(
+            "structural contract capability match should avoid slow secondary search"
+        )
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "List recent mailbox messages.",
+            max_results=1,
+            expected_outcome_contract={
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "summary": "List recent mailbox messages.",
+                "required_tools": ["gmail_list_profiles", "gmail_list_messages"],
+            },
+        )
+
+        assert result.search_sources == [
+            "capability_index",
+            "contract_capability_metadata",
+        ]
+        assert [match.concept_id for match in result.matches] == [
+            "#V#general_mail_review_workflow"
+        ]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#general_mail_review_workflow"
+        ]
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert any(
+            timing.get("stage") == "contract_capability_metadata_resolution"
+            and timing.get("match_count") == 1
+            and timing.get("sufficient") is True
+            and timing.get("entry_source") == "process_capability_entries"
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
         "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
         return_value=True,
     )

@@ -147,6 +147,11 @@ _TOOL_EXECUTION_FAILURE_REASON_MAP = {
     "missing_tool_call_parse_error": "Tool call parsing failed before any tool execution occurred.",
     "missing_tool_call_retry_exhausted": "Tool-call recovery exhausted retries without executing a tool.",
     "missing_tool_call_unresolved": "Tool-calling was selected but no executable tool call was produced.",
+    "tool_dispatch_boundary_missing": "Tool-calling workflow selected but no dispatch boundary evidence was recorded.",
+    "tool_dispatch_contract_unresolved": "Tool-calling workflow selected but its dispatch contract was unresolved.",
+    "tool_dispatch_handoff_zero_execution": "Tool-calling workflow handoff started but no tool execution was observed.",
+    "tool_dispatch_not_started": "Tool-calling workflow selected but the tool dispatch handoff did not start.",
+    "tool_dispatch_workflow_missing": "Tool-calling workflow selected but the dispatch workflow was missing.",
     "tool_pipeline_setup_exception": "Tool-pipeline setup failed before the first action could start.",
     "tool_pipeline_execution_exception": "Tool-pipeline execution failed before the first tool action completed.",
 }
@@ -1899,6 +1904,18 @@ def _derive_zero_tool_execution_reason(
         if isinstance(custom_workflow_execution, Mapping)
         else {}
     )
+    if tool_route_selected:
+        primary_failure_code = _safe_str(failure_codes[0]) if failure_codes else None
+        reason_code = primary_failure_code or "tool_dispatch_zero_execution"
+        return {
+            "zero_tool_reason_code": reason_code,
+            "zero_tool_reason": _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
+                reason_code,
+                "Tool-calling workflow selected but no tool execution was observed.",
+            ),
+            "zero_tool_execution_expected": False,
+        }
+
     if (selected_execution_mode or "").lower() == "custom_workflow":
         action_completed_count = _safe_non_negative_int(
             custom_execution.get("action_completed_count")
@@ -1953,18 +1970,6 @@ def _derive_zero_tool_execution_reason(
             "zero_tool_reason_code": "direct_response_no_tools_required",
             "zero_tool_reason": "No tools were required for this direct response.",
             "zero_tool_execution_expected": True,
-        }
-
-    if tool_route_selected:
-        primary_failure_code = _safe_str(failure_codes[0]) if failure_codes else None
-        return {
-            "zero_tool_reason_code": primary_failure_code
-            or "tool_dispatch_zero_execution",
-            "zero_tool_reason": _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
-                primary_failure_code or "",
-                "Tool-calling workflow selected but no tool execution was observed.",
-            ),
-            "zero_tool_execution_expected": False,
         }
 
     return {

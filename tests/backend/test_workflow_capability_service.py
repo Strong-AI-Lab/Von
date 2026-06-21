@@ -25,6 +25,7 @@ from src.backend.services.workflow_capability_service import (
     invalidate_workflow_capability_index,
     prewarm_workflow_capability_index,
     reset_workflow_capability_index,
+    resolve_workflow_capabilities_for_contract,
     run_workflow_capability_index_startup_check,
     search_workflow_capabilities,
 )
@@ -398,6 +399,68 @@ class TestIndexFromRegistry:
         assert results[0].metadata["workflow_action_ids"] == [
             "metadata.verify_representation"
         ]
+
+    def test_contract_resolution_matches_shared_tool_surface_without_rag_sync(self):
+        from src.backend.workflows import (
+            WorkflowActionInvocation,
+            WorkflowDefinition,
+            WorkflowRegistry,
+            WorkflowStateSpec,
+        )
+        from src.backend.workflows.workflow_registry import WorkflowRegistration
+
+        reset_workflow_capability_index()
+        registry = WorkflowRegistry()
+        mail_definition = WorkflowDefinition(
+            workflow_id="#V#mail_review_test_workflow",
+            initial_state="list",
+            states={
+                "list": WorkflowStateSpec(
+                    state_id="list",
+                    actions=(
+                        WorkflowActionInvocation(action_id="gmail_list_messages"),
+                    ),
+                    terminal=True,
+                )
+            },
+            purpose="Review mailbox messages through represented workflow actions.",
+        )
+        jira_definition = WorkflowDefinition(
+            workflow_id="#V#jira_review_test_workflow",
+            initial_state="search",
+            states={
+                "search": WorkflowStateSpec(
+                    state_id="search",
+                    actions=(WorkflowActionInvocation(action_id="jira_search"),),
+                    terminal=True,
+                )
+            },
+            purpose="Review Jira work through represented workflow actions.",
+        )
+        for definition in (mail_definition, jira_definition):
+            registry.register(
+                WorkflowRegistration(
+                    workflow_id=definition.workflow_id,
+                    definition=definition,
+                    purpose=definition.purpose,
+                    source="repo_seed_agent_test",
+                )
+            )
+
+        results = resolve_workflow_capabilities_for_contract(
+            required_tools=["gmail_list_profiles"],
+            workflow_registry=registry,
+            allow_registry_projection=True,
+            max_results=5,
+        )
+
+        assert [result.workflow_id for result in results] == [
+            "#V#mail_review_test_workflow"
+        ]
+        match = results[0].metadata["contract_capability_match"]
+        assert match["tool_overlap"] == []
+        assert match["tool_surface_family_overlap"] == ["gmail"]
+        assert match["entry_source"] == "registry_routing_projection"
 
     def test_indexes_lazy_registrations(self):
         from src.backend.workflows import WorkflowRegistry

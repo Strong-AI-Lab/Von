@@ -6,6 +6,7 @@ from typing import Any
 
 from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
+    _derive_zero_tool_execution_reason,
 )
 from src.backend.services.required_tool_obligation_service import (
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
@@ -30,6 +31,25 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_tool_route_zero_execution_overrides_custom_workflow_action_completion() -> None:
+    reason = _derive_zero_tool_execution_reason(
+        selected_execution_mode="custom_workflow",
+        tool_route_selected=True,
+        tool_executed_count=0,
+        failure_codes=["tool_dispatch_boundary_missing"],
+        dispatch_terminal_status="completed",
+        dispatch_terminal_completed=True,
+        custom_workflow_execution={
+            "action_completed_count": 2,
+            "terminal_effect_count": 1,
+        },
+    )
+
+    assert reason["zero_tool_reason_code"] == "tool_dispatch_boundary_missing"
+    assert reason["zero_tool_execution_expected"] is False
+    assert "no dispatch boundary evidence" in reason["zero_tool_reason"]
 
 
 def _validation_failure_aux() -> list[dict[str, Any]]:

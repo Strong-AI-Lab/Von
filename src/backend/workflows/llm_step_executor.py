@@ -365,6 +365,11 @@ def _agent_test_conversation_turn_fast_path_result(
     response_text: str | None = None
     if state_id == "expected_outcome_inference":
         prompt_id = _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID
+        if (
+            use_represented_selector_llm_for_agent_test_replay(request.data)
+            and not _agent_test_required_tools(request)
+        ):
+            return None
         response_text = _build_agent_test_expected_outcome_response(request)
     elif state_id == "selector_decision":
         if use_represented_selector_llm_for_agent_test_replay(request.data):

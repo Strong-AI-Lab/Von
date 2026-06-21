@@ -339,6 +339,58 @@ def test_agent_test_expected_outcome_fast_path_does_not_infer_prompt_tools(
     assert "most specific represented workflow" not in payload["selector_guidance"]
 
 
+def test_agent_test_expected_outcome_represented_selector_mode_uses_prompt_when_uncontracted(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    llm = _CapturingLLM(
+        json.dumps(
+            {
+                "expected_outcome_summary": "List recent Gmail messages.",
+                "grounding_requirement": "Use Gmail retrieval evidence.",
+                "precision_policy": "Do not guess mailbox rows.",
+                "selector_guidance": "Prefer the represented mail review workflow.",
+                "answering_guidance": "Answer from retrieved Gmail rows only.",
+                "reasoning": "The authored expected-outcome prompt owns tool requirements.",
+                "required_tools": ["gmail_list_profiles", "gmail_list_messages"],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm, model="gemma4:e4b"),
+        data={
+            "user_prompt": "List recent gmail messages with labels.",
+            "requested_model": "gemma4:e4b",
+            "selected_model_provider": "ollama",
+            AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: (
+                AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+            ),
+        },
+        prompt_contract={"prompt_text": "Return the expected-outcome JSON."},
+        llm_policy={"policy_stage": "planner"},
+        validation_policy=_expected_outcome_validation_policy(),
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="expected_outcome_inference",
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert len(llm.calls) == 1
+    payload = result.outputs["validated_json"]
+    assert payload["required_tools"] == ["gmail_list_profiles", "gmail_list_messages"]
+    aux_calls = result.outputs.get("aux_llm_calls") or []
+    assert not any(
+        call.get("reason_code") == "agent_test_explicit_local_replay_fast_path"
+        for call in aux_calls
+        if isinstance(call, dict)
+    )
+
+
 def test_agent_test_expected_outcome_fast_path_marks_gmail_arxiv_tools(
     monkeypatch,
 ) -> None:
