@@ -2076,7 +2076,7 @@ def _run_generate_background(
     model: str | None,
     gmail_profile: str | None,
     presenter_mode: bool,
-    agent_test_selector_replay_mode: str | None,
+    agent_test_selector_replay_mode: str | None = None,
     turn_expected_outcome_contract: Mapping[str, Any] | None,
     timeout_seconds: float,
     poll_interval_seconds: float,
@@ -2276,6 +2276,109 @@ def _fetch_turn_debug(
     return _as_mapping(debug_payload.get("llm_debug_data"))
 
 
+TASK_RESULT_DEBUG_COPY_KEYS = (
+    "request_id",
+    "session_id",
+    "conversation_session_id",
+    "model",
+    "response",
+    "response_text",
+    "tool_invocations",
+    "aux_llm_calls",
+    "llm_calls",
+    "workflow_discovery",
+    "workflow_routing",
+    "selected_workflow_trace",
+    "turn_execution_diagnostics",
+    "turn_execution_record",
+    "completion_gate",
+    "completion_gate_verdict",
+    "completion_report",
+    "required_tool_obligation_ledger",
+    "render_plan",
+    "turn_output_health",
+    "warnings",
+)
+
+TASK_RESULT_DIAGNOSTIC_EVIDENCE_KEYS = frozenset(
+    {
+        "tool_invocations",
+        "aux_llm_calls",
+        "llm_calls",
+        "workflow_discovery",
+        "workflow_routing",
+        "selected_workflow_trace",
+        "turn_execution_diagnostics",
+        "turn_execution_record",
+        "completion_gate",
+        "completion_gate_verdict",
+        "completion_report",
+        "required_tool_obligation_ledger",
+        "render_plan",
+        "turn_output_health",
+    }
+)
+
+
+def _build_task_result_debug_payload(
+    *,
+    generate_payload: Mapping[str, Any],
+    session_id: str,
+    request_id: str,
+    response_text: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    debug_payload = dict(_as_mapping(generate_payload.get("llm_debug")))
+    copied_keys: list[str] = []
+    for key in TASK_RESULT_DEBUG_COPY_KEYS:
+        if key in debug_payload or key not in generate_payload:
+            continue
+        debug_payload[key] = generate_payload[key]
+        copied_keys.append(key)
+
+    if request_id and not _safe_text(debug_payload.get("request_id")):
+        debug_payload["request_id"] = request_id
+    if session_id and not (
+        _safe_text(debug_payload.get("session_id"))
+        or _safe_text(debug_payload.get("conversation_session_id"))
+    ):
+        debug_payload["session_id"] = session_id
+    if response_text and not (
+        _safe_text(debug_payload.get("response"))
+        or _safe_text(debug_payload.get("response_text"))
+    ):
+        debug_payload["response"] = response_text
+
+    diagnostic_keys = [
+        key
+        for key in sorted(TASK_RESULT_DIAGNOSTIC_EVIDENCE_KEYS)
+        if key in debug_payload and debug_payload.get(key) not in (None, {}, [])
+    ]
+    has_response = bool(
+        _safe_text(debug_payload.get("response"))
+        or _safe_text(debug_payload.get("response_text"))
+    )
+    if not diagnostic_keys and not has_response:
+        return {}, {}
+
+    provenance = {
+        "source": (
+            "background_task_result.llm_debug"
+            if isinstance(generate_payload.get("llm_debug"), Mapping)
+            else "background_task_result"
+        ),
+        "copied_top_level_keys": copied_keys,
+        "diagnostic_keys": diagnostic_keys,
+        "has_turn_execution_diagnostics": bool(
+            _as_mapping(debug_payload.get("turn_execution_diagnostics"))
+        ),
+        "partial_debug_payload": not bool(
+            _as_mapping(debug_payload.get("turn_execution_diagnostics"))
+        ),
+    }
+    debug_payload["replay_sampler_readback"] = dict(provenance)
+    return debug_payload, provenance
+
+
 def _resolve_turn_debug_data(
     *,
     session: requests.Session,
@@ -2285,9 +2388,11 @@ def _resolve_turn_debug_data(
     response_text: str,
     generate_payload: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    embedded_llm_debug = _as_mapping(generate_payload.get("llm_debug"))
-    embedded_diagnostics = _as_mapping(
-        embedded_llm_debug.get("turn_execution_diagnostics")
+    task_result_debug, task_result_debug_provenance = _build_task_result_debug_payload(
+        generate_payload=generate_payload,
+        session_id=session_id,
+        request_id=request_id,
+        response_text=response_text,
     )
     try:
         history_location = _find_assistant_turn_history_location(
@@ -2313,15 +2418,15 @@ def _resolve_turn_debug_data(
             ),
         )
     except RuntimeError as exc:
-        if embedded_diagnostics:
+        if task_result_debug:
             return (
                 {
-                    "source": "background_task_result.llm_debug",
+                    **dict(task_result_debug_provenance),
                     "session_id": session_id,
                     "request_id": request_id,
                     "history_lookup_error": str(exc),
                 },
-                dict(embedded_llm_debug),
+                dict(task_result_debug),
             )
         raise
 
@@ -3314,6 +3419,16 @@ def _build_summary(
         },
         "telemetry": {
             "model": _safe_text(llm_debug_data.get("model")),
+            "debug_readback_source": (
+                _safe_text(history_location.get("source")) or "history_debug"
+            ),
+            "history_lookup_error": (
+                _safe_text(history_location.get("history_lookup_error")) or None
+            ),
+            "debug_readback_partial": bool(
+                history_location.get("partial_debug_payload")
+            ),
+            "debug_readback_has_turn_execution_diagnostics": bool(diagnostics),
             "selected_workflow_id": _safe_text(
                 dispatch.get("dispatch_workflow_id")
                 or routing.get("selected_workflow_id")
@@ -4082,7 +4197,7 @@ def _run_local_ollama_model_probe(
     seed: int | None,
     presenter_mode: bool,
     allow_non_agent_test_server: bool,
-    allow_agent_test_selector_fast_path: bool,
+    allow_agent_test_selector_fast_path: bool = False,
     repeat_count: int,
     screen_repeat_count: int,
     attempt_process_timeout_seconds: float,

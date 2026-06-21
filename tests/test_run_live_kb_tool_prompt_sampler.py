@@ -1225,6 +1225,81 @@ def test_run_generate_background_sends_turn_expected_outcome_contract(
     assert payload_contract["knowledge_surfaces"] == ["turn_context", "jira"]
 
 
+def test_run_generate_background_empty_task_result_remains_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            return {"task_id": "task-empty"}
+        if url.endswith("/von/api/task/status/task-empty"):
+            return {"status": "completed"}
+        if url.endswith("/von/api/task/result/task-empty"):
+            return {"result": {}}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    with pytest.raises(
+        sampler.BackgroundGenerateTaskError,
+        match="Background task result was empty",
+    ):
+        sampler._run_generate_background(
+            session=requests.Session(),
+            base_url="http://127.0.0.1:5000",
+            prompt="Tell me about JVNAUTOSCI-150 in JIRA",
+            model="gemma4:26b",
+            gmail_profile=None,
+            presenter_mode=False,
+            turn_expected_outcome_contract=None,
+            timeout_seconds=30.0,
+            poll_interval_seconds=0.2,
+        )
+
+
+def test_resolve_turn_debug_data_uses_partial_task_result_when_history_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_find_history_location(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError("history lookup absent")
+
+    monkeypatch.setattr(
+        sampler,
+        "_find_assistant_turn_history_location",
+        fake_find_history_location,
+    )
+
+    history_location, llm_debug_data = sampler._resolve_turn_debug_data(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        session_id="session-task",
+        request_id="request-task",
+        response_text="Jira issue details from the completed task result.",
+        generate_payload={
+            "response_text": "Jira issue details from the completed task result.",
+            "workflow_routing": {"workflow_id": "#V#tool_calling_workflow"},
+            "tool_invocations": [{"tool": "jira_get_issue", "success": True}],
+            "model": "gemma4:26b",
+        },
+    )
+
+    assert history_location["source"] == "background_task_result"
+    assert history_location["session_id"] == "session-task"
+    assert history_location["request_id"] == "request-task"
+    assert history_location["partial_debug_payload"] is True
+    assert "workflow_routing" in history_location["diagnostic_keys"]
+    assert "history lookup absent" in history_location["history_lookup_error"]
+    assert llm_debug_data["workflow_routing"]["workflow_id"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert llm_debug_data["tool_invocations"] == [
+        {"tool": "jira_get_issue", "success": True}
+    ]
+    assert llm_debug_data["replay_sampler_readback"]["source"] == (
+        "background_task_result"
+    )
+
+
 def test_run_generate_background_cancels_task_after_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2165,6 +2240,106 @@ def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None
         portfolio_report["aggregate_certification_decision"]["promotion_authorised"]
         is False
     )
+
+
+def test_run_replay_plan_continues_multi_arm_after_history_readback_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_models: list[str | None] = []
+
+    def fake_establish_session(**kwargs: object) -> tuple[str, str]:
+        arm_index = len(run_models) + 1
+        return f"default-session-{arm_index}", f"window-session-{arm_index}"
+
+    def fake_run_generate_background(**kwargs: object) -> tuple[str, dict[str, object]]:
+        requested_model = kwargs["model"]
+        run_models.append(requested_model if isinstance(requested_model, str) else None)
+        arm_index = len(run_models)
+        model = requested_model if isinstance(requested_model, str) else "active-model"
+        return (
+            f"task-{arm_index}",
+            {
+                "request_id": f"request-{arm_index}",
+                "conversation_session_id": f"session-{arm_index}",
+                "response_text": (
+                    f"{model} returned grounded Jira issue details from the tool."
+                ),
+                "model": model,
+                "workflow_routing": {
+                    "workflow_id": "#V#tool_calling_workflow",
+                    "source": "selector",
+                },
+                "tool_invocations": [{"tool": "jira_get_issue", "success": True}],
+            },
+        )
+
+    def fake_find_history_location(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError("assistant history location missing")
+
+    monkeypatch.setattr(
+        sampler, "_establish_authenticated_session", fake_establish_session
+    )
+    monkeypatch.setattr(sampler, "_run_generate_background", fake_run_generate_background)
+    monkeypatch.setattr(
+        sampler,
+        "_find_assistant_turn_history_location",
+        fake_find_history_location,
+    )
+
+    replay_arms = sampler._build_model_arm_plan(
+        requested_model="gemma4:26b",
+        compare_models=["gpt-5.4-mini"],
+        include_active_model_arm=False,
+    )
+    summary, should_user_be_happy = sampler._run_replay_plan(
+        prompt_entry={
+            "id": "tell_me_about_jvnautosci_150_in_jira",
+            "category": "single_tool_jira_summary",
+            "complexity_class": "tool_augmented",
+            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+            "knowledge_surfaces": ["turn_context", "jira"],
+            "likely_tools": ["jira_get_issue"],
+            "requires_tool_use": True,
+        },
+        base_url="http://127.0.0.1:5000",
+        requested_model="gemma4:26b",
+        replay_arms=replay_arms,
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="university_of_auckland_strong_ai_lab",
+        session_name="comparison run",
+        run_environment={"base_url": "http://127.0.0.1:5000"},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["tool_augmented"],
+        seed=17,
+        base_prompt_id=None,
+        prompt_variant_ids=[],
+        presenter_mode=False,
+        gmail_profile=None,
+        agent_test_selector_replay_mode=None,
+    )
+
+    assert run_models == ["gemma4:26b", "gpt-5.4-mini"]
+    assert should_user_be_happy is True
+    assert summary["mode"] == "multi_arm_comparison"
+    assert summary["comparison"]["arm_count"] == 2
+    assert summary["comparison"]["all_should_user_be_happy"] is True
+    for arm_summary in summary["arms"]:
+        assert arm_summary["conversation"]["history_location"]["source"] == (
+            "background_task_result"
+        )
+        assert arm_summary["telemetry"]["debug_readback_source"] == (
+            "background_task_result"
+        )
+        assert arm_summary["telemetry"]["debug_readback_partial"] is True
+        assert arm_summary["telemetry"]["history_lookup_error"] == (
+            "assistant history location missing"
+        )
+        assert arm_summary["telemetry"]["selected_workflow_id"] == (
+            "#V#tool_calling_workflow"
+        )
+        assert arm_summary["telemetry"]["observed_tools"] == ["jira_get_issue"]
 
 
 def test_build_repeated_replay_summary_reports_success_rate() -> None:
