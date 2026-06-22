@@ -21,6 +21,7 @@ class _InMemoryWorkflowInstanceManager:
     def __init__(self) -> None:
         self._counter = 0
         self.instances: dict[str, WorkflowInstance] = {}
+        self.auto_claim_enabled: dict[str, bool] = {}
 
     def _next_instance_id(self) -> str:
         self._counter += 1
@@ -39,6 +40,7 @@ class _InMemoryWorkflowInstanceManager:
         source_event_type: str | None = None,
         source_event_id: str | None = None,
         event_idempotency_key: str | None = None,
+        auto_claim_enabled: bool = True,
     ) -> str:
         instance = WorkflowInstance.create(
             workflow_id,
@@ -54,6 +56,7 @@ class _InMemoryWorkflowInstanceManager:
         )
         instance.instance_id = self._next_instance_id()
         self.instances[instance.instance_id] = instance
+        self.auto_claim_enabled[instance.instance_id] = bool(auto_claim_enabled)
         return instance.instance_id
 
     def create_instance_for_event(
@@ -69,6 +72,7 @@ class _InMemoryWorkflowInstanceManager:
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
         max_retries: int = 3,
+        auto_claim_enabled: bool = True,
     ) -> tuple[str, bool]:
         for instance in self.instances.values():
             if instance.event_idempotency_key == event_idempotency_key:
@@ -85,6 +89,7 @@ class _InMemoryWorkflowInstanceManager:
                 source_event_type=source_event_type,
                 source_event_id=source_event_id,
                 event_idempotency_key=event_idempotency_key,
+                auto_claim_enabled=auto_claim_enabled,
             ),
             True,
         )
@@ -357,6 +362,7 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
             source_event_id=str(kwargs["source_event_id"]),
             inputs=dict(kwargs.get("inputs") or {}),
             max_retries=int(kwargs.get("max_retries", 0) or 0),
+            auto_claim_enabled=bool(kwargs.get("auto_claim_enabled", True)),
         )
         return WorkflowInstanceSubmissionResult(
             success=True,
@@ -448,3 +454,4 @@ def test_generate_materialises_conversation_turn_instance_in_monitor(app: Flask)
     )
     assert stored_instance.inputs["conversation_session_id"] == "session-monitor-test"
     assert stored_instance.inputs["turn_id"]
+    assert manager.auto_claim_enabled[stored_instance.instance_id] is False
