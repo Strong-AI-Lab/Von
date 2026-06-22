@@ -1298,6 +1298,9 @@ const THINKING_RECOVERY_STAGE_ALIASES = new Map([
 const THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS = 30_000;
 const THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS = 8_000;
 const THINKING_PROGRESS_TIMEOUTS_BEFORE_VISIBLE = 2;
+const FOREGROUND_TASK_RESULT_POLL_FETCH_TIMEOUT_MS = 8_000;
+const FOREGROUND_TASK_RESULT_POLL_INITIAL_DELAY_MS = 750;
+const FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS = 5_000;
 const THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT = 40;
 const THINKING_DIAGNOSTICS_EXPORT_PHASE_HISTORY_LIMIT = 80;
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
@@ -11407,6 +11410,197 @@ function startToolUseProgressPolling(request) {
     request.toolUseProgressPoll = poll;
 
     void pollOnce();
+}
+
+function normaliseForegroundTaskResultPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const result = payload.result && typeof payload.result === 'object'
+        ? payload.result
+        : payload;
+    if (!result || typeof result !== 'object') {
+        return null;
+    }
+
+    if (
+        typeof result.response === 'string'
+        || typeof result.response_text === 'string'
+        || result.presenter_channels
+        || result.response_channels
+        || result.llm_debug
+    ) {
+        if (typeof result.response === 'string') {
+            return result;
+        }
+        return {
+            ...result,
+            response: typeof result.response_text === 'string' ? result.response_text : ''
+        };
+    }
+
+    return null;
+}
+
+function isForegroundTaskStatusTerminal(statusPayload) {
+    const status = String(statusPayload?.status || '').trim().toLowerCase();
+    return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function stopForegroundTaskResultPolling(request) {
+    const poll = request?.foregroundTaskResultPoll;
+    if (!poll) {
+        return;
+    }
+    try {
+        if (poll.timeoutId) {
+            clearTimeout(poll.timeoutId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    try {
+        poll.abortController?.abort();
+    } catch (_) {
+        // Ignore.
+    }
+    request.foregroundTaskResultPoll = null;
+}
+
+function startForegroundTaskResultPolling(request, handlers = {}) {
+    if (!request || request.aborted || !request.clientRequestId) {
+        return;
+    }
+
+    stopForegroundTaskResultPolling(request);
+
+    const requestId = request.clientRequestId;
+    const abortController = new AbortController();
+    const poll = {
+        abortController,
+        timeoutId: null,
+        nextDelayMs: FOREGROUND_TASK_RESULT_POLL_INITIAL_DELAY_MS,
+        delivering: false
+    };
+
+    const scheduleNextPoll = (delayMs) => {
+        if (
+            request.aborted
+            || request.foregroundDeliveryCompleted
+            || !isLiveChatRequest(request)
+        ) {
+            return;
+        }
+        poll.timeoutId = setTimeout(() => {
+            void pollOnce();
+        }, Math.max(0, Number(delayMs) || 0));
+    };
+
+    const fetchJson = async (url) => {
+        const resp = await fetchWithTimeout(url, {
+            method: 'GET',
+            signal: poll.abortController?.signal,
+            headers: buildChatFetchHeaders(),
+            credentials: 'omit',
+            timeoutMs: FOREGROUND_TASK_RESULT_POLL_FETCH_TIMEOUT_MS
+        });
+        if (!resp || typeof resp.json !== 'function') {
+            return { resp, payload: null };
+        }
+        let payload = null;
+        try {
+            payload = await resp.json();
+        } catch (_) {
+            // Keep the null payload default.
+        }
+        return { resp, payload };
+    };
+
+    const pollOnce = async () => {
+        if (
+            poll.delivering
+            || request.aborted
+            || request.foregroundDeliveryCompleted
+            || !isLiveChatRequest(request)
+        ) {
+            return;
+        }
+
+        try {
+            const { resp: statusResp, payload: statusPayload } = await fetchJson(
+                `/von/api/task/status/${encodeURIComponent(requestId)}`
+            );
+            if (!statusResp || statusResp.status === 404 || statusResp.status === 409) {
+                poll.nextDelayMs = Math.min(
+                    FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                    poll.nextDelayMs * 1.5
+                );
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+            if (!statusResp.ok || !isForegroundTaskStatusTerminal(statusPayload)) {
+                poll.nextDelayMs = Math.min(
+                    FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                    poll.nextDelayMs * 1.5
+                );
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            const status = String(statusPayload?.status || '').trim().toLowerCase();
+            if (status !== 'completed') {
+                poll.delivering = true;
+                await handlers.onFailed?.(statusPayload, status);
+                return;
+            }
+
+            const { resp: resultResp, payload: resultPayload } = await fetchJson(
+                `/von/api/task/result/${encodeURIComponent(requestId)}`
+            );
+            if (!resultResp || resultResp.status === 404 || resultResp.status === 409) {
+                poll.nextDelayMs = Math.min(
+                    FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                    poll.nextDelayMs * 1.5
+                );
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+            if (!resultResp.ok) {
+                poll.nextDelayMs = Math.min(
+                    FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                    poll.nextDelayMs * 1.5
+                );
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            const generateBody = normaliseForegroundTaskResultPayload(resultPayload);
+            if (!generateBody) {
+                poll.nextDelayMs = Math.min(
+                    FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                    poll.nextDelayMs * 1.5
+                );
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            poll.delivering = true;
+            await handlers.onCompleted?.(generateBody, resultPayload, statusPayload);
+        } catch (err) {
+            if (err && err.name === 'AbortError') {
+                return;
+            }
+            poll.nextDelayMs = Math.min(
+                FOREGROUND_TASK_RESULT_POLL_MAX_DELAY_MS,
+                poll.nextDelayMs * 1.5
+            );
+            scheduleNextPoll(poll.nextDelayMs);
+        }
+    };
+
+    request.foregroundTaskResultPoll = poll;
+    scheduleNextPoll(poll.nextDelayMs);
 }
 
 // Cool-down for failed history talk-track backfills so we do not spam the server.
@@ -30034,6 +30228,149 @@ async function handleSendPrompt(options = {}) {
         }
     }
 
+    const claimForegroundDelivery = () => {
+        if (request.foregroundDeliveryCompleted) {
+            return false;
+        }
+        request.foregroundDeliveryCompleted = true;
+        return true;
+    };
+
+    const deliverSuccessfulResponseData = (data, source = 'generate_response') => {
+        if (!claimForegroundDelivery()) {
+            return false;
+        }
+        const responsePresenterState = resolveResponsePresenterState(data);
+        const responseChannels = responsePresenterState.presenterChannels;
+        const screenText = responsePresenterState.screenText;
+        const spokenText = responsePresenterState.spokenText;
+        const displayElements = responsePresenterState.displayElements;
+        const turnExecutionDiagnostics = (
+            data?.llm_debug?.turn_execution_diagnostics
+            && typeof data.llm_debug.turn_execution_diagnostics === 'object'
+        )
+            ? data.llm_debug.turn_execution_diagnostics
+            : null;
+        const completionGateDecision = normaliseThinkingProgressStatusValue(
+            turnExecutionDiagnostics?.completion_gate?.decision
+            || turnExecutionDiagnostics?.completion_gate_decision
+        );
+        const turnOutcomeStatus = canonicalThinkingTerminalStatus(completionGateDecision)
+            || THINKING_STATUS_COMPLETED;
+        request.turnOutcome = {
+            status: turnOutcomeStatus,
+            phase_label: turnOutcomeStatus === 'error'
+                ? 'Turn failed'
+                : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'),
+            summary: turnOutcomeStatus === 'follow_up_required'
+                ? 'The turn completed, but a follow-up step is still required.'
+                : 'Response generated'
+        };
+        if (source === 'task_result') {
+            request.turnOutcome.summary = 'Response generated from completed task result';
+        }
+        if (turnExecutionDiagnostics) {
+            syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
+            syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
+            if (isRequestVisible()) {
+                refreshThinkingCardProgressUi(request);
+            }
+        }
+
+        // Store LLM debug data if available
+        if (data.llm_debug) {
+            const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
+                presenterChannels: responseChannels,
+                screenText,
+                spokenText,
+                displayElements
+            });
+            enriched.foreground_delivery_source = source;
+            syncThinkingCriticOutputFromSource(request, enriched);
+            setLlmDebugDataEntry(assistantTurnId, enriched);
+            if (isRequestVisible()) {
+                refreshThinkingCardProgressUi(request);
+            }
+            console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
+                hasButtonify: !!data.llm_debug?.buttonify,
+                buttonifyOptions: data.llm_debug?.buttonify?.options,
+                enrichedHasButtonify: !!enriched?.buttonify,
+                foregroundDeliverySource: source
+            });
+        }
+
+        const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
+
+        const toolProgressEnabled = data?.llm_debug?.internal_mcp?.tool_use_progress?.enabled;
+        if (toolProgressEnabled === false) {
+            stopToolUseProgressPolling(request);
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+        }
+
+        // Append assistant message with turnId and llm_debug flag
+        request.resultTurnId = assistantTurnId;
+        if (isRequestVisible()) {
+            appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
+            // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
+            const annotationToggle = document.getElementById('annotationToggle');
+            if (annotationToggle && annotationToggle.checked) {
+                try {
+                    annotateTurn({
+                        conversation_id: elements.conversationId || 'local',
+                        turn_id: assistantTurnId,
+                        speaker: 'assistant',
+                        text: screenText
+                    }).then((resp) => {
+                        console.info('[annotations] annotateTurn response (chatTab)', resp);
+                        if (resp && resp.suggestions) {
+                            renderSpanSuggestions(assistantTurnId, resp.suggestions);
+                        }
+                    }).catch(e => console.info('[annotations] assistant annotate error', e));
+                } catch (e) { console.info('[annotations] annotate assistant failed', e); }
+            }
+        }
+        return true;
+    };
+
+    const deliverErrorResponseData = (data, fallbackMessage = 'An error occurred') => {
+        if (!claimForegroundDelivery()) {
+            return false;
+        }
+        request.turnOutcome = {
+            status: 'error',
+            phase_label: 'Turn failed',
+            summary: data?.error || data?.detail || fallbackMessage
+        };
+        const turnExecutionDiagnostics = (
+            data?.llm_debug?.turn_execution_diagnostics
+            && typeof data.llm_debug.turn_execution_diagnostics === 'object'
+        )
+            ? data.llm_debug.turn_execution_diagnostics
+            : null;
+        if (turnExecutionDiagnostics) {
+            syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
+            syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
+            if (isRequestVisible()) {
+                refreshThinkingCardProgressUi(request);
+            }
+        }
+        // Store LLM debug data if available even on error
+        const errorTurnId = `e-${Date.now()}`;
+        if (data?.llm_debug) {
+            syncThinkingCriticOutputFromSource(request, data.llm_debug);
+            setLlmDebugDataEntry(errorTurnId, data.llm_debug);
+            if (isRequestVisible()) {
+                refreshThinkingCardProgressUi(request);
+            }
+            console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
+        }
+        request.resultTurnId = errorTurnId;
+        if (isRequestVisible()) {
+            appendMessage('Error', data?.error || data?.detail || fallbackMessage, errorTurnId, !!data?.llm_debug);
+        }
+        return true;
+    };
+
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
         rememberLastSubmittedUserPrompt(promptRaw);
@@ -30076,6 +30413,31 @@ async function handleSendPrompt(options = {}) {
             })
         });
         startToolUseProgressPolling(request);
+        startForegroundTaskResultPolling(request, {
+            onCompleted: async (generateBody) => {
+                const delivered = deliverSuccessfulResponseData(generateBody, 'task_result');
+                if (delivered) {
+                    try {
+                        request.abortController.abort();
+                    } catch (_) {
+                        // Ignore; the original fetch may already be resolving.
+                    }
+                }
+            },
+            onFailed: async (statusPayload, status) => {
+                const message = status === 'cancelled'
+                    ? 'Task was cancelled before the response reached the chat UI.'
+                    : 'Task failed before the response reached the chat UI.';
+                const delivered = deliverErrorResponseData(statusPayload, message);
+                if (delivered) {
+                    try {
+                        request.abortController.abort();
+                    } catch (_) {
+                        // Ignore; the original fetch may already be resolving.
+                    }
+                }
+            }
+        });
         // Give an already-available first progress response a chance to land
         // before an immediate generate response tears down the active card.
         await Promise.resolve();
@@ -30113,125 +30475,14 @@ async function handleSendPrompt(options = {}) {
         }
 
         if (response.ok) {
-            const responsePresenterState = resolveResponsePresenterState(data);
-            const responseChannels = responsePresenterState.presenterChannels;
-            const screenText = responsePresenterState.screenText;
-            const spokenText = responsePresenterState.spokenText;
-            const displayElements = responsePresenterState.displayElements;
-            const turnExecutionDiagnostics = (
-                data?.llm_debug?.turn_execution_diagnostics
-                && typeof data.llm_debug.turn_execution_diagnostics === 'object'
-            )
-                ? data.llm_debug.turn_execution_diagnostics
-                : null;
-            const completionGateDecision = normaliseThinkingProgressStatusValue(
-                turnExecutionDiagnostics?.completion_gate?.decision
-                || turnExecutionDiagnostics?.completion_gate_decision
-            );
-            const turnOutcomeStatus = canonicalThinkingTerminalStatus(completionGateDecision)
-                || THINKING_STATUS_COMPLETED;
-            request.turnOutcome = {
-                status: turnOutcomeStatus,
-                phase_label: turnOutcomeStatus === 'error'
-                    ? 'Turn failed'
-                    : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'),
-                summary: turnOutcomeStatus === 'follow_up_required'
-                    ? 'The turn completed, but a follow-up step is still required.'
-                    : 'Response generated'
-            };
-            if (turnExecutionDiagnostics) {
-                syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
-                syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
-                if (isRequestVisible()) {
-                    refreshThinkingCardProgressUi(request);
-                }
-            }
-
-            // Store LLM debug data if available
-            if (data.llm_debug) {
-                const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
-                    presenterChannels: responseChannels,
-                    screenText,
-                    spokenText,
-                    displayElements
-                });
-                syncThinkingCriticOutputFromSource(request, enriched);
-                setLlmDebugDataEntry(assistantTurnId, enriched);
-                if (isRequestVisible()) {
-                    refreshThinkingCardProgressUi(request);
-                }
-                console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
-                    hasButtonify: !!data.llm_debug?.buttonify,
-                    buttonifyOptions: data.llm_debug?.buttonify?.options,
-                    enrichedHasButtonify: !!enriched?.buttonify
-                });
-            }
-
-            const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
-
-            const toolProgressEnabled = data?.llm_debug?.internal_mcp?.tool_use_progress?.enabled;
-            if (toolProgressEnabled === false) {
-                stopToolUseProgressPolling(request);
-                setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
-            }
-
-            // Append assistant message with turnId and llm_debug flag
-            request.resultTurnId = assistantTurnId;
-            if (isRequestVisible()) {
-                appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
-                // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
-                const annotationToggle = document.getElementById('annotationToggle');
-                if (annotationToggle && annotationToggle.checked) {
-                    try {
-                        annotateTurn({
-                            conversation_id: elements.conversationId || 'local',
-                            turn_id: assistantTurnId,
-                            speaker: 'assistant',
-                            text: screenText
-                        }).then((resp) => {
-                            console.info('[annotations] annotateTurn response (chatTab)', resp);
-                            if (resp && resp.suggestions) {
-                                renderSpanSuggestions(assistantTurnId, resp.suggestions);
-                            }
-                        }).catch(e => console.info('[annotations] assistant annotate error', e));
-                    } catch (e) { console.info('[annotations] annotate assistant failed', e); }
-                }
-            }
+            deliverSuccessfulResponseData(data, 'generate_response');
         } else {
-            request.turnOutcome = {
-                status: 'error',
-                phase_label: 'Turn failed',
-                summary: data.error || 'An error occurred'
-            };
-            const turnExecutionDiagnostics = (
-                data?.llm_debug?.turn_execution_diagnostics
-                && typeof data.llm_debug.turn_execution_diagnostics === 'object'
-            )
-                ? data.llm_debug.turn_execution_diagnostics
-                : null;
-            if (turnExecutionDiagnostics) {
-                syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
-                syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
-                if (isRequestVisible()) {
-                    refreshThinkingCardProgressUi(request);
-                }
-            }
-            // Store LLM debug data if available even on error
-            const errorTurnId = `e-${Date.now()}`;
-            if (data.llm_debug) {
-                syncThinkingCriticOutputFromSource(request, data.llm_debug);
-                setLlmDebugDataEntry(errorTurnId, data.llm_debug);
-                if (isRequestVisible()) {
-                    refreshThinkingCardProgressUi(request);
-                }
-                console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
-            }
-            request.resultTurnId = errorTurnId;
-            if (isRequestVisible()) {
-                appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
-            }
+            deliverErrorResponseData(data, 'An error occurred');
         }
     } catch (error) {
+        if (request?.foregroundDeliveryCompleted) {
+            return;
+        }
         if (request && (request.aborted || (error && error.name === 'AbortError'))) {
             return;
         }
@@ -30248,6 +30499,7 @@ async function handleSendPrompt(options = {}) {
             appendMessage('Error', failureSummary, request.resultTurnId);
         }
     } finally {
+        stopForegroundTaskResultPolling(request);
         if (!request?.promptQueueRecordId && request?.promptQueueRecordPromise) {
             try {
                 const activeRecord = await request.promptQueueRecordPromise;

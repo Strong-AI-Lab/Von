@@ -6360,6 +6360,127 @@ describe('thinking card toggle accessibility', () => {
         expect(retained.detail.innerHTML).not.toContain('Active');
     });
 
+    test('renders a completed task result while the foreground generate request is still pending', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-task-result-bridge', 'Task Result Bridge');
+        document.getElementById('promptInput').value = 'show the completed side-channel answer';
+
+        let generateAbortObserved = false;
+        const taskStatusUrls = [];
+        const taskResultUrls = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'heartbeat',
+                        phase: 'response_finalising',
+                        stage: 'response_finalising',
+                        phase_label: 'Finalising response',
+                        result_summary: 'About to produce output',
+                        liveness_state: 'waiting'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                taskStatusUrls.push(url);
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        status: 'completed',
+                        has_result: true,
+                        task_id: decodeURIComponent(url.split('/').pop())
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/result/')) {
+                taskResultUrls.push(url);
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        task_id: decodeURIComponent(url.split('/').pop()),
+                        result: {
+                            response: '**Rendered from completed task result**',
+                            llm_debug: {
+                                model: 'gpt-5.2',
+                                request_id: decodeURIComponent(url.split('/').pop())
+                            }
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        html: 'Rendered from completed task result'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return new Promise((_resolve, reject) => {
+                    options.signal?.addEventListener('abort', () => {
+                        generateAbortObserved = true;
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    });
+                });
+            }
+
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const renderedText = document.querySelector('.message-container.assistant-turn .chat-message-text')?.textContent || '';
+            if (renderedText.includes('Rendered from completed task result')) {
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        const assistantMessages = Array.from(document.querySelectorAll('.message-container.assistant-turn .chat-message-text'));
+        expect(assistantMessages).toHaveLength(1);
+        expect(assistantMessages[0].textContent).toContain('Rendered from completed task result');
+        expect(taskStatusUrls.length).toBeGreaterThan(0);
+        expect(taskResultUrls.length).toBeGreaterThan(0);
+        expect(generateAbortObserved).toBe(true);
+
+        const retained = getRetainedThinkingCardElements();
+        expect(retained).not.toBeNull();
+        expect(retained.detail.innerHTML).toContain('Response generated from completed task result');
+    });
+
     test('retains a failed card inline when the last live progress remains non-terminal', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({

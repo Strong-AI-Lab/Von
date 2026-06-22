@@ -4267,6 +4267,75 @@ def _normalise_tool_progress_scope_keys(
     return deduped
 
 
+def _terminal_tool_progress_payload_from_task_status(
+    *, request_id: str, task_status: Any
+) -> dict[str, Any] | None:
+    raw_status = _progress_str(getattr(task_status, "status", None))
+    if not raw_status:
+        return None
+
+    normalised_status = raw_status.strip().lower()
+    if normalised_status == "completed":
+        progress_status = "completed"
+        phase_label = "Complete"
+        success = True
+    elif normalised_status == "failed":
+        progress_status = "error"
+        phase_label = "Turn failed"
+        success = False
+    elif normalised_status == "cancelled":
+        progress_status = "cancelled"
+        phase_label = "Cancelled"
+        success = False
+    else:
+        return None
+
+    progress = getattr(task_status, "progress", None)
+    progress_payload = dict(progress) if isinstance(progress, Mapping) else {}
+    result_summary = _progress_str(progress_payload.get("result_summary"))
+    if not result_summary and progress_status == "completed":
+        result_summary = "Completed task result is available."
+    elif not result_summary:
+        result_summary = _progress_str(getattr(task_status, "error", None)) or phase_label
+
+    payload: dict[str, Any] = {
+        "status": progress_status,
+        "stage": progress_status,
+        "phase": progress_status,
+        "phase_label": phase_label,
+        "request_id": request_id,
+        "success": success,
+        "result_summary": result_summary,
+        "source": "background_task_terminal_reconciliation",
+        "terminal_reconciliation": {
+            "source_status": normalised_status,
+            "reason": "background_task_result_terminal_while_live_progress_nonterminal",
+        },
+    }
+    if progress_payload:
+        payload["terminal_task_progress"] = progress_payload
+    return payload
+
+
+def _reconcile_tool_progress_heartbeat_with_terminal_task_status(
+    *, scope_keys: Sequence[str], request_id: str
+) -> bool:
+    try:
+        task_status = background_task_registry.get_task_status(request_id)
+    except Exception:
+        return False
+    payload = _terminal_tool_progress_payload_from_task_status(
+        request_id=request_id,
+        task_status=task_status,
+    )
+    if not isinstance(payload, dict):
+        return False
+
+    for candidate_scope_key in scope_keys:
+        _set_tool_progress(candidate_scope_key, request_id, dict(payload))
+    return True
+
+
 def _start_tool_progress_heartbeat(
     scope_keys: Sequence[str] | str, request_id: str
 ) -> tuple[threading.Event, threading.Thread]:
@@ -4292,6 +4361,11 @@ def _start_tool_progress_heartbeat(
                     continue
                 status = (_progress_str(current.get("status")) or "").lower()
                 if status in _TOOL_PROGRESS_TERMINAL_STATUSES:
+                    break
+                if _reconcile_tool_progress_heartbeat_with_terminal_task_status(
+                    scope_keys=active_scope_keys,
+                    request_id=request_id,
+                ):
                     break
                 heartbeat_payload = {
                     "status": "heartbeat",

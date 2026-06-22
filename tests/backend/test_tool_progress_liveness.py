@@ -1,6 +1,8 @@
 """Tests for generate() tool-progress liveness telemetry (JVNAUTOSCI-1103)."""
 
 import os
+import time
+from types import SimpleNamespace
 
 from flask import Flask
 
@@ -83,6 +85,69 @@ def test_heartbeat_updates_sequence_and_keeps_stage(monkeypatch) -> None:
     assert heartbeat["idle_ms"] >= int(
         von_routes._TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC * 1000
     )
+
+
+def test_heartbeat_reconciles_terminal_task_result_before_next_heartbeat(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(von_routes, "_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC", 0.01)
+
+    request_id = "req-terminal-task-result"
+    scope_key = "scope-terminal-task-result"
+    terminal_status = SimpleNamespace(
+        status="completed",
+        progress={
+            "status": "completed",
+            "source": "background_generate_success_body",
+            "result_summary": "Completed result exists.",
+        },
+        error=None,
+    )
+
+    class _FakeBackgroundTaskRegistry:
+        def get_task_status(self, task_id):
+            return terminal_status if task_id == request_id else None
+
+    monkeypatch.setattr(
+        von_routes,
+        "background_task_registry",
+        _FakeBackgroundTaskRegistry(),
+    )
+
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "heartbeat",
+            "phase": "response_finalising",
+            "stage": "response_finalising",
+            "phase_label": "Finalising response",
+            "request_id": request_id,
+        },
+    )
+
+    stop_event, thread = von_routes._start_tool_progress_heartbeat(
+        [scope_key],
+        request_id,
+    )
+    try:
+        for _ in range(50):
+            state = von_routes._get_tool_progress(scope_key, request_id)
+            if state and state.get("status") == "completed":
+                break
+            time.sleep(0.01)
+    finally:
+        von_routes._stop_tool_progress_heartbeat(stop_event, thread)
+
+    state = von_routes._get_tool_progress(scope_key, request_id)
+    assert state is not None
+    assert state["status"] == "completed"
+    assert state["source"] == "background_task_terminal_reconciliation"
+    assert state["terminal_reconciliation"]["reason"] == (
+        "background_task_result_terminal_while_live_progress_nonterminal"
+    )
+    assert state["terminal_task_progress"]["source"] == "background_generate_success_body"
+    assert not thread.is_alive()
 
 
 def test_selected_workflow_execution_events_survive_finalising_progress(monkeypatch) -> None:
