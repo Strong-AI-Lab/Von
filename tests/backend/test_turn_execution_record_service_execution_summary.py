@@ -1,5 +1,9 @@
 import json
 
+from src.backend.services.turn_decision_attribution_service import (
+    DECISION_KINDS,
+    TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION,
+)
 from src.backend.services.turn_execution_record_service import (
     TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
     build_turn_execution_correctness_summary,
@@ -22,6 +26,76 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_turn_record_carries_decision_attribution_payload() -> None:
+    record = build_turn_execution_record(
+        request_id="req-decision-attribution",
+        session_id="session-decision-attribution",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Run the represented paper workflow.",
+        response_text="The represented workflow completed.",
+        interaction_timestamp_utc="2026-06-22T00:00:00Z",
+        workflow_discovery={
+            "discovery_payload_origin": "durable_action_discover_workflows_for_turn",
+            "query": "represented paper workflow",
+            "candidate_count": 1,
+            "candidates": [
+                {
+                    "concept_id": "#V#paper_workflow",
+                    "name": "Paper workflow",
+                    "routing_eligible": True,
+                }
+            ],
+        },
+        workflow_routing={
+            "workflow_id": "#V#paper_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+            "selection_rationale": "selector_selected_discovered_candidate",
+        },
+        selected_workflow_trace={
+            "workflow_id": "#V#paper_workflow",
+            "workflow_model_policy": {
+                "policy_source": "graph",
+                "graph_completeness": "graph_complete",
+                "policy_id": "#V#default_workflow_model_policy",
+            },
+        },
+        aux_llm_calls=[
+            {
+                "decision_authority_origin": "python",
+                "stage": "workflow_dispatch",
+                "component": "internal_mcp_orchestrator",
+                "function": "record_turn_contract_dispatch_preflight",
+                "decision_class": "workflow_dispatch_turn_contract_check",
+                "decision_source": "turn_expected_outcome_contract",
+                "changed_outcome": False,
+                "reason_code": "selected_workflow_satisfies_contract",
+            }
+        ],
+    )
+
+    attribution = record["decision_attribution"]
+    assert (
+        attribution["schema_version"] == TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION
+    )
+    summary = attribution["summary"]
+    assert set(summary["decision_kind_breakdown"]) == set(DECISION_KINDS)
+    assert summary["decision_kind_breakdown"]["discovery"] == "represented"
+    assert summary["decision_kind_breakdown"]["selection"] == "represented"
+    assert summary["decision_kind_breakdown"]["dispatch"] == "represented"
+    assert summary["decision_kind_breakdown"]["model_choice"] == "represented"
+    assert summary["python_fallback_count"] == 0
+    assert summary["architecture_integrity_score"] == 1.0
+
+    by_kind = {item["decision_kind"]: item for item in attribution["decisions"]}
+    assert by_kind["selection"]["concept_ids"] == ["#V#paper_workflow"]
+    assert by_kind["model_choice"]["concept_ids"] == [
+        "#V#default_workflow_model_policy"
+    ]
 
 
 def test_turn_record_projects_context_adjudication_handoff() -> None:

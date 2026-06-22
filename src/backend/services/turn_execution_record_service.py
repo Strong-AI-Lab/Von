@@ -46,6 +46,7 @@ from .tool_metadata_service import (
     is_tool_verification_read,
     is_tool_write,
 )
+from .turn_decision_attribution_service import build_turn_decision_attribution
 from .turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
 )
@@ -9279,6 +9280,28 @@ def build_turn_execution_record(
         if isinstance(entry, Mapping)
     ]
 
+    decision_attribution_diagnostics = {
+        "workflow_discovery": workflow_routing_diagnostics.get("discovery"),
+        "workflow_routing_diagnostics": workflow_routing_diagnostics,
+        "workflow_selection": {
+            "selected_workflow_id": selected_workflow_id,
+            "selector_source": selector_source,
+            "selector_verdict": selector_verdict,
+        },
+        "selected_workflow_trace": selected_workflow_trace_payload,
+        "workflow_model_policy": (
+            selected_workflow_trace_payload.get("workflow_model_policy")
+            if isinstance(selected_workflow_trace_payload, Mapping)
+            else None
+        ),
+        "completion_gate": completion_gate,
+        "completion_gate_verdict": completion_gate_verdict,
+    }
+    decision_attribution = build_turn_decision_attribution(
+        diagnostics=decision_attribution_diagnostics,
+        aux_entries=aux_llm_call_log,
+    )
+
     record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
         "request_id": _safe_str(request_id),
@@ -9377,6 +9400,7 @@ def build_turn_execution_record(
             if isinstance(context_adjudication_projection, Mapping)
             else None
         ),
+        "decision_attribution": decision_attribution,
         "postcondition_checks": postcondition_checks,
         "critic": {
             "enabled": True,
