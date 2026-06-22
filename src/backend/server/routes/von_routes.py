@@ -7275,6 +7275,7 @@ def _finalise_llm_debug_info(
     org_id: str | None,
     workflow_discovery: dict[str, Any] | None = None,
     workflow_routing: Any = None,
+    method_catalogue: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(llm_debug_info, dict):
         return llm_debug_info
@@ -7406,6 +7407,15 @@ def _finalise_llm_debug_info(
                     llm_debug_info.get("required_tool_obligation_ledger"), dict
                 )
                 else None
+            ),
+            method_catalogue=(
+                method_catalogue
+                if isinstance(method_catalogue, Mapping)
+                else (
+                    llm_debug_info.get("method_catalogue")
+                    if isinstance(llm_debug_info.get("method_catalogue"), Mapping)
+                    else None
+                )
             ),
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
@@ -9825,6 +9835,7 @@ def _maybe_handle_tool_inventory_fastpath(
         namespace=prompt_namespace,
         user_id=history_user_id or user_concept_id,
         org_id=org_concept_id,
+        method_catalogue=methods_snapshot if isinstance(methods_snapshot, dict) else None,
     )
 
     if history_user_id:
@@ -14003,10 +14014,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # Capture a compact summary of the tool catalogue that the agent was shown.
         # This improves trace transparency without storing the full system prompt.
         tool_catalogue_summary = None
+        method_catalogue_snapshot = None
         if gateway is not None:
             try:
                 methods_snapshot = gateway.describe_methods()
                 if isinstance(methods_snapshot, dict):
+                    method_catalogue_snapshot = methods_snapshot
                     method_names = sorted(
                         [
                             name
@@ -14298,6 +14311,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 org_id=org_concept_id,
                 workflow_discovery=workflow_discovery_result,
                 workflow_routing=workflow_routing_info,
+                method_catalogue=method_catalogue_snapshot,
             )
 
         def _refresh_llm_debug_timing_payload(debug_payload: dict[str, Any]) -> None:

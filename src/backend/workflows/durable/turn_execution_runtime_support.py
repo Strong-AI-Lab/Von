@@ -55,6 +55,29 @@ def _is_agent_test_instance() -> bool:
     return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
 
 
+def _resolve_method_catalogue_snapshot(
+    *,
+    data: Mapping[str, Any],
+    environment: Any | None = None,
+) -> Mapping[str, Any] | None:
+    """Return the method catalogue snapshot already carried by the workflow."""
+
+    data_catalogue = data.get("method_catalogue")
+    if isinstance(data_catalogue, Mapping):
+        return data_catalogue
+
+    gateway = getattr(environment, "gateway", None)
+    describe_methods = getattr(gateway, "describe_methods", None)
+    if not callable(describe_methods):
+        return None
+
+    try:
+        described_methods = describe_methods()
+    except Exception:
+        return None
+    return described_methods if isinstance(described_methods, Mapping) else None
+
+
 def _coerce_non_negative_int(
     value: Any,
     *,
@@ -1822,6 +1845,7 @@ def _completion_gate_record_has_stale_required_tool_obligation_effect(
                 for invocation in invocations
                 if isinstance(invocation, Mapping)
             ],
+            method_catalogue=_resolve_method_catalogue_snapshot(data=data),
         )
     except Exception:
         return False
@@ -2763,16 +2787,10 @@ def run_turn_execution_critic(
     workflow_routing_payload = (
         dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
     )
-    method_catalogue = None
-    gateway = getattr(env, "gateway", None)
-    describe_methods = getattr(gateway, "describe_methods", None)
-    if callable(describe_methods):
-        try:
-            described_methods = describe_methods()
-            if isinstance(described_methods, Mapping):
-                method_catalogue = described_methods
-        except Exception:
-            method_catalogue = None
+    method_catalogue = _resolve_method_catalogue_snapshot(
+        data=data,
+        environment=env,
+    )
 
     turn_execution_record = build_turn_execution_record(
         request_id=data.get("turn_id"),

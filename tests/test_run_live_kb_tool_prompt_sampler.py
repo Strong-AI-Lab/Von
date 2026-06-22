@@ -1065,6 +1065,50 @@ def test_run_generate_background_omits_model_when_not_requested(
     assert "presenter_mode" not in seen_payloads[0]
 
 
+def test_run_generate_background_can_preserve_final_status_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            return {"task_id": "task-123"}
+        if url.endswith("/von/api/task/status/task-123"):
+            return {
+                "status": "completed",
+                "progress_history": [
+                    {
+                        "status": "llm_call_end",
+                        "stage": "context_adjudication",
+                    }
+                ],
+            }
+        if url.endswith("/von/api/task/result/task-123"):
+            return {"result": {"response": "ok"}}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    task_id, generate_payload = sampler._run_generate_background(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        prompt="Who am I in this conversation?",
+        model=None,
+        gmail_profile=None,
+        presenter_mode=False,
+        turn_expected_outcome_contract=None,
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.2,
+        include_status_payload=True,
+    )
+
+    assert task_id == "task-123"
+    assert generate_payload["response"] == "ok"
+    assert generate_payload["background_task_status"]["status"] == "completed"
+    assert generate_payload["background_task_status"]["progress_history"] == [
+        {"status": "llm_call_end", "stage": "context_adjudication"}
+    ]
+
+
 def test_run_generate_background_can_request_presenter_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1950,6 +1994,75 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
     assert model_report["certification_decision"]["promotion_authorised"] is False
     assert "insufficient_distinct_replay_cases" in (
         model_report["certification_decision"]["promotion_blockers"]
+    )
+
+
+def test_build_summary_projects_context_adjudication_from_background_status() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "gmail_token_refresh_check",
+            "category": "single_tool_gmail_auth",
+            "complexity_class": "tool_use",
+            "prompt": "Refresh the Gmail token if you have a tool.",
+            "knowledge_surfaces": ["tools"],
+            "likely_tools": ["gmail_get_auth_config"],
+        },
+        task_id="task-123",
+        session_id="session-123",
+        request_id="request-123",
+        history_location={"history_index": 2, "session_id": "session-123"},
+        generate_payload={"response": "No refresh tool is available."},
+        llm_debug_data={
+            "model": "qwen3:8b",
+            "background_task_status": {
+                "status": "completed",
+                "progress_history": [
+                    {
+                        "status": "llm_call_end",
+                        "stage": "context_adjudication",
+                        "model": "qwen3:8b",
+                        "llm_response_preview": {
+                            "text": (
+                                '{"mode":"no_prior_context",'
+                                '"summary":"Use only the current Gmail-token request.",'
+                                '"routing_evidence_scope":"current_request_only",'
+                                '"expected_outcome_scope":"current_request_only",'
+                                '"answer_scope":"current_request_only",'
+                                '"turn_context_handoff_messages":[],'
+                                '"lineage":[],'
+                                '"omitted_context_reasons":[],'
+                                '"risks":[],'
+                                '"confidence":0.85}'
+                            )
+                        },
+                    }
+                ],
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                        "selected_execution_mode": "tool_pipeline",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["tool_use"],
+        seed=17,
+        requested_model="qwen3:8b",
+        run_environment={"base_url": "http://127.0.0.1:5000"},
+    )
+
+    context_adjudication = summary["telemetry"]["context_adjudication"]
+    assert context_adjudication["source"] == "llm_debug_data"
+    assert context_adjudication["source_detail"] == "llm_response_preview.text"
+    assert context_adjudication["validated_output_recorded"] is False
+    assert context_adjudication["mode"] == "no_prior_context"
+    assert context_adjudication["summary"] == (
+        "Use only the current Gmail-token request."
     )
 
 

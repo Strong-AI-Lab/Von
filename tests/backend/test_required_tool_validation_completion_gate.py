@@ -445,6 +445,89 @@ def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> Non
     )
 
 
+def test_completion_gate_rebuild_uses_workflow_method_catalogue_snapshot() -> None:
+    data: dict[str, Any] = {
+        "turn_execution_record": {
+            "required_effects": [
+                {
+                    "effect_id": "effect_required_tool_obligations_1",
+                    "intent_origin": "required_tool_obligation_ledger",
+                    "effect_type": "tool_execution",
+                    "required_tools": ["gmail_get_auth_config"],
+                    "status": "not_satisfied",
+                    "status_reason": (
+                        "Required tool obligations were not satisfied: "
+                        "gmail_get_auth_config"
+                    ),
+                    "failure_code": "required_tool_metadata_missing",
+                    "failure_codes": ["required_tool_metadata_missing"],
+                }
+            ],
+            "completion_gate": {
+                "decision": "escalation_required",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_required_tool_obligations_1"],
+                "blocking_failure_codes": ["required_tool_metadata_missing"],
+            },
+        },
+        "required_prompt_tools": ["gmail_get_auth_config"],
+        "prompt": "Check the configured Gmail token status.",
+        "final_response": "Token status was inspected.",
+        "current_response": "Token status was inspected.",
+        "invocations": [
+            {
+                "tool": "gmail_get_auth_config",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "profile_id": "vonwitbrock-gmail",
+                    "token_status": "authorised",
+                },
+            }
+        ],
+        "method_catalogue": {"gmail_get_auth_config": {"category": "read"}},
+        "aux_llm_calls": [],
+        "workflow_routing": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        "turn_expected_outcome_contract_state": {
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {"summary": "Check Gmail token status."},
+            "required_tools": ["gmail_get_auth_config"],
+        },
+        "turn_id": "req-stale-required-tool-method-catalogue",
+        "conversation_session_id": "session-stale-required-tool-method-catalogue",
+        "user_concept_id": "#V#user",
+        "org_concept_id": "#V#org",
+        "turn_execution_record_generated_at": "2026-06-22T00:00:00Z",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is True
+    assert result.outputs["completion_gate_requires_follow_up"] is False
+    assert result.outputs["completion_gate_blocking_failure_codes"] == []
+    assert any(
+        entry.get("type") == "completion_gate_record_rebuilt"
+        and entry.get("reason")
+        == "stale_required_tool_obligation_effect_satisfied_by_current_invocations"
+        for entry in data["aux_llm_calls"]
+    )
+
+
 def test_completion_gate_promotes_selected_workflow_response_to_response_text() -> None:
     progress_events: list[dict[str, Any]] = []
     data = {

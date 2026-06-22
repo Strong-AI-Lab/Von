@@ -346,6 +346,64 @@ class TestTemperatureGuards:
         assert result.text_response == "ok"
         assert captured_kwargs["reasoning_effort"] == "low"
 
+    def test_openai_provider_omits_reasoning_effort_for_chat_tool_calls(
+        self, monkeypatch
+    ):
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            openai_client as provider_module,
+        )
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def _create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+                model="gpt-5.5",
+            )
+
+        monkeypatch.setattr(
+            provider_module.openai,
+            "AsyncOpenAI",
+            lambda **_kwargs: types.SimpleNamespace(
+                chat=types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=_create)
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            provider_module.openai,
+            "OpenAI",
+            lambda **_kwargs: object(),
+        )
+
+        client = OpenAIClient(LLMClientConfig(model="gpt-5.5", api_key="test-key"))
+        tool = ToolDefinition(
+            name="gmail_get_auth_config",
+            description="Read Gmail auth configuration",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        result = asyncio.run(
+            client.generate_with_tools(
+                prompt="hello",
+                available_tools=[tool],
+                llm_params={"reasoning_effort": "low"},
+            )
+        )
+
+        assert result.text_response == "ok"
+        assert "reasoning_effort" not in captured_kwargs
+        assert captured_kwargs["tools"]
+
     def test_unknown_model_defaults_to_ollama(self):
         """Test that unknown models default to Ollama."""
         from src.backend.languagemodels.structured_tool_calling.providers import (

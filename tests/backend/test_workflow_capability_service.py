@@ -589,6 +589,9 @@ class TestIndexFromRegistry:
                         "examples": [
                             "Create a workflow from this description request."
                         ],
+                        "routing_notes": [
+                            "Do not choose this for read-only lookup turns."
+                        ],
                     },
                     "discovery_exemplars_source": (
                         "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
@@ -605,6 +608,10 @@ class TestIndexFromRegistry:
         assert "Keywords: workflow creation, workflow repair" in capability_text
         assert (
             "Example requests: Create a workflow from this description request."
+            in capability_text
+        )
+        assert (
+            "Routing notes: Do not choose this for read-only lookup turns."
             in capability_text
         )
 
@@ -643,6 +650,9 @@ class TestIndexFromRegistry:
                             "papers and represent them."
                         )
                     ],
+                    "routing_notes": [
+                        "Do not choose this for ordinary mailbox review."
+                    ],
                 },
                 "discovery_exemplars_source": (
                     "repo_seed_text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
@@ -666,6 +676,9 @@ class TestIndexFromRegistry:
         entry = index._entries[workflow_id]
         assert "Keywords: recent email messages about arxiv papers" in entry.text
         assert "Example requests: Look for recent email messages" in entry.text
+        assert "Routing notes: Do not choose this for ordinary mailbox review." in (
+            entry.text
+        )
         assert entry.metadata["has_authoritative_routing_text"] is True
         results = index.search("Look for recent email messages about arxiv papers")
         assert results

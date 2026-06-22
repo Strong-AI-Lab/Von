@@ -337,6 +337,101 @@ def test_finalise_llm_debug_info_republishes_canonical_completion_gate(
     )
 
 
+def test_finalise_llm_debug_info_uses_catalogue_for_recovered_required_tool() -> None:
+    import src.backend.server.routes.von_routes as von_routes
+
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "req-recovered-gmail-auth-config",
+            "interaction_timestamp_utc": "2026-06-22T03:17:09+00:00",
+            "response": (
+                "Scopes for profile 'vonwitbrock-gmail': "
+                "https://www.googleapis.com/auth/gmail.modify "
+                "(source: vontology). Token status: authorised."
+            ),
+            "tool_invocations": [
+                {
+                    "tool": "gmail_get_auth_config",
+                    "status": "failed",
+                    "payload": {"namespace": "#V#user@org"},
+                    "error": "Missing required field 'profile_id'",
+                },
+                {
+                    "tool": "gmail_list_profiles",
+                    "status": "ok",
+                    "payload": {"namespace": "#V#user@org"},
+                    "result_preview": {
+                        "profiles": [
+                            {
+                                "profile_id": "vonwitbrock-gmail",
+                                "authorised_email": "zhanvonwitbrock@gmail.com",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "tool": "gmail_get_auth_config",
+                    "status": "ok",
+                    "arguments": {"profile_id": "vonwitbrock-gmail"},
+                    "payload": {
+                        "success": True,
+                        "profile_id": "vonwitbrock-gmail",
+                        "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+                        "scope_source": "vontology",
+                        "token_status": "authorised",
+                    },
+                },
+            ],
+            "turn_execution_diagnostics": {},
+            "aux_llm_calls": [],
+            "selected_workflow_trace": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "execution_mode": "tool_pipeline",
+                "expected_outcome_contract_state": {
+                    "required_tools": [
+                        "gmail_get_auth_config",
+                        "gmail_list_profiles",
+                    ]
+                },
+            },
+        },
+        prompt_text=(
+            "The interface Gmail access check passes. Are you sure? But yet, "
+            "try to refresh the token if you have a tool."
+        ),
+        response_text=(
+            "Scopes for profile 'vonwitbrock-gmail': "
+            "https://www.googleapis.com/auth/gmail.modify "
+            "(source: vontology). Token status: authorised."
+        ),
+        session_id="session-recovered-gmail-auth-config",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        workflow_routing={"workflow_id": "#V#tool_calling_workflow"},
+        method_catalogue={
+            "gmail_get_auth_config": {"category": "read"},
+            "gmail_list_profiles": {"category": "read"},
+        },
+    )
+
+    gate = result["completion_gate"]
+    assert gate["decision"] == "completed"
+    assert gate["safe_to_claim_completion"] is True
+    assert gate["requires_follow_up"] is False
+    dispatch = result["workflow_routing_diagnostics"]["dispatch"]
+    assert dispatch["required_tool_obligation_unsatisfied_count"] == 0
+    assert dispatch["required_tool_obligation_blocking_failure_codes"] == []
+    obligations = dispatch["required_tool_obligations"]["obligations"]
+    auth_obligation = next(
+        item for item in obligations if item["tool_name"] == "gmail_get_auth_config"
+    )
+    assert auth_obligation["operation_metadata_present"] is True
+    assert auth_obligation["available_on_gateway"] is True
+    assert auth_obligation["successful_count"] == 1
+    assert auth_obligation["satisfied"] is True
+
+
 def test_created_concept_label_extractor_ignores_existing_concept_results() -> None:
     import src.backend.server.routes.von_routes as von_routes
 

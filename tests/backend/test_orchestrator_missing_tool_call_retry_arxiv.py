@@ -109,6 +109,20 @@ class _Gateway:
                 "category": "write",
                 "description": "Upload cached arXiv PDF and register file copy",
             },
+            "gmail_get_auth_config": {
+                "category": "read",
+                "description": "Return OAuth scope and token status for a Gmail profile.",
+                "input_schema": {
+                    "required": {"profile_id": str},
+                    "optional": {"namespace": (str, type(None))},
+                    "allow_unknown": False,
+                    "aliases": {
+                        "profile": "profile_id",
+                        "identity": "profile_id",
+                        "profile_alias": "profile_id",
+                    },
+                },
+            },
             "materialise_scholarly_representation_for_file_copy": {
                 "category": "write",
                 "description": "Materialise scholarly-paper representation from file copy",
@@ -1939,6 +1953,102 @@ def test_tool_calling_plan_does_not_force_parent_guided_retry_without_explicit_m
     assert result.outputs["direct_response"] is True
     assert result.outputs["final_response"] == "I will search the KB and web now."
     assert result.outputs["missing_tool_call_recovery_outcome"] is None
+
+
+def test_tool_calling_plan_parent_retry_uses_catalogue_defaults_for_required_tool():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "The Gmail access check confirms authentication is valid.",
+            "qwen3:8b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: {}
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+    orchestrator._merge_prompt_requirements_with_existing_tool_policy = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+
+    class _PromptRequirements:
+        required_tools = ["gmail_get_auth_config"]
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        unavailable_required_tools: list[str] = []
+        missing_tools: list[str] = []
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = None
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": (
+                "The interface Gmail access check passes. Are you sure? But yet, "
+                "try to refresh the token if you have a tool."
+            ),
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "qwen3:8b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "emit_phase_transition": None,
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="qwen3:8b",
+            max_tool_invocations=4,
+            default_gmail_profile="vonwitbrock-gmail",
+            user_namespace="#V#user@org",
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="respond",
+        workflow_state_metadata={},
+        action_id="tool_calling.respond",
+    )
+
+    result = orchestrator._action_tool_calling_plan(cast(Any, request))
+
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["direct_response"] is False
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "gmail_get_auth_config",
+            "payload": {
+                "profile_id": "vonwitbrock-gmail",
+                "namespace": "#V#user@org",
+            },
+        }
+    ]
 
 
 def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_required_surfaces_remain():

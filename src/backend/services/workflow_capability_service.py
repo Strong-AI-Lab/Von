@@ -1295,6 +1295,15 @@ def _capability_discovery_exemplar_text(
         ]
         if example_lines:
             capability_parts.append("Example requests: " + " | ".join(example_lines))
+    routing_notes = discovery_exemplars.get("routing_notes") or []
+    if isinstance(routing_notes, Sequence) and not isinstance(routing_notes, str):
+        routing_note_lines = [
+            str(item).strip()
+            for item in routing_notes
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if routing_note_lines:
+            capability_parts.append("Routing notes: " + " | ".join(routing_note_lines))
     return capability_parts
 
 

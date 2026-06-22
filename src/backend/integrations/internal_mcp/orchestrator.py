@@ -5359,6 +5359,9 @@ class InternalMCPChatOrchestrator:
         record_llm_call = data.get("record_llm_call")
         llm_calls_log = data.get("llm_calls")
         calling_path = "legacy"
+        method_catalogue_for_retry = self._resolve_method_catalogue_for_workflow_data(
+            data
+        )
         assessment = data.get("missing_tool_call_assessment")
         if isinstance(assessment, dict) and isinstance(assessment.get("path"), str):
             calling_path = str(assessment.get("path") or "legacy")
@@ -5604,6 +5607,41 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
                 base_data=data if isinstance(data, Mapping) else None,
+            ),
+            method_catalogue=method_catalogue_for_retry,
+            selected_gmail_profile=(
+                str(data.get("gmail_profile")).strip()
+                if isinstance(data.get("gmail_profile"), str)
+                and str(data.get("gmail_profile")).strip()
+                else (
+                    str(getattr(request.environment, "default_gmail_profile", "")).strip()
+                    if isinstance(
+                        getattr(request.environment, "default_gmail_profile", None),
+                        str,
+                    )
+                    and str(
+                        getattr(request.environment, "default_gmail_profile", "")
+                    ).strip()
+                    else (
+                        str(self._default_gmail_profile).strip()
+                        if isinstance(self._default_gmail_profile, str)
+                        and str(self._default_gmail_profile).strip()
+                        else None
+                    )
+                )
+            ),
+            user_namespace=getattr(request.environment, "user_namespace", None),
+            conversation_session_id=(
+                str(data.get("conversation_session_id")).strip()
+                if isinstance(data.get("conversation_session_id"), str)
+                and str(data.get("conversation_session_id")).strip()
+                else None
+            ),
+            turn_id=(
+                str(data.get("turn_id")).strip()
+                if isinstance(data.get("turn_id"), str)
+                and str(data.get("turn_id")).strip()
+                else None
             ),
         )
         if forced:
@@ -7254,6 +7292,41 @@ class InternalMCPChatOrchestrator:
     #   orchestrator_result (pre-built OrchestratorResult for error exits).
     # ------------------------------------------------------------------
 
+    def _resolve_method_catalogue_for_workflow_data(
+        self,
+        data: Mapping[str, Any] | MutableMapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        method_catalogue = data.get("method_catalogue")
+        if not isinstance(method_catalogue, Mapping):
+            try:
+                method_catalogue = self._gateway.describe_methods()
+            except Exception:
+                method_catalogue = None
+        if isinstance(method_catalogue, Mapping):
+            if isinstance(data, MutableMapping):
+                data["method_catalogue"] = method_catalogue
+            return method_catalogue
+        return None
+
+    def _selected_gmail_profile_for_workflow_data(
+        self,
+        data: Mapping[str, Any],
+        environment: Any,
+    ) -> str | None:
+        placeholder_profile: str | None = None
+        for candidate in (
+            data.get("gmail_profile"),
+            getattr(environment, "default_gmail_profile", None),
+            getattr(self, "_default_gmail_profile", None),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                profile = candidate.strip()
+                if profile.lower() in {"default", "primary"}:
+                    placeholder_profile = placeholder_profile or profile
+                    continue
+                return profile
+        return placeholder_profile
+
     def _action_tool_calling_preflight_requirements(
         self, request: Any
     ) -> WorkflowActionResult:
@@ -7272,12 +7345,7 @@ class InternalMCPChatOrchestrator:
             else ""
         )
 
-        method_catalogue = data.get("method_catalogue")
-        if not isinstance(method_catalogue, Mapping):
-            try:
-                method_catalogue = self._gateway.describe_methods()
-            except Exception:
-                method_catalogue = None
+        method_catalogue = self._resolve_method_catalogue_for_workflow_data(data)
 
         augmented_context = data.get("augmented_context")
         context_messages = (
@@ -7321,9 +7389,6 @@ class InternalMCPChatOrchestrator:
 
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         data["prompt_requirement_url_policy"] = dict(url_requirement)
-        if isinstance(method_catalogue, Mapping):
-            data["method_catalogue"] = method_catalogue
-
         aux_log = data.get("aux_llm_calls")
         if isinstance(aux_log, list):
             try:
@@ -7860,14 +7925,12 @@ class InternalMCPChatOrchestrator:
         )
         if agent_test_plan_result is not None:
             return agent_test_plan_result
-        method_catalogue_for_requirements = data.get("method_catalogue")
-        if not isinstance(method_catalogue_for_requirements, Mapping):
-            try:
-                method_catalogue_for_requirements = self._gateway.describe_methods()
-            except Exception:
-                method_catalogue_for_requirements = None
-        if isinstance(method_catalogue_for_requirements, Mapping):
-            data["method_catalogue"] = method_catalogue_for_requirements
+        method_catalogue_for_requirements = (
+            self._resolve_method_catalogue_for_workflow_data(data)
+        )
+        selected_gmail_profile_for_retry = (
+            self._selected_gmail_profile_for_workflow_data(data, env)
+        )
 
         tool_plan_stage_messages = self._build_turn_expected_outcome_stage_messages(
             data=data,
@@ -7952,6 +8015,14 @@ class InternalMCPChatOrchestrator:
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         required_prompt_tools = list(prompt_requirements.required_tools)
+        invocations_for_requirements = cast(
+            Sequence[Mapping[str, Any]], data.get("invocations") or []
+        )
+        missing_required_tools_for_retry = self._missing_required_tools_for_retry(
+            required_tools=required_prompt_tools,
+            missing_tools=_data_list("missing_prompt_tools"),
+            tool_invocations=invocations_for_requirements,
+        )
         data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
 
         # Emit planning phase.
@@ -8179,7 +8250,7 @@ class InternalMCPChatOrchestrator:
                         ).strip()
                         else None
                     ),
-                    missing_required_tools=_data_list("missing_prompt_tools"),
+                    missing_required_tools=missing_required_tools_for_retry,
                     missing_required_fetch_concept_ids=_data_list(
                         "missing_prompt_fetch_concept_ids"
                     ),
@@ -8256,6 +8327,25 @@ class InternalMCPChatOrchestrator:
                             else None
                         ),
                         base_data=data if isinstance(data, Mapping) else None,
+                    ),
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                    selected_gmail_profile=selected_gmail_profile_for_retry,
+                    user_namespace=getattr(env, "user_namespace", None),
+                    conversation_session_id=(
+                        str(data.get("conversation_session_id")).strip()
+                        if isinstance(data.get("conversation_session_id"), str)
+                        and str(data.get("conversation_session_id")).strip()
+                        else None
+                    ),
+                    turn_id=(
+                        str(data.get("turn_id")).strip()
+                        if isinstance(data.get("turn_id"), str)
+                        and str(data.get("turn_id")).strip()
+                        else None
                     ),
                 )
                 if parent_forced_tool_calls:
@@ -8794,7 +8884,7 @@ class InternalMCPChatOrchestrator:
         ):
             data[required_key]
         aux_llm_calls = data["aux_llm_calls"]
-        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+        gmail_profile = self._selected_gmail_profile_for_workflow_data(data, env)
         conversation_session_id = data.get("conversation_session_id")
 
         # Build method catalogue on first validation pass. Keep tool category
@@ -9286,7 +9376,7 @@ class InternalMCPChatOrchestrator:
         iteration_count = data.get("iteration_count", 0)
         allowed_write_tools: set = data.get("allowed_write_tools", set())
         recent_user_prompts = data.get("recent_user_prompts", [])
-        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+        gmail_profile = self._selected_gmail_profile_for_workflow_data(data, env)
         conversation_session_id = data.get("conversation_session_id")
         emit_progress = data.get("emit_progress")
         check_cancellation = data.get("check_cancellation")
@@ -10491,12 +10581,12 @@ class InternalMCPChatOrchestrator:
                     }
                 )
 
-            method_catalogue_for_requirements = data.get("method_catalogue")
-            if not isinstance(method_catalogue_for_requirements, Mapping):
-                try:
-                    method_catalogue_for_requirements = self._gateway.describe_methods()
-                except Exception:
-                    method_catalogue_for_requirements = None
+            method_catalogue_for_requirements = (
+                self._resolve_method_catalogue_for_workflow_data(data)
+            )
+            selected_gmail_profile_for_retry = (
+                self._selected_gmail_profile_for_workflow_data(data, env)
+            )
 
             prompt_for_requirements = data.get("prompt_for_requirements")
             if (
@@ -10572,6 +10662,11 @@ class InternalMCPChatOrchestrator:
                 prompt_requirements.required_create_type_name
             )
             missing_prompt_tools = list(prompt_requirements.missing_tools)
+            missing_required_tools_for_retry = self._missing_required_tools_for_retry(
+                required_tools=required_prompt_tools,
+                missing_tools=missing_prompt_tools,
+                tool_invocations=invocations_for_requirements,
+            )
             missing_prompt_fetch_concept_ids = list(
                 prompt_requirements.missing_fetch_concept_ids
             )
@@ -10583,7 +10678,7 @@ class InternalMCPChatOrchestrator:
             )
             self._store_prompt_requirement_evaluation(data, prompt_requirements)
             has_unmet_prompt_requirements = bool(
-                missing_prompt_tools
+                missing_required_tools_for_retry
                 or missing_prompt_fetch_concept_ids
                 or missing_prompt_read_file_copy_ids
                 or missing_prompt_scholarly_representation_file_copy_ids
@@ -10598,7 +10693,9 @@ class InternalMCPChatOrchestrator:
                                 "type": "prompt_tool_requirements",
                                 "stage": "tool_execute",
                                 "required_tools": list(required_prompt_tools),
-                                "missing_tools": list(missing_prompt_tools),
+                                "missing_tools": list(
+                                    missing_required_tools_for_retry
+                                ),
                                 "required_fetch_concept_ids": list(
                                     required_prompt_fetch_concept_ids
                                 ),
@@ -10631,10 +10728,10 @@ class InternalMCPChatOrchestrator:
                             function="_action_tool_calling_respond",
                             decision_class="prompt_requirement_inference",
                             decision_source="explicit_identifier_parse",
-                            changed_outcome=bool(missing_prompt_tools),
+                            changed_outcome=bool(missing_required_tools_for_retry),
                             reason_code=(
                                 "explicit_prompt_tool_requirement_missing"
-                                if missing_prompt_tools
+                                if missing_required_tools_for_retry
                                 else "explicit_prompt_tool_requirement_satisfied"
                             ),
                             possible_inappropriate_python_code_use=False,
@@ -10712,7 +10809,7 @@ class InternalMCPChatOrchestrator:
                             ).strip()
                             else None
                         ),
-                        missing_required_tools=missing_prompt_tools,
+                        missing_required_tools=missing_required_tools_for_retry,
                         missing_required_fetch_concept_ids=(
                             missing_prompt_fetch_concept_ids
                         ),
@@ -11006,7 +11103,7 @@ class InternalMCPChatOrchestrator:
                         ).strip()
                         else None
                     ),
-                    missing_required_tools=missing_prompt_tools,
+                    missing_required_tools=missing_required_tools_for_retry,
                     missing_required_fetch_concept_ids=(
                         missing_prompt_fetch_concept_ids
                     ),
@@ -11079,6 +11176,25 @@ class InternalMCPChatOrchestrator:
                             else None
                         ),
                         base_data=data if isinstance(data, Mapping) else None,
+                    ),
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                    selected_gmail_profile=selected_gmail_profile_for_retry,
+                    user_namespace=getattr(env, "user_namespace", None),
+                    conversation_session_id=(
+                        str(data.get("conversation_session_id")).strip()
+                        if isinstance(data.get("conversation_session_id"), str)
+                        and str(data.get("conversation_session_id")).strip()
+                        else None
+                    ),
+                    turn_id=(
+                        str(data.get("turn_id")).strip()
+                        if isinstance(data.get("turn_id"), str)
+                        and str(data.get("turn_id")).strip()
+                        else None
                     ),
                 )
                 if parent_forced_tool_calls:
@@ -13595,6 +13711,25 @@ class InternalMCPChatOrchestrator:
             and InternalMCPChatOrchestrator._tool_requirement_key(tool_name)
             not in observed_tools
         ]
+
+    @classmethod
+    def _missing_required_tools_for_retry(
+        cls,
+        *,
+        required_tools: Sequence[Any],
+        missing_tools: Sequence[Any],
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Merge explicit missing tools with required tools not yet observed."""
+
+        explicit_missing = cls._ordered_unique_tool_names(missing_tools)
+        derived_missing = cls._missing_prompt_tool_requirements(
+            required_tools=list(cls._ordered_unique_tool_names(required_tools)),
+            tool_invocations=tool_invocations,
+        )
+        return list(
+            cls._ordered_unique_tool_names([*explicit_missing, *derived_missing])
+        )
 
     @staticmethod
     def _tool_requirement_key(tool_name: Any) -> str:
@@ -20666,7 +20801,19 @@ class InternalMCPChatOrchestrator:
     ) -> list[dict[str, Any]]:
         bindings: list[dict[str, Any]] = []
         if tool_name.startswith("gmail_"):
-            profile_value = payload.get("profile")
+            profile_field = "profile"
+            if schema is not None:
+                schema_fields = set(schema.required.keys()) | set(
+                    schema.optional.keys()
+                )
+                profile_alias_target = str(schema.aliases.get("profile") or "").strip()
+                if "profile" not in schema_fields and (
+                    "profile_id" in schema_fields
+                    or profile_alias_target == "profile_id"
+                ):
+                    profile_field = "profile_id"
+
+            profile_value = payload.get(profile_field)
             profile_text = (
                 str(profile_value or "").strip()
                 if isinstance(profile_value, str)
@@ -20684,10 +20831,10 @@ class InternalMCPChatOrchestrator:
                     and selected_profile_text != profile_text
                 )
             ):
-                payload["profile"] = selected_gmail_profile
+                payload[profile_field] = selected_gmail_profile
                 bindings.append(
                     {
-                        "field": "profile",
+                        "field": profile_field,
                         "source": (
                             "selected_gmail_profile_placeholder_replacement"
                             if profile_text in {"default", "primary"}
@@ -28373,6 +28520,62 @@ class InternalMCPChatOrchestrator:
 
         return forced_calls or None
 
+    def _infer_default_bound_required_retry_tool_call(
+        self,
+        *,
+        tool_name: str,
+        method_catalogue: Mapping[str, Any] | None,
+        selected_gmail_profile: str | None,
+        user_namespace: str | None,
+        conversation_session_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> _ToolCallRequest | None:
+        if not isinstance(method_catalogue, Mapping):
+            return None
+        schema = self._tool_schema_for_name(tool_name, method_catalogue)
+        if schema is None:
+            return None
+
+        payload: MutableMapping[str, Any] = {}
+        bindings = self._apply_payload_defaults(
+            tool_name,
+            payload,
+            schema=schema,
+            user_namespace=user_namespace,
+            selected_gmail_profile=selected_gmail_profile,
+            conversation_session_id=conversation_session_id,
+            turn_id=turn_id,
+        )
+        profile_bound = any(
+            isinstance(binding, Mapping)
+            and str(binding.get("source") or "").startswith("selected_gmail_profile")
+            for binding in bindings
+        )
+        if not profile_bound:
+            return None
+
+        normalise_payload_aliases(schema, payload)
+        coerce_payload_types(schema, payload)
+        validation_payload: Mapping[str, Any] = payload
+        if (
+            not schema.allow_unknown
+            and "namespace" in payload
+            and "namespace" not in schema.required
+            and "namespace" not in schema.optional
+        ):
+            validation_payload = dict(payload)
+            validation_payload.pop("namespace", None)
+        ok, _validation_errors = validate_payload(schema, validation_payload)
+        if not ok:
+            return None
+
+        return {
+            "action": "call_tool",
+            "tool": tool_name,
+            "payload": dict(validation_payload),
+            "_retry_binding_source": "schema_default_binding",
+        }
+
     def _infer_required_prompt_tool_retry_tool_calls(
         self,
         *,
@@ -28396,6 +28599,11 @@ class InternalMCPChatOrchestrator:
         workflow_required_effects_contract_source: str | None = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
         workflow_execute_inputs: Mapping[str, Any] | None = None,
+        method_catalogue: Mapping[str, Any] | None = None,
+        selected_gmail_profile: str | None = None,
+        user_namespace: str | None = None,
+        conversation_session_id: str | None = None,
+        turn_id: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Replay only structured retry payloads for explicit required tools."""
 
@@ -28720,6 +28928,18 @@ class InternalMCPChatOrchestrator:
                 if metadata_bound_calls:
                     forced_calls.extend(metadata_bound_calls)
                     continue
+
+            default_bound_call = self._infer_default_bound_required_retry_tool_call(
+                tool_name=name,
+                method_catalogue=method_catalogue,
+                selected_gmail_profile=selected_gmail_profile,
+                user_namespace=user_namespace,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+            )
+            if default_bound_call is not None:
+                forced_calls.append(default_bound_call)
+                continue
 
             identifier_bound_calls = (
                 self._infer_identifier_bound_required_retry_tool_calls(
@@ -29864,6 +30084,11 @@ class InternalMCPChatOrchestrator:
         user_concept_id: str | None = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
         workflow_execute_inputs: Mapping[str, Any] | None = None,
+        method_catalogue: Mapping[str, Any] | None = None,
+        selected_gmail_profile: str | None = None,
+        user_namespace: str | None = None,
+        conversation_session_id: str | None = None,
+        turn_id: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Replay only structurally explicit retry calls.
 
@@ -29950,6 +30175,31 @@ class InternalMCPChatOrchestrator:
             workflow_execute_inputs=(
                 workflow_execute_inputs
                 if isinstance(workflow_execute_inputs, Mapping)
+                else None
+            ),
+            method_catalogue=(
+                method_catalogue if isinstance(method_catalogue, Mapping) else None
+            ),
+            selected_gmail_profile=(
+                str(selected_gmail_profile).strip()
+                if isinstance(selected_gmail_profile, str)
+                and str(selected_gmail_profile).strip()
+                else None
+            ),
+            user_namespace=(
+                str(user_namespace).strip()
+                if isinstance(user_namespace, str) and str(user_namespace).strip()
+                else None
+            ),
+            conversation_session_id=(
+                str(conversation_session_id).strip()
+                if isinstance(conversation_session_id, str)
+                and str(conversation_session_id).strip()
+                else None
+            ),
+            turn_id=(
+                str(turn_id).strip()
+                if isinstance(turn_id, str) and str(turn_id).strip()
                 else None
             ),
         )
@@ -32255,9 +32505,48 @@ class InternalMCPChatOrchestrator:
         ):
             return {}
         probes: dict[str, dict[str, Any]] = {}
+        discovery_origin = str(
+            workflow_discovery_result.get("discovery_payload_origin") or ""
+        ).strip()
+        agent_test_synthetic_action_overlap = (
+            _is_agent_test_instance()
+            and workflow_discovery_result.get("agent_test_local_replay") is True
+            and discovery_origin == "agent_test_local_replay_synthetic_action_overlap"
+        )
         for candidate in self._extract_discovery_candidates(workflow_discovery_result):
             concept_id = str(candidate.get("concept_id") or "").strip()
             if not concept_id or concept_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+                continue
+            if (
+                agent_test_synthetic_action_overlap
+                and candidate.get("candidate_source") == "agent_test_local_replay"
+                and candidate.get("candidate_reason")
+                == "required_tool_workflow_action_overlap"
+                and candidate.get("is_executable") is True
+                and candidate.get("routing_eligible") is not False
+            ):
+                probes[concept_id] = {
+                    "workflow_id": concept_id,
+                    "initial_state_id": None,
+                    "launchable": True,
+                    "launch_input_resolution": {
+                        "status": "agent_test_local_replay_synthetic_action_overlap",
+                        "contract_source": "workflow_registry_action_overlap",
+                        "resolved_inputs": [],
+                        "unresolved_required_inputs": [],
+                    },
+                    "pre_action_validation": {
+                        "applied": False,
+                        "ok": True,
+                        "reason_code": (
+                            "agent_test_local_replay_synthetic_action_overlap"
+                        ),
+                        "symbol": None,
+                        "message": None,
+                    },
+                    "local_replay_support_only": True,
+                    "not_production_acceptance_evidence": True,
+                }
                 continue
             if (
                 self._selected_workflow_execution_mode(selected_workflow_id=concept_id)

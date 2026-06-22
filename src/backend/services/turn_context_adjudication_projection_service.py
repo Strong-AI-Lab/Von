@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
@@ -53,6 +54,7 @@ _CONTAINER_KEYS = (
     "prompt_resolution",
     "workflow_model_policy",
     "metadata",
+    "background_task_status",
 )
 
 _CONTAINER_LIST_KEYS = (
@@ -78,6 +80,8 @@ _MODEL_KEYS = (
     "model_name",
     "model",
 )
+
+_MAX_CONTAINER_SEQUENCE_ITEMS = 200
 
 
 def _safe_str(value: Any) -> str | None:
@@ -120,7 +124,7 @@ def _iter_candidate_mappings(value: Any, *, depth: int = 0) -> Sequence[Mapping[
         child_sequence = _safe_sequence(child)
         if child_sequence is None:
             continue
-        for item in child_sequence[:24]:
+        for item in child_sequence[:_MAX_CONTAINER_SEQUENCE_ITEMS]:
             if isinstance(item, Mapping):
                 candidates.extend(_iter_candidate_mappings(item, depth=depth + 1))
 
@@ -128,7 +132,7 @@ def _iter_candidate_mappings(value: Any, *, depth: int = 0) -> Sequence[Mapping[
         child_sequence = _safe_sequence(mapping.get(key))
         if child_sequence is None:
             continue
-        for item in child_sequence[:24]:
+        for item in child_sequence[:_MAX_CONTAINER_SEQUENCE_ITEMS]:
             if isinstance(item, Mapping):
                 candidates.extend(_iter_candidate_mappings(item, depth=depth + 1))
 
@@ -141,6 +145,54 @@ def _looks_like_context_adjudication_stage(mapping: Mapping[str, Any]) -> bool:
         if value and "context_adjudication" in value:
             return True
     return False
+
+
+def _json_object_from_llm_response_preview(
+    mapping: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    preview = _safe_mapping(mapping.get("llm_response_preview"))
+    if preview is None:
+        return None
+
+    text = _safe_str(preview.get("text"))
+    if text is None:
+        text = _safe_str(preview.get("preview"))
+    if text is None:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    return {str(key): _copy_jsonish(value) for key, value in parsed.items()}
+
+
+def _candidate_with_preview_adjudication_decision(
+    candidate: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _looks_like_context_adjudication_stage(candidate):
+        return None
+
+    decision = _json_object_from_llm_response_preview(candidate)
+    if decision is None:
+        return None
+
+    projected = {
+        str(key): _copy_jsonish(value)
+        for key, value in candidate.items()
+        if isinstance(key, str)
+    }
+    projected["validated_json"] = decision
+    projected["turn_context_handoff_decision"] = decision
+    projected["projection_source_detail"] = "llm_response_preview.text"
+    projected["validated_output_recorded"] = False
+    for context_key, decision_key in _DECISION_FIELD_BY_CONTEXT_KEY.items():
+        value = decision.get(decision_key)
+        if value is not None:
+            projected[context_key] = _copy_jsonish(value)
+    return projected
 
 
 def _find_handoff_candidate(
@@ -161,6 +213,11 @@ def _find_handoff_candidate(
                 candidate.get("validated_json"), Mapping
             ):
                 return source_name, candidate
+            preview_candidate = _candidate_with_preview_adjudication_decision(
+                candidate
+            )
+            if preview_candidate is not None:
+                return source_name, preview_candidate
     return None
 
 
@@ -252,6 +309,14 @@ def build_turn_context_adjudication_projection(
             value = decision_source.get(decision_key)
         if value is not None:
             projection[decision_key] = _copy_jsonish(value)
+
+    source_detail = _safe_str(candidate.get("projection_source_detail"))
+    if source_detail:
+        projection["source_detail"] = source_detail
+    if "validated_output_recorded" in candidate:
+        projection["validated_output_recorded"] = bool(
+            candidate.get("validated_output_recorded")
+        )
 
     prompt_id = _first_string_from_candidates(candidates, _PROMPT_ID_KEYS)
     if prompt_id:

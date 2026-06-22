@@ -59,6 +59,7 @@ SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
+TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID = "#V#tool_call_repair_prompt"
 POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_postcondition_critic"
 GENERAL_MAIL_REVIEW_WORKFLOW_ID = "#V#general_mail_review_workflow"
 GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID = "#V#gmail_message_detail_fetch_workflow"
@@ -166,6 +167,9 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "read-only external-system retrieval" in expected_outcome_text
     assert "#V#general_mail_review_workflow" in expected_outcome_text
     assert "ordinary mailbox review" in expected_outcome_text
+    assert "Do not use the mail-review workflow for Gmail auth" in (
+        expected_outcome_text
+    )
     assert (
         '"required_tools":["gmail_list_profiles","gmail_list_messages","gmail_get_message"]'
         in expected_outcome_text
@@ -176,6 +180,28 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         expected_outcome_text
     )
     assert "Read-only recent Gmail listing example" in expected_outcome_text
+    assert (
+        "Gmail auth, OAuth, scope, auth-config, and token-status checks"
+        in expected_outcome_text
+    )
+    assert "read-only authentication diagnostics" in expected_outcome_text
+    assert "gmail_get_auth_config" in expected_outcome_text
+    assert "confirmation doubt about a Gmail/interface access check" in (
+        expected_outcome_text
+    )
+    assert '"required_tools":["gmail_list_profiles","gmail_get_auth_config"]' in (
+        expected_outcome_text
+    )
+    assert "no manual token-refresh tool exists" in expected_outcome_text
+    assert "never invent tools such as `gmail_refresh_token`" in expected_outcome_text
+    assert "Gmail auth/token status example" in expected_outcome_text
+    assert (
+        "Gmail access-check doubt with refresh-if-available example"
+        in expected_outcome_text
+    )
+    assert "Do not answer solely from the absence of gmail_refresh_token" in (
+        expected_outcome_text
+    )
     assert "deictic or count-based" in expected_outcome_text
     assert "stable target handles" in expected_outcome_text
     assert "Do not replace concrete handles such as `2605.03042`" in (
@@ -186,6 +212,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert "turn_context_handoff_decision" in expected_outcome_text
     assert "`no_prior_context`" in expected_outcome_text
+    assert "must contain only exact tool IDs" in expected_outcome_text
+    assert "Never invent capability-shaped tool names" in expected_outcome_text
 
     context_adjudication_rows = get_texts_for_concept(
         CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
@@ -242,6 +270,12 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "read-only Gmail tools" in missing_tool_retry_text
     assert "`gmail_list_profiles`" in missing_tool_retry_text
     assert "`gmail_list_messages`" in missing_tool_retry_text
+    assert "Gmail auth, token, OAuth-scope, or auth-config checks" in (
+        missing_tool_retry_text
+    )
+    assert "Never invent placeholder aliases such as `user_profile_123`" in (
+        missing_tool_retry_text
+    )
     assert "max_results" in missing_tool_retry_text
     assert "Do not emit unsupported payload fields such as `count` or `fields`" in (
         missing_tool_retry_text
@@ -250,6 +284,24 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         missing_tool_retry_text
     )
     assert "Do not substitute external label-listing tools" in (missing_tool_retry_text)
+
+    tool_repair_rows = get_texts_for_concept(
+        TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    tool_repair_text = next(
+        (
+            (row or {}).get("text")
+            for row in tool_repair_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    assert isinstance(tool_repair_text, str)
+    assert "Gmail profile-scoped requests" in tool_repair_text
+    assert "gmail_get_auth_config" in tool_repair_text
+    assert "Never emit placeholders such as `user_profile_123`" in tool_repair_text
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
@@ -270,6 +322,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "Invalid outputs. Never do any of these" in selector_text
     assert "optional `workflow_inputs`" in selector_text
     assert "selected-workflow launch parameters" in selector_text
+    assert "Treat `required_tools` as exact-symbol evidence only" in selector_text
+    assert "do not select a semantically similar workflow" in selector_text
+    assert "Treat auth, OAuth, scope, auth-config, credential" in selector_text
+    assert "do not select it for Gmail auth/token diagnostics" in selector_text
     assert "authenticated self-relative entity-information question" in selector_text
     assert "#V#entity_information_retrieval_workflow" in selector_text
     assert '"workflow_id":"#V#tool_calling_workflow"' in selector_text
@@ -311,6 +367,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "completion_gate_escalation_signal" in recovery_text
     assert "Turn Expected Outcome Summary" in recovery_text
     assert "unresolved mechanically extractable targets remain" in recovery_text
+    assert "Gmail/mail tool blockers" in recovery_text
+    assert "gmail_list_profiles" in recovery_text
+    assert "do not answer as if Gmail auth or mailbox state was verified" in (
+        recovery_text
+    )
     assert (
         '`"retry_execution"`, `"execute_tool_batch"`, '
         '`"respond_with_answer"`, or `"respond_with_follow_up"`'
@@ -1063,6 +1124,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         "mail_review_output_shape",
         "mail_review_output_fields",
     }.issubset(mail_mapping_targets)
+    mail_routing_profile = mail_review_definition.metadata.get("routing_profile")
+    assert isinstance(mail_routing_profile, dict)
+    assert mail_routing_profile.get("ordinary_mail_review") is True
+    assert mail_routing_profile.get("excludes_auth_or_token_refresh") is True
     mail_exemplar_rows = get_texts_for_concept(
         GENERAL_MAIL_REVIEW_WORKFLOW_ID,
         predicate="#V#hasWorkflowDiscoveryExemplarsJson",
@@ -1081,6 +1146,8 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert "gmail review" in mail_exemplar_text
     assert "ordinary mailbox listing" in mail_exemplar_text
+    assert "Do not choose this for Gmail authentication" in mail_exemplar_text
+    assert "token-status" in mail_exemplar_text
     assert "Do not choose arXiv" in mail_exemplar_text
 
     assert "mail_profile_id" in mail_exemplar_text

@@ -2080,6 +2080,7 @@ def _run_generate_background(
     turn_expected_outcome_contract: Mapping[str, Any] | None,
     timeout_seconds: float,
     poll_interval_seconds: float,
+    include_status_payload: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     client_request_id = f"live-kb-prompt-{uuid.uuid4()}"
     request_payload: dict[str, Any] = {
@@ -2191,6 +2192,9 @@ def _run_generate_background(
             task_id=task_id,
             status_payload=status_payload or {},
         )
+    if include_status_payload and isinstance(status_payload, Mapping):
+        generate_payload = dict(generate_payload)
+        generate_payload["background_task_status"] = dict(status_payload)
     return task_id, generate_payload
 
 
@@ -2298,6 +2302,7 @@ TASK_RESULT_DEBUG_COPY_KEYS = (
     "render_plan",
     "turn_output_health",
     "warnings",
+    "background_task_status",
 )
 
 TASK_RESULT_DIAGNOSTIC_EVIDENCE_KEYS = frozenset(
@@ -2408,14 +2413,22 @@ def _resolve_turn_debug_data(
                 "History location did not include an integer history_index: "
                 f"{history_location!r}"
             )
+        history_debug = _fetch_turn_debug(
+            session=session,
+            base_url=base_url,
+            session_id=session_id,
+            history_index=history_index_raw,
+        )
+        if task_result_debug:
+            history_debug = dict(history_debug)
+            for key, value in task_result_debug.items():
+                if key == "background_task_status":
+                    history_debug[key] = value
+                elif key not in history_debug:
+                    history_debug[key] = value
         return (
             dict(history_location),
-            _fetch_turn_debug(
-                session=session,
-                base_url=base_url,
-                session_id=session_id,
-                history_index=history_index_raw,
-            ),
+            history_debug,
         )
     except RuntimeError as exc:
         if task_result_debug:
@@ -3645,6 +3658,7 @@ def _run_prompt_replay_arm(
         ),
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
+        include_status_payload=True,
     )
     request_id, session_id = _extract_request_and_session_ids(
         task_id=task_id,

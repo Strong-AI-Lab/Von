@@ -79,6 +79,13 @@ class OpenAIClient(LLMClient):
                         model=request_model,
                     )
                 )
+            if tools and "reasoning_effort" in request_kwargs:
+                request_kwargs.pop("reasoning_effort", None)
+                logger.info(
+                    "Omitting reasoning_effort for OpenAI Chat Completions "
+                    "structured tool call; stored model effort remains available "
+                    "on compatible API surfaces."
+                )
 
             # Only pass temperature if the model supports it and a value is set
             # Some models (e.g. gpt-5.2) only accept default temperature

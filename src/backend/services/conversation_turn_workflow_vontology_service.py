@@ -347,7 +347,16 @@ def _ensure_conversation_turn_prompt_support(
                 "gmail_list_profiles",
                 "gmail_list_messages",
                 "gmail_get_message",
+                "Do not use the mail-review workflow for Gmail auth",
+                "Gmail auth, OAuth, scope, auth-config, and token-status checks",
+                "read-only authentication diagnostics",
+                "gmail_get_auth_config",
+                "confirmation doubt about a Gmail/interface access check",
+                "no manual token-refresh tool exists",
+                "Gmail access-check doubt with refresh-if-available example",
                 "predicates, relation schema, usage, incidence",
+                "must contain only exact tool IDs",
+                "Never invent capability-shaped tool names",
             ),
         )
     ):
@@ -391,6 +400,9 @@ def _ensure_conversation_turn_prompt_support(
                 "turn_context_handoff_decision",
                 "`no_prior_context`",
                 "adjudicated prior-context handoff",
+                "Treat `required_tools` as exact-symbol evidence only",
+                "do not select a semantically similar workflow",
+                "Treat auth, OAuth, scope, auth-config, credential",
             ),
         )
     ):
@@ -415,7 +427,18 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_NARRATION_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _RECOVERY_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "Gmail/mail tool blockers",
+                "gmail_list_profiles",
+                "do not answer as if Gmail auth or mailbox state was verified",
+            ),
+        )
+    ):
         upsert_singleton_text_relation(
             subject_concept_id=_RECOVERY_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -440,6 +463,8 @@ def _ensure_conversation_turn_prompt_support(
                 "gmail_list_profiles",
                 "gmail_list_messages",
                 "gmail_get_message",
+                "Gmail auth, token, OAuth-scope, or auth-config checks",
+                "Never invent placeholder aliases such as `user_profile_123`",
             ),
         )
     ):
@@ -473,8 +498,17 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "Gmail profile-scoped requests",
+                "gmail_get_auth_config",
+                "Never emit placeholders such as `user_profile_123`",
+            ),
+        )
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,

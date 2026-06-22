@@ -40,6 +40,7 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_long_horizon_policies,
     resolve_workflow_narrative_text,
     resolve_workflow_publication_lifecycle,
+    resolve_workflow_routing_profile,
     resolve_workflow_step_runtime_policies,
     resolve_workflow_typed_subworkflow_route_map,
 )
@@ -350,6 +351,36 @@ class TestFetchConceptProjection:
 
 
 class TestWorkflowDescriptionResolution:
+    def test_resolve_workflow_routing_profile_preserves_simple_extension_fields(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowRoutingProfileJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_routing_profile.v1",
+                            "role": "execution",
+                            "authoring_intent_required": False,
+                            "ordinary_mail_review": True,
+                            "excludes_auth_or_token_refresh": True,
+                            "domain": "mail_review",
+                            "notes": ["represented boundary"],
+                        }
+                    ),
+                }
+            ],
+        ):
+            profile, source = resolve_workflow_routing_profile("#V#demo_workflow")
+
+        assert profile is not None
+        assert profile["role"] == "execution"
+        assert profile["ordinary_mail_review"] is True
+        assert profile["excludes_auth_or_token_refresh"] is True
+        assert profile["domain"] == "mail_review"
+        assert profile["notes"] == ["represented boundary"]
+        assert source == "text_relation:#V#hasWorkflowRoutingProfileJson"
+
     def test_resolve_workflow_typed_subworkflow_route_map_prefers_canonical_text_relation(
         self,
     ):
@@ -410,6 +441,9 @@ class TestWorkflowDescriptionResolution:
                             "examples": [
                                 "Create a workflow from this description request."
                             ],
+                            "routing_notes": [
+                                "Do not choose this for read-only lookup turns."
+                            ],
                         }
                     ),
                 }
@@ -423,6 +457,9 @@ class TestWorkflowDescriptionResolution:
         assert exemplars["keywords"] == ["workflow creation"]
         assert exemplars["examples"] == [
             "Create a workflow from this description request."
+        ]
+        assert exemplars["routing_notes"] == [
+            "Do not choose this for read-only lookup turns."
         ]
         assert source == "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
 
@@ -1571,6 +1608,9 @@ class TestInitialStepKey:
                                     "examples": [
                                         "Create a workflow from this description request."
                                     ],
+                                    "routing_notes": [
+                                        "Prefer this only for workflow-authoring turns."
+                                    ],
                                 },
                                 "text_relation:#V#hasWorkflowDiscoveryExemplarsJson",
                             ),
@@ -1586,6 +1626,9 @@ class TestInitialStepKey:
         ]
         assert metadata["discovery_exemplars"]["examples"] == [
             "Create a workflow from this description request."
+        ]
+        assert metadata["discovery_exemplars"]["routing_notes"] == [
+            "Prefer this only for workflow-authoring turns."
         ]
         assert (
             metadata["discovery_exemplars_source"]

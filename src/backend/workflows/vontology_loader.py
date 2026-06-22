@@ -1692,7 +1692,44 @@ def _normalise_workflow_routing_profile(
     }
     if execution_mode in {"custom_workflow", "direct_response", "tool_pipeline"}:
         payload["execution_mode"] = execution_mode
+    core_keys = {
+        "schema_version",
+        "role",
+        "workflow_role",
+        "authoring_intent_required",
+        "explicit_workflow_context_required",
+        "prefer_existing_capability",
+        "execution_mode",
+        "selected_execution_mode",
+        "dispatch_execution_mode",
+    }
+    for raw_key, raw_value in raw_profile.items():
+        key = _normalise_non_empty_text(raw_key)
+        if key is None or key in core_keys or key in payload:
+            continue
+        value = _normalise_profile_extension_value(raw_value)
+        if value is not None:
+            payload[key] = value
     return payload
+
+
+def _normalise_profile_extension_value(value: Any) -> Any | None:
+    """Preserve simple represented routing-profile extension fields.
+
+    The loader should not invent selector semantics, but it should carry
+    Vontology-authored flags and compact lists through to routing surfaces.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _normalise_non_empty_text(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(_normalise_non_empty_text_tuple(value, max_items=24))
+        return items or None
+    return None
 
 
 def _parse_workflow_routing_profile_text_value(
@@ -2004,14 +2041,21 @@ def _normalise_workflow_discovery_exemplars(
         raw_payload.get("examples") or raw_payload.get("exemplars"),
         max_items=24,
     )
-    if not keywords and not examples:
+    routing_notes = _normalise_non_empty_text_tuple(
+        raw_payload.get("routing_notes"),
+        max_items=24,
+    )
+    if not keywords and not examples and not routing_notes:
         return None
 
-    return {
+    payload = {
         "schema_version": WORKFLOW_DISCOVERY_EXEMPLARS_SCHEMA_VERSION,
         "keywords": list(keywords),
         "examples": list(examples),
     }
+    if routing_notes:
+        payload["routing_notes"] = list(routing_notes)
+    return payload
 
 
 def _parse_workflow_discovery_exemplars_text_value(
