@@ -29967,6 +29967,18 @@ async function sendQueuedChatPromptEntryAtIndex(nextIndex) {
         return;
     }
 
+    const targetSessionId = normaliseHistorySessionId(nextEntry.sessionId);
+    if (targetSessionId && targetSessionId !== activeChatSessionId) {
+        const switchResult = await switchToChatSession(targetSessionId);
+        if (!switchResult?.ok) {
+            nextEntry.syncError = switchResult?.error || 'Could not show this queued task conversation.';
+            renderChatTaskQueuePanel();
+            refreshChatSessionTabActivityIndicators();
+            updateSendButtonForCurrentChatState();
+            return;
+        }
+    }
+
     if (nextEntry.queueId) {
         try {
             const updatedEntry = await persistQueuedPromptUpdateNow(nextEntry);
@@ -31242,6 +31254,9 @@ function setLlmDebugButtonCopyState(button, state) {
     if (!(button instanceof HTMLButtonElement)) {
         return;
     }
+    const defaultLabel = button.dataset.defaultLabel || button.textContent || 'LLM ℹ';
+    button.dataset.defaultLabel = defaultLabel;
+    delete button.dataset.copyFeedback;
     button.classList.remove(
         LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS,
         LLM_DEBUG_BUTTON_COPIED_CLASS,
@@ -31249,18 +31264,23 @@ function setLlmDebugButtonCopyState(button, state) {
     );
 
     if (state === 'copied') {
+        button.textContent = 'Copied';
+        button.dataset.copyFeedback = 'Copied';
         button.classList.add(LLM_DEBUG_BUTTON_COPIED_CLASS);
         button.setAttribute('title', 'Copied LLM reference JSON to clipboard. Shift-click to open details.');
         button.setAttribute('aria-label', 'LLM reference JSON copied. Shift-click to open details.');
         return;
     }
     if (state === 'failed') {
+        button.textContent = 'Copy failed';
+        button.dataset.copyFeedback = 'Copy failed';
         button.classList.add(LLM_DEBUG_BUTTON_COPY_FAILED_CLASS);
         button.setAttribute('title', 'Copy failed. Shift-click to open LLM details.');
         button.setAttribute('aria-label', 'Copy LLM reference JSON failed. Shift-click to open details.');
         return;
     }
 
+    button.textContent = defaultLabel;
     button.classList.add(LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS);
     button.setAttribute('title', 'Copy LLM reference JSON. Shift-click to open details.');
     button.setAttribute('aria-label', 'Copy LLM reference JSON. Shift-click to open details.');

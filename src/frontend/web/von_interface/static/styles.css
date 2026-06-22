@@ -2155,6 +2155,7 @@ body {
 /* LLM debug button in chat messages */
 .llm-debug-button {
     font-size: 0.75rem;
+    min-width: 58px;
     padding: 2px 6px;
     background: #dcfce7;
     color: #14532d;
@@ -2162,6 +2163,7 @@ body {
     border-radius: 4px;
     cursor: pointer;
     transition: all 0.15s ease;
+    text-align: center;
 }
 
 .llm-debug-button:hover {
@@ -2170,14 +2172,16 @@ body {
 }
 
 .llm-debug-button.llm-debug-button-copied {
-    background: #ffffff;
-    color: #111827;
-    border-color: #d1d5db;
+    background: #16a34a;
+    color: #ffffff;
+    border-color: #15803d;
+    box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.18);
+    font-weight: 700;
 }
 
 .llm-debug-button.llm-debug-button-copied:hover {
-    background: #f8fafc;
-    border-color: #cbd5e1;
+    background: #15803d;
+    border-color: #166534;
 }
 
 .llm-debug-button.llm-debug-button-copy-failed {

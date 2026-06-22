@@ -92,6 +92,8 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(copiedPayload.messages).toBeUndefined();
         expect(copiedPayload.response).toBeUndefined();
         expect(button.classList.contains('llm-debug-button-copied')).toBe(true);
+        expect(button.textContent).toBe('Copied');
+        expect(button.dataset.copyFeedback).toBe('Copied');
         expect(button.getAttribute('title')).toContain('Copied LLM reference JSON');
         expect(popup.classList.contains('hidden')).toBe(true);
     });
