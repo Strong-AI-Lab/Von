@@ -1159,7 +1159,14 @@ def test_infer_required_prompt_tool_retry_tool_calls_binds_predicate_incidence_f
         {
             "action": "call_tool",
             "tool": "get_predicate_incidence",
-            "payload": {"concept_id": "#V#michael_witbrock"},
+            "payload": {
+                "argument_index": "subject",
+                "relation_kind": "binary",
+                "include_argument_type_counts": True,
+                "include_concept_preview": False,
+                "limit": 12,
+                "concept_id": "#V#michael_witbrock",
+            },
             "_retry_binding_source": "metadata_binding",
             "_retry_target_concept_source": "focal_concept",
         }
