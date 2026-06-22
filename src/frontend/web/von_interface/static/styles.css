@@ -9552,6 +9552,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     background: #fff5f5;
 }
 
+.chat-task-queue-item-selected {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
 .chat-task-queue-item-label {
     font-size: 12px;
     font-weight: 600;

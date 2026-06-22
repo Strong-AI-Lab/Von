@@ -236,6 +236,152 @@ describe('chat task queue', () => {
         expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
     }, 15000);
 
+    test('sends the focused queued prompt immediately without duplicating it', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+            __testOnly_setLiveChatRequestForSession,
+            sendMessage,
+        } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setLiveChatRequestForSession('busy-session', {
+            promptQueueRecordId: 'busy-record',
+            promptRaw: 'Busy'
+        });
+
+        const fetchCalls = [];
+        const generateBodies = [];
+        global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                if ((options.method || 'GET') === 'POST') {
+                    throw new Error('selected queued prompt should not create a duplicate record');
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [
+                            {
+                                queue_id: 'queue-1',
+                                prompt_raw: 'First queued',
+                                status: 'queued',
+                                session_id: 'session-1',
+                                session_name: 'Current'
+                            },
+                            {
+                                queue_id: 'queue-2',
+                                prompt_raw: 'Second selected queued',
+                                status: 'queued',
+                                session_id: 'session-1',
+                                session_name: 'Current'
+                            }
+                        ]
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-2') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            queue_id: 'queue-2',
+                            prompt_raw: 'Second selected queued',
+                            status: 'queued',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-2/claim') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: {
+                            queue_id: 'queue-2',
+                            prompt_raw: 'Second selected queued',
+                            status: 'in_progress',
+                            session_id: 'session-1',
+                            session_name: 'Current'
+                        }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-2/finish') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: { queue_id: 'queue-2', status: 'completed' }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const parsed = JSON.parse(options.body || '{}');
+                generateBodies.push(parsed);
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Selected queued response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        __testOnly_setLiveChatRequestForSession('busy-session', null);
+
+        const queuedEditors = document.querySelectorAll('.chat-task-queue-edit');
+        expect(queuedEditors).toHaveLength(2);
+        queuedEditors[1].focus();
+        queuedEditors[1].dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+
+        await sendMessage();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(generateBodies[0].prompt).toBe('Second selected queued');
+        expect(generateBodies[0].conversation_session_id).toBe('session-1');
+        expect(fetchCalls.some((call) => (
+            String(call.url) === '/von/api/chat_prompt_queue'
+            && (call.options.method || 'GET') === 'POST'
+        ))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/queue-2/claim'))).toBe(true);
+    }, 15000);
+
     test('restores interrupted persisted prompts and restarts them explicitly', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const {
@@ -450,6 +596,120 @@ describe('chat task queue', () => {
         expect(document.querySelector('.chat-task-queue-restart')).toBeNull();
         expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
         expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
+    }, 15000);
+
+    test('resubmits the focused failed persisted prompt through the normal send path', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+            sendMessage,
+        } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const fetchCalls = [];
+        const generateBodies = [];
+        global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                if ((options.method || 'GET') === 'POST') {
+                    const parsed = JSON.parse(options.body || '{}');
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                queue_id: 'queue-active',
+                                prompt_raw: parsed.prompt_raw,
+                                status: parsed.status || 'in_progress',
+                                session_id: parsed.session_id,
+                                session_name: parsed.session_name
+                            }
+                        })
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [],
+                        recent_failed_items: [{
+                            queue_id: 'queue-failed',
+                            prompt_raw: 'List the most recent 10 gmail messages together with any labels',
+                            status: 'failed',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            completed_at: '2026-06-22T13:19:21.486Z',
+                            last_error: 'The final response did not return from Von.'
+                        }]
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue/queue-active/finish') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        item: { queue_id: 'queue-active', status: 'completed' }
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const parsed = JSON.parse(options.body || '{}');
+                generateBodies.push(parsed);
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Selected failed prompt response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+
+        const failedEditor = document.querySelector('.chat-task-queue-edit');
+        expect(failedEditor).toBeTruthy();
+        failedEditor.focus();
+        failedEditor.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        expect(document.querySelector('.chat-task-queue-item-selected')).toBeTruthy();
+
+        await sendMessage();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].prompt).toBe('List the most recent 10 gmail messages together with any labels');
+        expect(generateBodies[0].conversation_session_id).toBe('session-1');
+        expect(fetchCalls.some((call) => String(call.url).includes('/queue-failed/claim'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/queue-failed/finish'))).toBe(false);
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeNull();
     }, 15000);
 
     test('shows precise persisted claim failure reason', async () => {

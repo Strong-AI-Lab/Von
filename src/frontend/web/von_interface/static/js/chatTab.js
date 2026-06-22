@@ -19966,6 +19966,8 @@ let queuedChatPrompts = [];
 let queuedChatPromptCounter = 0;
 let queuedChatPromptDrainTimer = null;
 const queuedChatPromptSyncTimers = new Map();
+let selectedChatPromptQueueEntryId = null;
+const locallyHiddenChatPromptQueueEntryKeys = new Set();
 const LEGACY_CHAT_REQUEST_SESSION_KEY = '__legacy_active_chat_session__';
 
 const CHAT_TASK_QUEUE_PANEL_ID = 'chatTaskQueuePanel';
@@ -28295,6 +28297,14 @@ export function initializeChatTab() {
     void refreshChatPromptQueueFromServer({ silent: true });
 
     // Add Enter key support for prompt input
+    promptInput.addEventListener('focusin', function () {
+        setSelectedChatPromptQueueEntryId(null);
+    });
+
+    promptInput.addEventListener('input', function () {
+        setSelectedChatPromptQueueEntryId(null);
+    });
+
     promptInput.addEventListener('keypress', function (event) {
         if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
@@ -29070,8 +29080,25 @@ function getLiveChatRequestForPromptQueueRecord(queueId) {
     return null;
 }
 
+function getChatPromptQueueEntryVisibilityKey(entry) {
+    if (!entry) {
+        return null;
+    }
+    if (typeof entry.queueId === 'string' && entry.queueId.trim()) {
+        return entry.queueId.trim();
+    }
+    if (typeof entry.id === 'string' && entry.id.trim()) {
+        return entry.id.trim();
+    }
+    return null;
+}
+
 function isDisplayedChatPromptQueueEntry(entry) {
     if (!entry) {
+        return false;
+    }
+    const visibilityKey = getChatPromptQueueEntryVisibilityKey(entry);
+    if (visibilityKey && locallyHiddenChatPromptQueueEntryKeys.has(visibilityKey)) {
         return false;
     }
     if (
@@ -29085,6 +29112,81 @@ function isDisplayedChatPromptQueueEntry(entry) {
         return false;
     }
     return true;
+}
+
+function getChatPromptQueueEntryById(entryId) {
+    const cleanEntryId = (typeof entryId === 'string' && entryId.trim())
+        ? entryId.trim()
+        : null;
+    if (!cleanEntryId) {
+        return null;
+    }
+    return queuedChatPrompts.find((entry) => entry?.id === cleanEntryId) || null;
+}
+
+function updateChatTaskQueueSelectionUi() {
+    const panel = document.getElementById(CHAT_TASK_QUEUE_PANEL_ID);
+    if (!panel) {
+        return;
+    }
+    panel.querySelectorAll('.chat-task-queue-item').forEach((item) => {
+        if (!(item instanceof HTMLElement)) {
+            return;
+        }
+        const isSelected = !!selectedChatPromptQueueEntryId
+            && item.getAttribute('data-queue-id') === selectedChatPromptQueueEntryId;
+        item.classList.toggle('chat-task-queue-item-selected', isSelected);
+        item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+    });
+}
+
+function setSelectedChatPromptQueueEntryId(entryId) {
+    const cleanEntryId = (typeof entryId === 'string' && entryId.trim())
+        ? entryId.trim()
+        : null;
+    selectedChatPromptQueueEntryId = cleanEntryId;
+    updateChatTaskQueueSelectionUi();
+}
+
+function hideChatPromptQueueEntryLocally(entry) {
+    const visibilityKey = getChatPromptQueueEntryVisibilityKey(entry);
+    if (visibilityKey) {
+        locallyHiddenChatPromptQueueEntryKeys.add(visibilityKey);
+    }
+    if (entry?.id && selectedChatPromptQueueEntryId === entry.id) {
+        selectedChatPromptQueueEntryId = null;
+    }
+    renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
+}
+
+function getSelectedChatPromptQueueEntryForSend() {
+    const activeElement = document.activeElement;
+    const activeQueueId = (
+        activeElement instanceof HTMLTextAreaElement
+        && activeElement.classList.contains('chat-task-queue-edit')
+    )
+        ? String(activeElement.dataset.queueId || '').trim()
+        : null;
+    const selectedId = activeQueueId || selectedChatPromptQueueEntryId;
+    const entry = getChatPromptQueueEntryById(selectedId);
+    if (!entry || !isDisplayedChatPromptQueueEntry(entry)) {
+        return null;
+    }
+    if (getLiveChatRequestForPromptQueueRecord(entry.queueId)) {
+        return null;
+    }
+    if (
+        entry.status !== CHAT_PROMPT_QUEUE_STATUS_QUEUED
+        && entry.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED
+    ) {
+        return null;
+    }
+    if (typeof entry.promptRaw !== 'string' || !entry.promptRaw.trim()) {
+        return null;
+    }
+    return entry;
 }
 
 async function fetchChatPromptQueueJson(path = '', options = {}) {
@@ -29335,6 +29437,27 @@ function ensureChatTaskQueuePanel() {
     if (panel.dataset.bound !== '1') {
         panel.dataset.bound = '1';
 
+        panel.addEventListener('focusin', (event) => {
+            const target = event.target;
+            if (
+                target instanceof HTMLTextAreaElement
+                && target.classList.contains('chat-task-queue-edit')
+            ) {
+                setSelectedChatPromptQueueEntryId(String(target.dataset.queueId || '').trim());
+            }
+        });
+
+        panel.addEventListener('mousedown', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) {
+                return;
+            }
+            const item = target.closest('.chat-task-queue-item');
+            if (item instanceof HTMLElement) {
+                setSelectedChatPromptQueueEntryId(String(item.getAttribute('data-queue-id') || '').trim());
+            }
+        });
+
         panel.addEventListener('input', (event) => {
             const target = event.target;
             if (!(target instanceof HTMLTextAreaElement)) {
@@ -29371,6 +29494,7 @@ function ensureChatTaskQueuePanel() {
                 if (!queued) {
                     return;
                 }
+                setSelectedChatPromptQueueEntryId(queued.id);
                 restartButton.disabled = true;
                 void (async () => {
                     try {
@@ -29493,7 +29617,11 @@ function renderChatTaskQueuePanel() {
         } else if (isFailed) {
             item.classList.add('chat-task-queue-item-failed');
         }
+        if (entry.id === selectedChatPromptQueueEntryId) {
+            item.classList.add('chat-task-queue-item-selected');
+        }
         item.setAttribute('data-queue-id', entry.id);
+        item.setAttribute('aria-selected', entry.id === selectedChatPromptQueueEntryId ? 'true' : 'false');
 
         const label = document.createElement('div');
         label.className = 'chat-task-queue-item-label';
@@ -29618,15 +29746,11 @@ async function queuePromptForLater(promptRaw, options = {}) {
     return localEntry;
 }
 
-async function drainQueuedChatPromptIfIdle() {
-    if (hasAnyLiveChatRequest() || queuedChatPrompts.length === 0) {
+async function sendQueuedChatPromptEntryAtIndex(nextIndex) {
+    if (hasAnyLiveChatRequest()) {
         return;
     }
-
-    const nextIndex = queuedChatPrompts.findIndex(
-        (entry) => entry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
-    );
-    if (nextIndex < 0) {
+    if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= queuedChatPrompts.length) {
         return;
     }
 
@@ -29691,6 +29815,21 @@ async function drainQueuedChatPromptIfIdle() {
     });
 }
 
+async function drainQueuedChatPromptIfIdle() {
+    if (hasAnyLiveChatRequest() || queuedChatPrompts.length === 0) {
+        return;
+    }
+
+    const nextIndex = queuedChatPrompts.findIndex(
+        (entry) => entry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
+    );
+    if (nextIndex < 0) {
+        return;
+    }
+
+    await sendQueuedChatPromptEntryAtIndex(nextIndex);
+}
+
 function scheduleQueuedChatPromptDrain() {
     if (queuedChatPromptDrainTimer !== null) {
         return;
@@ -29708,24 +29847,45 @@ async function handleSendPrompt(options = {}) {
     }
 
     const fromQueue = options && options.fromQueue === true;
-    let targetSessionId = normaliseHistorySessionId(options?.sessionId ?? activeChatSessionId);
+    const hasPromptOverride = options && typeof options.promptOverride === 'string';
+    const selectedQueueEntry = (!fromQueue && !hasPromptOverride)
+        ? getSelectedChatPromptQueueEntryForSend()
+        : null;
+    if (selectedQueueEntry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED && !hasAnyLiveChatRequest()) {
+        const selectedIndex = queuedChatPrompts.findIndex((entry) => entry?.id === selectedQueueEntry.id);
+        await sendQueuedChatPromptEntryAtIndex(selectedIndex);
+        return;
+    }
+    let targetSessionId = normaliseHistorySessionId(
+        options?.sessionId
+        ?? selectedQueueEntry?.sessionId
+        ?? activeChatSessionId
+    );
     let targetSessionName = (typeof options?.sessionName === 'string' && options.sessionName.trim())
         ? options.sessionName.trim()
-        : activeChatSessionName;
-    const hasPromptOverride = options && typeof options.promptOverride === 'string';
-    const promptRaw = hasPromptOverride ? options.promptOverride : promptInput.value;
+        : (
+            (typeof selectedQueueEntry?.sessionName === 'string' && selectedQueueEntry.sessionName.trim())
+                ? selectedQueueEntry.sessionName.trim()
+                : activeChatSessionName
+        );
+    const promptRaw = hasPromptOverride
+        ? options.promptOverride
+        : (selectedQueueEntry ? selectedQueueEntry.promptRaw : promptInput.value);
     const selectionStart = hasPromptOverride
         ? null
-        : (typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null);
+        : (selectedQueueEntry ? null : (typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null));
     const selectionEnd = hasPromptOverride
         ? null
-        : (typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null);
+        : (selectedQueueEntry ? null : (typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null));
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
 
     if (hasAnyLiveChatRequest()) {
         if (fromQueue) {
             scheduleQueuedChatPromptDrain();
+            return;
+        }
+        if (selectedQueueEntry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED) {
             return;
         }
         if (!promptText) {
@@ -29735,8 +29895,13 @@ async function handleSendPrompt(options = {}) {
             sessionId: targetSessionId,
             sessionName: targetSessionName
         });
+        if (selectedQueueEntry) {
+            hideChatPromptQueueEntryLocally(selectedQueueEntry);
+        }
         rememberLastSubmittedUserPrompt(promptRaw);
-        setPromptComposerValue('', { promptInput });
+        if (!selectedQueueEntry) {
+            setPromptComposerValue('', { promptInput });
+        }
         return;
     }
 
@@ -29831,6 +29996,9 @@ async function handleSendPrompt(options = {}) {
             });
     setFinishedThinkingCardForSession(targetSessionId, null);
     setLiveChatRequestForSession(targetSessionId, request);
+    if (selectedQueueEntry) {
+        hideChatPromptQueueEntryLocally(selectedQueueEntry);
+    }
     invalidateSessionHistoryCache(targetSessionId);
 
     const isRequestVisible = () => isRequestInActiveChatSession(request);
@@ -32902,6 +33070,8 @@ export function __testOnly_resetChatRequestState() {
     }
     queuedChatPromptSyncTimers.clear();
     queuedChatPromptCounter = 0;
+    selectedChatPromptQueueEntryId = null;
+    locallyHiddenChatPromptQueueEntryKeys.clear();
     activeChatRequest = null;
     lastFinishedThinkingCard = null;
     activeChatSessionId = null;
