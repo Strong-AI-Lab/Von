@@ -355,6 +355,103 @@ describe('chat task queue', () => {
         expect(document.querySelector('.chat-task-queue-item')).toBeNull();
     }, 15000);
 
+    test('keeps off-session running queue records visible while current-session prompts wait', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+            __testOnly_setLiveChatRequestForSession,
+        } = require(chatTabModulePath);
+
+        __testOnly_setLiveChatRequestForSession('session-2', {
+            promptQueueRecordId: 'queue-running',
+            promptRaw: 'Background task'
+        });
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [
+                            {
+                                queue_id: 'queue-running',
+                                prompt_raw: 'Background task',
+                                status: 'in_progress',
+                                session_id: 'session-2',
+                                session_name: 'Background'
+                            },
+                            {
+                                queue_id: 'queue-waiting',
+                                prompt_raw: 'Current task',
+                                status: 'queued',
+                                session_id: 'session-1',
+                                session_name: 'Current'
+                            }
+                        ]
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 running, 1 queued');
+        const labels = Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
+            .map((node) => node.textContent);
+        expect(labels).toEqual(['Running • Background', 'Next up • Current']);
+        const runningItem = document.querySelector('.chat-task-queue-item-running');
+        expect(runningItem?.querySelector('.chat-task-queue-delete')).toBeNull();
+        expect(runningItem?.querySelector('.chat-task-queue-restart')).toBeNull();
+    }, 15000);
+
+    test('shows recent failed persisted prompts without rerunning them', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        const fetchCalls = [];
+        global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [],
+                        recent_failed_items: [{
+                            queue_id: 'queue-failed',
+                            prompt_raw: 'List the most recent 10 gmail messages together with any labels',
+                            status: 'failed',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            completed_at: '2026-06-22T13:19:21.486Z',
+                            last_error: 'The final response did not return from Von.'
+                        }]
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await flushMicrotasks();
+
+        expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 failed');
+        expect(document.querySelector('.chat-task-queue-item-label')?.textContent).toBe('Failed • Current');
+        expect(document.querySelector('.chat-task-queue-edit')?.readOnly).toBe(true);
+        expect(document.querySelector('.chat-task-queue-failure-message')?.textContent).toBe(
+            'The final response did not return from Von.'
+        );
+        expect(document.querySelector('.chat-task-queue-delete')).toBeNull();
+        expect(document.querySelector('.chat-task-queue-restart')).toBeNull();
+        expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
+    }, 15000);
+
     test('shows precise persisted claim failure reason', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,

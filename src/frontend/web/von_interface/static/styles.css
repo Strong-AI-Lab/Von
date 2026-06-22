@@ -9542,6 +9542,16 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     background: #fffbea;
 }
 
+.chat-task-queue-item-running {
+    border-color: #93c5fd;
+    background: #eff6ff;
+}
+
+.chat-task-queue-item-failed {
+    border-color: #fca5a5;
+    background: #fff5f5;
+}
+
 .chat-task-queue-item-label {
     font-size: 12px;
     font-weight: 600;
@@ -9577,6 +9587,12 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     margin-top: 4px;
     font-size: 12px;
     color: #92400e;
+}
+
+.chat-task-queue-failure-message {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #991b1b;
 }
 
 .chat-task-queue-actions {

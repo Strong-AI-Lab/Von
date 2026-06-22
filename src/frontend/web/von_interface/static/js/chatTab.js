@@ -3779,6 +3779,30 @@ function getQueuedChatPromptCountForSession(sessionId = activeChatSessionId) {
     return queuedChatPrompts.filter((entry) => entry?.sessionKey === sessionKey).length;
 }
 
+function getChatPromptQueueCountsForSession(sessionId = activeChatSessionId) {
+    const sessionKey = getChatRequestSessionKey(sessionId);
+    const counts = {
+        total: 0,
+        queued: 0,
+        restartable: 0,
+        failed: 0
+    };
+    queuedChatPrompts.forEach((entry) => {
+        if (!entry || entry.sessionKey !== sessionKey) {
+            return;
+        }
+        counts.total += 1;
+        if (entry.status === CHAT_PROMPT_QUEUE_STATUS_FAILED) {
+            counts.failed += 1;
+        } else if (entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS) {
+            counts.restartable += 1;
+        } else {
+            counts.queued += 1;
+        }
+    });
+    return counts;
+}
+
 function getQueuedChatPromptSessionLabel(entry) {
     const explicitName = (typeof entry?.sessionName === 'string' && entry.sessionName.trim())
         ? entry.sessionName.trim()
@@ -22570,7 +22594,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         }
 
         const hasLiveRequest = !!getLiveChatRequestForSession(sid);
-        const queuedPromptCount = getQueuedChatPromptCountForSession(sid);
+        const queueCounts = getChatPromptQueueCountsForSession(sid);
+        const queuedPromptCount = queueCounts.total;
 
         if (groupLabelText) {
             tab.classList.add('chat-session-tab-group-start');
@@ -22674,9 +22699,16 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             if (hasLiveRequest) {
                 activityBadge.textContent = sid === activeSessionId ? 'Thinking' : 'Background';
                 tab.title = `${tab.title} • ${sid === activeSessionId ? 'Thinking' : 'Background request active'}`;
+            } else if (queueCounts.failed > 0 && (queueCounts.queued + queueCounts.restartable) === 0) {
+                activityBadge.textContent = queueCounts.failed === 1 ? 'Failed' : `Failed ${queueCounts.failed}`;
+                tab.title = `${tab.title} • ${queueCounts.failed} failed queued prompt${queueCounts.failed === 1 ? '' : 's'}`;
             } else {
-                activityBadge.textContent = queuedPromptCount === 1 ? 'Queued' : `Queued ${queuedPromptCount}`;
-                tab.title = `${tab.title} • ${queuedPromptCount} queued prompt${queuedPromptCount === 1 ? '' : 's'}`;
+                const pendingCount = queueCounts.queued + queueCounts.restartable;
+                activityBadge.textContent = pendingCount === 1 ? 'Queued' : `Queued ${pendingCount}`;
+                const failedSuffix = queueCounts.failed > 0
+                    ? `, ${queueCounts.failed} failed`
+                    : '';
+                tab.title = `${tab.title} • ${pendingCount} queued prompt${pendingCount === 1 ? '' : 's'}${failedSuffix}`;
             }
             header.appendChild(activityBadge);
         }
@@ -28970,8 +29002,14 @@ function normaliseChatPromptQueueStatus(status) {
     const cleaned = (typeof status === 'string' && status.trim())
         ? status.trim()
         : CHAT_PROMPT_QUEUE_STATUS_QUEUED;
-    if (cleaned === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS) {
-        return CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS;
+    if ([
+        CHAT_PROMPT_QUEUE_STATUS_QUEUED,
+        CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS,
+        CHAT_PROMPT_QUEUE_STATUS_COMPLETED,
+        CHAT_PROMPT_QUEUE_STATUS_FAILED,
+        CHAT_PROMPT_QUEUE_STATUS_CANCELLED
+    ].includes(cleaned)) {
+        return cleaned;
     }
     return CHAT_PROMPT_QUEUE_STATUS_QUEUED;
 }
@@ -29002,32 +29040,48 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
         sessionName,
         localOnly: queueId ? false : rawEntry.localOnly === true,
         syncError: rawEntry.syncError || null,
+        lastError: rawEntry.last_error || rawEntry.lastError || null,
         attemptCount: Number.isFinite(Number(rawEntry.attempt_count ?? rawEntry.attemptCount))
             ? Number(rawEntry.attempt_count ?? rawEntry.attemptCount)
             : 0,
         createdAt: rawEntry.created_at || rawEntry.createdAt || null,
-        updatedAt: rawEntry.updated_at || rawEntry.updatedAt || null
+        updatedAt: rawEntry.updated_at || rawEntry.updatedAt || null,
+        queuedAt: rawEntry.queued_at || rawEntry.queuedAt || null,
+        claimedAt: rawEntry.claimed_at || rawEntry.claimedAt || null,
+        completedAt: rawEntry.completed_at || rawEntry.completedAt || null
     };
 }
 
-function getLiveChatPromptQueueRecordIds() {
-    const ids = new Set();
+function getLiveChatRequestForPromptQueueRecord(queueId) {
+    const cleanQueueId = (typeof queueId === 'string' && queueId.trim())
+        ? queueId.trim()
+        : null;
+    if (!cleanQueueId) {
+        return null;
+    }
     for (const request of liveChatRequestsBySession.values()) {
-        const queueId = (typeof request?.promptQueueRecordId === 'string' && request.promptQueueRecordId.trim())
+        const requestQueueId = (typeof request?.promptQueueRecordId === 'string' && request.promptQueueRecordId.trim())
             ? request.promptQueueRecordId.trim()
             : null;
-        if (queueId) {
-            ids.add(queueId);
+        if (requestQueueId === cleanQueueId) {
+            return request;
         }
     }
-    return ids;
+    return null;
 }
 
 function isDisplayedChatPromptQueueEntry(entry) {
     if (!entry) {
         return false;
     }
-    if (entry.queueId && getLiveChatPromptQueueRecordIds().has(entry.queueId)) {
+    if (
+        entry.status === CHAT_PROMPT_QUEUE_STATUS_COMPLETED
+        || entry.status === CHAT_PROMPT_QUEUE_STATUS_CANCELLED
+    ) {
+        return false;
+    }
+    const liveRequest = getLiveChatRequestForPromptQueueRecord(entry.queueId);
+    if (liveRequest && isRequestInActiveChatSession(liveRequest)) {
         return false;
     }
     return true;
@@ -29119,15 +29173,20 @@ function mergePersistedChatPromptQueueEntry(entry) {
 async function refreshChatPromptQueueFromServer(options = {}) {
     try {
         const data = await fetchChatPromptQueueJson('');
-        const liveQueueIds = getLiveChatPromptQueueRecordIds();
         const persistedEntries = Array.isArray(data.items)
             ? data.items
                 .map((item) => normaliseChatPromptQueueEntry(item))
                 .filter(Boolean)
-                .filter((entry) => !(entry.queueId && liveQueueIds.has(entry.queueId)))
+                .filter(isDisplayedChatPromptQueueEntry)
+            : [];
+        const recentFailedEntries = Array.isArray(data.recent_failed_items)
+            ? data.recent_failed_items
+                .map((item) => normaliseChatPromptQueueEntry(item))
+                .filter(Boolean)
+                .filter(isDisplayedChatPromptQueueEntry)
             : [];
         const localOnlyEntries = queuedChatPrompts.filter((entry) => entry?.localOnly === true);
-        queuedChatPrompts = [...persistedEntries, ...localOnlyEntries];
+        queuedChatPrompts = [...persistedEntries, ...localOnlyEntries, ...recentFailedEntries];
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
         updateSendButtonForCurrentChatState();
@@ -29375,19 +29434,40 @@ function renderChatTaskQueuePanel() {
     const { panel, list, count } = elements;
     const displayEntries = queuedChatPrompts.filter(isDisplayedChatPromptQueueEntry);
     const queueSize = displayEntries.length;
-    const queuedCount = displayEntries.filter(
-        (entry) => entry.status !== CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
-    ).length;
-    const interruptedCount = queueSize - queuedCount;
+    let runningCount = 0;
+    let interruptedCount = 0;
+    let failedCount = 0;
+    let queuedCount = 0;
+    displayEntries.forEach((entry) => {
+        const liveRequest = getLiveChatRequestForPromptQueueRecord(entry.queueId);
+        if (liveRequest) {
+            runningCount += 1;
+        } else if (entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS) {
+            interruptedCount += 1;
+        } else if (entry.status === CHAT_PROMPT_QUEUE_STATUS_FAILED) {
+            failedCount += 1;
+        } else {
+            queuedCount += 1;
+        }
+    });
 
     if (queueSize === 0) {
         count.textContent = '0 queued';
-    } else if (interruptedCount > 0 && queuedCount > 0) {
-        count.textContent = `${queuedCount} queued, ${interruptedCount} restartable`;
-    } else if (interruptedCount > 0) {
-        count.textContent = interruptedCount === 1 ? '1 restartable' : `${interruptedCount} restartable`;
     } else {
-        count.textContent = queuedCount === 1 ? '1 queued' : `${queuedCount} queued`;
+        const countParts = [];
+        if (runningCount > 0) {
+            countParts.push(runningCount === 1 ? '1 running' : `${runningCount} running`);
+        }
+        if (queuedCount > 0) {
+            countParts.push(queuedCount === 1 ? '1 queued' : `${queuedCount} queued`);
+        }
+        if (interruptedCount > 0) {
+            countParts.push(interruptedCount === 1 ? '1 restartable' : `${interruptedCount} restartable`);
+        }
+        if (failedCount > 0) {
+            countParts.push(failedCount === 1 ? '1 failed' : `${failedCount} failed`);
+        }
+        count.textContent = countParts.join(', ');
     }
     list.innerHTML = '';
 
@@ -29398,23 +29478,37 @@ function renderChatTaskQueuePanel() {
 
     panel.classList.remove('hidden');
 
+    let queuedOrdinal = 0;
     displayEntries.forEach((entry, index) => {
-        const isInterrupted = entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS;
+        const liveRequest = getLiveChatRequestForPromptQueueRecord(entry.queueId);
+        const isRunning = !!liveRequest;
+        const isInterrupted = !isRunning && entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS;
+        const isFailed = !isRunning && entry.status === CHAT_PROMPT_QUEUE_STATUS_FAILED;
         const item = document.createElement('div');
-        item.className = isInterrupted
-            ? 'chat-task-queue-item chat-task-queue-item-interrupted'
-            : 'chat-task-queue-item';
+        item.className = 'chat-task-queue-item';
+        if (isRunning) {
+            item.classList.add('chat-task-queue-item-running');
+        } else if (isInterrupted) {
+            item.classList.add('chat-task-queue-item-interrupted');
+        } else if (isFailed) {
+            item.classList.add('chat-task-queue-item-failed');
+        }
         item.setAttribute('data-queue-id', entry.id);
 
         const label = document.createElement('div');
         label.className = 'chat-task-queue-item-label';
         const sessionLabel = getQueuedChatPromptSessionLabel(entry);
-        if (isInterrupted) {
+        if (isRunning) {
+            label.textContent = `Running • ${sessionLabel}`;
+        } else if (isInterrupted) {
             label.textContent = `Interrupted • ${sessionLabel}`;
+        } else if (isFailed) {
+            label.textContent = `Failed • ${sessionLabel}`;
         } else {
-            label.textContent = index === 0
+            queuedOrdinal += 1;
+            label.textContent = queuedOrdinal === 1
                 ? `Next up • ${sessionLabel}`
-                : `Queue #${index + 1} • ${sessionLabel}`;
+                : `Queue #${queuedOrdinal} • ${sessionLabel}`;
         }
 
         const editor = document.createElement('textarea');
@@ -29422,8 +29516,8 @@ function renderChatTaskQueuePanel() {
         editor.rows = 2;
         editor.value = entry.promptRaw;
         editor.setAttribute('data-queue-id', entry.id);
-        editor.readOnly = isInterrupted;
-        editor.setAttribute('aria-label', isInterrupted ? `Interrupted task ${index + 1}` : `Queued task ${index + 1}`);
+        editor.readOnly = isRunning || isInterrupted || isFailed;
+        editor.setAttribute('aria-label', isRunning ? `Running task ${index + 1}` : (isInterrupted ? `Interrupted task ${index + 1}` : (isFailed ? `Failed task ${index + 1}` : `Queued task ${index + 1}`)));
 
         const actions = document.createElement('div');
         actions.className = 'chat-task-queue-actions';
@@ -29438,14 +29532,16 @@ function renderChatTaskQueuePanel() {
             actions.appendChild(restartButton);
         }
 
-        const deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.className = 'btn-mini chat-task-queue-delete';
-        deleteButton.textContent = 'Delete';
-        deleteButton.setAttribute('data-queue-id', entry.id);
-        deleteButton.setAttribute('aria-label', isInterrupted ? `Delete interrupted task ${index + 1}` : `Delete queued task ${index + 1}`);
+        if (!isRunning && !isFailed) {
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'btn-mini chat-task-queue-delete';
+            deleteButton.textContent = 'Delete';
+            deleteButton.setAttribute('data-queue-id', entry.id);
+            deleteButton.setAttribute('aria-label', isInterrupted ? `Delete interrupted task ${index + 1}` : `Delete queued task ${index + 1}`);
+            actions.appendChild(deleteButton);
+        }
 
-        actions.appendChild(deleteButton);
         item.appendChild(label);
         item.appendChild(editor);
         if (entry.syncError) {
@@ -29454,7 +29550,15 @@ function renderChatTaskQueuePanel() {
             syncWarning.textContent = entry.syncError;
             item.appendChild(syncWarning);
         }
-        item.appendChild(actions);
+        if (isFailed && entry.lastError) {
+            const failureMessage = document.createElement('div');
+            failureMessage.className = 'chat-task-queue-failure-message';
+            failureMessage.textContent = entry.lastError;
+            item.appendChild(failureMessage);
+        }
+        if (actions.childElementCount > 0) {
+            item.appendChild(actions);
+        }
         list.appendChild(item);
     });
 }
@@ -29520,7 +29624,7 @@ async function drainQueuedChatPromptIfIdle() {
     }
 
     const nextIndex = queuedChatPrompts.findIndex(
-        (entry) => entry?.status !== CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
+        (entry) => entry?.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED
     );
     if (nextIndex < 0) {
         return;
@@ -31499,6 +31603,26 @@ function cloneConversationHistoryLocation(historyLocation) {
     return { ...historyLocation };
 }
 
+function isSameConversationHistoryLocation(left, right) {
+    const leftLocation = cloneConversationHistoryLocation(left);
+    const rightLocation = cloneConversationHistoryLocation(right);
+    if (!leftLocation || !rightLocation) {
+        return false;
+    }
+    const leftSessionId = typeof leftLocation.session_id === 'string' ? leftLocation.session_id.trim() : '';
+    const rightSessionId = typeof rightLocation.session_id === 'string' ? rightLocation.session_id.trim() : '';
+    const leftHistoryIndex = Number(leftLocation.history_index);
+    const rightHistoryIndex = Number(rightLocation.history_index);
+    return Boolean(
+        leftSessionId
+        && rightSessionId
+        && leftSessionId === rightSessionId
+        && Number.isInteger(leftHistoryIndex)
+        && Number.isInteger(rightHistoryIndex)
+        && leftHistoryIndex === rightHistoryIndex
+    );
+}
+
 function resolveConversationTelemetryRequestId(debugData) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
@@ -32040,10 +32164,11 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
     }
 }
 
-function findConversationTelemetryLocatorTurn(payload, { turnId = null, requestId = null } = {}) {
+function findConversationTelemetryLocatorTurn(payload, { turnId = null, requestId = null, historyLocation = null } = {}) {
     const turns = Array.isArray(payload?.turns) ? payload.turns : [];
     const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
     const cleanTurnId = typeof turnId === 'string' ? turnId.trim() : '';
+    const cleanHistoryLocation = cloneConversationHistoryLocation(historyLocation);
 
     if (cleanRequestId) {
         const matchedByRequestId = turns.find((entry) => {
@@ -32055,14 +32180,23 @@ function findConversationTelemetryLocatorTurn(payload, { turnId = null, requestI
         }
     }
 
-    if (!cleanTurnId) {
-        return null;
+    if (cleanHistoryLocation) {
+        const matchedByHistoryLocation = turns.find((entry) => (
+            isSameConversationHistoryLocation(entry?.history_location, cleanHistoryLocation)
+        ));
+        if (matchedByHistoryLocation) {
+            return matchedByHistoryLocation;
+        }
     }
 
-    return turns.find((entry) => {
-        const candidate = typeof entry?.turn_id === 'string' ? entry.turn_id.trim() : '';
-        return candidate && candidate === cleanTurnId;
-    }) || null;
+    if (cleanTurnId) {
+        return turns.find((entry) => {
+            const candidate = typeof entry?.turn_id === 'string' ? entry.turn_id.trim() : '';
+            return candidate && candidate === cleanTurnId;
+        }) || null;
+    }
+
+    return null;
 }
 
 async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugData) {
@@ -32073,13 +32207,16 @@ async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDa
     const existingHistoryLocation = cloneConversationHistoryLocation(
         debugData.turn_execution_diagnostics?.history_location || debugData.history_location
     );
-    if (existingHistoryLocation) {
+    const requestId = resolveConversationTelemetryRequestId(debugData);
+    if (existingHistoryLocation && requestId) {
         return debugData;
     }
 
-    const requestId = resolveConversationTelemetryRequestId(debugData);
-    const sessionId = typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '';
-    if (!sessionId || (!requestId && !(typeof turnId === 'string' && turnId.trim()))) {
+    const sessionId = (
+        (typeof existingHistoryLocation?.session_id === 'string' && existingHistoryLocation.session_id.trim())
+        || (typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '')
+    );
+    if (!sessionId || (!requestId && !existingHistoryLocation && !(typeof turnId === 'string' && turnId.trim()))) {
         return debugData;
     }
 
@@ -32090,23 +32227,38 @@ async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDa
 
     const matchedTurn = findConversationTelemetryLocatorTurn(locatorPayload, {
         turnId,
-        requestId
+        requestId,
+        historyLocation: existingHistoryLocation
     });
-    const historyLocation = cloneConversationHistoryLocation(matchedTurn?.history_location);
-    if (!historyLocation) {
+    const historyLocation = cloneConversationHistoryLocation(matchedTurn?.history_location) || existingHistoryLocation;
+    const matchedRequestId = typeof matchedTurn?.request_id === 'string'
+        ? matchedTurn.request_id.trim()
+        : '';
+    if (!historyLocation && !matchedRequestId) {
         return debugData;
     }
 
     const merged = {
-        ...debugData,
-        history_location: historyLocation
+        ...debugData
     };
+    if (historyLocation) {
+        merged.history_location = historyLocation;
+    }
+    if (matchedRequestId && !resolveConversationTelemetryRequestId(merged)) {
+        merged.request_id = matchedRequestId;
+    }
     if (debugData.turn_execution_diagnostics && typeof debugData.turn_execution_diagnostics === 'object') {
         merged.turn_execution_diagnostics = {
             ...debugData.turn_execution_diagnostics,
             history_location: cloneConversationHistoryLocation(
                 debugData.turn_execution_diagnostics.history_location || historyLocation
+            ),
+            request_id: (
+                typeof debugData.turn_execution_diagnostics.request_id === 'string'
+                && debugData.turn_execution_diagnostics.request_id.trim()
             )
+                ? debugData.turn_execution_diagnostics.request_id
+                : (matchedRequestId || debugData.turn_execution_diagnostics.request_id)
         };
     }
     if (typeof turnId === 'string' && turnId.trim()) {

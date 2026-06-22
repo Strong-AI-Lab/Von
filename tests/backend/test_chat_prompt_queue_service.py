@@ -242,3 +242,69 @@ def test_list_active_queue_records_expires_stale_in_progress_records() -> None:
     assert persisted is not None
     assert persisted["status"] == queue_service.STATUS_FAILED
     assert persisted["last_error"] == queue_service.STALE_IN_PROGRESS_LAST_ERROR
+
+
+def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    other_scope = queue_service.build_queue_scope(
+        user_concept_id="#V#other",
+        organisation_concept_id="#V#org",
+        namespace="#V#other@org",
+    )
+
+    failed = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Visible failed task",
+        session_id="session-1",
+        session_name="Current",
+    )
+    queue_service.claim_queue_record(scope=scope, queue_id=failed["queue_id"])
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=failed["queue_id"],
+        status=queue_service.STATUS_FAILED,
+        error="The final response did not return from Von.",
+    )
+
+    completed = queue_service.create_queue_record(scope=scope, prompt_raw="Completed task")
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=completed["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+    )
+
+    other_failed = queue_service.create_queue_record(
+        scope=other_scope,
+        prompt_raw="Private failed task",
+    )
+    queue_service.finish_prompt_record(
+        scope=other_scope,
+        queue_id=other_failed["queue_id"],
+        status=queue_service.STATUS_FAILED,
+        error="Other scope",
+    )
+
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    old_completed_at = datetime.now(timezone.utc) - timedelta(days=3)
+    stale_failed = queue_service.create_queue_record(scope=scope, prompt_raw="Old failed task")
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=stale_failed["queue_id"],
+        status=queue_service.STATUS_FAILED,
+        error="Too old",
+    )
+    coll.update_one(
+        {"queue_id": stale_failed["queue_id"]},
+        {"$set": {"completed_at": old_completed_at, "updated_at": old_completed_at}},
+    )
+
+    recent = queue_service.list_recent_failed_queue_records(scope=scope)
+
+    assert [item["queue_id"] for item in recent] == [failed["queue_id"]]
+    assert recent[0]["prompt_raw"] == "Visible failed task"
+    assert recent[0]["last_error"] == "The final response did not return from Von."

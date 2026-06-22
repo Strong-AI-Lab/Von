@@ -32,6 +32,7 @@ VALID_STATUSES = set(ACTIVE_STATUSES + TERMINAL_STATUSES)
 MAX_PROMPT_RAW_CHARS = 100_000
 MAX_SESSION_NAME_CHARS = 500
 STALE_IN_PROGRESS_TIMEOUT_SECONDS = 24 * 60 * 60
+RECENT_FAILED_VISIBILITY_SECONDS = 24 * 60 * 60
 STALE_IN_PROGRESS_LAST_ERROR = (
     "Prompt queue record expired after being in progress for more than 24 hours."
 )
@@ -346,6 +347,40 @@ def list_active_queue_records(
     }
     docs = _collection().find(query).sort([("created_at", 1)]).limit(max_limit)
     return [record for record in (serialise_queue_record(doc) for doc in docs) if record]
+
+
+def list_recent_failed_queue_records(
+    *,
+    scope: Mapping[str, Any],
+    limit: int = 20,
+    since_seconds: int = RECENT_FAILED_VISIBILITY_SECONDS,
+) -> list[dict[str, Any]]:
+    """Return bounded recent failed queue records for durable user-visible state."""
+
+    seconds = max(1, int(since_seconds or RECENT_FAILED_VISIBILITY_SECONDS))
+    cutoff = _now() - timedelta(seconds=seconds)
+    max_limit = max(1, min(int(limit or 20), 100))
+    query = {
+        **_compatible_scope_query(scope),
+        "status": STATUS_FAILED,
+        "completed_at": {"$gte": cutoff},
+    }
+    docs = (
+        _collection()
+        .find(query)
+        .sort([("completed_at", -1), ("updated_at", -1)])
+        .limit(max_limit)
+    )
+    return [record for record in (serialise_queue_record(doc) for doc in docs) if record]
+
+
+def list_queue_visibility_records(*, scope: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Return active queue records plus bounded failed records for UI visibility."""
+
+    return {
+        "items": list_active_queue_records(scope=scope),
+        "recent_failed_items": list_recent_failed_queue_records(scope=scope),
+    }
 
 
 def create_queue_record(

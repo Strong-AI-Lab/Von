@@ -106,6 +106,24 @@ describe('LLM debug popup workflow execution hook', () => {
             clipboard: { writeText }
         });
         global.fetch = jest.fn();
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        fetchWithTimeout.mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                schema_version: 'conversation_llm_telemetry_locator.v1',
+                session_id: 'session-history-ref',
+                turns: [
+                    {
+                        turn_id: 'history-assistant',
+                        request_id: 'req-history-ref',
+                        history_location: {
+                            session_id: 'session-history-ref',
+                            history_index: 4
+                        }
+                    }
+                ]
+            })
+        });
 
         setLlmDebugDataForTurn('assistant-history-ref', {
             history_location: {
@@ -126,15 +144,21 @@ describe('LLM debug popup workflow execution hook', () => {
         await flushAsyncClickHandler();
 
         expect(global.fetch).not.toHaveBeenCalled();
+        const [calledUrl] = fetchWithTimeout.mock.calls[0];
+        const parsedUrl = new URL(calledUrl, 'https://example.test');
+        expect(parsedUrl.pathname).toBe('/von/history/telemetry_locator');
+        expect(parsedUrl.searchParams.get('session_id')).toBe('session-history-ref');
         expect(writeText).toHaveBeenCalledTimes(1);
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
         expect(copiedPayload.schema_version).toBe('turn_telemetry_locator.v1');
+        expect(copiedPayload.request_id).toBe('req-history-ref');
         expect(copiedPayload.history_location).toEqual({
             session_id: 'session-history-ref',
             history_index: 4
         });
         expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
-            chat_history_get_debug_entry: expect.any(Object)
+            chat_history_get_debug_entry: expect.any(Object),
+            turn_execution_get_diagnostics: expect.any(Object)
         }));
         expect(copiedPayload.llm_debug_data).toBeUndefined();
         expect(copiedPayload.messages).toBeUndefined();

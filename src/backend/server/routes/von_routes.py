@@ -696,8 +696,8 @@ def list_chat_prompt_queue_route():
     if isinstance(scope, tuple):
         return scope
     try:
-        records = chat_prompt_queue_service.list_active_queue_records(scope=scope)
-        return jsonify({"success": True, "items": records})
+        records = chat_prompt_queue_service.list_queue_visibility_records(scope=scope)
+        return jsonify({"success": True, **records})
     except Exception as exc:
         return _chat_prompt_queue_error_response(exc, action="list", scope=scope)
 

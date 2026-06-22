@@ -111,3 +111,38 @@ def test_chat_prompt_queue_claim_reports_terminal_wrong_state(client) -> None:
     payload = claim_resp.get_json()
     assert payload["error_code"] == "wrong_state"
     assert payload["details"]["current_status"] == "completed"
+
+
+def test_chat_prompt_queue_route_lists_recent_failed_items_separately(client) -> None:
+    create_resp = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            "prompt_raw": "List the most recent 10 gmail messages together with any labels",
+            "session_id": "session-1",
+            "session_name": "Current",
+        },
+    )
+    assert create_resp.status_code == 201
+    queue_id = create_resp.get_json()["item"]["queue_id"]
+
+    claim_resp = client.post(f"/von/api/chat_prompt_queue/{queue_id}/claim")
+    assert claim_resp.status_code == 200
+
+    finish_resp = client.post(
+        f"/von/api/chat_prompt_queue/{queue_id}/finish",
+        json={
+            "status": "failed",
+            "error": "The final response did not return from Von.",
+        },
+    )
+    assert finish_resp.status_code == 200
+
+    list_resp = client.get("/von/api/chat_prompt_queue")
+    assert list_resp.status_code == 200
+    payload = list_resp.get_json()
+    assert payload["items"] == []
+    assert [item["queue_id"] for item in payload["recent_failed_items"]] == [queue_id]
+    assert (
+        payload["recent_failed_items"][0]["last_error"]
+        == "The final response did not return from Von."
+    )
