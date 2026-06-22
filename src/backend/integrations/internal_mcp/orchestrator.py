@@ -45,6 +45,12 @@ from .tool_call_contracts import (
     validation_diagnostic,
     stable_json_dumps,
 )
+from .tool_argument_resolution import (
+    apply_gmail_profile_default,
+    extend_placeholder_tool_argument_diagnostics,
+    is_unresolved_tool_argument_placeholder,
+    placeholder_tool_argument_block,
+)
 
 # Structured tool calling support (JVNAUTOSCI-799 Phase 3)
 from ...languagemodels.structured_tool_calling import (
@@ -5609,26 +5615,9 @@ class InternalMCPChatOrchestrator:
                 base_data=data if isinstance(data, Mapping) else None,
             ),
             method_catalogue=method_catalogue_for_retry,
-            selected_gmail_profile=(
-                str(data.get("gmail_profile")).strip()
-                if isinstance(data.get("gmail_profile"), str)
-                and str(data.get("gmail_profile")).strip()
-                else (
-                    str(getattr(request.environment, "default_gmail_profile", "")).strip()
-                    if isinstance(
-                        getattr(request.environment, "default_gmail_profile", None),
-                        str,
-                    )
-                    and str(
-                        getattr(request.environment, "default_gmail_profile", "")
-                    ).strip()
-                    else (
-                        str(self._default_gmail_profile).strip()
-                        if isinstance(self._default_gmail_profile, str)
-                        and str(self._default_gmail_profile).strip()
-                        else None
-                    )
-                )
+            selected_gmail_profile=self._selected_gmail_profile_for_workflow_data(
+                data,
+                request.environment,
             ),
             user_namespace=getattr(request.environment, "user_namespace", None),
             conversation_session_id=(
@@ -7313,7 +7302,6 @@ class InternalMCPChatOrchestrator:
         data: Mapping[str, Any],
         environment: Any,
     ) -> str | None:
-        placeholder_profile: str | None = None
         for candidate in (
             data.get("gmail_profile"),
             getattr(environment, "default_gmail_profile", None),
@@ -7321,11 +7309,10 @@ class InternalMCPChatOrchestrator:
         ):
             if isinstance(candidate, str) and candidate.strip():
                 profile = candidate.strip()
-                if profile.lower() in {"default", "primary"}:
-                    placeholder_profile = placeholder_profile or profile
+                if is_unresolved_tool_argument_placeholder(profile):
                     continue
                 return profile
-        return placeholder_profile
+        return None
 
     def _action_tool_calling_preflight_requirements(
         self, request: Any
@@ -9938,6 +9925,66 @@ class InternalMCPChatOrchestrator:
                 progress_argument_summary = (
                     self._build_tool_progress_argument_summary(payload)
                 )
+                placeholder_block = placeholder_tool_argument_block(
+                    tool_name=tool_name,
+                    payload=payload,
+                    payload_before_invoke=payload_before_invoke,
+                    schema=schema,
+                    call_id=call_id,
+                    stage=self.PHASE_TOOL_EXECUTE,
+                    batch_size=current_batch_size,
+                    tool_calls_done=iteration_count,
+                    tool_calls_cap=int(max_tool_invocations),
+                    tool_calls_remaining=max(
+                        0, max_tool_invocations - iteration_count
+                    ),
+                    tool_argument_summary=progress_argument_summary,
+                )
+                if placeholder_block is not None:
+                    message = str(placeholder_block["message"])
+                    invocations.append(
+                        dict(
+                            cast(
+                                Mapping[str, Any],
+                                placeholder_block["invocation_record"],
+                            )
+                        )
+                    )
+                    try:
+                        if isinstance(aux_llm_calls, list):
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
+                                    cast(
+                                        Mapping[str, Any],
+                                        placeholder_block["telemetry_payload"],
+                                    ),
+                                    stage=self.PHASE_TOOL_EXECUTE,
+                                    component="internal_mcp_orchestrator",
+                                    function="_action_tool_calling_execute",
+                                    decision_class="tool_argument_resolution_guard",
+                                    decision_source="gateway_pre_dispatch_validation",
+                                    changed_outcome=True,
+                                    reason_code=(
+                                        "unresolved_placeholder_tool_argument"
+                                    ),
+                                    possible_inappropriate_python_code_use=False,
+                                )
+                            )
+                    except Exception:
+                        pass
+                    tool_payload = self._format_tool_result(
+                        tool_name, None, None, "error", message
+                    )
+                    if callable(emit_progress):
+                        emit_progress(
+                            cast(
+                                Mapping[str, Any],
+                                placeholder_block["progress_payload"],
+                            )
+                        )
+                    augmented_context.append({"role": "tool", "content": tool_payload})
+                    tool_messages.append({"role": "tool", "content": tool_payload})
+                    continue
 
                 result = self._gateway.invoke(tool_name, payload)
                 auto_retry_details: dict[str, Any] | None = None
@@ -20678,6 +20725,15 @@ class InternalMCPChatOrchestrator:
                     warnings.append(
                         f"{tool_name}: Filled field '{field_name}' from {source_name or 'context binding'}."
                     )
+            extend_placeholder_tool_argument_diagnostics(
+                errors=errors,
+                diagnostics=diagnostics,
+                tool_name=tool_name,
+                payload=payload,
+                schema=schema,
+                contract=contract,
+                warnings=warnings,
+            )
             # Deterministically resolve close-but-invalid concept IDs for
             # write tools before schema validation/execution.
             self._rewrite_write_payload_concept_ids(
@@ -20801,48 +20857,13 @@ class InternalMCPChatOrchestrator:
     ) -> list[dict[str, Any]]:
         bindings: list[dict[str, Any]] = []
         if tool_name.startswith("gmail_"):
-            profile_field = "profile"
-            if schema is not None:
-                schema_fields = set(schema.required.keys()) | set(
-                    schema.optional.keys()
-                )
-                profile_alias_target = str(schema.aliases.get("profile") or "").strip()
-                if "profile" not in schema_fields and (
-                    "profile_id" in schema_fields
-                    or profile_alias_target == "profile_id"
-                ):
-                    profile_field = "profile_id"
-
-            profile_value = payload.get(profile_field)
-            profile_text = (
-                str(profile_value or "").strip()
-                if isinstance(profile_value, str)
-                else ""
+            profile_binding = apply_gmail_profile_default(
+                payload,
+                schema=schema,
+                selected_gmail_profile=selected_gmail_profile,
             )
-            selected_profile_text = (
-                str(selected_gmail_profile or "").strip()
-                if isinstance(selected_gmail_profile, str)
-                else ""
-            )
-            if selected_profile_text and (
-                not profile_text
-                or (
-                    profile_text in {"default", "primary"}
-                    and selected_profile_text != profile_text
-                )
-            ):
-                payload[profile_field] = selected_gmail_profile
-                bindings.append(
-                    {
-                        "field": profile_field,
-                        "source": (
-                            "selected_gmail_profile_placeholder_replacement"
-                            if profile_text in {"default", "primary"}
-                            else "selected_gmail_profile"
-                        ),
-                        "value_present": True,
-                    }
-                )
+            if profile_binding is not None:
+                bindings.append(profile_binding)
             namespace_binding = apply_namespace_to_mcp_payload(
                 payload,
                 input_schema=schema,

@@ -188,6 +188,19 @@ def _gmail_auth_config_catalogue():
     }
 
 
+def _gmail_profile_catalogue():
+    catalogue = _gmail_auth_config_catalogue()
+    catalogue["gmail_list_profiles"] = {
+        "description": "List configured Gmail profile aliases.",
+        "input_schema": {
+            "required": {},
+            "optional": {"namespace": (str, type(None))},
+            "allow_unknown": False,
+        },
+    }
+    return catalogue
+
+
 def test_apply_vontology_template_search_concepts_empty_query_uses_filter_context():
     payload = {
         "results": [{"concept_id": "#V#one"}, {"concept_id": "#V#two"}],
@@ -1251,6 +1264,69 @@ def test_default_gmail_profile_injects_profile_id_for_auth_config():
     assert "profile" not in tool_calls[0]["payload"]
 
 
+def test_gmail_profile_listing_does_not_receive_profile_default():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        default_gmail_profile="service-profile",
+    )
+    tool_calls = [{"action": "call_tool", "tool": "gmail_list_profiles", "payload": {}}]
+
+    preflight = orchestrator._preflight_tool_calls(
+        tool_calls,  # type: ignore[arg-type]
+        _gmail_profile_catalogue(),
+        allowed_tool_names=None,
+        user_namespace="#V#user@org",
+        selected_gmail_profile="service-profile",
+    )
+
+    assert preflight.errors == []
+    assert tool_calls[0]["payload"] == {"namespace": "#V#user@org"}
+
+
+def test_placeholder_gmail_profile_is_not_selected_without_concrete_default():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        default_gmail_profile=None,
+    )
+
+    selected = orchestrator._selected_gmail_profile_for_workflow_data(
+        {"gmail_profile": "default"},
+        SimpleNamespace(default_gmail_profile="primary"),
+    )
+
+    assert selected is None
+
+
+def test_placeholder_gmail_profile_argument_fails_preflight_before_gateway():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        default_gmail_profile=None,
+    )
+    tool_calls = [
+        {
+            "action": "call_tool",
+            "tool": "gmail_get_auth_config",
+            "payload": {"profile_id": "default"},
+        }
+    ]
+
+    preflight = orchestrator._preflight_tool_calls(
+        tool_calls,  # type: ignore[arg-type]
+        _gmail_auth_config_catalogue(),
+        allowed_tool_names=None,
+        user_namespace="#V#user@org",
+        selected_gmail_profile=None,
+    )
+
+    assert any("unresolved placeholder" in error for error in preflight.errors)
+    assert preflight.diagnostics
+    assert preflight.diagnostics[0]["error_code"] == (
+        "placeholder_tool_argument_unresolved"
+    )
+    assert preflight.diagnostics[0]["field"] == "profile_id"
+    assert preflight.diagnostics[0]["placeholder_value"] == "default"
+
+
 def test_tool_call_validation_uses_orchestrator_default_gmail_profile():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_DummyGateway(),  # type: ignore[arg-type]
@@ -1286,6 +1362,87 @@ def test_tool_call_validation_uses_orchestrator_default_gmail_profile():
     )
 
 
+def test_tool_call_validation_rejects_placeholder_without_concrete_profile():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        default_gmail_profile=None,
+    )
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.validate",
+        data={
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "gmail_get_auth_config",
+                    "payload": {"profile_id": "default"},
+                }
+            ],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "model_for_stage": lambda stage: "qwen3:8b",
+            "record_llm_call": lambda **kwargs: None,
+            "llm_calls": [],
+            "aux_llm_calls": [],
+            "method_catalogue": _gmail_auth_config_catalogue(),
+            "gmail_profile": "default",
+        },
+    )
+
+    result = orchestrator._action_tool_calling_validate(request)
+
+    assert result.outputs["tool_calls_validated"] is False
+    assert result.outputs["tool_call_validation_error_pending"] is True
+    diagnostics = result.outputs["tool_call_validation_diagnostics"]
+    assert diagnostics[0]["error_code"] == "placeholder_tool_argument_unresolved"
+    assert diagnostics[0]["field"] == "profile_id"
+    assert request.environment.llm_client.calls == []
+
+
+def test_tool_execution_blocks_placeholder_profile_before_gateway_invoke():
+    gateway = _DummyGateway()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        default_gmail_profile=None,
+    )
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.execute",
+        data={
+            "prompt": "Check whether Gmail access is authorised.",
+            "response": "I will check Gmail auth config.",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "gmail_get_auth_config",
+                    "payload": {"profile_id": "default"},
+                }
+            ],
+            "method_catalogue": _gmail_auth_config_catalogue(),
+            "tool_categories": {"gmail_get_auth_config": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "gmail_profile": "default",
+        },
+    )
+
+    result = orchestrator._action_tool_calling_execute(request)
+
+    assert result.outputs["tool_execution_complete"] is True
+    assert gateway.calls == []
+    assert request.data["invocations"][0]["blocked"] is True
+    assert request.data["invocations"][0]["blocked_reason"] == (
+        "unresolved_placeholder_tool_argument"
+    )
+    assert request.data["invocations"][0]["diagnostics"][0]["error_code"] == (
+        "placeholder_tool_argument_unresolved"
+    )
+    assert request.data["tool_messages"]
+
+
 def test_missing_tool_retry_forces_auth_config_with_default_profile():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_DummyGateway(),  # type: ignore[arg-type]
@@ -1305,6 +1462,24 @@ def test_missing_tool_retry_forces_auth_config_with_default_profile():
     assert calls[0]["tool"] == "gmail_get_auth_config"
     assert calls[0]["payload"]["profile_id"] == "service-profile"
     assert calls[0]["_retry_binding_source"] == "schema_default_binding"
+
+
+def test_missing_tool_retry_does_not_force_auth_config_with_placeholder_profile():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        default_gmail_profile=None,
+    )
+
+    calls = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Check whether Gmail access is authorised.",
+        missing_required_tools=["gmail_get_auth_config"],
+        method_catalogue=_gmail_auth_config_catalogue(),
+        selected_gmail_profile="default",
+        user_namespace="#V#user@org",
+    )
+
+    assert calls is None
 
 
 def test_missing_tool_retry_resolves_gateway_catalogue_for_default_bound_tool():
@@ -1339,6 +1514,7 @@ def test_missing_tool_retry_resolves_gateway_catalogue_for_default_bound_tool():
             "required_url_extraction_url": None,
             "extract_tool_calls_fn": orchestrator._extract_tool_calls,
             "aux_llm_calls": aux_llm_calls,
+            "gmail_profile": "default",
         },
     )
 
