@@ -15,6 +15,10 @@ from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnviro
 from src.backend.workflows.durable import jira_task_incremental_import_workflow as mod
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.workflow_launch_input_contracts import (
+    WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+    resolve_workflow_launch_inputs,
+)
 
 
 @pytest.fixture
@@ -54,6 +58,54 @@ def test_incremental_import_workflow_requires_vontology_materialisation(
         mod,
         "build_jira_task_incremental_import_workflow_test_registration",
     )
+
+
+def test_incremental_import_workflow_publishes_actor_launch_contract(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_report = bootstrap_canonical_jira_task_incremental_import_workflow()
+    assert bootstrap_report["success"] is True
+
+    definition = load_workflow_definition_from_vontology(
+        mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID
+    )
+    assert definition is not None
+    launch_contract = definition.metadata.get("launch_input_contract")
+    assert (
+        launch_contract["schema_version"]
+        == WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION
+    )
+    assert launch_contract["required_inputs"] == ["actor_concept_id"]
+
+    mappings = {
+        (item["target_context_key"], item["source_expression"])
+        for item in launch_contract["input_mappings"]
+    }
+    assert ("actor_concept_id", "inputs.actor_concept_id") in mappings
+    assert ("actor_concept_id", "inputs.user_concept_id") in mappings
+    assert ("organisation_concept_id", "inputs.org_concept_id") in mappings
+    assert ("namespace", "inputs.user_namespace") in mappings
+
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+        contract=launch_contract,
+        inputs={
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "user_namespace": (
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            ),
+        },
+        contract_source=definition.metadata.get("launch_input_contract_source"),
+    )
+
+    assert dict(resolution.resolved_inputs) == {
+        "actor_concept_id": "#V#michael_witbrock",
+        "organisation_concept_id": "#V#university_of_auckland_strong_ai_lab",
+        "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+    }
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.diagnostics["actor_context_binding"]["status"] == "bound"
 
 
 def test_incremental_import_workflow_executes_shared_runner(

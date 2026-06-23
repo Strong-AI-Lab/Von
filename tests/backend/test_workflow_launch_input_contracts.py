@@ -4,6 +4,7 @@ from src.backend.workflows.workflow_launch_input_contracts import (
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST,
     WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+    WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING,
     normalise_workflow_launch_input_contract,
     resolve_workflow_launch_inputs,
 )
@@ -227,6 +228,103 @@ def test_resolve_workflow_launch_inputs_extracts_all_grounded_arxiv_ids() -> Non
     }
     assert resolution.unresolved_required_inputs == ()
     assert resolution.diagnostics.get("status") == "resolved"
+
+
+def test_resolve_workflow_launch_inputs_binds_authenticated_actor_context() -> None:
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id="#V#generic_actor_context_workflow",
+        contract={
+            "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+            "required_inputs": ["actor_concept_id"],
+            "input_mappings": [
+                {
+                    "target_context_key": "actor_concept_id",
+                    "source_expression": "inputs.actor_concept_id",
+                    "extractor": "identity",
+                    "required": False,
+                },
+                {
+                    "target_context_key": "actor_concept_id",
+                    "source_expression": "inputs.user_concept_id",
+                    "extractor": "identity",
+                    "required": True,
+                },
+                {
+                    "target_context_key": "organisation_concept_id",
+                    "source_expression": "inputs.org_concept_id",
+                    "extractor": "identity",
+                    "required": False,
+                },
+                {
+                    "target_context_key": "namespace",
+                    "source_expression": "inputs.user_namespace",
+                    "extractor": "identity",
+                    "required": False,
+                },
+            ],
+        },
+        inputs={
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "user_namespace": (
+                "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+            ),
+        },
+        contract_source="test_contract",
+    )
+
+    assert dict(resolution.resolved_inputs) == {
+        "actor_concept_id": "#V#michael_witbrock",
+        "organisation_concept_id": "#V#university_of_auckland_strong_ai_lab",
+        "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+    }
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.diagnostics.get("status") == "resolved"
+    assert resolution.diagnostics.get("actor_context_binding") == {
+        "schema_version": "workflow_actor_context_binding.v1",
+        "required_fields": ["actor_concept_id"],
+        "bound_fields": [
+            "actor_concept_id",
+            "namespace",
+            "organisation_concept_id",
+        ],
+        "missing_fields": [],
+        "status": "bound",
+    }
+
+
+def test_resolve_workflow_launch_inputs_reports_typed_missing_actor_context() -> None:
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id="#V#generic_actor_context_workflow",
+        contract={
+            "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+            "required_inputs": ["actor_concept_id"],
+            "input_mappings": [
+                {
+                    "target_context_key": "actor_concept_id",
+                    "source_expression": "inputs.user_concept_id",
+                    "extractor": "identity",
+                    "required": True,
+                }
+            ],
+        },
+        inputs={"prompt": "Run the authenticated workflow."},
+    )
+
+    assert dict(resolution.resolved_inputs) == {}
+    assert resolution.unresolved_required_inputs == ("actor_concept_id",)
+    assert resolution.diagnostics.get("status") == "failed"
+    assert (
+        resolution.diagnostics.get("failure_code")
+        == WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING
+    )
+    assert resolution.diagnostics.get("actor_context_binding") == {
+        "schema_version": "workflow_actor_context_binding.v1",
+        "required_fields": ["actor_concept_id"],
+        "bound_fields": [],
+        "missing_fields": ["actor_concept_id"],
+        "status": "failed",
+    }
 
 
 def test_normalise_workflow_launch_input_contract_rejects_invalid_extractor() -> None:

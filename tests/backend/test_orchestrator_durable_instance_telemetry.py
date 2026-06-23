@@ -16,6 +16,9 @@ from src.backend.workflows import (
     WorkflowDefinition,
     WorkflowStateSpec,
 )
+from src.backend.workflows.workflow_launch_input_contracts import (
+    WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING,
+)
 from src.backend.workflows.workflow_registry import WorkflowRegistration
 
 
@@ -959,6 +962,85 @@ def test_execute_workflow_fails_closed_when_required_launch_input_unresolved(
     assert resolution.get("unresolved_required_inputs") == ["invitation_text"]
     assert resolution.get("failing_state_id") == "prepare"
     assert resolution.get("failing_action_id") == "tool.prepare"
+    assert "required launch inputs were unresolved" in str(
+        result.data.get("response_text")
+    )
+    assert fake_manager.create_for_event_calls == []
+
+
+def test_execute_workflow_fails_closed_when_actor_context_unresolved(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_id = "#V#actor_context_failure_workflow"
+    _register_test_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        initial_state="run_actor_action",
+        terminal=True,
+        actions=(WorkflowActionInvocation(action_id="tool.actor_action"),),
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "required_inputs": ["actor_concept_id"],
+                "input_mappings": [
+                    {
+                        "target_context_key": "actor_concept_id",
+                        "source_expression": "inputs.user_concept_id",
+                        "extractor": "identity",
+                        "required": True,
+                    }
+                ],
+            },
+            "launch_input_contract_source": "test_actor_contract",
+        },
+    )
+
+    def _unexpected_run(*_args: Any, **_kwargs: Any):
+        raise AssertionError(
+            "workflow executor should not run when actor context is unresolved"
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _unexpected_run)
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "prompt": "Run the authenticated workflow without identity context.",
+            "conversation_session_id": "chat-actor-fail",
+            "turn_id": "turn-actor-fail",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace=None,
+        conversation_session_id="chat-actor-fail",
+        turn_id="turn-actor-fail",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    assert result.completed is False
+    assert result.final_state == "run_actor_action"
+    assert str(result.error) == (
+        f"{WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING}:actor_concept_id"
+    )
+    resolution = result.data.get("workflow_launch_input_resolution")
+    assert isinstance(resolution, dict)
+    assert resolution.get("failure_code") == WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING
+    assert resolution.get("actor_context_binding") == {
+        "schema_version": "workflow_actor_context_binding.v1",
+        "required_fields": ["actor_concept_id"],
+        "bound_fields": [],
+        "missing_fields": ["actor_concept_id"],
+        "status": "failed",
+    }
     assert "required launch inputs were unresolved" in str(
         result.data.get("response_text")
     )

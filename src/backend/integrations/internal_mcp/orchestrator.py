@@ -153,9 +153,7 @@ from ...workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
 )
-from ...workflows.workflow_launch_input_contracts import (
-    resolve_workflow_launch_inputs,
-)
+from ...workflows.workflow_launch_input_contracts import resolve_workflow_launch_inputs
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
 from ...workflows.workflow_selector import (
@@ -31604,11 +31602,13 @@ class InternalMCPChatOrchestrator:
                 diagnostics_payload["failing_state_id"] = initial_state
                 diagnostics_payload["failing_action_id"] = failing_action_id
                 data["workflow_launch_input_resolution"] = diagnostics_payload
+                failure_code = _safe_scalar_text(
+                    diagnostics_payload.get("failure_code")
+                ) or "workflow_launch_input_resolution_failed"
+                unresolved_list_text = ", ".join(unresolved_required_inputs)
                 message = (
-                    f"Workflow {workflow_id} could not start because required launch "
-                    "inputs were unresolved: "
-                    + ", ".join(unresolved_required_inputs)
-                    + "."
+                    f"Workflow {workflow_id} could not start because required "
+                    f"launch inputs were unresolved: {unresolved_list_text}."
                 )
                 if failing_action_id:
                     message += f" Initial action: {failing_action_id}."
@@ -31621,7 +31621,8 @@ class InternalMCPChatOrchestrator:
                     completed=False,
                     final_state=initial_state or "workflow_launch_input_resolution",
                     error=(
-                        "workflow_launch_input_resolution_failed:"
+                        failure_code
+                        + ":"
                         + ",".join(unresolved_required_inputs)
                     ),
                 )

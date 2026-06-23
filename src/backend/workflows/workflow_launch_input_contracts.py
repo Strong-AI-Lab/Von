@@ -13,6 +13,17 @@ import re
 from typing import Any, Dict, List, Mapping, Tuple
 
 WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION = "workflow_launch_input_contract.v1"
+WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING = "workflow_required_actor_context_missing"
+
+_WORKFLOW_ACTOR_CONTEXT_KEYS: Tuple[str, ...] = (
+    "actor_concept_id",
+    "actor_user_concept_id",
+    "user_concept_id",
+    "organisation_concept_id",
+    "org_concept_id",
+    "namespace",
+    "user_namespace",
+)
 
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY = "identity"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT = "first_quoted_text"
@@ -408,6 +419,33 @@ def resolve_workflow_launch_inputs(
         "unresolved_optional_inputs": sorted(dict.fromkeys(unresolved_optional_inputs)),
         "mappings": mapping_diagnostics,
     }
+    required_actor_context_fields = [
+        key for key in sorted(required_targets) if key in _WORKFLOW_ACTOR_CONTEXT_KEYS
+    ]
+    bound_actor_context_fields = [
+        key for key in sorted(resolved_inputs) if key in _WORKFLOW_ACTOR_CONTEXT_KEYS
+    ]
+    missing_actor_context_fields = [
+        key
+        for key in sorted(dict.fromkeys(unresolved_required_inputs))
+        if key in _WORKFLOW_ACTOR_CONTEXT_KEYS
+    ]
+    if (
+        required_actor_context_fields
+        or bound_actor_context_fields
+        or missing_actor_context_fields
+    ):
+        diagnostics["actor_context_binding"] = {
+            "schema_version": "workflow_actor_context_binding.v1",
+            "required_fields": required_actor_context_fields,
+            "bound_fields": bound_actor_context_fields,
+            "missing_fields": missing_actor_context_fields,
+            "status": "failed" if missing_actor_context_fields else "bound",
+        }
+    if missing_actor_context_fields:
+        diagnostics["failure_code"] = WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING
+    elif unresolved_required_inputs:
+        diagnostics["failure_code"] = "workflow_launch_input_resolution_failed"
     return WorkflowLaunchInputResolution(
         resolved_inputs=resolved_inputs,
         unresolved_required_inputs=tuple(
@@ -422,6 +460,7 @@ def resolve_workflow_launch_inputs(
 
 __all__ = [
     "WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION",
+    "WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST",

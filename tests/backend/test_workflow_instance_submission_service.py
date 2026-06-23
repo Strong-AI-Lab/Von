@@ -23,6 +23,9 @@ from src.backend.workflows.engine import (
     WorkflowStateSpec,
 )
 from src.backend.workflows.workflow_registry import WorkflowRegistry
+from src.backend.workflows.workflow_launch_input_contracts import (
+    WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+)
 from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
@@ -1431,6 +1434,77 @@ def test_submit_verified_workflow_instance_applies_launch_input_contract() -> No
         result.verification["workflow_launch_input_resolution"]["resolved_inputs"]
         == ["prompt_text"]
     )
+
+
+def test_submit_verified_workflow_instance_binds_authenticated_actor_context() -> None:
+    manager = MagicMock()
+    manager.create_instance.return_value = "instance-actor-1"
+    verification = _make_verification()
+    definition = _make_definition(
+        include_action=True,
+        metadata={
+            "launch_input_contract": {
+                "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+                "required_inputs": ["actor_concept_id"],
+                "input_mappings": [
+                    {
+                        "target_context_key": "actor_concept_id",
+                        "source_expression": "inputs.user_concept_id",
+                        "extractor": "identity",
+                        "required": True,
+                    },
+                    {
+                        "target_context_key": "organisation_concept_id",
+                        "source_expression": "inputs.org_concept_id",
+                        "extractor": "identity",
+                        "required": False,
+                    },
+                    {
+                        "target_context_key": "namespace",
+                        "source_expression": "inputs.user_namespace",
+                        "extractor": "identity",
+                        "required": False,
+                    },
+                ],
+            },
+            "launch_input_contract_source": "test_actor_contract",
+        },
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        side_effect=[verification, verification],
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice@org_nao",
+            inputs={"dry_run": True},
+        )
+
+    assert result.success is True
+    create_inputs = manager.create_instance.call_args.kwargs["inputs"]
+    assert create_inputs["actor_concept_id"] == "#V#user_alice"
+    assert create_inputs["organisation_concept_id"] == "#V#org_nao"
+    assert create_inputs["namespace"] == "#V#user_alice@org_nao"
+    resolution = create_inputs["workflow_launch_input_resolution"]
+    assert resolution["status"] == "resolved"
+    assert resolution["actor_context_binding"] == {
+        "schema_version": "workflow_actor_context_binding.v1",
+        "required_fields": ["actor_concept_id"],
+        "bound_fields": [
+            "actor_concept_id",
+            "namespace",
+            "organisation_concept_id",
+        ],
+        "missing_fields": [],
+        "status": "bound",
+    }
 
 
 def test_submit_verified_workflow_instance_rejects_unresolved_required_launch_input() -> None:

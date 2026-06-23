@@ -54,6 +54,7 @@ from ..workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
 from ..workflow_launch_input_contracts import (
+    WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING,
     WorkflowLaunchInputResolution,
     resolve_workflow_launch_inputs,
 )
@@ -417,6 +418,7 @@ def _resolve_submission_launch_inputs(
     inputs: Mapping[str, Any],
     actor_user_id: str | None = None,
     actor_org_id: str | None = None,
+    actor_namespace: str | None = None,
 ) -> tuple[WorkflowDefinition | None, WorkflowLaunchInputResolution]:
     workflow_definition: WorkflowDefinition | None = None
     try:
@@ -460,10 +462,19 @@ def _resolve_submission_launch_inputs(
         if isinstance(workflow_metadata, Mapping)
         else None
     )
+    launch_inputs = dict(inputs)
+    if actor_user_id:
+        launch_inputs.setdefault("user_concept_id", actor_user_id)
+    if actor_org_id:
+        launch_inputs.setdefault("org_concept_id", actor_org_id)
+    if actor_namespace:
+        launch_inputs.setdefault("user_namespace", actor_namespace)
+        launch_inputs.setdefault("namespace", actor_namespace)
+
     resolution = resolve_workflow_launch_inputs(
         workflow_id=workflow_id,
         contract=launch_contract if isinstance(launch_contract, Mapping) else None,
-        inputs=inputs,
+        inputs=launch_inputs,
         contract_source=(
             str(launch_contract_source).strip()
             if isinstance(launch_contract_source, str) and launch_contract_source.strip()
@@ -1274,6 +1285,7 @@ def submit_verified_workflow_instance(
         inputs=inputs_payload,
         actor_user_id=resolved_user_id,
         actor_org_id=resolved_org_id,
+        actor_namespace=canonical_namespace,
     )
     launch_diagnostics = dict(launch_resolution.diagnostics)
     verification_payload["workflow_launch_input_resolution"] = launch_diagnostics
@@ -1303,18 +1315,31 @@ def submit_verified_workflow_instance(
         if isinstance(item, str) and item.strip()
     )
     if unresolved_required_inputs:
+        failure_code = (
+            str(launch_diagnostics.get("failure_code") or "").strip()
+            or "workflow_launch_input_resolution_failed"
+        )
+        if failure_code == WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING:
+            failure_message = (
+                f"Workflow '{workflow_id}' could not start because required "
+                "authenticated actor context inputs were unresolved: "
+                + ", ".join(unresolved_required_inputs)
+                + "."
+            )
+        else:
+            failure_message = (
+                f"Workflow '{workflow_id}' could not start because required launch "
+                "inputs were unresolved: "
+                + ", ".join(unresolved_required_inputs)
+                + "."
+            )
         return WorkflowInstanceSubmissionResult(
             success=False,
             workflow_id=workflow_id,
             status="rejected_launch_input_contract",
             instance_id=None,
-            error_code="workflow_launch_input_resolution_failed",
-            error=(
-                f"Workflow '{workflow_id}' could not start because required launch "
-                "inputs were unresolved: "
-                + ", ".join(unresolved_required_inputs)
-                + "."
-            ),
+            error_code=failure_code,
+            error=failure_message,
             verification=verification_payload,
             created_new=None,
         )

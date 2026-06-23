@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "32",
+  "seed_version": "33",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -8553,6 +8553,56 @@
     {
       "display_name": "Jira Task Incremental Import Workflow",
       "description": "Imports or reconciles Jira task data into represented Von task state. This workflow is for explicit Jira import, synchronisation, migration, reconciliation, or backfill work; it is not a read-only Jira issue search/list/recency lookup workflow.",
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "actor_concept_id"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "actor_concept_id",
+            "source_expression": "inputs.actor_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Preserve an explicitly supplied actor concept id when one is already present in the invocation context."
+          },
+          {
+            "target_context_key": "actor_concept_id",
+            "source_expression": "inputs.user_concept_id",
+            "extractor": "identity",
+            "required": true,
+            "description": "Bind the authenticated turn user into the actor concept id required by the import action."
+          },
+          {
+            "target_context_key": "organisation_concept_id",
+            "source_expression": "inputs.organisation_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Preserve an explicitly supplied organisation concept id when one is already present in the invocation context."
+          },
+          {
+            "target_context_key": "organisation_concept_id",
+            "source_expression": "inputs.org_concept_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Bind the authenticated organisation concept id into the import action context when available."
+          },
+          {
+            "target_context_key": "namespace",
+            "source_expression": "inputs.namespace",
+            "extractor": "identity",
+            "required": false,
+            "description": "Preserve an explicitly supplied namespace when one is already present in the invocation context."
+          },
+          {
+            "target_context_key": "namespace",
+            "source_expression": "inputs.user_namespace",
+            "extractor": "identity",
+            "required": false,
+            "description": "Bind the authenticated user namespace into the import action context when available."
+          }
+        ]
+      },
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
