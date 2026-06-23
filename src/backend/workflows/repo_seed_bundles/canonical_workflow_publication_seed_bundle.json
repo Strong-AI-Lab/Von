@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "31",
+  "seed_version": "32",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -8551,6 +8551,20 @@
       "workflow_id": "#V#entity_identity_resolution_workflow"
     },
     {
+      "display_name": "Jira Task Incremental Import Workflow",
+      "description": "Imports or reconciles Jira task data into represented Von task state. This workflow is for explicit Jira import, synchronisation, migration, reconciliation, or backfill work; it is not a read-only Jira issue search/list/recency lookup workflow.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":false,\"domain\":\"jira_task_import\",\"excludes_read_only_lookup\":true,\"requires_explicit_import_or_reconciliation_intent\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"Jira task import\",\"Jira task synchronisation\",\"Jira task migration\",\"Jira task reconciliation\",\"Jira task backfill\"],\"examples\":[\"Import Jira tasks into represented Von task state.\",\"Synchronise Jira tasks into Vontology.\",\"Backfill Jira task records for the project.\"],\"routing_notes\":[\"Choose this only when the user explicitly asks to import, synchronise, migrate, reconcile, or backfill Jira tasks into represented task state.\",\"Do not choose this for read-only Jira issue/task listing, search, review, most-recent, latest, newest, or recently-updated lookup turns.\",\"For read-only Jira lookup turns, prefer a read-only Jira lookup route or the general tool-calling workflow with jira_search before answer synthesis.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "publication_spec": {
         "initial_state": "run_sync",
         "steps": [

@@ -70,6 +70,32 @@ def test_expected_outcome_prompt_binds_type_targets_for_predicate_schema_turns()
     assert "authenticated user" in lowered
 
 
+def test_expected_outcome_prompt_requires_read_only_jira_lookup_evidence() -> None:
+    prompt_text = (
+        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "read-only jira retrieval" in lowered
+    assert "latest, most recent, newest" in lowered
+    assert "jira_search" in prompt_text
+    assert "do not use jira import/reconciliation workflows" in lowered
+    assert "#V#jira_task_full_reconciliation_workflow" in prompt_text
+    assert "#V#jira_task_incremental_import_workflow" in prompt_text
+    assert "task_import_jira_issues" in prompt_text
+    assert "Jira recency/list lookup example" in prompt_text
+    assert '"required_tools":["jira_search"]' in prompt_text
+    assert "concrete predicate before `ORDER BY`" in prompt_text
+    assert "never use a bare `ORDER BY updated DESC`" in prompt_text
+    assert "issuetype = Task ORDER BY created DESC" in prompt_text
+    assert "project = JVNAUTOSCI AND issuetype = Task ORDER BY created DESC" in (
+        prompt_text
+    )
+    assert "created DESC" in prompt_text
+    assert "updated DESC" in prompt_text
+    assert "recency basis" in lowered
+
+
 def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> None:
     prompt_text = (_SEED_DIR / "missing_tool_call_retry_prompt_seed.md").read_text(
         encoding="utf-8"
@@ -136,3 +162,41 @@ def test_tool_calling_workflow_has_generic_write_discovery_exemplars() -> None:
     assert routing_profile["schema_version"] == "workflow_routing_profile.v1"
     assert routing_profile["role"] == "execution"
     assert routing_profile["authoring_intent_required"] is False
+
+
+def test_jira_incremental_import_workflow_excludes_read_only_lookup_routing() -> None:
+    bundle = json.loads(
+        (_SEED_DIR / "canonical_workflow_publication_seed_bundle.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    workflows = {
+        item.get("workflow_id"): item
+        for item in bundle.get("workflows", [])
+        if isinstance(item, dict)
+    }
+    workflow = workflows["#V#jira_task_incremental_import_workflow"]
+    text_relations = workflow.get("text_relations", [])
+
+    routing_text = next(
+        item["text"]
+        for item in text_relations
+        if item.get("predicate") == "#V#hasWorkflowRoutingProfileJson"
+    )
+    routing_profile = json.loads(routing_text)
+    assert routing_profile["schema_version"] == "workflow_routing_profile.v1"
+    assert routing_profile["role"] == "maintenance"
+    assert routing_profile["domain"] == "jira_task_import"
+    assert routing_profile["excludes_read_only_lookup"] is True
+    assert routing_profile["requires_explicit_import_or_reconciliation_intent"] is True
+
+    exemplar_text = next(
+        item["text"]
+        for item in text_relations
+        if item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
+    )
+    exemplars = json.loads(exemplar_text)
+    haystack = json.dumps(exemplars, sort_keys=True).lower()
+    assert "import, synchronise, migrate, reconcile, or backfill" in haystack
+    assert "do not choose this for read-only jira issue/task listing" in haystack
+    assert "jira_search before answer synthesis" in haystack
