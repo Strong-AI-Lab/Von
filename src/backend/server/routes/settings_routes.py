@@ -1006,6 +1006,7 @@ def save_all_settings():
                     llm_data.get(MODEL_PARAMETERS_KEY) or llm_data.get("modelParameters"),
                     provider=provider,
                     model=model,
+                    include_registry=True,
                 )
                 if scope == "user":
                     ok = (
@@ -1475,6 +1476,7 @@ def set_llm_override():
             data.get(MODEL_PARAMETERS_KEY) or data.get("modelParameters"),
             provider=provider,
             model=model,
+            include_registry=True,
         )
         if scope == "user":
             ok = (
@@ -1645,12 +1647,8 @@ def get_model_parameter_capabilities():
     provider = str(request.args.get("provider") or "").strip().lower()
     model = str(request.args.get("model") or "").strip()
     api_surface = str(request.args.get("api_surface") or "responses").strip()
-    include_registry = str(request.args.get("include_registry") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    include_registry_arg = str(request.args.get("include_registry") or "").strip().lower()
+    include_registry = include_registry_arg not in {"0", "false", "no", "off"}
     if not provider or not model:
         return _jsonify_no_store(
             {
@@ -3206,11 +3204,13 @@ def test_openai_model():
             provider="openai",
             model=resolved_model,
             api_surface="responses",
+            include_registry=True,
         )
         parameter_capabilities = build_model_parameter_capabilities(
             provider="openai",
             model=resolved_model,
             api_surface="responses",
+            include_registry=True,
         )
         client = OpenAIClient(api_key_env_var=api_key_env_var)
 

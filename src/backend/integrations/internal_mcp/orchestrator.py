@@ -15509,6 +15509,7 @@ class InternalMCPChatOrchestrator:
                     raw_parameters,
                     provider=parsed.provider or provider,
                     model=parsed.model,
+                    include_registry=True,
                 )
             except Exception:
                 model_parameters = {}
@@ -15990,6 +15991,7 @@ class InternalMCPChatOrchestrator:
                 default_model_parameters,
                 provider=default_provider,
                 model=default_model,
+                include_registry=True,
             )
         else:
             active_model_parameters = {}
@@ -16030,6 +16032,7 @@ class InternalMCPChatOrchestrator:
                     entry.get(MODEL_PARAMETERS_KEY),
                     provider=provider,
                     model=model,
+                    include_registry=True,
                 )
                 if callable(normalise_model_parameters_for_storage)
                 else {}
@@ -37357,6 +37360,7 @@ class InternalMCPChatOrchestrator:
                 model_parameters,
                 provider=self._infer_provider_from_model_reference(model),
                 model=model,
+                include_registry=True,
             )
         except Exception:
             normalised_model_parameters = {}

@@ -237,6 +237,7 @@ def _normalise_llm_setting_entry(raw: Any) -> dict[str, Any] | None:
         raw_parameters,
         provider=provider,
         model=model,
+        include_registry=True,
     )
     if model_parameters:
         normalised[MODEL_PARAMETERS_KEY] = model_parameters

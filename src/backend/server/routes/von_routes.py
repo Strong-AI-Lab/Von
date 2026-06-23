@@ -6476,6 +6476,7 @@ def _resolve_generate_requested_model(
         raw_model_parameters,
         provider=explicit_client_type,
         model=model_name,
+        include_registry=True,
     )
     return model_name, explicit_client_type, requested_model_parameters
 

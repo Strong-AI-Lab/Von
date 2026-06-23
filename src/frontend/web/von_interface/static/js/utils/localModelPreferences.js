@@ -5,7 +5,6 @@ const LS_OLLAMA_SELECTION = 'von:ollamaSelection';
 const LS_PREMIUM_MODEL_USE_ENABLED = 'von:premiumModelUseEnabled';
 const LOCAL_MODEL_PREFERENCE_SCHEMA = 'localModelPreference.v1';
 const LOCAL_MODEL_UNAVAILABLE_REASON_NO_OLLAMA_MODEL = 'premium_disabled_no_ollama_model';
-const REASONING_EFFORT_VALUES = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 function readStoredJson(key) {
   try {
@@ -75,7 +74,16 @@ function normaliseOllamaSelection(selection) {
   };
 }
 
-export function normaliseModelParameters(value) {
+function allowedReasoningEffortValues(capability = null) {
+  const values = capability?.parameters?.reasoning_effort?.allowed_values;
+  if (!Array.isArray(values) || !values.length) return null;
+  const tokens = values
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter(Boolean);
+  return tokens.length ? new Set(tokens) : null;
+}
+
+export function normaliseModelParameters(value, capability = null) {
   if (!value || typeof value !== 'object') return null;
   const params = {};
   let effort = value.reasoning_effort ?? value.reasoningEffort ?? null;
@@ -84,7 +92,8 @@ export function normaliseModelParameters(value) {
   }
   if (typeof effort === 'string') {
     const token = effort.trim().toLowerCase();
-    if (REASONING_EFFORT_VALUES.has(token)) {
+    const allowedValues = allowedReasoningEffortValues(capability);
+    if (token && (!allowedValues || allowedValues.has(token))) {
       params.reasoning_effort = token;
     }
   }

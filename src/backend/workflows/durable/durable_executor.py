@@ -132,6 +132,7 @@ def _resolve_instance_runtime_model_context(
             raw_parameters,
             provider=inferred_client_type,
             model=normalised_requested_model,
+            include_registry=True,
         )
     except Exception:
         model_parameters = {}

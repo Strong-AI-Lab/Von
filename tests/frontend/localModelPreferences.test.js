@@ -33,6 +33,7 @@ describe('local model preferences', () => {
     test('stores OpenAI reasoning effort with the selected premium model', async () => {
         const {
             getStoredLocalModelPreference,
+            normaliseModelParameters,
             resolveLocalRequestedLlm,
             setLocalPremiumModelUseEnabled,
             setStoredOpenAiModelParameters,
@@ -56,6 +57,14 @@ describe('local model preferences', () => {
             requestModel: 'openai:gpt-5.5',
             model_parameters: { reasoning_effort: 'low' },
         });
+        expect(normaliseModelParameters(
+            { reasoning_effort: 'future' },
+            { parameters: { reasoning_effort: { allowed_values: ['future'] } } },
+        )).toEqual({ reasoning_effort: 'future' });
+        expect(normaliseModelParameters(
+            { reasoning_effort: 'xhigh' },
+            { parameters: { reasoning_effort: { allowed_values: ['future'] } } },
+        )).toBeNull();
     });
 
     test('prefers the locally selected Ollama model when premium use is disabled locally', async () => {

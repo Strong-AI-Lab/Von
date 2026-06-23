@@ -114,6 +114,7 @@ let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
 let latestOpenAiModelProbe = null;
+let latestOpenAiModelParameterCapability = null;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
 let latestCapabilityIndexStatus = null;
@@ -954,7 +955,10 @@ function setInlineStatusMessage(element, text, tone = null) {
 
 function readOpenAiModelParametersFromUi() {
   const effort = String(document.getElementById('openaiReasoningEffortSelect')?.value || '').trim();
-  return normaliseModelParameters(effort ? { reasoning_effort: effort } : null);
+  return normaliseModelParameters(
+    effort ? { reasoning_effort: effort } : null,
+    latestOpenAiModelParameterCapability,
+  );
 }
 
 function applyOpenAiReasoningEffortControls(capability) {
@@ -972,11 +976,11 @@ function applyOpenAiReasoningEffortControls(capability) {
     return;
   }
 
-  const allowedValues = (
-    Array.isArray(reasoning.allowed_values) && reasoning.allowed_values.length
-      ? reasoning.allowed_values
-      : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
-  ).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  const allowedValues = Array.isArray(reasoning.allowed_values)
+    ? reasoning.allowed_values
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean)
+    : [];
   const current = getStoredOpenAiModelParameters()?.reasoning_effort || '';
   selectEl.replaceChildren();
   const defaultOption = document.createElement('option');
@@ -998,22 +1002,25 @@ function applyOpenAiReasoningEffortControls(capability) {
 async function refreshOpenAiReasoningEffortControls() {
   const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
   if (!selectedModel) {
+    latestOpenAiModelParameterCapability = null;
     applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
     return null;
   }
   try {
     const response = await fetch(
-      `/api/settings/model_parameters/capabilities?provider=openai&model=${encodeURIComponent(selectedModel)}&api_surface=responses`,
+      `/api/settings/model_parameters/capabilities?provider=openai&model=${encodeURIComponent(selectedModel)}&api_surface=responses&include_registry=true`,
       { cache: 'no-store' },
     );
     const capability = await response.json();
     if (response.ok && capability?.success !== false) {
+      latestOpenAiModelParameterCapability = capability;
       applyOpenAiReasoningEffortControls(capability);
       return capability;
     }
   } catch (error) {
     console.warn('Failed to refresh OpenAI model parameter controls', error);
   }
+  latestOpenAiModelParameterCapability = null;
   applyOpenAiReasoningEffortControls({ parameters: { reasoning_effort: { supported: false } } });
   return null;
 }
