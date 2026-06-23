@@ -78,6 +78,7 @@ def test_expected_outcome_prompt_requires_read_only_jira_lookup_evidence() -> No
     lowered = prompt_text.lower()
     assert "read-only jira retrieval" in lowered
     assert "latest, most recent, newest" in lowered
+    assert "jira_get_issue" in prompt_text
     assert "jira_search" in prompt_text
     assert "do not use jira import/reconciliation workflows" in lowered
     assert "#V#jira_task_full_reconciliation_workflow" in prompt_text
@@ -94,6 +95,24 @@ def test_expected_outcome_prompt_requires_read_only_jira_lookup_evidence() -> No
     assert "created DESC" in prompt_text
     assert "updated DESC" in prompt_text
     assert "recency basis" in lowered
+
+
+def test_expected_outcome_prompt_requires_direct_jira_issue_lookup_evidence() -> None:
+    prompt_text = (
+        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "concrete jira issue key" in lowered
+    assert "Jira direct issue-key lookup example" in prompt_text
+    assert "JVNAUTOSCI-150" in prompt_text
+    assert "jira_get_issue" in prompt_text
+    assert '"required_tools":["jira_get_issue"]' in prompt_text
+    assert "Preserve the exact issue key" in prompt_text
+    assert "Do not use #V#jira_task_full_reconciliation_workflow" in prompt_text
+    assert "#V#jira_task_incremental_import_workflow" in prompt_text
+    assert "task_import_jira_issues" in prompt_text
+    assert "not memory or search snippets" in prompt_text
 
 
 def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> None:

@@ -176,10 +176,14 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert "read-only Jira retrieval" in expected_outcome_text
     assert "latest, most recent, newest" in expected_outcome_text
+    assert "jira_get_issue" in expected_outcome_text
     assert "jira_search" in expected_outcome_text
     assert "Do not use Jira import/reconciliation workflows" in expected_outcome_text
     assert "#V#jira_task_full_reconciliation_workflow" in expected_outcome_text
     assert "task_import_jira_issues" in expected_outcome_text
+    assert "Jira direct issue-key lookup example" in expected_outcome_text
+    assert '"required_tools":["jira_get_issue"]' in expected_outcome_text
+    assert "Preserve the exact issue key" in expected_outcome_text
     assert "Jira recency/list lookup example" in expected_outcome_text
     assert '"required_tools":["jira_search"]' in expected_outcome_text
     assert "recency basis" in expected_outcome_text
