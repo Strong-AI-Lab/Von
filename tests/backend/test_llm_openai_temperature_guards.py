@@ -161,6 +161,47 @@ def test_llm_interface_openai_generate_preserves_temperature_for_gpt4(
     assert captured_kwargs["temperature"] == 0.7
 
 
+def test_llm_interface_openai_generate_applies_timeout_as_request_option(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    captured_options: dict[str, object] = {}
+    captured_kwargs: dict[str, object] = {}
+
+    def _create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _build_fake_openai_response("gpt-4")
+
+    class _FakeOpenAI:
+        def __init__(self):
+            self.chat = types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=_create)
+            )
+
+        def with_options(self, **kwargs):
+            captured_options.update(kwargs)
+            return self
+
+    monkeypatch.setattr(
+        mod.openai,
+        "OpenAI",
+        lambda **_kwargs: _FakeOpenAI(),
+    )
+
+    client = mod.OpenAIClient(api_key="test-key")
+    result = client.generate(
+        prompt="hello",
+        model="gpt-4",
+        llm_params={"temperature": 0.7, "timeout_seconds": 12},
+    )
+
+    assert result == "ok"
+    assert captured_options == {"timeout": 12.0, "max_retries": 0}
+    assert captured_kwargs["temperature"] == 0.7
+    assert "timeout_seconds" not in captured_kwargs
+
+
 def test_llm_interface_openai_generate_uses_responses_reasoning_effort(
     monkeypatch,
 ) -> None:

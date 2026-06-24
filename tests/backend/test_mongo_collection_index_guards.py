@@ -92,6 +92,23 @@ def test_interaction_session_indexes_are_ensured_once_per_database(monkeypatch):
     ]
 
 
+def test_application_settings_index_is_ensured_once_per_database(monkeypatch):
+    _reset_collection_index_state(monkeypatch)
+    db = _FakeDb("test_von_db", client=object())
+    monkeypatch.setattr(mc, "get_db", lambda: db)
+
+    coll_first = cast(_FakeCollection, mc.get_application_settings_collection())
+    coll_second = cast(_FakeCollection, mc.get_application_settings_collection())
+
+    assert coll_first is coll_second
+    assert coll_first is not None
+    assert len(coll_first.create_index_calls) == 1
+    assert coll_first.create_index_calls[0]["keys"] == [
+        ("setting_name", mc.ASCENDING)
+    ]
+    assert coll_first.create_index_calls[0]["kwargs"] == {"unique": True}
+
+
 def test_concepts_indexes_are_guarded_per_database_key(monkeypatch):
     _reset_collection_index_state(monkeypatch)
     shared_client = object()

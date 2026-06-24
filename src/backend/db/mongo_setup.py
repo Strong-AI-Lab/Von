@@ -1,10 +1,10 @@
 import logging
 from pymongo.collection import Collection
-from pymongo import ASCENDING
-from pymongo.errors import OperationFailure
 
 # Imports from mongo_client.py, located in the same directory
-from .mongo_client import get_db, APPLICATION_SETTINGS_COLLECTION_NAME
+from .mongo_client import (
+    get_application_settings_collection as _get_application_settings_collection,
+)
 
 # REFACTORING_NOTE: This file is intended to house MongoDB setup-related functions,
 # such as those that ensure collections exist and have the correct indexes.
@@ -20,36 +20,7 @@ def get_application_settings_collection() -> Collection | None:
     Returns:
         A PyMongo Collection object for the application settings, or None if an error occurs.
     """
-    db = get_db()  # get_db() is imported from mongo_client and handles DB connection
-    if db is None:
-        logger.error(
-            "Could not get database instance (via mongo_client.get_db()). Cannot access application_settings collection."
-        )
-        return None
-
-    try:
-        settings_coll = db[APPLICATION_SETTINGS_COLLECTION_NAME]
-
-        # Ensure index on setting_name for quick lookups and to enforce uniqueness.
-        # MongoDB's create_index is idempotent.
-        settings_coll.create_index([("setting_name", ASCENDING)], unique=True)
-        # print(f"Index on 'setting_name' for collection '{APPLICATION_SETTINGS_COLLECTION_NAME}' ensured.")
-
-        return settings_coll
-
-    except OperationFailure as e:
-        logger.warning(
-            "MongoDB operation failed while accessing or indexing '%s': %s",
-            APPLICATION_SETTINGS_COLLECTION_NAME,
-            e,
-        )
-        return None
-    except Exception as e:  # Catch any other unexpected errors
-        logger.warning(
-            "An unexpected error occurred while getting application settings collection: %s",
-            e,
-        )
-        return None
+    return _get_application_settings_collection()
 
 
 if __name__ == "__main__":

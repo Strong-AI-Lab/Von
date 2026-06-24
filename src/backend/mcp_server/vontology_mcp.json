@@ -3747,10 +3747,12 @@
                         "prompt_concept_ids": [
                             "#V#turn_prompt_context_adjudication_prompt"
                         ],
-                        "llm_policy": {
-                            "policy_stage": "context_adjudication",
-                            "context_messages_context_key": "augmented_context",
-                            "context_fields": [
+            "llm_policy": {
+              "policy_stage": "context_adjudication",
+              "context_messages_context_key": "conversation_context",
+              "context_messages_max_chars": 6000,
+              "context_messages_truncation_strategy": "tail",
+              "context_fields": [
                                 {
                                     "context_key": "user_prompt",
                                     "label": "Current User Request"

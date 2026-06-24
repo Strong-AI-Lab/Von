@@ -1555,6 +1555,24 @@ class OpenAIClient(LLMInterface):
         self.client = openai.OpenAI(api_key=self.api_key)
         logger.info("OpenAIClient initialized.")
 
+    @staticmethod
+    def _split_request_timeout_from_llm_params(
+        llm_params: Optional[Dict[str, Any]],
+    ) -> tuple[Dict[str, Any], float | None]:
+        if not isinstance(llm_params, dict):
+            return {}, None
+        params = dict(llm_params)
+        raw_timeout = params.pop("timeout_seconds", None)
+        if raw_timeout is None:
+            raw_timeout = params.pop("request_timeout_seconds", None)
+        try:
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+        except (TypeError, ValueError):
+            timeout_seconds = None
+        if timeout_seconds is not None:
+            timeout_seconds = max(1.0, min(600.0, timeout_seconds))
+        return params, timeout_seconds
+
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
         resolved_model = resolve_openai_model_name(model)
@@ -1649,14 +1667,25 @@ class OpenAIClient(LLMInterface):
                 "[LLM PROMPT][OpenAI][%s]: %s", target_model, _truncate_for_log(prompt)
             )
         try:
+            llm_params_for_model, request_timeout_seconds = (
+                self._split_request_timeout_from_llm_params(llm_params)
+            )
+            request_client = (
+                self.client.with_options(
+                    timeout=request_timeout_seconds,
+                    max_retries=0,
+                )
+                if request_timeout_seconds is not None
+                else self.client
+            )
             conv = build_conversation(prompt, context)
             messages = to_openai_messages(conv)
             responses_params = openai_responses_kwargs_from_model_parameters(
-                llm_params or {},
+                llm_params_for_model,
                 model=target_model,
             )
             if responses_params:
-                response = self.client.responses.create(  # type: ignore[attr-defined]
+                response = request_client.responses.create(  # type: ignore[attr-defined]
                     model=target_model,
                     input=messages,  # type: ignore[arg-type]
                     **responses_params,
@@ -1688,17 +1717,17 @@ class OpenAIClient(LLMInterface):
                 return content
 
             openai_params = {}
-            if llm_params:
-                if "temperature" in llm_params:
+            if llm_params_for_model:
+                if "temperature" in llm_params_for_model:
                     safe_temperature = resolve_safe_temperature_for_model(
                         target_model,
-                        llm_params["temperature"],
+                        llm_params_for_model["temperature"],
                     )
                     if safe_temperature is not None:
                         openai_params["temperature"] = safe_temperature
                 # Add other OpenAI specific params like top_p, max_tokens, etc.
 
-            response = self.client.chat.completions.create(  # type: ignore[arg-type]
+            response = request_client.chat.completions.create(  # type: ignore[arg-type]
                 model=target_model,
                 messages=messages,  # type: ignore[arg-type]
                 **openai_params,

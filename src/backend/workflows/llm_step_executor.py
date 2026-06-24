@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import re
 import threading
 import time
@@ -32,6 +31,7 @@ from ..services.required_tool_obligation_service import (
 from ..services.workflow_llm_duration_stats_service import (
     record_workflow_llm_step_duration_observation,
 )
+from ..languagemodels.llm_interface import infer_llm_client_provider
 from .llm_call_telemetry import stamp_llm_call_timestamps
 from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .recovery_prompt_compaction import (
@@ -61,6 +61,7 @@ _SPOKEN_BLOCK_RE = re.compile(
 )
 _CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
     {
+        "context_adjudication",
         "context_adjudication_decision",
         "expected_outcome_inference",
         "selector_decision",
@@ -661,6 +662,112 @@ def _coerce_context_messages(value: Any) -> list[dict[str, str]]:
     return rows
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _context_message_chars(messages: Sequence[Mapping[str, str]]) -> int:
+    total = 0
+    for item in messages:
+        total += len(_context_string(item.get("role")))
+        total += len(_context_string(item.get("content")))
+    return total
+
+
+def _bounded_context_messages_for_policy(
+    *,
+    raw_value: Any,
+    llm_policy_map: Mapping[str, Any],
+    context_messages_key: str,
+) -> tuple[list[dict[str, str]], dict[str, Any] | None]:
+    messages = _coerce_context_messages(raw_value)
+    raw_chars = _context_message_chars(messages)
+    max_chars = _coerce_positive_int(
+        llm_policy_map.get("context_messages_max_chars")
+        or llm_policy_map.get("context_messages_char_budget")
+    )
+    strategy = (
+        _context_string(llm_policy_map.get("context_messages_truncation_strategy"))
+        or "tail"
+    ).lower()
+    if strategy not in {"head", "tail"}:
+        strategy = "tail"
+
+    diagnostics: dict[str, Any] = {
+        "schema_version": "llm_context_messages_diagnostics.v1",
+        "context_messages_context_key": context_messages_key or None,
+        "raw_message_count": len(messages),
+        "raw_chars": raw_chars,
+        "max_chars": max_chars,
+        "truncation_strategy": strategy,
+        "truncated": False,
+        "rendered_message_count": len(messages),
+        "rendered_chars": raw_chars,
+        "omitted_message_count": 0,
+        "omitted_chars": 0,
+    }
+    if not max_chars or raw_chars <= max_chars:
+        return messages, diagnostics
+
+    selected_reversed: list[dict[str, str]] = []
+    remaining = max_chars
+    source = list(messages if strategy == "head" else reversed(messages))
+    truncated_single_message = False
+    for message in source:
+        role = _context_string(message.get("role")) or "user"
+        content = _context_string(message.get("content"))
+        message_chars = len(role) + len(content)
+        if message_chars <= remaining:
+            selected_reversed.append({"role": role, "content": content})
+            remaining -= message_chars
+            continue
+        if remaining > len(role):
+            content_budget = max(0, remaining - len(role))
+            if content_budget:
+                content = (
+                    content[:content_budget]
+                    if strategy == "head"
+                    else content[-content_budget:]
+                )
+                selected_reversed.append({"role": role, "content": content})
+                truncated_single_message = True
+        break
+
+    selected = (
+        selected_reversed if strategy == "head" else list(reversed(selected_reversed))
+    )
+    rendered_chars = _context_message_chars(selected)
+    diagnostics.update(
+        {
+            "truncated": True,
+            "rendered_message_count": len(selected),
+            "rendered_chars": rendered_chars,
+            "omitted_message_count": max(0, len(messages) - len(selected)),
+            "omitted_chars": max(0, raw_chars - rendered_chars),
+            "single_message_truncated": truncated_single_message,
+        }
+    )
+    return selected, diagnostics
+
+
+def _merge_prompt_context_diagnostics(
+    existing: Mapping[str, Any] | None,
+    *,
+    context_messages_diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = dict(existing) if isinstance(existing, Mapping) else {}
+    if context_messages_diagnostics:
+        merged["schema_version"] = "llm_prompt_context_diagnostics.v1"
+        merged["context_messages"] = dict(context_messages_diagnostics)
+    return merged
+
+
 def _coerce_context_telemetry(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -671,8 +778,21 @@ def _conversation_turn_llm_phase_override(
     request: WorkflowActionRequest,
 ) -> str | None:
     workflow_state_id = _context_string(request.workflow_state_id)
+    state_alias = _conversation_turn_llm_state_alias(workflow_state_id)
+    if state_alias:
+        return state_alias
+    return None
+
+
+def _conversation_turn_llm_state_alias(value: Any) -> str | None:
+    workflow_state_id = _context_string(value)
+    if not workflow_state_id:
+        return None
     if workflow_state_id in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
         return workflow_state_id
+    for state_id in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
+        if workflow_state_id.endswith(state_id):
+            return state_id
     return None
 
 
@@ -694,12 +814,36 @@ def _conversation_turn_llm_timeout_override_sec(
         return explicit_override
 
     workflow_state_id = _context_string(request.workflow_state_id)
-    if workflow_state_id not in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
+    if _conversation_turn_llm_state_alias(workflow_state_id) is None:
         return None
 
     return default_conversation_turn_llm_timeout_sec(
         os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
     )
+
+
+def _conversation_turn_llm_fallback_guard_timeout_sec(
+    timeout_seconds: float | None,
+) -> float | None:
+    """Return an outer guard that leaves room for gateway fallback handling."""
+
+    if timeout_seconds is None:
+        return timeout_seconds
+    if timeout_seconds < 30.0:
+        return timeout_seconds + 1.0
+    return timeout_seconds + max(30.0, min(90.0, timeout_seconds * 0.75))
+
+
+def _conversation_turn_llm_step_guard_timeout_sec(
+    timeout_seconds: float | None,
+) -> float | None:
+    """Return a whole-step guard that leaves setup plus one LLM call budget."""
+
+    if timeout_seconds is None:
+        return None
+    if timeout_seconds < 30.0:
+        return timeout_seconds + 1.0
+    return timeout_seconds + max(180.0, min(240.0, timeout_seconds * 1.5))
 
 
 def _missing_prompt_tools_for_completion_report_narration(
@@ -817,6 +961,30 @@ def _prefer_default_model_for_request(request: WorkflowActionRequest) -> bool:
     requested_model = _context_string(request.data.get("requested_model"))
     requested_client_type = _context_string(request.data.get("requested_client_type"))
     return bool(requested_model or requested_client_type)
+
+
+def _default_model_parameters_for_request(
+    request: WorkflowActionRequest,
+) -> Mapping[str, Any] | None:
+    requested_parameters = request.data.get("requested_model_parameters")
+    if isinstance(requested_parameters, Mapping):
+        return dict(requested_parameters)
+    if _prefer_default_model_for_request(request):
+        return None
+    environment_parameters = getattr(request.environment, "model_parameters", None)
+    if isinstance(environment_parameters, Mapping):
+        return dict(environment_parameters)
+    return None
+
+
+def _model_parameters_with_timeout(
+    model_parameters: Mapping[str, Any] | None,
+    timeout_seconds: float | None,
+) -> Mapping[str, Any] | None:
+    params = dict(model_parameters) if isinstance(model_parameters, Mapping) else {}
+    if timeout_seconds is not None and timeout_seconds > 0:
+        params["timeout_seconds"] = timeout_seconds
+    return params or None
 
 
 def _resolve_prompt_from_policy_context(
@@ -938,6 +1106,28 @@ def _resolve_prompt_render(
             )
 
     return None, None, {}, None
+
+
+def _diagnostic_prompt_id_from_contract(
+    prompt_contract: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(prompt_contract, Mapping):
+        return None
+    resolved_prompt_id = _context_string(
+        prompt_contract.get("resolved_prompt_concept_id")
+    )
+    if resolved_prompt_id:
+        return resolved_prompt_id
+    requested_prompt_ids = prompt_contract.get("requested_prompt_concept_ids")
+    if isinstance(requested_prompt_ids, Sequence) and not isinstance(
+        requested_prompt_ids,
+        (str, bytes, bytearray),
+    ):
+        for candidate in requested_prompt_ids:
+            prompt_id = _context_string(candidate)
+            if prompt_id:
+                return prompt_id
+    return None
 
 
 def _append_recovery_total_truncation_marker(
@@ -1613,13 +1803,18 @@ def _run_gateway_runtime_setup_step(
     if timeout_seconds is None or timeout_seconds <= 0:
         return operation()
 
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+    result_event = threading.Event()
+    result_holder: dict[str, Any] = {}
 
     def _worker() -> None:
         try:
-            result_queue.put(("result", operation()))
+            result_holder["kind"] = "result"
+            result_holder["payload"] = operation()
         except Exception as exc:
-            result_queue.put(("exception", exc))
+            result_holder["kind"] = "exception"
+            result_holder["payload"] = exc
+        finally:
+            result_event.set()
 
     thread = threading.Thread(
         target=_worker,
@@ -1627,9 +1822,10 @@ def _run_gateway_runtime_setup_step(
         daemon=True,
     )
     thread.start()
-    try:
-        kind, payload = result_queue.get(timeout=timeout_seconds)
-    except queue.Empty:
+    while not result_event.wait(timeout=0.25):
+        _check_request_cancellation(request)
+        if time.perf_counter() - step_start < timeout_seconds:
+            continue
         duration_ms = int((time.perf_counter() - step_start) * 1000)
         _append_workflow_llm_setup_diagnostic(
             request,
@@ -1647,6 +1843,8 @@ def _run_gateway_runtime_setup_step(
         if timeout_fallback is not None:
             return timeout_fallback(timeout_seconds)
         raise TimeoutError(f"{step_label} timed out after {timeout_seconds:.1f}s")
+    kind = result_holder.get("kind")
+    payload = result_holder.get("payload")
     if kind == "exception":
         raise payload
     _check_request_cancellation(request)
@@ -1679,6 +1877,271 @@ def _record_workflow_llm_duration_for_entry(
         return
     if isinstance(baseline, Mapping) and baseline:
         entry.update(dict(baseline))
+
+
+def _record_workflow_llm_duration_for_entry_async(
+    request: WorkflowActionRequest,
+    entry: MutableMapping[str, Any],
+    *,
+    stage: str | None,
+    model_name: str | None,
+    provider: str | None = None,
+    duration_ms: float | None,
+    workflow_stage_id: str | None = None,
+) -> None:
+    def _worker() -> None:
+        _record_workflow_llm_duration_for_entry(
+            request,
+            entry,
+            stage=stage,
+            model_name=model_name,
+            provider=provider,
+            duration_ms=duration_ms,
+            workflow_stage_id=workflow_stage_id,
+        )
+
+    threading.Thread(
+        target=_worker,
+        name="workflow-llm-duration-record",
+        daemon=True,
+    ).start()
+
+
+def _has_llm_call_timeout_entry(
+    llm_calls: Iterable[Mapping[str, Any]],
+    *,
+    stage: str,
+    prompt_id: str | None,
+    workflow_state_id: str | None,
+) -> bool:
+    for entry in llm_calls:
+        if entry.get("failure_kind") != "llm_call_timeout":
+            continue
+        if _context_string(entry.get("stage")) != stage:
+            continue
+        entry_prompt_id = _context_string(entry.get("prompt_id"))
+        if prompt_id and entry_prompt_id and entry_prompt_id != prompt_id:
+            continue
+        entry_state_id = _context_string(entry.get("workflow_stage_id"))
+        if workflow_state_id and entry_state_id and entry_state_id != workflow_state_id:
+            continue
+        return True
+    return False
+
+
+def _nonblocking_progress_callback(
+    emit_progress: Callable[[Mapping[str, Any]], None] | None,
+) -> Callable[[Mapping[str, Any]], None]:
+    if not callable(emit_progress):
+        return lambda _payload: None
+
+    lock = threading.Lock()
+    in_flight = False
+
+    def _emit(payload: Mapping[str, Any]) -> None:
+        nonlocal in_flight
+        with lock:
+            if in_flight:
+                return
+            in_flight = True
+        payload_snapshot = dict(payload)
+
+        def _worker() -> None:
+            nonlocal in_flight
+            try:
+                emit_progress(payload_snapshot)
+            except Exception:
+                pass
+            finally:
+                with lock:
+                    in_flight = False
+
+        threading.Thread(
+            target=_worker,
+            name="workflow-llm-progress-forwarder",
+            daemon=True,
+        ).start()
+
+    return _emit
+
+
+def _run_llm_call_with_timeout(
+    request: WorkflowActionRequest,
+    *,
+    operation: Any,
+    stage: str,
+    prompt_id: str | None,
+    selected_model: str | None,
+    selected_candidate: Mapping[str, Any] | None,
+    timeout_seconds: float | None,
+    llm_calls: list[dict[str, Any]],
+) -> Any:
+    _check_request_cancellation(request)
+    started_at = time.perf_counter()
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return operation()
+
+    emit_progress = (
+        request.data.get("emit_progress")
+        if callable(request.data.get("emit_progress"))
+        else None
+    )
+    progress_emit = _nonblocking_progress_callback(emit_progress)
+    telemetry_phase = _conversation_turn_llm_phase_override(request) or stage
+    if callable(emit_progress):
+        progress_emit(
+            {
+                "phase": telemetry_phase,
+                "status": "thinking",
+                "subtask": "bounded LLM call",
+                "result_summary": "Running bounded LLM call for workflow step.",
+                "workflow_state_id": telemetry_phase,
+                "llm_timeout_seconds": timeout_seconds,
+                "prompt_id": prompt_id,
+                "model_name": selected_model,
+                "provider": (
+                    _context_string(selected_candidate.get("provider"))
+                    if isinstance(selected_candidate, Mapping)
+                    else None
+                ),
+            }
+        )
+
+    result_event = threading.Event()
+    result_holder: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            result_holder["kind"] = "result"
+            result_holder["payload"] = operation()
+        except Exception as exc:
+            result_holder["kind"] = "exception"
+            result_holder["payload"] = exc
+        finally:
+            result_event.set()
+
+    thread = threading.Thread(
+        target=_worker,
+        name=f"workflow-llm-step-call-{stage}",
+        daemon=True,
+    )
+    thread.start()
+    while not result_event.wait(timeout=0.25):
+        _check_request_cancellation(request)
+        if time.perf_counter() - started_at < timeout_seconds:
+            continue
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        provider = (
+            _context_string(selected_candidate.get("provider"))
+            if isinstance(selected_candidate, Mapping)
+            else None
+        )
+        timeout_entry: dict[str, Any] = {
+            "type": "llm.generate",
+            "stage": stage,
+            "workflow_stage_id": request.workflow_state_id,
+            "model_name": selected_model,
+            "duration_ms": duration_ms,
+            "status": "timed_out",
+            "success": False,
+            "error": "workflow_llm_step_timeout",
+            "error_class": "TimeoutError",
+            "failure_kind": "llm_call_timeout",
+            "timeout_seconds": timeout_seconds,
+            "prompt_id": prompt_id,
+        }
+        if provider:
+            timeout_entry["provider"] = provider
+        if isinstance(selected_candidate, Mapping):
+            timeout_entry["candidate"] = dict(selected_candidate)
+        stamp_llm_call_timestamps(timeout_entry, duration_ms=duration_ms)
+        if not _has_llm_call_timeout_entry(
+            llm_calls,
+            stage=stage,
+            prompt_id=prompt_id,
+            workflow_state_id=request.workflow_state_id,
+        ):
+            llm_calls.append(timeout_entry)
+            _record_workflow_llm_duration_for_entry_async(
+                request,
+                timeout_entry,
+                stage=stage,
+                model_name=selected_model,
+                provider=provider,
+                duration_ms=duration_ms,
+                workflow_stage_id=request.workflow_state_id,
+            )
+        raise TimeoutError(
+            f"LLM call timed out after {timeout_seconds:.1f}s "
+            f"(stage={stage}, state={request.workflow_state_id}, model={selected_model})"
+        )
+    kind = result_holder.get("kind")
+    payload = result_holder.get("payload")
+    if kind == "exception":
+        raise payload
+    _check_request_cancellation(request)
+    return payload
+
+
+def _run_llm_step_with_timeout(
+    request: WorkflowActionRequest,
+    *,
+    stage: str,
+    llm_policy_map: Mapping[str, Any],
+    timeout_seconds: float,
+) -> WorkflowActionResult:
+    prompt_id = _diagnostic_prompt_id_from_contract(request.prompt_contract)
+    llm_calls = cast(
+        list[dict[str, Any]],
+        (
+            request.data.get("llm_calls")
+            if isinstance(request.data.get("llm_calls"), list)
+            else []
+        ),
+    )
+    if "llm_calls" not in request.data:
+        request.data["llm_calls"] = llm_calls
+    aux_llm_calls = cast(
+        list[dict[str, Any]],
+        (
+            request.data.get("aux_llm_calls")
+            if isinstance(request.data.get("aux_llm_calls"), list)
+            else []
+        ),
+    )
+    if "aux_llm_calls" not in request.data:
+        request.data["aux_llm_calls"] = aux_llm_calls
+
+    try:
+        return cast(
+            WorkflowActionResult,
+            _run_llm_call_with_timeout(
+                request,
+                operation=lambda: _execute_llm_step_inner(request),
+                stage=stage,
+                prompt_id=prompt_id,
+                selected_model=request.environment.model,
+                selected_candidate=_selected_candidate_context_from_request(request),
+                timeout_seconds=timeout_seconds,
+                llm_calls=llm_calls,
+            ),
+        )
+    except TimeoutError as exc:
+        timeout_detail = _context_string(str(exc)) or "llm_step_timed_out"
+        return _build_timeout_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source="prompt_contract",
+            rendered_variables={},
+            llm_policy_map=llm_policy_map,
+            timeout_detail=timeout_detail,
+            selected_model=request.environment.model,
+            llm_calls=llm_calls,
+            aux_llm_calls=aux_llm_calls,
+            selected_candidate=_selected_candidate_context_from_request(request),
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _tool_mode(llm_policy: Mapping[str, Any]) -> str:
@@ -1856,10 +2319,16 @@ def _selected_candidate_context_from_request(
     request: WorkflowActionRequest,
 ) -> dict[str, Any] | None:
     candidate: dict[str, Any] = {}
+    requested_model = _context_string(
+        request.data.get("requested_model") or getattr(request.environment, "model", None)
+    )
+    model_provider, _model_name = _split_model_provider_prefix(requested_model)
     provider = _context_string(
         request.data.get("requested_client_type")
         or request.data.get("selected_model_provider")
         or request.data.get("model_provider")
+    ) or model_provider or _context_string(
+        infer_llm_client_provider(getattr(request.environment, "llm_client", None))
     )
     if provider:
         candidate["provider"] = provider
@@ -1884,6 +2353,12 @@ def _select_model_context_for_prompt_variant(
     registry_snapshot: Mapping[str, Any] | None = None
 
     if not request.environment.gateway:
+        return selected_model, selected_candidate, registry_snapshot, diagnostics
+    if _prefer_default_model_for_request(request):
+        requested_model = _context_string(request.data.get("requested_model"))
+        if requested_model:
+            selected_model = requested_model
+        diagnostics["source"] = "explicit_request_model"
         return selected_model, selected_candidate, registry_snapshot, diagnostics
 
     try:
@@ -2044,16 +2519,25 @@ def _build_timeout_failure_result(
     selected_model: str | None,
     llm_calls: Sequence[Mapping[str, Any]],
     aux_llm_calls: Sequence[Mapping[str, Any]],
+    selected_candidate: Mapping[str, Any] | None = None,
+    timeout_seconds: float | None = None,
     prompt_variant_selection: Mapping[str, Any] | None = None,
     prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     llm_step_envelope = {
         "execution_mode": "llm",
         "action_id": request.action_id,
+        "workflow_id": request.workflow_id,
+        "workflow_state_id": request.workflow_state_id,
+        "policy_stage": stage,
         "selected_prompt_id": prompt_id,
         "selected_prompt_source": prompt_source,
         "selected_model": selected_model,
-        "selected_model_candidate": None,
+        "selected_model_candidate": (
+            dict(selected_candidate)
+            if isinstance(selected_candidate, Mapping)
+            else None
+        ),
         "tool_invocations": [],
         "tool_messages": [],
         "rendered_prompt_variables": dict(rendered_variables),
@@ -2069,6 +2553,11 @@ def _build_timeout_failure_result(
         "completion_reason": "timeout",
         "timeout_stage": stage,
         "timeout_detail": timeout_detail,
+        "timeout_seconds": timeout_seconds,
+        "timeout_failure_kind": "llm_call_timeout",
+        "fail_closed": True,
+        "fallback_used": False,
+        "fallback_policy": "none",
     }
     if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
         llm_step_envelope["base_prompt_id"] = prompt_variant_selection.get(
@@ -2113,18 +2602,71 @@ def _run_direct_llm_step(
             error="workflow_llm_step_client_unavailable",
         )
 
-    context_messages = _coerce_context_messages(
-        request.data.get(
-            _context_string(llm_policy_map.get("context_messages_context_key"))
+    context_messages_key = _context_string(
+        llm_policy_map.get("context_messages_context_key")
+    )
+    context_messages, context_messages_diagnostics = (
+        _bounded_context_messages_for_policy(
+            raw_value=request.data.get(context_messages_key),
+            llm_policy_map=llm_policy_map,
+            context_messages_key=context_messages_key,
         )
     )
-    model_name = request.environment.model
-    start = time.perf_counter()
-    response = llm_client.generate(
-        rendered_prompt,
-        context=context_messages or None,
-        model=model_name,
+    prompt_context_diagnostics = _merge_prompt_context_diagnostics(
+        prompt_context_diagnostics,
+        context_messages_diagnostics=context_messages_diagnostics,
     )
+    model_name = request.environment.model
+    timeout_override_sec = _conversation_turn_llm_timeout_override_sec(request)
+    llm_calls = cast(
+        list[dict[str, Any]],
+        (
+            request.data.get("llm_calls")
+            if isinstance(request.data.get("llm_calls"), list)
+            else []
+        ),
+    )
+    if "llm_calls" not in request.data:
+        request.data["llm_calls"] = llm_calls
+    selected_candidate = _selected_candidate_context_from_request(request)
+    start = time.perf_counter()
+    try:
+        response = _run_llm_call_with_timeout(
+            request,
+            operation=lambda: llm_client.generate(
+                rendered_prompt,
+                context=context_messages or None,
+                model=model_name,
+                llm_params=_model_parameters_with_timeout(
+                    _default_model_parameters_for_request(request),
+                    timeout_override_sec,
+                ),
+            ),
+            stage=stage,
+            prompt_id=prompt_id,
+            selected_model=model_name,
+            selected_candidate=selected_candidate,
+            timeout_seconds=timeout_override_sec,
+            llm_calls=llm_calls,
+        )
+    except TimeoutError as exc:
+        timeout_detail = _context_string(str(exc)) or "llm_call_timed_out"
+        return _build_timeout_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            timeout_detail=timeout_detail,
+            selected_model=model_name,
+            llm_calls=llm_calls,
+            aux_llm_calls=request.data.get("aux_llm_calls") or [],
+            selected_candidate=selected_candidate,
+            timeout_seconds=timeout_override_sec,
+            prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
+        )
     duration_ms = (time.perf_counter() - start) * 1000.0
     llm_call_entry = _append_llm_call(
         request.data,
@@ -2195,7 +2737,17 @@ def _run_gateway_llm_step_no_tools(
     context_messages_key = _context_string(
         llm_policy_map.get("context_messages_context_key")
     )
-    context_messages = _coerce_context_messages(request.data.get(context_messages_key))
+    context_messages, context_messages_diagnostics = (
+        _bounded_context_messages_for_policy(
+            raw_value=request.data.get(context_messages_key),
+            llm_policy_map=llm_policy_map,
+            context_messages_key=context_messages_key,
+        )
+    )
+    prompt_context_diagnostics = _merge_prompt_context_diagnostics(
+        prompt_context_diagnostics,
+        context_messages_diagnostics=context_messages_diagnostics,
+    )
     context_lineage_key = _context_string(
         llm_policy_map.get("context_lineage_context_key")
     )
@@ -2205,6 +2757,7 @@ def _run_gateway_llm_step_no_tools(
         if callable(request.data.get("emit_progress"))
         else None
     )
+    heartbeat_progress = _nonblocking_progress_callback(emit_progress)
     check_cancellation = (
         request.data.get("check_cancellation")
         if callable(request.data.get("check_cancellation"))
@@ -2214,6 +2767,28 @@ def _run_gateway_llm_step_no_tools(
     last_validation_response_text: str | None = None
     last_validation_model: str | None = None
     last_validation_candidate: Mapping[str, Any] | None = None
+    timeout_selected_model = request.environment.model
+    timeout_selected_candidate = _selected_candidate_context_from_request(request)
+    try:
+        selector = getattr(orchestrator, "_select_model_for_stage", None)
+        if callable(selector):
+            timeout_selected_model = (
+                _context_string(
+                    selector(
+                        stage=stage,
+                        default_model=request.environment.model,
+                        policy_state=policy_state,
+                        registry_snapshot=registry_snapshot,
+                        workflow_id=request.workflow_id,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                        prefer_default_model=prefer_default_model,
+                    )
+                )
+                or timeout_selected_model
+            )
+    except Exception:
+        pass
 
     def _validate_candidate_response(
         response_text: str,
@@ -2319,29 +2894,39 @@ def _run_gateway_llm_step_no_tools(
 
     try:
         response_text, selected_model, selected_candidate = (
-            orchestrator._run_llm_with_fallbacks(
+            _run_llm_call_with_timeout(
+                request,
                 stage=stage,
-                prompt=rendered_prompt,
-                context=context_messages,
-                default_client=request.environment.llm_client,
-                default_model=request.environment.model,
-                default_model_parameters=(
-                    request.data.get("requested_model_parameters")
-                    or getattr(request.environment, "model_parameters", None)
+                prompt_id=prompt_id,
+                selected_model=timeout_selected_model,
+                selected_candidate=timeout_selected_candidate,
+                timeout_seconds=_conversation_turn_llm_fallback_guard_timeout_sec(
+                    timeout_override_sec
                 ),
-                policy_state=policy_state,
-                registry_snapshot=registry_snapshot,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-                llm_calls_log=llm_calls,
-                aux_log=aux_llm_calls,
-                record_llm_call=_record_llm_call,
-                emit_progress=emit_progress,
-                context_telemetry=context_telemetry,
-                prefer_default_model=prefer_default_model,
-                timeout_override_sec=timeout_override_sec,
-                check_cancellation=check_cancellation,
-                response_validator=_validate_candidate_response,
+                llm_calls=llm_calls,
+                operation=lambda: orchestrator._run_llm_with_fallbacks(
+                    stage=stage,
+                    prompt=rendered_prompt,
+                    context=context_messages,
+                    default_client=request.environment.llm_client,
+                    default_model=request.environment.model,
+                    default_model_parameters=_default_model_parameters_for_request(
+                        request
+                    ),
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=_record_llm_call,
+                    emit_progress=heartbeat_progress,
+                    context_telemetry=context_telemetry,
+                    prefer_default_model=prefer_default_model,
+                    timeout_override_sec=timeout_override_sec,
+                    check_cancellation=check_cancellation,
+                    response_validator=_validate_candidate_response,
+                ),
             )
         )
     except TimeoutError as exc:
@@ -2354,9 +2939,11 @@ def _run_gateway_llm_step_no_tools(
             rendered_variables=rendered_variables,
             llm_policy_map=llm_policy_map,
             timeout_detail=timeout_detail,
-            selected_model=request.environment.model,
+            selected_model=timeout_selected_model,
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
+            selected_candidate=timeout_selected_candidate,
+            timeout_seconds=timeout_override_sec,
             prompt_variant_selection=prompt_variant_selection,
             prompt_context_diagnostics=prompt_context_diagnostics,
         )
@@ -2425,7 +3012,7 @@ def _run_gateway_llm_step_no_tools(
     )
 
 
-def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
+def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionResult:
     """Execute a generic LLM workflow step."""
 
     llm_policy_map = (
@@ -2454,6 +3041,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             context=request.data,
         )
     )
+    if not prompt_id:
+        prompt_id = _diagnostic_prompt_id_from_contract(request.prompt_contract)
     if not isinstance(base_prompt_text, str) or not base_prompt_text.strip():
         return WorkflowActionResult(
             status="failed",
@@ -2688,6 +3277,16 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         selected_models[inner_stage] = model_name
         return model_name
 
+    timeout_override_sec = _conversation_turn_llm_timeout_override_sec(request)
+    timeout_selected_model = request.environment.model
+    timeout_selected_candidate = _selected_candidate_context_from_request(request)
+    try:
+        timeout_selected_model = (
+            _context_string(_model_for_stage(stage)) or timeout_selected_model
+        )
+    except Exception:
+        pass
+
     def _record_llm_call(
         *,
         call_type: str,
@@ -2915,7 +3514,18 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         contract_concept_id=request.contract_concept_id,
     )
     try:
-        plan_result = orchestrator._action_tool_calling_plan(plan_request)
+        plan_result = _run_llm_call_with_timeout(
+            request,
+            operation=lambda: orchestrator._action_tool_calling_plan(plan_request),
+            stage=stage,
+            prompt_id=prompt_id,
+            selected_model=timeout_selected_model,
+            selected_candidate=timeout_selected_candidate,
+            timeout_seconds=_conversation_turn_llm_fallback_guard_timeout_sec(
+                timeout_override_sec
+            ),
+            llm_calls=llm_calls,
+        )
         shared_data.update(plan_result.outputs)
         if plan_result.status == "failed":
             return plan_result
@@ -2955,9 +3565,11 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             rendered_variables=rendered_variables,
             llm_policy_map=llm_policy_map,
             timeout_detail=timeout_detail,
-            selected_model=request.environment.model,
+            selected_model=timeout_selected_model,
             llm_calls=llm_calls,
             aux_llm_calls=aux_llm_calls,
+            selected_candidate=timeout_selected_candidate,
+            timeout_seconds=timeout_override_sec,
             prompt_variant_selection=prompt_variant_selection,
             prompt_context_diagnostics=prompt_context_diagnostics,
         )
@@ -3033,6 +3645,23 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         max_tool_invocations=max_tool_invocations,
         prompt_variant_selection=prompt_variant_selection,
         prompt_context_diagnostics=prompt_context_diagnostics,
+    )
+
+
+def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
+    llm_policy_map = (
+        dict(request.llm_policy) if isinstance(request.llm_policy, Mapping) else {}
+    )
+    stage = _llm_stage(llm_policy_map, request)
+    timeout_seconds = _conversation_turn_llm_timeout_override_sec(request)
+    if timeout_seconds is None:
+        return _execute_llm_step_inner(request)
+    return _run_llm_step_with_timeout(
+        request,
+        stage=stage,
+        llm_policy_map=llm_policy_map,
+        timeout_seconds=_conversation_turn_llm_step_guard_timeout_sec(timeout_seconds)
+        or timeout_seconds,
     )
 
 

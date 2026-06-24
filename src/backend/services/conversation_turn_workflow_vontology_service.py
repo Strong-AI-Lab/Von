@@ -395,7 +395,7 @@ def _ensure_conversation_turn_prompt_support(
             predicate="hasContent",
             text=_load_context_adjudication_prompt_seed_text(),
             lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2513", "source": _MANAGED_BY},
+            context={"jira": "JVNAUTOSCI-2544", "source": _MANAGED_BY},
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)

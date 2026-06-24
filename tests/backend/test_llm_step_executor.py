@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -768,6 +769,109 @@ def test_execute_llm_step_uses_model_family_prompt_variant(monkeypatch) -> None:
     assert envelope["selected_prompt_source"] == "prompt_contract:model_variant"
     assert envelope["prompt_variant_selection"]["match_reason"] == "model_family"
     assert envelope["prompt_variant_selection"]["fallback_reason"] is None
+
+
+def test_prompt_variant_model_context_uses_explicit_request_without_gateway_setup(
+    monkeypatch,
+) -> None:
+    def _unexpected_gateway_setup(_request):
+        raise AssertionError("explicit requested model should avoid gateway setup")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        _unexpected_gateway_setup,
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+        ),
+        data={"requested_model": "gpt-4.1-mini", "requested_client_type": "openai"},
+    )
+
+    selected_model, selected_candidate, registry_snapshot, diagnostics = (
+        lse._select_model_context_for_prompt_variant(
+            request=request,
+            stage="context_adjudication",
+        )
+    )
+
+    assert selected_model == "gpt-4.1-mini"
+    assert selected_candidate == {"provider": "openai"}
+    assert registry_snapshot is None
+    assert diagnostics["source"] == "explicit_request_model"
+
+
+def test_prompt_variant_model_context_infers_provider_from_environment_client(
+    monkeypatch,
+) -> None:
+    class OpenAIClient:
+        pass
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda _request: (_ for _ in ()).throw(
+            AssertionError("explicit requested model should avoid gateway setup")
+        ),
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=OpenAIClient(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+        ),
+        data={"requested_model": "gpt-4.1-mini"},
+    )
+
+    selected_model, selected_candidate, registry_snapshot, diagnostics = (
+        lse._select_model_context_for_prompt_variant(
+            request=request,
+            stage="context_adjudication",
+        )
+    )
+
+    assert selected_model == "gpt-4.1-mini"
+    assert selected_candidate == {"provider": "openai"}
+    assert registry_snapshot is None
+    assert diagnostics["source"] == "explicit_request_model"
+
+
+def test_context_messages_policy_budget_preserves_tail_with_diagnostics() -> None:
+    messages, diagnostics = lse._bounded_context_messages_for_policy(
+        raw_value=[
+            {"role": "user", "content": "older context " * 20},
+            {"role": "assistant", "content": "middle context " * 20},
+            {"role": "user", "content": "Tell me about JVNAUTOSCI-150 in JIRA"},
+        ],
+        llm_policy_map={
+            "context_messages_max_chars": 80,
+            "context_messages_truncation_strategy": "tail",
+        },
+        context_messages_key="conversation_context",
+    )
+
+    assert messages
+    assert messages[-1]["content"] == "Tell me about JVNAUTOSCI-150 in JIRA"
+    assert diagnostics is not None
+    assert diagnostics["context_messages_context_key"] == "conversation_context"
+    assert diagnostics["truncated"] is True
+    assert diagnostics["raw_message_count"] == 3
+    assert diagnostics["rendered_chars"] <= 80
+    assert diagnostics["omitted_message_count"] >= 1
+
+
+def test_conversation_turn_fallback_guard_preserves_small_test_budgets() -> None:
+    assert lse._conversation_turn_llm_fallback_guard_timeout_sec(None) is None
+    assert lse._conversation_turn_llm_fallback_guard_timeout_sec(1.0) == 2.0
+    assert lse._conversation_turn_llm_fallback_guard_timeout_sec(120.0) == 210.0
+    assert lse._conversation_turn_llm_step_guard_timeout_sec(None) is None
+    assert lse._conversation_turn_llm_step_guard_timeout_sec(1.0) == 2.0
+    assert lse._conversation_turn_llm_step_guard_timeout_sec(120.0) == 300.0
 
 
 def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
@@ -1779,6 +1883,217 @@ def test_execute_llm_step_uses_default_timeout_for_tool_planning_when_env_missin
     assert captured["timeout_override_sec"] == DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC
 
 
+def test_gateway_llm_step_does_not_inherit_model_parameters_for_explicit_model(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["default_model_parameters"] = kwargs.get(
+                "default_model_parameters"
+            )
+            captured["emit_progress_callable"] = callable(kwargs.get("emit_progress"))
+            return ('{"ok": true}', "gpt-4.1-mini", {"provider": "openai"})
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+            model_parameters={"reasoning_effort": "medium"},
+        ),
+        data={
+            "requested_model": "gpt-4.1-mini",
+            "context_messages": [{"role": "user", "content": "Hello"}],
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"context_messages_context_key": "context_messages"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["default_model_parameters"] is None
+    assert captured["emit_progress_callable"] is True
+
+
+def test_gateway_llm_step_uses_explicit_requested_model_parameters(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["default_model_parameters"] = kwargs.get(
+                "default_model_parameters"
+            )
+            return ('{"ok": true}', "gpt-4.1-mini", {"provider": "openai"})
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+            model_parameters={"reasoning_effort": "high"},
+        ),
+        data={
+            "requested_model": "gpt-4.1-mini",
+            "requested_model_parameters": {"reasoning_effort": "low"},
+            "context_messages": [{"role": "user", "content": "Hello"}],
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"context_messages_context_key": "context_messages"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["default_model_parameters"] == {"reasoning_effort": "low"}
+
+
+def test_gateway_llm_step_progress_forwarding_does_not_block_llm_call(
+    monkeypatch,
+) -> None:
+    progress_entered = threading.Event()
+    release_progress = threading.Event()
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            emit_progress = kwargs.get("emit_progress")
+            assert callable(emit_progress)
+            emit_progress({"status": "heartbeat", "stage": "context_adjudication"})
+            return ('{"ok": true}', "gpt-4.1-mini", {"provider": "openai"})
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    def _blocking_progress(_payload):
+        progress_entered.set()
+        release_progress.wait(2.0)
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "emit_progress": _blocking_progress,
+            "context_messages": [{"role": "user", "content": "Hello"}],
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"context_messages_context_key": "context_messages"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    started_at = time.perf_counter()
+    try:
+        result = execute_llm_step(request)
+    finally:
+        release_progress.set()
+
+    assert result.status == "success"
+    assert (time.perf_counter() - started_at) < 1.0
+    assert progress_entered.wait(1.0)
+
+
+def test_bounded_llm_step_progress_event_does_not_block_execution_guard(
+    monkeypatch,
+) -> None:
+    progress_entered = threading.Event()
+    release_progress = threading.Event()
+
+    class _FastClient:
+        def generate(self, *_args, **_kwargs):
+            return '{"ok": true}'
+
+    def _blocking_progress(_payload):
+        progress_entered.set()
+        release_progress.wait(2.0)
+
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_FastClient(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "emit_progress": _blocking_progress,
+            "context_messages": [{"role": "user", "content": "Hello"}],
+        },
+        workflow_state_id="context_adjudication",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "policy_stage": "context_adjudication",
+            "context_messages_context_key": "context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    started_at = time.perf_counter()
+    try:
+        result = execute_llm_step(request)
+    finally:
+        release_progress.set()
+
+    assert result.status == "success"
+    assert (time.perf_counter() - started_at) < 1.0
+    assert progress_entered.wait(1.0)
+
+
+def test_direct_llm_step_passes_timeout_to_client_llm_params() -> None:
+    captured: dict[str, object] = {}
+
+    class _CapturingClient:
+        def generate(self, *_args, **kwargs):
+            captured["llm_params"] = kwargs.get("llm_params")
+            return '{"ok": true}'
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_CapturingClient(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "conversation_turn_llm_timeout_override_sec": 12,
+            "context_messages": [{"role": "user", "content": "Hello"}],
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"context_messages_context_key": "context_messages"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["llm_params"] == {"timeout_seconds": 12.0}
+
+
 def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
     monkeypatch,
 ) -> None:
@@ -1823,6 +2138,310 @@ def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
     assert envelope["completion_reason"] == "timeout"
     assert envelope["timeout_stage"] == "llm.action"
     assert "timed out after 12s" in envelope["timeout_detail"]
+
+
+def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(
+    monkeypatch,
+) -> None:
+    blocker = threading.Event()
+
+    class _StubOrchestrator:
+        def _select_model_for_stage(self, **_kwargs):
+            return "gpt-4.1-mini"
+
+        def _run_llm_with_fallbacks(self, **_kwargs):
+            blocker.wait(3.0)
+            raise AssertionError("blocked LLM call should have timed out")
+
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), {"models": []}, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Tell me about JVN"}],
+        },
+        workflow_id="#V#turn_prompt_context_adjudication_workflow",
+        workflow_state_id=(
+            "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+            "context_adjudication_decision"
+        ),
+        prompt_contract={
+            "prompt_text": "Return context adjudication JSON.",
+            "resolved_prompt_concept_id": "#V#turn_prompt_context_adjudication_prompt",
+        },
+        llm_policy={
+            "policy_stage": "context_adjudication",
+            "context_messages_context_key": "context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert "workflow_llm_step_timeout:" in str(result.error or "")
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "timeout"
+    assert envelope["timeout_stage"] == "context_adjudication"
+    assert envelope["workflow_state_id"] == (
+        "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+        "context_adjudication_decision"
+    )
+    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert envelope["selected_model"] == "gpt-4.1-mini"
+    assert envelope["selected_model_candidate"]["provider"] == "openai"
+    assert envelope["timeout_seconds"] == 2.0
+    assert envelope["fail_closed"] is True
+    assert envelope["fallback_used"] is False
+    assert envelope["fallback_policy"] == "none"
+    timeout_entries = [
+        entry
+        for entry in envelope["llm_calls"]
+        if entry.get("failure_kind") == "llm_call_timeout"
+    ]
+    assert len(timeout_entries) == 1
+    assert timeout_entries[0]["stage"] == "context_adjudication"
+    assert timeout_entries[0]["workflow_stage_id"] == (
+        "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+        "context_adjudication_decision"
+    )
+    assert timeout_entries[0]["provider"] == "openai"
+    assert timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+
+
+def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
+    monkeypatch,
+) -> None:
+    blocker = threading.Event()
+
+    class _BlockingClient:
+        def generate(self, *_args, **_kwargs):
+            blocker.wait(3.0)
+            raise AssertionError("blocked direct LLM call should have timed out")
+
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        lse,
+        "resolve_model_prompt_variant",
+        lambda **kwargs: pmr.WorkflowPromptVariantResolution(
+            base_prompt_concept_id=kwargs.get("base_prompt_concept_id"),
+            selected_prompt_concept_id=kwargs.get("base_prompt_concept_id"),
+            prompt_text=kwargs.get("base_prompt_text"),
+            rendered_variables=kwargs.get("variables") or {},
+            match_reason="base_prompt",
+            diagnostics={"match_reason": "base_prompt"},
+        ),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_BlockingClient(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Tell me about JVN"}],
+        },
+        workflow_id="#V#turn_prompt_context_adjudication_workflow",
+        workflow_state_id=(
+            "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+            "context_adjudication_decision"
+        ),
+        prompt_contract={
+            "prompt_text": "Return context adjudication JSON.",
+            "resolved_prompt_concept_id": "#V#turn_prompt_context_adjudication_prompt",
+        },
+        llm_policy={
+            "policy_stage": "context_adjudication",
+            "context_messages_context_key": "context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "timeout"
+    assert envelope["timeout_stage"] == "context_adjudication"
+    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert envelope["selected_model"] == "gpt-4.1-mini"
+    assert envelope["selected_model_candidate"]["provider"] == "openai"
+    assert envelope["timeout_seconds"] == 1.0
+    assert envelope["fail_closed"] is True
+    timeout_entries = [
+        entry
+        for entry in envelope["llm_calls"]
+        if entry.get("failure_kind") == "llm_call_timeout"
+    ]
+    assert len(timeout_entries) == 1
+    assert timeout_entries[0]["stage"] == "context_adjudication"
+    assert timeout_entries[0]["provider"] == "openai"
+    assert timeout_entries[0]["timeout_seconds"] == 1.0
+
+
+def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(
+    monkeypatch,
+) -> None:
+    blocker = threading.Event()
+
+    class _StubGateway:
+        def describe_methods(self):
+            return {}
+
+    class _StubOrchestrator:
+        def _select_model_for_stage(self, **_kwargs):
+            return "gpt-4.1-mini"
+
+        def _action_tool_calling_plan(self, _request):
+            blocker.wait(3.0)
+            raise AssertionError("blocked tool planner should have timed out")
+
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request, **_kwargs: (
+            _StubOrchestrator(),
+            object(),
+            {"models": []},
+            None,
+            None,
+        ),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Tell me about JVN"}],
+        },
+        workflow_id="#V#turn_prompt_context_adjudication_workflow",
+        workflow_state_id=(
+            "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+            "context_adjudication_decision"
+        ),
+        prompt_contract={
+            "prompt_text": "Return context adjudication JSON.",
+            "requested_prompt_concept_ids": [
+                "#V#turn_prompt_context_adjudication_prompt"
+            ],
+        },
+        llm_policy={
+            "policy_stage": "context_adjudication",
+            "tool_mode": "allowed",
+            "allowed_tools": ["jira_get_issue"],
+            "context_messages_context_key": "context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "timeout"
+    assert envelope["timeout_stage"] == "context_adjudication"
+    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert envelope["selected_model"] == "gpt-4.1-mini"
+    assert envelope["selected_model_candidate"]["provider"] == "openai"
+    assert envelope["timeout_seconds"] == 2.0
+    assert envelope["fail_closed"] is True
+    assert envelope["fallback_used"] is False
+    timeout_entries = [
+        entry
+        for entry in envelope["llm_calls"]
+        if entry.get("failure_kind") == "llm_call_timeout"
+    ]
+    assert len(timeout_entries) == 1
+    assert timeout_entries[0]["stage"] == "context_adjudication"
+    assert timeout_entries[0]["provider"] == "openai"
+
+
+def test_execute_llm_step_bounds_blocked_context_adjudication_prompt_render(
+    monkeypatch,
+) -> None:
+    blocker = threading.Event()
+
+    class _BlockingPromptService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def render_prompt(self, *_args, **_kwargs):
+            blocker.wait(3.0)
+            raise AssertionError("blocked prompt render should have timed out")
+
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "0.01")
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor.PromptTemplateService",
+        _BlockingPromptService,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            model="gpt-4.1-mini",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Tell me about JVN"}],
+        },
+        workflow_id="#V#turn_prompt_context_adjudication_workflow",
+        workflow_state_id=(
+            "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
+            "context_adjudication_decision"
+        ),
+        prompt_contract={
+            "requested_prompt_concept_ids": [
+                "#V#turn_prompt_context_adjudication_prompt"
+            ],
+        },
+        llm_policy={
+            "policy_stage": "context_adjudication",
+            "context_messages_context_key": "context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "timeout"
+    assert envelope["timeout_stage"] == "context_adjudication"
+    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert envelope["selected_model"] == "gpt-4.1-mini"
+    assert envelope["selected_model_candidate"]["provider"] == "openai"
+    assert envelope["timeout_seconds"] == 2.0
+    assert envelope["fail_closed"] is True
+    timeout_entries = [
+        entry
+        for entry in envelope["llm_calls"]
+        if entry.get("failure_kind") == "llm_call_timeout"
+    ]
+    assert len(timeout_entries) == 1
+    assert timeout_entries[0]["stage"] == "context_adjudication"
+    assert timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
 
 
 def test_execute_llm_step_uses_explicit_timeout_override_from_request_data(

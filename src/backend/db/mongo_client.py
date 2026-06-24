@@ -1290,27 +1290,14 @@ def get_application_settings_collection() -> Collection | None:
     """
     db = get_db()
     if db is not None:
-        settings_coll = db[APPLICATION_SETTINGS_COLLECTION_NAME]
-        # Index on setting_name for quick lookups, should be unique if setting_name is the primary key.
-        # If multiple documents can have the same setting_name (e.g. for different users, though not the case here),
-        # then unique=True should be omitted or a compound index used.
-        # For global settings, setting_name should be unique.
-        try:
-            settings_coll.create_index([("setting_name", ASCENDING)], unique=True)
-            # print(f"Indexes for '{APPLICATION_SETTINGS_COLLECTION_NAME}' ensured.")
-        except OperationFailure as e:
-            logger.warning(
-                "Error creating indexes for '%s': %s",
-                APPLICATION_SETTINGS_COLLECTION_NAME,
-                e,
-            )
-        except Exception as e:
-            logger.warning(
-                "An unexpected error occurred during index creation for '%s': %s",
-                APPLICATION_SETTINGS_COLLECTION_NAME,
-                e,
-            )
-        return settings_coll
+        return _ensure_collection_indexes_once(
+            db,
+            APPLICATION_SETTINGS_COLLECTION_NAME,
+            lambda settings_coll: settings_coll.create_index(
+                [("setting_name", ASCENDING)],
+                unique=True,
+            ),
+        )
     return None
 
 

@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "33",
+  "seed_version": "35",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -3763,7 +3763,9 @@
             ],
             "llm_policy": {
               "policy_stage": "context_adjudication",
-              "context_messages_context_key": "augmented_context",
+              "context_messages_context_key": "conversation_context",
+              "context_messages_max_chars": 6000,
+              "context_messages_truncation_strategy": "tail",
               "context_fields": [
                 {
                   "context_key": "user_prompt",
