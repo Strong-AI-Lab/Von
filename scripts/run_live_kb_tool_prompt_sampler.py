@@ -1352,17 +1352,20 @@ class BackgroundGenerateTaskError(RuntimeError):
         task_id: str | None = None,
         status_payload: Mapping[str, Any] | None = None,
         cancellation_payload: Mapping[str, Any] | None = None,
+        timeout_reconciliation: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.task_id = task_id
         self.status_payload = dict(status_payload or {})
         self.cancellation_payload = dict(cancellation_payload or {})
+        self.timeout_reconciliation = dict(timeout_reconciliation or {})
 
     def to_report(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "status_payload": self.status_payload,
             "cancellation_payload": self.cancellation_payload,
+            "timeout_reconciliation": self.timeout_reconciliation,
         }
 
 
@@ -2068,6 +2071,80 @@ def _build_turn_expected_outcome_contract_for_prompt_entry(
     return contract
 
 
+def _late_terminal_grace_seconds(
+    *,
+    poll_interval_seconds: float,
+    override_seconds: float | None = None,
+) -> float:
+    if override_seconds is not None:
+        return max(0.0, float(override_seconds))
+    return min(15.0, max(2.0, float(poll_interval_seconds) * 5.0))
+
+
+def _fetch_late_terminal_background_result(
+    *,
+    session: requests.Session,
+    base_url: str,
+    task_id: str,
+    timeout_status_payload: Mapping[str, Any] | None,
+    poll_interval_seconds: float,
+    grace_seconds: float,
+) -> dict[str, Any]:
+    reconciliation: dict[str, Any] = {
+        "schema_version": "background_task_timeout_reconciliation.v1",
+        "timed_out_before_budget": True,
+        "late_terminal_result_observed": False,
+        "task_id": task_id,
+        "timeout_status_payload": dict(timeout_status_payload or {}),
+        "grace_seconds": max(0.0, float(grace_seconds)),
+    }
+    deadline = time.monotonic() + max(0.0, float(grace_seconds))
+    last_status_payload: dict[str, Any] | None = None
+    while True:
+        try:
+            status_payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}/von/api/task/status/{task_id}",
+                timeout_seconds=15.0,
+            )
+        except Exception as exc:
+            reconciliation["status_readback_error"] = str(exc)
+            break
+
+        last_status_payload = dict(status_payload)
+        status = _safe_text(status_payload.get("status"))
+        if status in {"completed", "failed", "cancelled"}:
+            reconciliation["final_status_payload"] = dict(status_payload)
+            reconciliation["final_status"] = status
+            if status == "completed":
+                try:
+                    task_result_payload = _request_json(
+                        session,
+                        "GET",
+                        f"{base_url}/von/api/task/result/{task_id}",
+                        timeout_seconds=30.0,
+                    )
+                except Exception as exc:
+                    reconciliation["result_readback_error"] = str(exc)
+                    break
+                result_payload = _as_mapping(task_result_payload.get("result"))
+                reconciliation["result_payload_observed"] = bool(result_payload)
+                if result_payload:
+                    reconciliation["late_terminal_result_observed"] = True
+                    reconciliation["result_payload"] = dict(result_payload)
+            break
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(float(poll_interval_seconds), 0.2))
+
+    if last_status_payload is not None and "final_status_payload" not in reconciliation:
+        reconciliation["final_status_payload"] = last_status_payload
+        reconciliation["final_status"] = _safe_text(last_status_payload.get("status")) or None
+    return reconciliation
+
+
 def _run_generate_background(
     *,
     session: requests.Session,
@@ -2081,6 +2158,7 @@ def _run_generate_background(
     timeout_seconds: float,
     poll_interval_seconds: float,
     include_status_payload: bool = False,
+    late_terminal_grace_seconds: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     client_request_id = f"live-kb-prompt-{uuid.uuid4()}"
     request_payload: dict[str, Any] = {
@@ -2146,6 +2224,34 @@ def _run_generate_background(
         isinstance(status_payload, dict)
         and _safe_text(status_payload.get("status")) == "completed"
     ):
+        timeout_reconciliation = _fetch_late_terminal_background_result(
+            session=session,
+            base_url=base_url,
+            task_id=task_id,
+            timeout_status_payload=status_payload or {},
+            poll_interval_seconds=poll_interval_seconds,
+            grace_seconds=_late_terminal_grace_seconds(
+                poll_interval_seconds=poll_interval_seconds,
+                override_seconds=late_terminal_grace_seconds,
+            ),
+        )
+        if timeout_reconciliation.get("late_terminal_result_observed") is True:
+            generate_payload = _as_mapping(timeout_reconciliation.get("result_payload"))
+            if generate_payload:
+                generate_payload = dict(generate_payload)
+                generate_payload["background_task_timeout_reconciliation"] = {
+                    key: value
+                    for key, value in timeout_reconciliation.items()
+                    if key != "result_payload"
+                }
+                final_status_payload = timeout_reconciliation.get(
+                    "final_status_payload"
+                )
+                if isinstance(final_status_payload, Mapping):
+                    generate_payload["background_task_status"] = dict(
+                        final_status_payload
+                    )
+                return task_id, generate_payload
         cancellation_payload = _request_task_cancellation(
             session=session,
             base_url=base_url,
@@ -2158,6 +2264,7 @@ def _run_generate_background(
             task_id=task_id,
             status_payload=status_payload or {},
             cancellation_payload=cancellation_payload,
+            timeout_reconciliation=timeout_reconciliation,
         )
     task_result_payload = _request_json(
         session,
@@ -2303,6 +2410,7 @@ TASK_RESULT_DEBUG_COPY_KEYS = (
     "turn_output_health",
     "warnings",
     "background_task_status",
+    "background_task_timeout_reconciliation",
 )
 
 TASK_RESULT_DIAGNOSTIC_EVIDENCE_KEYS = frozenset(
@@ -2603,6 +2711,18 @@ def _evaluate_user_happiness(
     )
     if not response_text:
         reasons.append("No assistant response text was returned.")
+    timeout_reconciliation = _as_mapping(
+        generate_payload.get("background_task_timeout_reconciliation")
+    )
+    if timeout_reconciliation.get("timed_out_before_budget") is True:
+        if timeout_reconciliation.get("late_terminal_result_observed") is True:
+            reasons.append(
+                "Background task exceeded the configured timeout budget; a late terminal result was observed."
+            )
+        else:
+            reasons.append(
+                "Background task exceeded the configured timeout budget before a terminal result was observed."
+            )
 
     diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
@@ -2636,8 +2756,16 @@ def _evaluate_user_happiness(
         "denied",
         "escalation_required",
         "follow_up_required",
+        "incomplete",
+        "needs_replay",
+        "partial",
+        "retrying",
     }:
         reasons.append(f"Completion gate reported {completion_gate_status}.")
+    if completion_gate.get("safe_to_claim_completion") is False:
+        reasons.append("Completion gate reported safe_to_claim_completion=false.")
+    if completion_gate.get("requires_follow_up") is True:
+        reasons.append("Completion gate reported requires_follow_up=true.")
 
     critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
     critic_status = _safe_text(

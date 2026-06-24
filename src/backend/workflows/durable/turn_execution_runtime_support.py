@@ -3897,7 +3897,12 @@ def run_turn_execution_completion_gate(
         return None
 
     emit_progress = data.get("emit_progress")
-    if callable(emit_progress) and not repeat_iteration:
+    response_ready_permitted = bool(
+        (not repeat_iteration)
+        and safe_to_claim_completion
+        and not requires_follow_up
+    )
+    if callable(emit_progress) and response_ready_permitted:
         ready_response_text = _completion_gate_ready_response_text()
         if isinstance(ready_response_text, str) and ready_response_text.strip():
             try:

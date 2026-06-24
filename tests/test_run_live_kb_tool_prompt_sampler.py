@@ -230,6 +230,47 @@ def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
     assert any("Dispatch failed" in reason for reason in evaluation["reasons"])
 
 
+def test_evaluate_user_happiness_flags_partial_completion_gate() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "recent_arxiv_listing_messages",
+            "prompt": "List six recent arXiv listing emails.",
+            "knowledge_surfaces": ["gmail", "arxiv"],
+            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": "One recent arXiv listing email was found.",
+        },
+        llm_debug_data={
+            "completion_gate_verdict": {
+                "decision": "partial",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "gmail_list_messages", "status": "ok"},
+                ],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert "Completion gate reported partial." in evaluation["reasons"]
+    assert (
+        "Completion gate reported safe_to_claim_completion=false."
+        in evaluation["reasons"]
+    )
+    assert "Completion gate reported requires_follow_up=true." in evaluation["reasons"]
+
+
 def test_evaluate_user_happiness_flags_explicit_timeout_failure_response() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={
@@ -1107,6 +1148,80 @@ def test_run_generate_background_can_preserve_final_status_payload(
     assert generate_payload["background_task_status"]["progress_history"] == [
         {"status": "llm_call_end", "stage": "context_adjudication"}
     ]
+
+
+def test_run_generate_background_captures_late_terminal_result_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status_calls = 0
+    time_values = iter([100.0, 100.1, 131.0, 131.1])
+
+    def fake_time() -> float:
+        return next(time_values)
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal status_calls
+        url = str(args[2])
+        if url.endswith("/von/generate"):
+            return {"task_id": "task-late"}
+        if url.endswith("/von/api/task/status/task-late"):
+            status_calls += 1
+            if status_calls == 1:
+                return {"status": "running", "progress": {"phase": "finalising"}}
+            return {
+                "status": "completed",
+                "has_result": True,
+                "completed_at": "2026-06-24T00:49:16.619509+00:00",
+            }
+        if url.endswith("/von/api/task/result/task-late"):
+            return {
+                "result": {
+                    "response": "Late grounded answer.",
+                    "llm_debug": {
+                        "turn_execution_diagnostics": {
+                            "workflow_routing_diagnostics": {}
+                        }
+                    },
+                }
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+    monkeypatch.setattr(sampler.time, "time", fake_time)
+    monkeypatch.setattr(sampler.time, "sleep", lambda _seconds: None)
+
+    task_id, generate_payload = sampler._run_generate_background(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        prompt="Tell me about JVNAUTOSCI-150 in JIRA",
+        model=None,
+        gmail_profile=None,
+        presenter_mode=False,
+        turn_expected_outcome_contract=None,
+        timeout_seconds=1.0,
+        poll_interval_seconds=0.01,
+        late_terminal_grace_seconds=0.0,
+    )
+
+    assert task_id == "task-late"
+    assert generate_payload["response"] == "Late grounded answer."
+    reconciliation = generate_payload["background_task_timeout_reconciliation"]
+    assert reconciliation["timed_out_before_budget"] is True
+    assert reconciliation["late_terminal_result_observed"] is True
+    assert reconciliation["timeout_status_payload"]["status"] == "running"
+    assert reconciliation["final_status_payload"]["status"] == "completed"
+    assert generate_payload["background_task_status"]["status"] == "completed"
+
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "complexity_class": "direct_context_or_background",
+            "knowledge_surfaces": ["turn_context"],
+        },
+        generate_payload=generate_payload,
+        llm_debug_data=generate_payload["llm_debug"],
+    )
+    assert evaluation["should_user_be_happy"] is False
+    assert any("late terminal result" in reason for reason in evaluation["reasons"])
 
 
 def test_run_generate_background_can_request_presenter_mode(

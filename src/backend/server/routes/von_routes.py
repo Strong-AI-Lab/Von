@@ -32,6 +32,7 @@ from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
 from ...workflows.durable.turn_execution_runtime_support import (
+    coerce_user_visible_response_text,
     strip_completion_ledger_suffix,
 )
 from ...languagemodels.llm_interface import (
@@ -5996,29 +5997,63 @@ def _extract_durable_display_text(
     return None
 
 
+def _normalise_non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _select_durable_turn_response_text(
+    *,
+    outputs: Mapping[str, Any],
+    display_elements: Mapping[str, Any] | None,
+) -> str:
+    completion_report = outputs.get("completion_report")
+    completion_report_response = (
+        completion_report.get("response_text")
+        if isinstance(completion_report, Mapping)
+        else None
+    )
+    fallback_execution_status: str | None = None
+    for value in (
+        outputs.get("selected_workflow_user_response"),
+        completion_report_response,
+        outputs.get("final_response"),
+        outputs.get("response_text"),
+        outputs.get("current_response"),
+        outputs.get("response"),
+        _extract_durable_display_text(display_elements),
+        outputs.get("response_preview"),
+    ):
+        candidate = coerce_user_visible_response_text(value)
+        if candidate:
+            return candidate
+        text = _normalise_non_empty_text(value)
+        if (
+            fallback_execution_status is None
+            and isinstance(text, str)
+            and text.startswith("Execution status:")
+        ):
+            fallback_execution_status = text
+
+    if fallback_execution_status:
+        return fallback_execution_status
+
+    error_text = _normalise_non_empty_text(outputs.get("error"))
+    return error_text or ""
+
+
 def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     outputs = dict(instance.outputs) if isinstance(instance.outputs, Mapping) else {}
     display_elements = outputs.get("display_elements")
     if not isinstance(display_elements, Mapping):
         display_elements = None
 
-    response_text = outputs.get("response")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("selected_workflow_user_response")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("final_response")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("response_text")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("current_response")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = _extract_durable_display_text(display_elements)
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("response_preview")
-    if not isinstance(response_text, str) or not response_text.strip():
-        response_text = outputs.get("error")
-    if not isinstance(response_text, str):
-        response_text = ""
+    response_text = _select_durable_turn_response_text(
+        outputs=outputs,
+        display_elements=display_elements,
+    )
 
     session_id = outputs.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
@@ -6045,13 +6080,39 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     for key in (
         "workflow_discovery",
         "workflow_routing",
+        "selected_workflow_trace",
         "turn_execution_record",
         "turn_execution_diagnostics",
+        "completion_gate",
+        "completion_gate_verdict",
+        "completion_report",
+        "required_tool_obligation_ledger",
         "response_transformations",
     ):
         value = outputs.get(key)
         if isinstance(value, Mapping):
             llm_debug[key] = dict(value)
+    if "completion_gate_verdict" not in llm_debug and any(
+        key in outputs
+        for key in (
+            "completion_gate_decision",
+            "completion_gate_decision_reason",
+            "completion_gate_requires_follow_up",
+            "completion_gate_safe_to_claim_completion",
+            "completion_gate_terminal_outcome",
+            "completion_gate_evidence_payload",
+        )
+    ):
+        llm_debug["completion_gate_verdict"] = {
+            "decision": outputs.get("completion_gate_decision"),
+            "decision_reason": outputs.get("completion_gate_decision_reason"),
+            "requires_follow_up": outputs.get("completion_gate_requires_follow_up"),
+            "safe_to_claim_completion": outputs.get(
+                "completion_gate_safe_to_claim_completion"
+            ),
+            "terminal_outcome": outputs.get("completion_gate_terminal_outcome"),
+            "evidence_payload": outputs.get("completion_gate_evidence_payload"),
+        }
 
     return {
         "request_id": request_id,

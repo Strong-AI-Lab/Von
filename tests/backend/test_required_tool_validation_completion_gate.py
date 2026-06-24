@@ -756,6 +756,62 @@ def test_completion_gate_does_not_publish_timeout_as_ready_response() -> None:
     ] == []
 
 
+def test_completion_gate_does_not_publish_partial_answer_as_ready_response() -> None:
+    progress_events: list[dict[str, Any]] = []
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Expected six messages but only one was supported.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["required_evidence_answer_consistency"],
+                "blocking_failure_codes": ["answer_partial"],
+                "evidence_payload": {
+                    "unresolved_preconditions": [
+                        {
+                            "effect_id": "required_evidence_answer_consistency",
+                            "effect_type": "required_evidence_answer_consistency",
+                            "status": "not_satisfied",
+                            "status_reason": "The answer was partial.",
+                            "failure_codes": ["answer_partial"],
+                        }
+                    ]
+                },
+            },
+            "required_effects": [],
+        },
+        "selected_workflow_user_response": "One recent arXiv listing email was found.",
+        "final_response": "One recent arXiv listing email was found.",
+        "response_text": "One recent arXiv listing email was found.",
+        "current_response": "One recent arXiv listing email was found.",
+        "invocations": [{"tool": "gmail_list_messages", "status": "ok"}],
+        "aux_llm_calls": [],
+        "emit_progress": progress_events.append,
+        "turn_id": "turn-partial-not-ready",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert [
+        event
+        for event in progress_events
+        if event.get("status") == "orchestrator_result_ready"
+    ] == []
+
+
 def test_selected_workflow_outputs_render_structured_response_text() -> None:
     outputs = build_turn_execution_selected_workflow_outputs(
         selected_workflow_id="#V#general_mail_review_workflow",

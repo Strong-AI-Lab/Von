@@ -148,6 +148,106 @@ def test_background_result_returns_reconciled_durable_payload(monkeypatch) -> No
     )
 
 
+def test_background_result_prefers_user_answer_over_machine_json_response(
+    monkeypatch,
+) -> None:
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-json",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    instance = SimpleNamespace(
+        instance_id="instance-json",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="responded",
+        error=None,
+        source_event_id="turn-json",
+        inputs={"conversation_session_id": "session-json"},
+        outputs={
+            "request_id": "turn-json",
+            "session_id": "session-json",
+            "response": (
+                '{"confidence": 1.0, "workflow_id": '
+                '"#V#turn_completion_gate_workflow"}'
+            ),
+            "selected_workflow_user_response": "Grounded Jira answer.",
+            "final_response": "Grounded Jira answer.",
+            "completion_gate_decision": "completed",
+            "completion_gate_requires_follow_up": False,
+            "completion_gate_safe_to_claim_completion": True,
+        },
+    )
+    manager = _TerminalTurnManager(instance)
+    app = _make_app(monkeypatch, registry, manager)
+
+    response = app.test_client().get("/von/api/task/result/turn-json")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["result"]["response"] == "Grounded Jira answer."
+    assert body["result"]["llm_debug"]["response"] == "Grounded Jira answer."
+    assert body["result"]["llm_debug"]["completion_gate_verdict"] == {
+        "decision": "completed",
+        "decision_reason": None,
+        "requires_follow_up": False,
+        "safe_to_claim_completion": True,
+        "terminal_outcome": None,
+        "evidence_payload": None,
+    }
+
+
+def test_background_result_uses_completion_report_before_machine_json(
+    monkeypatch,
+) -> None:
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-report",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    instance = SimpleNamespace(
+        instance_id="instance-report",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="responded",
+        error=None,
+        source_event_id="turn-report",
+        inputs={"conversation_session_id": "session-report"},
+        outputs={
+            "request_id": "turn-report",
+            "session_id": "session-report",
+            "response": (
+                '{"confidence": 1.0, "workflow_id": '
+                '"#V#turn_completion_gate_workflow"}'
+            ),
+            "final_response": (
+                '{"confidence": 1.0, "workflow_id": '
+                '"#V#turn_completion_gate_workflow"}'
+            ),
+            "completion_report": {
+                "response_text": "Here is the grounded completion report answer."
+            },
+        },
+    )
+    manager = _TerminalTurnManager(instance)
+    app = _make_app(monkeypatch, registry, manager)
+
+    response = app.test_client().get("/von/api/task/result/turn-report")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert (
+        body["result"]["response"] == "Here is the grounded completion report answer."
+    )
+    assert body["result"]["llm_debug"]["completion_report"] == {
+        "response_text": "Here is the grounded completion report answer."
+    }
+
+
 def test_background_result_restores_failed_task_from_completed_durable_turn(
     monkeypatch,
 ) -> None:
