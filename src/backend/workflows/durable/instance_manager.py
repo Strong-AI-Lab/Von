@@ -156,6 +156,24 @@ def _ensure_indexes() -> None:
                 ],
                 name="started_status_created_instance_lock",
             )
+        if "claim_started_created_desc_instance" not in existing:
+            instances_coll.create_index(
+                [
+                    ("started_at", ASCENDING),
+                    ("created_at", DESCENDING),
+                    ("instance_id", ASCENDING),
+                ],
+                name="claim_started_created_desc_instance",
+            )
+        if "claim_started_created_asc_instance" not in existing:
+            instances_coll.create_index(
+                [
+                    ("started_at", ASCENDING),
+                    ("created_at", ASCENDING),
+                    ("instance_id", ASCENDING),
+                ],
+                name="claim_started_created_asc_instance",
+            )
 
         # User queries
         if "created_at_desc" not in existing:
@@ -362,10 +380,9 @@ class WorkflowInstanceManager:
 
     @staticmethod
     def _normalise_status_filter(
-        status: WorkflowInstanceStatus
-        | str
-        | Iterable[WorkflowInstanceStatus | str]
-        | None,
+        status: (
+            WorkflowInstanceStatus | str | Iterable[WorkflowInstanceStatus | str] | None
+        ),
     ) -> list[str]:
         if status is None:
             return []
@@ -435,10 +452,9 @@ class WorkflowInstanceManager:
         user_id: str | None = None,
         org_id: str | None = None,
         namespace: str | None = None,
-        status: WorkflowInstanceStatus
-        | str
-        | Iterable[WorkflowInstanceStatus | str]
-        | None = None,
+        status: (
+            WorkflowInstanceStatus | str | Iterable[WorkflowInstanceStatus | str] | None
+        ) = None,
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,
@@ -877,9 +893,7 @@ class WorkflowInstanceManager:
         )
         return self._instance_from_doc(doc)
 
-    def find_instance_id_by_event_key(
-        self, event_idempotency_key: str
-    ) -> str | None:
+    def find_instance_id_by_event_key(self, event_idempotency_key: str) -> str | None:
         """Return the instance_id already created for an event idempotency key.
 
         Cheap unique-index lookup used to keep idempotent event redelivery from
@@ -959,10 +973,9 @@ class WorkflowInstanceManager:
         user_id: str | None = None,
         org_id: str | None = None,
         namespace: str | None = None,
-        status: WorkflowInstanceStatus
-        | str
-        | Iterable[WorkflowInstanceStatus | str]
-        | None = None,
+        status: (
+            WorkflowInstanceStatus | str | Iterable[WorkflowInstanceStatus | str] | None
+        ) = None,
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,
@@ -1007,7 +1020,9 @@ class WorkflowInstanceManager:
             to_utc=to_utc,
         )
         cursor = coll.find(query).sort("created_at", -1).limit(limit)
-        return [instance for doc in cursor if (instance := self._instance_from_doc(doc))]
+        return [
+            instance for doc in cursor if (instance := self._instance_from_doc(doc))
+        ]
 
     def list_instance_status_dicts(
         self,
@@ -1015,10 +1030,9 @@ class WorkflowInstanceManager:
         user_id: str | None = None,
         org_id: str | None = None,
         namespace: str | None = None,
-        status: WorkflowInstanceStatus
-        | str
-        | Iterable[WorkflowInstanceStatus | str]
-        | None = None,
+        status: (
+            WorkflowInstanceStatus | str | Iterable[WorkflowInstanceStatus | str] | None
+        ) = None,
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,

@@ -893,7 +893,7 @@ class TestWorkflowInstanceManager:
         assert summaries[1]["status"] == WorkflowInstanceStatus.RUNNING.value
 
     def test_workflow_instance_indexes_include_namespace_status_created(self) -> None:
-        """Workflow instance indexes should cover the monitor namespace/status query."""
+        """Workflow instance indexes should cover monitor and worker-claim queries."""
         manager = WorkflowInstanceManager()
         manager.create_instance(
             "#V#test_workflow",
@@ -907,6 +907,8 @@ class TestWorkflowInstanceManager:
 
         index_names = {index["name"] for index in collection.list_indexes()}
         assert "namespace_status_created" in index_names
+        assert "claim_started_created_desc_instance" in index_names
+        assert "claim_started_created_asc_instance" in index_names
 
     def test_create_instance_for_event_reuses_existing(self) -> None:
         """create_instance_for_event() should deduplicate by idempotency key."""
