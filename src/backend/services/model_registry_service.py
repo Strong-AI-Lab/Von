@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
+from pathlib import Path
+import tempfile
 import threading
 import time
 from typing import Any, Mapping, Optional, Sequence
@@ -42,15 +45,59 @@ PARAMETER_ACTION_FIXED_VALUE = "fixed_value"
 
 _MODEL_REGISTRY_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
 _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION = (
+    "model_registry_snapshot_cache.v1"
+)
+_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES = frozenset(
+    {"vontology_graph", "vontology_json"}
+)
+_DEFAULT_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "data"
+    / "model_registry_cache"
+    / "model_registry_snapshot.json"
+)
 
 
-def _registry_snapshot_cache_ttl_seconds() -> float:
-    raw_value = os.getenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "300")
+def _truthy_env(var_name: str, *, default: str = "0") -> bool:
+    return os.getenv(var_name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float_seconds(var_name: str, *, default: float) -> float:
+    raw_value = os.getenv(var_name, str(default))
     try:
         parsed = float(str(raw_value).strip())
     except Exception:
-        parsed = 300.0
+        parsed = default
     return max(0.0, parsed)
+
+
+def _registry_snapshot_cache_ttl_seconds() -> float:
+    return _env_float_seconds(
+        "VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS",
+        default=300.0,
+    )
+
+
+def _registry_snapshot_disk_cache_enabled() -> bool:
+    return _truthy_env(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED",
+        default="1",
+    )
+
+
+def _registry_snapshot_disk_cache_ttl_seconds() -> float:
+    return _env_float_seconds(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_TTL_SECONDS",
+        default=3600.0,
+    )
+
+
+def _registry_snapshot_disk_cache_path() -> Path:
+    override = os.getenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH")
+    if isinstance(override, str) and override.strip():
+        return Path(override.strip())
+    return _DEFAULT_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH
 
 
 def _registry_snapshot_cache_key(preferred_language: str | None) -> str:
@@ -59,6 +106,177 @@ def _registry_snapshot_cache_key(preferred_language: str | None) -> str:
         if isinstance(preferred_language, str) and preferred_language.strip()
         else ""
     )
+
+
+def _utc_iso_from_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _store_registry_snapshot_in_memory(
+    *,
+    cache_key: str,
+    snapshot: Mapping[str, Any],
+    expires_at: float,
+) -> None:
+    if expires_at <= time.time():
+        return
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
+            "expires_at": expires_at,
+            "snapshot": snapshot,
+        }
+
+
+def _load_registry_snapshot_from_disk(
+    *,
+    cache_key: str,
+    now: float,
+) -> tuple[Mapping[str, Any], float] | None:
+    if not _registry_snapshot_disk_cache_enabled():
+        return None
+    try:
+        cache_path = _registry_snapshot_disk_cache_path()
+        if not cache_path.exists():
+            return None
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            return None
+        if (
+            payload.get("schema_version")
+            != _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION
+        ):
+            return None
+        entries = payload.get("entries")
+        entry: Any
+        if isinstance(entries, Mapping):
+            entry = entries.get(cache_key)
+        elif payload.get("cache_key") == cache_key:
+            entry = payload
+        else:
+            return None
+        if not isinstance(entry, Mapping):
+            return None
+        expires_at = entry.get("expires_at")
+        if not isinstance(expires_at, (int, float)) or expires_at <= now:
+            return None
+        source = entry.get("source")
+        if source not in _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES:
+            return None
+        snapshot = entry.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            return None
+        if snapshot.get("source") != source:
+            return None
+        return snapshot, float(expires_at)
+    except Exception as exc:
+        logger.debug("Could not load model registry snapshot disk cache: %s", exc)
+        return None
+
+
+def _persist_registry_snapshot_to_disk(
+    *,
+    cache_key: str,
+    preferred_language: str | None,
+    snapshot: Mapping[str, Any],
+    hydrate_duration_ms: int | None,
+) -> None:
+    if not _registry_snapshot_disk_cache_enabled():
+        return
+    source = snapshot.get("source")
+    if source not in _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES:
+        return
+    disk_ttl_seconds = _registry_snapshot_disk_cache_ttl_seconds()
+    if disk_ttl_seconds <= 0:
+        return
+
+    created_at = time.time()
+    entry = {
+        "cache_key": cache_key,
+        "preferred_language": preferred_language or "",
+        "source": source,
+        "created_at": created_at,
+        "created_at_utc": _utc_iso_from_timestamp(created_at),
+        "expires_at": created_at + disk_ttl_seconds,
+        "expires_at_utc": _utc_iso_from_timestamp(created_at + disk_ttl_seconds),
+        "metadata": {
+            "hydrate_duration_ms": hydrate_duration_ms,
+        },
+        "snapshot": snapshot,
+    }
+
+    cache_path = _registry_snapshot_disk_cache_path()
+    temp_path: str | None = None
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        entries: dict[str, Any] = {}
+        try:
+            existing_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing_payload = None
+        if (
+            isinstance(existing_payload, Mapping)
+            and existing_payload.get("schema_version")
+            == _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION
+        ):
+            existing_entries = existing_payload.get("entries")
+            if isinstance(existing_entries, Mapping):
+                entries = {
+                    str(existing_key): existing_entry
+                    for existing_key, existing_entry in existing_entries.items()
+                    if isinstance(existing_key, str)
+                    and isinstance(existing_entry, Mapping)
+                }
+            elif isinstance(existing_payload.get("cache_key"), str):
+                entries[str(existing_payload["cache_key"])] = existing_payload
+        entries[cache_key] = entry
+        payload = {
+            "schema_version": _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION,
+            "updated_at": created_at,
+            "updated_at_utc": _utc_iso_from_timestamp(created_at),
+            "entries": entries,
+        }
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{cache_path.name}.",
+            suffix=".tmp",
+            dir=str(cache_path.parent),
+        )
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(temp_path, cache_path)
+        temp_path = None
+        try:
+            os.chmod(cache_path, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        logger.debug("Could not persist model registry snapshot disk cache: %s", exc)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def clear_model_registry_snapshot_caches(*, remove_disk: bool = False) -> None:
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        _MODEL_REGISTRY_SNAPSHOT_CACHE.clear()
+    if not remove_disk:
+        return
+    try:
+        _registry_snapshot_disk_cache_path().unlink(missing_ok=True)
+    except Exception as exc:
+        logger.debug("Could not remove model registry snapshot disk cache: %s", exc)
 
 
 def _parse_registry_json(raw_text: str) -> Optional[Mapping[str, Any]]:
@@ -527,36 +745,63 @@ def get_model_registry_snapshot(
                 ):
                     return snapshot
 
+    disk_cache_hit = _load_registry_snapshot_from_disk(cache_key=cache_key, now=now)
+    if disk_cache_hit is not None:
+        disk_snapshot, disk_expires_at = disk_cache_hit
+        if cache_ttl_seconds > 0:
+            _store_registry_snapshot_in_memory(
+                cache_key=cache_key,
+                snapshot=disk_snapshot,
+                expires_at=min(time.time() + cache_ttl_seconds, disk_expires_at),
+            )
+        return disk_snapshot
+
+    graph_started_at = time.time()
     registry = _load_registry_from_vontology_graph(
         preferred_language=preferred_language
     )
+    graph_duration_ms = int((time.time() - graph_started_at) * 1000)
     if registry is not None:
         snapshot = {
             "source": "vontology_graph",
             **registry,
         }
         if cache_ttl_seconds > 0:
-            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
-                _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
-                    "expires_at": time.time() + cache_ttl_seconds,
-                    "snapshot": snapshot,
-                }
+            _store_registry_snapshot_in_memory(
+                cache_key=cache_key,
+                snapshot=snapshot,
+                expires_at=time.time() + cache_ttl_seconds,
+            )
+        _persist_registry_snapshot_to_disk(
+            cache_key=cache_key,
+            preferred_language=preferred_language,
+            snapshot=snapshot,
+            hydrate_duration_ms=graph_duration_ms,
+        )
         return snapshot
 
+    json_started_at = time.time()
     registry = _load_registry_from_vontology_json(
         preferred_language=preferred_language
     )
+    json_duration_ms = int((time.time() - json_started_at) * 1000)
     if registry is not None:
         snapshot = {
             "source": "vontology_json",
             **registry,
         }
         if cache_ttl_seconds > 0:
-            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
-                _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
-                    "expires_at": time.time() + cache_ttl_seconds,
-                    "snapshot": snapshot,
-                }
+            _store_registry_snapshot_in_memory(
+                cache_key=cache_key,
+                snapshot=snapshot,
+                expires_at=time.time() + cache_ttl_seconds,
+            )
+        _persist_registry_snapshot_to_disk(
+            cache_key=cache_key,
+            preferred_language=preferred_language,
+            snapshot=snapshot,
+            hydrate_duration_ms=json_duration_ms,
+        )
         return snapshot
 
     return _build_registry_from_settings()

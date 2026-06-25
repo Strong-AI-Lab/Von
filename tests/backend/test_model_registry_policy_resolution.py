@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Any, Mapping, cast
 from unittest.mock import patch
 
@@ -87,6 +89,7 @@ def test_model_registry_snapshot_is_cached_within_ttl(monkeypatch):
         }
 
     monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "0")
     monkeypatch.setattr(
         registry_service,
         "_load_registry_from_vontology_graph",
@@ -107,6 +110,293 @@ def test_model_registry_snapshot_is_cached_within_ttl(monkeypatch):
     assert first is second
     assert first["source"] == "vontology_graph"
     registry_service._MODEL_REGISTRY_SNAPSHOT_CACHE.clear()
+
+
+def _write_registry_disk_cache(
+    path,
+    *,
+    cache_key="en-nz",
+    expires_at=None,
+    source="vontology_graph",
+):
+    now = time.time()
+    snapshot = {
+        "source": source,
+        "registry_concept_id": "#V#default_model_registry",
+        "models": [
+            {
+                "model_id": "openai:gpt-5.4-nano",
+                "provider": "openai",
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "model_registry_snapshot_cache.v1",
+                "updated_at": now,
+                "entries": {
+                    cache_key: {
+                        "cache_key": cache_key,
+                        "preferred_language": "en-NZ",
+                        "source": source,
+                        "created_at": now,
+                        "expires_at": (
+                            expires_at if expires_at is not None else now + 60
+                        ),
+                        "metadata": {
+                            "hydrate_duration_ms": 1234,
+                        },
+                        "snapshot": snapshot,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return snapshot
+
+
+def test_model_registry_snapshot_uses_valid_disk_cache(tmp_path, monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    expected_snapshot = _write_registry_disk_cache(cache_path)
+    registry_service.clear_model_registry_snapshot_caches()
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_graph",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("graph loader should not run on disk hit")
+        ),
+    )
+
+    snapshot = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    assert snapshot == expected_snapshot
+    assert registry_service._MODEL_REGISTRY_SNAPSHOT_CACHE["en-nz"]["snapshot"] is snapshot
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_snapshot_ignores_stale_disk_cache(tmp_path, monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    _write_registry_disk_cache(cache_path, expires_at=time.time() - 1)
+    registry_service.clear_model_registry_snapshot_caches()
+    calls = {"graph": 0}
+
+    def _load_graph(**_kwargs):
+        calls["graph"] += 1
+        return {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [
+                {
+                    "model_id": "openai:gpt-5.5-nano",
+                    "provider": "openai",
+                }
+            ],
+        }
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_TTL_SECONDS", "120")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_graph", _load_graph)
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_json", lambda **_kwargs: None)
+
+    snapshot = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    assert calls["graph"] == 1
+    assert snapshot["models"][0]["model_id"] == "openai:gpt-5.5-nano"
+    entry = persisted["entries"]["en-nz"]
+    assert entry["source"] == "vontology_graph"
+    assert entry["metadata"]["hydrate_duration_ms"] >= 0
+    assert entry["snapshot"]["models"][0]["model_id"] == "openai:gpt-5.5-nano"
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_snapshot_ignores_wrong_key_disk_cache(tmp_path, monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    _write_registry_disk_cache(cache_path, cache_key="fr")
+    registry_service.clear_model_registry_snapshot_caches()
+    calls = {"graph": 0}
+
+    def _load_graph(**_kwargs):
+        calls["graph"] += 1
+        return {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [{"model_id": "openai:gpt-5.5-nano", "provider": "openai"}],
+        }
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_graph", _load_graph)
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_json", lambda **_kwargs: None)
+
+    snapshot = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    assert calls["graph"] == 1
+    assert snapshot["models"][0]["model_id"] == "openai:gpt-5.5-nano"
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_snapshot_ignores_invalid_disk_cache(tmp_path, monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    cache_path.write_text("{not valid json", encoding="utf-8")
+    registry_service.clear_model_registry_snapshot_caches()
+    calls = {"graph": 0}
+
+    def _load_graph(**_kwargs):
+        calls["graph"] += 1
+        return {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [{"model_id": "openai:gpt-5.5-nano", "provider": "openai"}],
+        }
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_graph", _load_graph)
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_json", lambda **_kwargs: None)
+
+    snapshot = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    assert calls["graph"] == 1
+    assert snapshot["models"][0]["model_id"] == "openai:gpt-5.5-nano"
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_settings_fallback_is_not_disk_cached(tmp_path, monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    registry_service.clear_model_registry_snapshot_caches()
+    calls = {"settings": 0}
+
+    def _build_settings():
+        calls["settings"] += 1
+        return {
+            "source": "settings",
+            "models": [{"model_id": "openai:gpt-5.4-nano", "provider": "openai"}],
+        }
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_graph", lambda **_kwargs: None)
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_json", lambda **_kwargs: None)
+    monkeypatch.setattr(registry_service, "_build_registry_from_settings", _build_settings)
+
+    first = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+    second = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    assert first["source"] == "settings"
+    assert second["source"] == "settings"
+    assert calls["settings"] == 2
+    assert not cache_path.exists()
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_disk_cache_write_is_atomic_enough_for_readers(
+    tmp_path, monkeypatch
+):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    registry_service.clear_model_registry_snapshot_caches()
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_graph",
+        lambda **_kwargs: {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [{"model_id": "openai:gpt-5.4-nano", "provider": "openai"}],
+        },
+    )
+    monkeypatch.setattr(registry_service, "_load_registry_from_vontology_json", lambda **_kwargs: None)
+
+    registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == "model_registry_snapshot_cache.v1"
+    assert persisted["entries"]["en-nz"]["cache_key"] == "en-nz"
+    assert persisted["entries"]["en-nz"]["snapshot"]["source"] == "vontology_graph"
+    assert list(tmp_path.glob(".*.tmp")) == []
+    registry_service.clear_model_registry_snapshot_caches()
+
+
+def test_model_registry_disk_cache_keeps_multiple_language_keys(
+    tmp_path, monkeypatch
+):
+    import src.backend.services.model_registry_service as registry_service
+
+    cache_path = tmp_path / "registry_snapshot.json"
+    _write_registry_disk_cache(cache_path, cache_key="")
+    registry_service.clear_model_registry_snapshot_caches()
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(cache_path),
+    )
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_graph",
+        lambda **_kwargs: {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [{"model_id": "openai:gpt-5.5-nano", "provider": "openai"}],
+        },
+    )
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_json",
+        lambda **_kwargs: None,
+    )
+
+    registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    assert set(persisted["entries"]) == {"", "en-nz"}
+    assert persisted["entries"][""]["snapshot"]["models"][0]["model_id"] == (
+        "openai:gpt-5.4-nano"
+    )
+    assert persisted["entries"]["en-nz"]["snapshot"]["models"][0]["model_id"] == (
+        "openai:gpt-5.5-nano"
+    )
+    registry_service.clear_model_registry_snapshot_caches()
 
 
 def test_policy_candidate_prefers_active_llm_primary_before_enabled_models():
