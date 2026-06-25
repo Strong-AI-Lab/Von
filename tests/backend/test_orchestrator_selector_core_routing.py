@@ -427,6 +427,79 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     assert result.response_text == "Custom analysis complete."
 
 
+def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
+    """Required-tool turns should not offer no-tool defaults to the selector."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": "#V#missing_tool_call_workflow",
+                        "name": "Missing Tool Call Workflow",
+                        "description": "Recovery workflow for already observed missing tool calls.",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "candidate_source": "workflow_discovery",
+                    }
+                ],
+                "candidates": [
+                    {"concept_id": "#V#missing_tool_call_workflow"},
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": ["jira_get_issue", "jira_get_issue"],
+                },
+            },
+            prompt="Tell me about JVNAUTOSCI-150 in JIRA",
+        )
+    )
+
+    assert discovered == []
+    assert [candidate.get("concept_id") for candidate in selector_candidates] == [
+        TOOL_CALLING_WORKFLOW_ID
+    ]
+    tool_candidate = selector_candidates[0]
+    assert tool_candidate["candidate_source"] == "selector_default"
+    assert tool_candidate["candidate_reason"] == "required_turn_tools"
+    assert tool_candidate["routing_profile_role"] == "execution"
+    assert tool_candidate["turn_launchable"] is True
+    assert tool_candidate["covers_expected_tool_set"] is True
+    assert tool_candidate["covers_success_contract"] is True
+    assert tool_candidate["satisfies_expected_outcome_contract"] is True
+    assert tool_candidate["matched_required_tools"] == ["jira_get_issue"]
+    assert tool_candidate["routing_index_metadata"]["required_tools"] == [
+        "jira_get_issue"
+    ]
+
+    excluded_by_id = {candidate["concept_id"]: candidate for candidate in excluded}
+    assert set(excluded_by_id) == {
+        "#V#missing_tool_call_workflow",
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+    }
+    for workflow_id, candidate in excluded_by_id.items():
+        assert candidate["routing_eligible"] is False
+        assert candidate["required_tools"] == ["jira_get_issue"]
+        if workflow_id == "#V#missing_tool_call_workflow":
+            assert candidate["candidate_source"] == "workflow_discovery"
+            assert candidate["candidate_reason"] == "discovered_workflow_excluded"
+            assert (
+                candidate["routing_exclusion_reason"]
+                == "required_tool_contract_not_satisfied"
+            )
+        else:
+            assert candidate["candidate_source"] == "selector_default"
+            assert candidate["candidate_reason"] == "selector_default_excluded"
+            assert candidate["routing_exclusion_reason"] == (
+                "direct_response_route_cannot_satisfy_required_turn_tools"
+            )
+
+
 def test_top_level_selector_applies_represented_fast_path_before_llm(monkeypatch):
     """Represented candidate policy should route the top-level path without selector LLM drift."""
 
