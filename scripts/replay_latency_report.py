@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -133,6 +133,7 @@ class ProgressEvent:
     timestamp: datetime | None
     total_elapsed_ms: int | None
     duration_ms: int | None
+    llm_request_prepared_at: datetime | None
 
 
 def _phase_for_event(raw_event: Mapping[str, Any]) -> str:
@@ -171,6 +172,9 @@ def _normalise_events(
                 timestamp=_parse_timestamp(raw_event.get("recorded_at")),
                 total_elapsed_ms=_coerce_elapsed_ms(raw_event.get("total_elapsed_ms")),
                 duration_ms=_coerce_elapsed_ms(raw_event.get("duration_ms")),
+                llm_request_prepared_at=_parse_timestamp(
+                    raw_event.get("llm_request_prepared_at_utc")
+                ),
             )
         )
     return events
@@ -280,14 +284,25 @@ def _summarise_llm_gaps(events: Sequence[ProgressEvent]) -> list[dict[str, Any]]
             active_by_phase.setdefault(event.phase, event)
             previous = event
             continue
+        prepared_event: ProgressEvent | None = None
+        status = "prepared"
         if event.status == "llm_request_prepared":
+            prepared_event = event
+        elif event.llm_request_prepared_at is not None:
+            prepared_event = replace(
+                event,
+                status="llm_request_prepared",
+                timestamp=event.llm_request_prepared_at,
+            )
+            status = "prepared_from_timestamp"
+
+        if prepared_event is not None:
             start = active_by_phase.pop(event.phase, None)
-            status = "prepared"
             if start is None:
                 start = phase_start_by_phase.get(event.phase)
                 status = "prepared_from_phase_start"
             if start is not None:
-                gaps.append(_build_llm_gap(start, event, status=status))
+                gaps.append(_build_llm_gap(start, prepared_event, status=status))
         previous = event
 
     last_by_phase: dict[str, ProgressEvent] = {}

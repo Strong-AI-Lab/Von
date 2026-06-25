@@ -68,6 +68,47 @@ def test_policy_candidate_resolves_via_model_registry():
     assert candidates[-1].source == "active_llm"
 
 
+def test_model_registry_snapshot_is_cached_within_ttl(monkeypatch):
+    import src.backend.services.model_registry_service as registry_service
+
+    registry_service._MODEL_REGISTRY_SNAPSHOT_CACHE.clear()
+    calls = {"graph": 0}
+
+    def _load_graph(**_kwargs):
+        calls["graph"] += 1
+        return {
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [
+                {
+                    "model_id": "openai:gpt-5.4-nano",
+                    "provider": "openai",
+                }
+            ],
+        }
+
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_graph",
+        _load_graph,
+    )
+    monkeypatch.setattr(
+        registry_service,
+        "_load_registry_from_vontology_json",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("JSON fallback should not be consulted")
+        ),
+    )
+
+    first = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+    second = registry_service.get_model_registry_snapshot(preferred_language="en-NZ")
+
+    assert calls["graph"] == 1
+    assert first is second
+    assert first["source"] == "vontology_graph"
+    registry_service._MODEL_REGISTRY_SNAPSHOT_CACHE.clear()
+
+
 def test_policy_candidate_prefers_active_llm_primary_before_enabled_models():
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
 

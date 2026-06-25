@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
+import time
 from typing import Any, Mapping, Optional, Sequence
 
 from .settings_service import resolve_enabled_llm_settings, resolve_llm_setting
@@ -36,6 +39,26 @@ KNOWN_PROVIDER_PREFIXES = frozenset(
 )
 PARAMETER_ACTION_OMIT = "omit"
 PARAMETER_ACTION_FIXED_VALUE = "fixed_value"
+
+_MODEL_REGISTRY_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
+_MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK = threading.Lock()
+
+
+def _registry_snapshot_cache_ttl_seconds() -> float:
+    raw_value = os.getenv("VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS", "300")
+    try:
+        parsed = float(str(raw_value).strip())
+    except Exception:
+        parsed = 300.0
+    return max(0.0, parsed)
+
+
+def _registry_snapshot_cache_key(preferred_language: str | None) -> str:
+    return (
+        preferred_language.strip().lower()
+        if isinstance(preferred_language, str) and preferred_language.strip()
+        else ""
+    )
 
 
 def _parse_registry_json(raw_text: str) -> Optional[Mapping[str, Any]]:
@@ -488,23 +511,53 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
 def get_model_registry_snapshot(
     *, preferred_language: str | None = None
 ) -> Mapping[str, Any]:
+    cache_ttl_seconds = _registry_snapshot_cache_ttl_seconds()
+    cache_key = _registry_snapshot_cache_key(preferred_language)
+    now = time.time()
+    if cache_ttl_seconds > 0:
+        with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+            cached = _MODEL_REGISTRY_SNAPSHOT_CACHE.get(cache_key)
+            if isinstance(cached, Mapping):
+                expires_at = cached.get("expires_at")
+                snapshot = cached.get("snapshot")
+                if (
+                    isinstance(expires_at, (int, float))
+                    and expires_at > now
+                    and isinstance(snapshot, Mapping)
+                ):
+                    return snapshot
+
     registry = _load_registry_from_vontology_graph(
         preferred_language=preferred_language
     )
     if registry is not None:
-        return {
+        snapshot = {
             "source": "vontology_graph",
             **registry,
         }
+        if cache_ttl_seconds > 0:
+            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+                _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
+                    "expires_at": time.time() + cache_ttl_seconds,
+                    "snapshot": snapshot,
+                }
+        return snapshot
 
     registry = _load_registry_from_vontology_json(
         preferred_language=preferred_language
     )
     if registry is not None:
-        return {
+        snapshot = {
             "source": "vontology_json",
             **registry,
         }
+        if cache_ttl_seconds > 0:
+            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+                _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
+                    "expires_at": time.time() + cache_ttl_seconds,
+                    "snapshot": snapshot,
+                }
+        return snapshot
 
     return _build_registry_from_settings()
 

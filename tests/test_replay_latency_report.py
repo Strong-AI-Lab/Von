@@ -165,6 +165,36 @@ def test_replay_latency_report_counts_phase_start_prepare_gap(tmp_path) -> None:
     assert gap["total_duration_ms"] == 207000
 
 
+def test_replay_latency_report_uses_prepared_timestamp_from_call_event(tmp_path) -> None:
+    artifact = tmp_path / "call_event_timestamp.json"
+    _write_artifact(
+        artifact,
+        [
+            {
+                "recorded_at": "2026-06-24T00:00:00+00:00",
+                "phase": "selector_decision",
+                "status": "thinking",
+                "subtask": "bounded LLM call",
+                "model_name": "gpt-5.4-nano",
+            },
+            {
+                "recorded_at": "2026-06-24T00:00:35+00:00",
+                "phase": "selector_decision",
+                "status": "llm_call_end",
+                "duration_ms": 5000,
+                "llm_request_prepared_at_utc": "2026-06-24T00:00:30+00:00",
+            },
+        ],
+    )
+
+    report = replay_latency_report.build_replay_latency_report([artifact])
+
+    gap = report["llm_request_preparation_gap_totals"][0]
+    assert gap["phase"] == "selector_decision"
+    assert gap["status"] == "prepared_from_timestamp"
+    assert gap["total_duration_ms"] == 30000
+
+
 def test_render_markdown_is_redacted_and_structural(tmp_path) -> None:
     artifact = tmp_path / "sample.json"
     _write_artifact(
