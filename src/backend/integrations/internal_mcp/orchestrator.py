@@ -34276,10 +34276,15 @@ class InternalMCPChatOrchestrator:
                     required_tools=expected_required_tools
                 )
             )
+            selector_default_candidates, _excluded_defaults = (
+                self._build_selector_default_candidates(
+                    required_tools=expected_required_tools
+                )
+            )
             tool_candidate = next(
                 (
                     dict(candidate)
-                    for candidate in self._build_selector_default_candidates()
+                    for candidate in selector_default_candidates
                     if candidate.get("concept_id") == TOOL_CALLING_WORKFLOW_ID
                 ),
                 {
@@ -46467,13 +46472,66 @@ class InternalMCPChatOrchestrator:
         _persist_trace(status=terminal_trace_status)
         return result
 
-    def _build_selector_default_candidates(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _selector_contract_required_tools(
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> tuple[str, ...]:
+        if not isinstance(workflow_discovery_result, Mapping):
+            return ()
+        sources: list[Any] = []
+        for key in (
+            "turn_expected_required_tools",
+            "required_tools",
+            "required_prompt_tools",
+        ):
+            sources.append(workflow_discovery_result.get(key))
+        for key in (
+            "contract_projection",
+            "turn_expected_outcome_contract",
+            "turn_expected_outcome_contract_state",
+        ):
+            raw_payload = workflow_discovery_result.get(key)
+            if isinstance(raw_payload, Mapping):
+                sources.append(raw_payload.get("required_tools"))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for source in sources:
+            if isinstance(source, str):
+                raw_items: Sequence[Any] = (source,)
+            elif isinstance(source, Sequence):
+                raw_items = source
+            else:
+                continue
+            for raw_item in raw_items:
+                if not isinstance(raw_item, str):
+                    continue
+                tool_name = raw_item.strip()
+                if not tool_name:
+                    continue
+                dedupe_key = tool_name.lower()
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                ordered.append(tool_name)
+        return tuple(ordered)
+
+    def _build_selector_default_candidates(
+        self,
+        *,
+        required_tools: Sequence[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         candidate_ids = (
             CHAT_ASSISTANT_WORKFLOW_ID,
             TOOL_CALLING_WORKFLOW_ID,
             CHAT_NARRATION_WORKFLOW_ID,
         )
         candidates: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        required_tool_names = tuple(
+            str(tool_name).strip()
+            for tool_name in (required_tools or ())
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        )
         for workflow_id in candidate_ids:
             registration = self._workflow_registry.get_registration(workflow_id)
             if registration is None:
@@ -46481,21 +46539,56 @@ class InternalMCPChatOrchestrator:
             name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
             name = name.replace("_", " ").strip().title() or workflow_id
             description = str(getattr(registration, "purpose", "") or "").strip()
-            candidates.append(
-                {
-                    "concept_id": workflow_id,
-                    "name": name,
-                    "description": description,
-                    "candidate_source": "selector_default",
-                    "candidate_reason": "builtin_selector_candidate",
-                    "is_executable": True,
-                    "executability_reason": "executable_now",
-                    "is_policy_safe": True,
-                    "routing_eligible": True,
-                    "routing_exclusion_reason": None,
-                }
-            )
-        return candidates
+            item = {
+                "concept_id": workflow_id,
+                "name": name,
+                "description": description,
+                "candidate_source": "selector_default",
+                "candidate_reason": "builtin_selector_candidate",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "routing_exclusion_reason": None,
+            }
+            if required_tool_names and workflow_id == TOOL_CALLING_WORKFLOW_ID:
+                item.update(
+                    {
+                        "candidate_reason": "required_turn_tools",
+                        "routing_profile_role": "execution",
+                        "routing_profile_role_source": (
+                            "turn_expected_outcome_contract"
+                        ),
+                        "turn_launchable": True,
+                        "covers_expected_tool_set": True,
+                        "covers_success_contract": True,
+                        "satisfies_expected_outcome_contract": True,
+                        "selector_fast_path_eligible": True,
+                        "matched_required_tools": list(required_tool_names),
+                        "required_tool_overlap_count": len(required_tool_names),
+                        "routing_index_metadata": {
+                            "required_tools": list(required_tool_names),
+                            "required_tool_source": "turn_expected_outcome_contract",
+                        },
+                    }
+                )
+                candidates.append(item)
+                continue
+            if required_tool_names:
+                item.update(
+                    {
+                        "candidate_reason": "selector_default_excluded",
+                        "routing_eligible": False,
+                        "routing_exclusion_reason": (
+                            "direct_response_route_cannot_satisfy_required_turn_tools"
+                        ),
+                        "required_tools": list(required_tool_names),
+                    }
+                )
+                excluded.append(item)
+                continue
+            candidates.append(item)
+        return candidates, excluded
 
     @staticmethod
     def _merge_selector_candidates(
@@ -46517,6 +46610,86 @@ class InternalMCPChatOrchestrator:
                 seen_ids.add(dedupe_key)
                 merged.append(dict(item))
         return merged
+
+    @staticmethod
+    def _selector_candidate_covers_required_tools(
+        candidate: Mapping[str, Any],
+        required_tools: Sequence[str],
+    ) -> bool:
+        required_tool_keys = {
+            str(tool_name).strip().lower()
+            for tool_name in (required_tools or ())
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        if not required_tool_keys:
+            return True
+        if candidate.get("concept_id") == TOOL_CALLING_WORKFLOW_ID:
+            return True
+        for flag_key in (
+            "covers_expected_tool_set",
+            "satisfies_expected_outcome_contract",
+        ):
+            if candidate.get(flag_key) is True:
+                return True
+
+        candidate_tool_values: list[Any] = []
+        for key in (
+            "matched_required_tools",
+            "required_tools",
+            "workflow_action_ids",
+        ):
+            candidate_tool_values.append(candidate.get(key))
+        routing_index_metadata = candidate.get("routing_index_metadata")
+        if isinstance(routing_index_metadata, Mapping):
+            candidate_tool_values.append(routing_index_metadata.get("required_tools"))
+
+        candidate_tool_keys: set[str] = set()
+        for raw_value in candidate_tool_values:
+            if isinstance(raw_value, str):
+                raw_items: Sequence[Any] = (raw_value,)
+            elif isinstance(raw_value, Sequence):
+                raw_items = raw_value
+            else:
+                continue
+            for raw_item in raw_items:
+                if isinstance(raw_item, str) and raw_item.strip():
+                    candidate_tool_keys.add(raw_item.strip().lower())
+        return required_tool_keys.issubset(candidate_tool_keys)
+
+    def _partition_discovered_candidates_by_required_tools(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        *,
+        required_tools: Sequence[str],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not required_tools:
+            return [dict(candidate) for candidate in candidates], []
+        included: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        for candidate in candidates:
+            item = dict(candidate)
+            if self._selector_candidate_covers_required_tools(item, required_tools):
+                included.append(item)
+                continue
+            concept_id = str(item.get("concept_id") or "").strip()
+            if self._selected_workflow_prefers_direct_response(
+                selected_workflow_id=concept_id
+            ):
+                included.append(item)
+                continue
+            item["routing_eligible"] = False
+            item["candidate_reason"] = "discovered_workflow_excluded"
+            item["routing_exclusion_reason"] = (
+                item.get("routing_exclusion_reason")
+                or "required_tool_contract_not_satisfied"
+            )
+            item["required_tools"] = [
+                str(tool_name).strip()
+                for tool_name in required_tools
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            ]
+            excluded.append(item)
+        return included, excluded
 
     def _prepare_selector_candidates(
         self,
@@ -46540,9 +46713,27 @@ class InternalMCPChatOrchestrator:
                 turn_text=prompt,
                 candidate_turn_launchability=candidate_turn_launchability,
             )
+        required_tools = self._selector_contract_required_tools(
+            workflow_discovery_result
+        )
+        (
+            local_discovered_matches,
+            required_tool_excluded_matches,
+        ) = self._partition_discovered_candidates_by_required_tools(
+            local_discovered_matches,
+            required_tools=required_tools,
+        )
+        default_candidates, excluded_default_candidates = (
+            self._build_selector_default_candidates(required_tools=required_tools)
+        )
+        local_excluded_matches = [
+            *local_excluded_matches,
+            *required_tool_excluded_matches,
+            *excluded_default_candidates,
+        ]
         local_selector_candidate_matches = self._merge_selector_candidates(
             local_discovered_matches,
-            self._build_selector_default_candidates(),
+            default_candidates,
         )
         return (
             local_discovered_matches,
