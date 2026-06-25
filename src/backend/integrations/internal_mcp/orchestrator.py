@@ -17243,6 +17243,50 @@ class InternalMCPChatOrchestrator:
             raise error
         return state.get("result")
 
+    @staticmethod
+    def _llm_request_preparation_progress_threshold_ms() -> int:
+        raw_value = os.getenv(
+            "VON_LLM_REQUEST_PREPARATION_PROGRESS_THRESHOLD_MS",
+            "1000",
+        )
+        try:
+            parsed = int(float(str(raw_value).strip()))
+        except Exception:
+            parsed = 1000
+        return max(0, parsed)
+
+    def _emit_llm_request_preparation_step(
+        self,
+        *,
+        emit_progress: Callable[[Mapping[str, Any]], None] | None,
+        stage: str,
+        stage_extra: Mapping[str, Any],
+        step: str,
+        started_at: float,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not callable(emit_progress):
+            return
+        duration_ms = int(max(0.0, (time.perf_counter() - started_at) * 1000.0))
+        if duration_ms < self._llm_request_preparation_progress_threshold_ms():
+            return
+        payload: dict[str, Any] = {
+            "status": "llm_request_preparation_step",
+            "stage": stage,
+            "request_preparation_step": step,
+            "duration_ms": duration_ms,
+            **dict(stage_extra),
+        }
+        if isinstance(metadata, Mapping):
+            payload.update(
+                {
+                    str(key): value
+                    for key, value in metadata.items()
+                    if isinstance(key, str)
+                }
+            )
+        emit_progress(payload)
+
     def _run_llm_with_fallbacks(
         self,
         *,
@@ -17292,6 +17336,7 @@ class InternalMCPChatOrchestrator:
             _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = policy_stage or stage
 
+        candidate_resolution_start = time.perf_counter()
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
             default_model=default_model,
@@ -17302,6 +17347,17 @@ class InternalMCPChatOrchestrator:
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             prefer_default_model=prefer_default_model,
+        )
+        self._emit_llm_request_preparation_step(
+            emit_progress=emit_progress,
+            stage=stage,
+            stage_extra=_stage_extra,
+            step="model_candidate_resolution",
+            started_at=candidate_resolution_start,
+            metadata={
+                "candidate_stage": candidate_stage,
+                "candidate_count": len(candidates),
+            },
         )
 
         # JVNAUTOSCI-2373: per-turn dead-candidate cache. Skip candidates that
@@ -17327,10 +17383,22 @@ class InternalMCPChatOrchestrator:
         last_exception: Exception | None = None
         last_failure_class: Optional[str] = None
         total_candidates = len(candidates)
+        request_telemetry_start = time.perf_counter()
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
             context=context,
             context_telemetry=context_telemetry,
+        )
+        self._emit_llm_request_preparation_step(
+            emit_progress=emit_progress,
+            stage=stage,
+            stage_extra=_stage_extra,
+            step="request_telemetry_build",
+            started_at=request_telemetry_start,
+            metadata={
+                "context_message_count": request_telemetry.get("context_message_count"),
+                "tool_count": request_telemetry.get("tool_count"),
+            },
         )
         request_prepared_at_utc = self._utc_now_iso()
         # JVNAUTOSCI-2517: one stable exchange id per prepared request; each
@@ -18515,6 +18583,7 @@ class InternalMCPChatOrchestrator:
         if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
             _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = stage
+        candidate_resolution_start = time.perf_counter()
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
             default_model=default_model,
@@ -18524,6 +18593,17 @@ class InternalMCPChatOrchestrator:
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             prefer_default_model=prefer_default_model,
+        )
+        self._emit_llm_request_preparation_step(
+            emit_progress=emit_progress,
+            stage=stage,
+            stage_extra=_stage_extra,
+            step="model_candidate_resolution",
+            started_at=candidate_resolution_start,
+            metadata={
+                "candidate_stage": candidate_stage,
+                "candidate_count": len(candidates),
+            },
         )
 
         # JVNAUTOSCI-2373: per-turn dead-candidate cache (tool-call path).
@@ -18542,6 +18622,7 @@ class InternalMCPChatOrchestrator:
         last_exception: Exception | None = None
         last_failure_class: Optional[str] = None
         total_candidates = len(candidates)
+        request_telemetry_start = time.perf_counter()
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
             context=context,
@@ -18549,6 +18630,17 @@ class InternalMCPChatOrchestrator:
             workflow_action_id=workflow_action_id,
             required_prompt_tools=required_prompt_tools,
             context_telemetry=context_telemetry,
+        )
+        self._emit_llm_request_preparation_step(
+            emit_progress=emit_progress,
+            stage=stage,
+            stage_extra=_stage_extra,
+            step="request_telemetry_build",
+            started_at=request_telemetry_start,
+            metadata={
+                "context_message_count": request_telemetry.get("context_message_count"),
+                "tool_count": request_telemetry.get("tool_count"),
+            },
         )
         request_prepared_at_utc = self._utc_now_iso()
         # JVNAUTOSCI-2517: one stable exchange id per prepared request; each

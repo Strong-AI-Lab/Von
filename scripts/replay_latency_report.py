@@ -125,12 +125,14 @@ class ProgressEvent:
     phase: str
     status: str
     subtask: str
+    request_preparation_step: str
     prompt_id: str
     model_name: str
     provider: str
     llm_exchange_id: str
     timestamp: datetime | None
     total_elapsed_ms: int | None
+    duration_ms: int | None
 
 
 def _phase_for_event(raw_event: Mapping[str, Any]) -> str:
@@ -158,12 +160,17 @@ def _normalise_events(
                 phase=_phase_for_event(raw_event),
                 status=_safe_text(raw_event.get("status")),
                 subtask=_safe_text(raw_event.get("subtask")),
+                request_preparation_step=_safe_text(
+                    raw_event.get("request_preparation_step")
+                    or raw_event.get("preparation_step")
+                ),
                 prompt_id=_safe_text(raw_event.get("prompt_id")),
                 model_name=_safe_text(raw_event.get("model_name")),
                 provider=_safe_text(raw_event.get("provider")),
                 llm_exchange_id=_safe_text(raw_event.get("llm_exchange_id")),
                 timestamp=_parse_timestamp(raw_event.get("recorded_at")),
                 total_elapsed_ms=_coerce_elapsed_ms(raw_event.get("total_elapsed_ms")),
+                duration_ms=_coerce_elapsed_ms(raw_event.get("duration_ms")),
             )
         )
     return events
@@ -253,6 +260,7 @@ def _build_phase_span(start: ProgressEvent, end: ProgressEvent) -> dict[str, Any
 def _summarise_llm_gaps(events: Sequence[ProgressEvent]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
     active_by_phase: dict[str, ProgressEvent] = {}
+    phase_start_by_phase: dict[str, ProgressEvent] = {}
     previous: ProgressEvent | None = None
 
     for event in events:
@@ -266,16 +274,20 @@ def _summarise_llm_gaps(events: Sequence[ProgressEvent]) -> list[dict[str, Any]]
                         status="missing_llm_request_prepared",
                     )
                 )
+        if event.status == "phase_transition":
+            phase_start_by_phase[event.phase] = event
         if event.subtask == "bounded LLM call":
             active_by_phase.setdefault(event.phase, event)
             previous = event
             continue
         if event.status == "llm_request_prepared":
             start = active_by_phase.pop(event.phase, None)
+            status = "prepared"
             if start is None:
-                previous = event
-                continue
-            gaps.append(_build_llm_gap(start, event, status="prepared"))
+                start = phase_start_by_phase.get(event.phase)
+                status = "prepared_from_phase_start"
+            if start is not None:
+                gaps.append(_build_llm_gap(start, event, status=status))
         previous = event
 
     last_by_phase: dict[str, ProgressEvent] = {}
@@ -288,6 +300,32 @@ def _summarise_llm_gaps(events: Sequence[ProgressEvent]) -> list[dict[str, Any]]
         )
 
     return sorted(gaps, key=lambda row: int(row.get("duration_ms") or 0), reverse=True)
+
+
+def _summarise_llm_preparation_steps(
+    events: Sequence[ProgressEvent],
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for event in events:
+        if event.status != "llm_request_preparation_step":
+            continue
+        if not event.request_preparation_step:
+            continue
+        steps.append(
+            {
+                "phase": event.phase,
+                "step": event.request_preparation_step,
+                "duration_ms": event.duration_ms or 0,
+                "prompt_id": event.prompt_id,
+                "model_name": event.model_name,
+                "provider": event.provider,
+            }
+        )
+    return sorted(
+        steps,
+        key=lambda row: int(row.get("duration_ms") or 0),
+        reverse=True,
+    )
 
 
 def _build_llm_gap(
@@ -310,6 +348,7 @@ def analyse_replay_artifact(path: Path) -> dict[str, Any]:
     events = _normalise_events(progress_history)
     phase_spans = _summarise_phase_spans(events)
     llm_gaps = _summarise_llm_gaps(events)
+    llm_preparation_steps = _summarise_llm_preparation_steps(events)
 
     return {
         "path": str(path),
@@ -322,12 +361,17 @@ def analyse_replay_artifact(path: Path) -> dict[str, Any]:
         "progress_event_count": len(events),
         "phase_spans": phase_spans,
         "llm_request_preparation_gaps": llm_gaps,
+        "llm_request_preparation_steps": llm_preparation_steps,
         "max_phase_duration_ms": max(
             (int(row.get("total_duration_ms") or 0) for row in phase_spans),
             default=0,
         ),
         "max_llm_request_preparation_gap_ms": max(
             (int(row.get("duration_ms") or 0) for row in llm_gaps),
+            default=0,
+        ),
+        "max_llm_request_preparation_step_ms": max(
+            (int(row.get("duration_ms") or 0) for row in llm_preparation_steps),
             default=0,
         ),
     }
@@ -363,6 +407,18 @@ def build_replay_latency_report(paths: Sequence[Path]) -> dict[str, Any]:
         lambda: {
             "phase": "",
             "status": "",
+            "artifact_count": 0,
+            "total_duration_ms": 0,
+            "max_duration_ms": 0,
+            "prompt_ids": set(),
+            "models": set(),
+            "providers": set(),
+        }
+    )
+    step_totals: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "phase": "",
+            "step": "",
             "artifact_count": 0,
             "total_duration_ms": 0,
             "max_duration_ms": 0,
@@ -411,6 +467,25 @@ def build_replay_latency_report(paths: Sequence[Path]) -> dict[str, Any]:
                 value = _safe_text(row.get(field))
                 if value:
                     total[target].add(value)
+        for row in _as_list(artefact.get("llm_request_preparation_steps")):
+            if not isinstance(row, Mapping):
+                continue
+            key = f"{_safe_text(row.get('phase'))}|{_safe_text(row.get('step'))}"
+            total = step_totals[key]
+            total["phase"] = _safe_text(row.get("phase")) or "unknown"
+            total["step"] = _safe_text(row.get("step")) or "unknown"
+            total["artifact_count"] += 1
+            duration = int(row.get("duration_ms") or 0)
+            total["total_duration_ms"] += duration
+            total["max_duration_ms"] = max(int(total["max_duration_ms"]), duration)
+            for field, target in (
+                ("prompt_id", "prompt_ids"),
+                ("model_name", "models"),
+                ("provider", "providers"),
+            ):
+                value = _safe_text(row.get(field))
+                if value:
+                    total[target].add(value)
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -421,6 +496,9 @@ def build_replay_latency_report(paths: Sequence[Path]) -> dict[str, Any]:
         "phase_totals": _normalise_aggregate_rows(phase_totals.values()),
         "llm_request_preparation_gap_totals": _normalise_aggregate_rows(
             gap_totals.values()
+        ),
+        "llm_request_preparation_step_totals": _normalise_aggregate_rows(
+            step_totals.values()
         ),
         "artifacts": artefacts,
     }
@@ -435,6 +513,7 @@ def _normalise_aggregate_rows(
             {
                 "phase": row.get("phase") or "",
                 **({"status": row.get("status")} if row.get("status") else {}),
+                **({"step": row.get("step")} if row.get("step") else {}),
                 "artifact_count": int(row.get("artifact_count") or 0),
                 "total_duration_ms": int(row.get("total_duration_ms") or 0),
                 "max_duration_ms": int(row.get("max_duration_ms") or 0),
@@ -495,6 +574,29 @@ def render_markdown(report: Mapping[str, Any], *, limit: int = 20) -> str:
             "| {phase} | {status} | {artifact_count} | {total_duration_ms} | {max_duration_ms} | {prompts} | {models} |".format(
                 phase=_safe_text(row.get("phase")) or "unknown",
                 status=_safe_text(row.get("status")) or "unknown",
+                artifact_count=int(row.get("artifact_count") or 0),
+                total_duration_ms=int(row.get("total_duration_ms") or 0),
+                max_duration_ms=int(row.get("max_duration_ms") or 0),
+                prompts=", ".join(_as_list(row.get("prompt_ids"))) or "-",
+                models=", ".join(_as_list(row.get("models"))) or "-",
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## LLM Request Preparation Steps",
+            "",
+            "| Phase | Step | Artefacts | Total ms | Max ms | Prompts | Models |",
+            "| --- | --- | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in _as_list(report.get("llm_request_preparation_step_totals"))[:limit]:
+        if not isinstance(row, Mapping):
+            continue
+        lines.append(
+            "| {phase} | {step} | {artifact_count} | {total_duration_ms} | {max_duration_ms} | {prompts} | {models} |".format(
+                phase=_safe_text(row.get("phase")) or "unknown",
+                step=_safe_text(row.get("step")) or "unknown",
                 artifact_count=int(row.get("artifact_count") or 0),
                 total_duration_ms=int(row.get("total_duration_ms") or 0),
                 max_duration_ms=int(row.get("max_duration_ms") or 0),

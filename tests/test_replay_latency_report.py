@@ -54,6 +54,14 @@ def test_replay_latency_report_ranks_phases_and_llm_prepare_gaps(tmp_path) -> No
                 "provider": "openai",
             },
             {
+                "recorded_at": "2026-06-24T00:00:12+00:00",
+                "phase": "context_adjudication_decision",
+                "status": "llm_request_preparation_step",
+                "request_preparation_step": "model_candidate_resolution",
+                "duration_ms": 1700,
+                "provider": "openai",
+            },
+            {
                 "recorded_at": "2026-06-24T00:00:41+00:00",
                 "phase": "context_adjudication_decision",
                 "status": "llm_request_prepared",
@@ -79,6 +87,13 @@ def test_replay_latency_report_ranks_phases_and_llm_prepare_gaps(tmp_path) -> No
     )
     assert report["llm_request_preparation_gap_totals"][0]["status"] == "prepared"
     assert report["llm_request_preparation_gap_totals"][0]["total_duration_ms"] == 30000
+    assert report["llm_request_preparation_step_totals"][0]["phase"] == (
+        "context_adjudication_decision"
+    )
+    assert report["llm_request_preparation_step_totals"][0]["step"] == (
+        "model_candidate_resolution"
+    )
+    assert report["llm_request_preparation_step_totals"][0]["total_duration_ms"] == 1700
 
 
 def test_replay_latency_report_flags_missing_llm_request_prepared(tmp_path) -> None:
@@ -118,6 +133,38 @@ def test_replay_latency_report_flags_missing_llm_request_prepared(tmp_path) -> N
     assert gap["total_duration_ms"] == 120000
 
 
+def test_replay_latency_report_counts_phase_start_prepare_gap(tmp_path) -> None:
+    artifact = tmp_path / "tool_plan.json"
+    _write_artifact(
+        artifact,
+        [
+            {
+                "recorded_at": "2026-06-24T00:00:00+00:00",
+                "phase": "tool_plan",
+                "status": "phase_transition",
+            },
+            {
+                "recorded_at": "2026-06-24T00:03:27+00:00",
+                "phase": "tool_plan",
+                "status": "llm_request_prepared",
+                "llm_exchange_id": "llm-tool-plan",
+            },
+            {
+                "recorded_at": "2026-06-24T00:03:30+00:00",
+                "phase": "tool_plan",
+                "status": "llm_call_start",
+            },
+        ],
+    )
+
+    report = replay_latency_report.build_replay_latency_report([artifact])
+
+    gap = report["llm_request_preparation_gap_totals"][0]
+    assert gap["phase"] == "tool_plan"
+    assert gap["status"] == "prepared_from_phase_start"
+    assert gap["total_duration_ms"] == 207000
+
+
 def test_render_markdown_is_redacted_and_structural(tmp_path) -> None:
     artifact = tmp_path / "sample.json"
     _write_artifact(
@@ -140,5 +187,9 @@ def test_render_markdown_is_redacted_and_structural(tmp_path) -> None:
     markdown = replay_latency_report.render_markdown(report)
 
     assert "| Phase | Artefacts | Total ms | Max ms | Prompts | Models |" in markdown
+    assert (
+        "| Phase | Step | Artefacts | Total ms | Max ms | Prompts | Models |"
+        in markdown
+    )
     assert "context_build" in markdown
     assert "task-123" not in markdown

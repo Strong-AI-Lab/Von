@@ -779,6 +779,7 @@ def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
     # completed lifecycle (and every fallback attempt) by a stable exchange id
     # plus per-attempt call id. Prove the orchestrator actually emits them.
     orchestrator = _bare_orchestrator()
+    monkeypatch.setenv("VON_LLM_REQUEST_PREPARATION_PROGRESS_THRESHOLD_MS", "0")
     ollama_candidate = _ModelCandidate(
         provider="ollama",
         model="granite3.3:2b",
@@ -851,6 +852,17 @@ def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
     prepared = next(
         e for e in progress_events if e.get("status") == "llm_request_prepared"
     )
+    preparation_steps = [
+        e for e in progress_events if e.get("status") == "llm_request_preparation_step"
+    ]
+    assert {event.get("request_preparation_step") for event in preparation_steps} == {
+        "model_candidate_resolution",
+        "request_telemetry_build",
+    }
+    assert all(
+        event.get("workflow_stage_id") == "tool_plan" for event in preparation_steps
+    )
+
     exchange_id = prepared["llm_exchange_id"]
     assert exchange_id.startswith("llm-")
     assert prepared["call_id"] == f"{exchange_id}:attempt:1"
