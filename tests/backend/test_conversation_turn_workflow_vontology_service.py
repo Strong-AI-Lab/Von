@@ -247,7 +247,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         "",
     )
     assert isinstance(context_adjudication_text, str)
-    assert "prompt-dependent prior-context adjudication policy" in (
+    assert "prior conversation context may be handed to downstream" in (
         context_adjudication_text
     )
     assert "turn_context_handoff_messages" in context_adjudication_text
@@ -1279,10 +1279,16 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "target_type_ids" in (
         expected_outcome_policy.get("json_field_defaults") or {}
     )
+    assert "workflow_concept_ids" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
     assert "target_concept_ids" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
     assert "target_type_ids" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
+    assert "workflow_concept_ids" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
@@ -1323,6 +1329,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         and mapping.get("tool_output_field") == "validated_json.target_type_ids"
         for mapping in expected_outcome_mappings
     )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_workflow_concept_ids"
+        and mapping.get("tool_output_field") == "validated_json.workflow_concept_ids"
+        for mapping in expected_outcome_mappings
+    )
     assert "turn_expected_required_tools" in (
         expected_outcome_metadata.get("writes_context_keys") or []
     )
@@ -1330,6 +1342,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         expected_outcome_metadata.get("writes_context_keys") or []
     )
     assert "turn_expected_target_type_ids" in (
+        expected_outcome_metadata.get("writes_context_keys") or []
+    )
+    assert "turn_expected_workflow_concept_ids" in (
         expected_outcome_metadata.get("writes_context_keys") or []
     )
 

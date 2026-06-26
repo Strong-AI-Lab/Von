@@ -46,6 +46,9 @@ from src.backend.services.workflow_discovery_service import (
     discover_workflows_for_turn,
     invalidate_workflow_discovery_executability_caches,
 )
+from src.backend.workflows.turn_expected_outcome_contract import (
+    TurnExpectedOutcomeContract,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1174,6 +1177,81 @@ class TestDiscoverWorkflowsForTurn:
         assert any(
             timing.get("stage") == "contract_direct_workflow_resolution"
             and timing.get("match_count") == 1
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    def test_contract_workflow_concept_ids_resolve_when_capability_index_cold(
+        self,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.side_effect = AssertionError(
+            "contract-named workflow should resolve before capability index"
+        )
+        mock_semantic.side_effect = AssertionError(
+            "semantic search should not run when direct contract resolution succeeds"
+        )
+        mock_vontology.side_effect = AssertionError(
+            "vontology search should not run when direct contract resolution succeeds"
+        )
+        mock_enrich.side_effect = lambda matches: matches
+        registry = SimpleNamespace(
+            all_workflow_ids=lambda: ["#V#arxiv_paper_representation_workflow"],
+            peek_registration=lambda workflow_id: SimpleNamespace(
+                workflow_id=workflow_id,
+                purpose="Canonical arXiv wrapper workflow.",
+                source="vontology",
+            ),
+        )
+        contract = TurnExpectedOutcomeContract.from_mapping(
+            {
+                "expected_outcome_summary": "Represent the arXiv paper.",
+                "required_tools": ["workflow_execute"],
+                "target_workflow_id": "#V#arxiv_paper_representation_workflow",
+            }
+        ).to_state_payload()
+
+        result = discover_workflows(
+            "Yes, represent it.",
+            max_results=1,
+            workflow_registry=registry,
+            expected_outcome_contract=contract,
+            timeout_seconds=0.75,
+        )
+
+        assert result.search_sources == ["contract_direct_workflow_resolution"]
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#arxiv_paper_representation_workflow"
+        ]
+        assert result.contract_projection is not None
+        assert result.contract_projection["workflow_concept_ids"] == [
+            "#V#arxiv_paper_representation_workflow"
+        ]
+        assert any(
+            timing.get("stage") == "contract_direct_workflow_resolution"
+            and timing.get("match_count") == 1
+            and timing.get("workflow_concept_id_count") == 1
+            and timing.get("sufficient") is True
             for timing in result.stage_timings
         )
 

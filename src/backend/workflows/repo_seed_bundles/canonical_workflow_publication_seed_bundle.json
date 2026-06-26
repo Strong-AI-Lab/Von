@@ -4180,6 +4180,11 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_target_type_ids_to_turn_expected_target_type_ids",
                 "context_key": "turn_expected_target_type_ids",
                 "tool_output_field": "validated_json.target_type_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_workflow_concept_ids_to_turn_expected_workflow_concept_ids",
+                "context_key": "turn_expected_workflow_concept_ids",
+                "tool_output_field": "validated_json.workflow_concept_ids"
               }
             ],
             "validation_policy": {
@@ -4192,7 +4197,8 @@
                 "reasoning": "Fallback defaults applied because the expected-outcome inference omitted one or more contract fields.",
                 "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence.",
                 "target_concept_ids": [],
-                "target_type_ids": []
+                "target_type_ids": [],
+                "workflow_concept_ids": []
               },
               "output_format": "json_value",
               "required_json_fields": [
@@ -4204,7 +4210,8 @@
                 "reasoning",
                 "required_tools",
                 "target_concept_ids",
-                "target_type_ids"
+                "target_type_ids",
+                "workflow_concept_ids"
               ]
             },
             "writes_context_keys": [
@@ -4217,7 +4224,8 @@
               "turn_expected_outcome_reasoning",
               "turn_expected_required_tools",
               "turn_expected_target_concept_ids",
-              "turn_expected_target_type_ids"
+              "turn_expected_target_type_ids",
+              "turn_expected_workflow_concept_ids"
             ],
             "state_id": "expected_outcome_inference"
           },

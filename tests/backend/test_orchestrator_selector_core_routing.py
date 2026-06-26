@@ -500,6 +500,54 @@ def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
             )
 
 
+def test_workflow_execute_contract_keeps_launchable_discovered_workflow(monkeypatch):
+    """workflow_execute is satisfied by a launchable represented workflow target."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#arxiv_paper_representation_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Represent an arXiv paper through the canonical workflow.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Arxiv Paper Representation Workflow",
+                        "description": (
+                            "Represent an arXiv paper through the canonical workflow."
+                        ),
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "match_source": "contract_direct_workflow_resolution",
+                        "routing_profile": {"role": "execution"},
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": ["workflow_execute"],
+                    "workflow_concept_ids": [workflow_id],
+                },
+            },
+            prompt="Please represent https://arxiv.org/abs/2406.15341 in Vontology.",
+        )
+    )
+
+    assert [candidate["concept_id"] for candidate in discovered] == [workflow_id]
+    assert [candidate["concept_id"] for candidate in selector_candidates][:1] == [
+        workflow_id
+    ]
+    assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
+
+
 def test_top_level_selector_applies_represented_fast_path_before_llm(monkeypatch):
     """Represented candidate policy should route the top-level path without selector LLM drift."""
 

@@ -14582,6 +14582,8 @@ class InternalMCPChatOrchestrator:
             payload["target_concept_ids"] = list(contract_object.target_concept_ids)
         if contract_object.target_type_ids:
             payload["target_type_ids"] = list(contract_object.target_type_ids)
+        if contract_object.workflow_concept_ids:
+            payload["workflow_concept_ids"] = list(contract_object.workflow_concept_ids)
         return payload
 
     @classmethod
@@ -32962,6 +32964,8 @@ class InternalMCPChatOrchestrator:
             not contract
             and not contract_object.required_tools
             and not contract_object.target_concept_ids
+            and not contract_object.target_type_ids
+            and not contract_object.workflow_concept_ids
         ):
             return []
 
@@ -33009,6 +33013,19 @@ class InternalMCPChatOrchestrator:
         }:
             lines.append(
                 "- Target concept IDs: " + ", ".join(contract_object.target_concept_ids)
+            )
+        if contract_object.workflow_concept_ids and stage in {
+            "selector_preparation",
+            "selector_decision",
+            "workflow_dispatch",
+            "tool_call",
+            "tool_plan",
+            "tool_follow_up",
+            "recovery_decision",
+        }:
+            lines.append(
+                "- Workflow concept IDs: "
+                + ", ".join(contract_object.workflow_concept_ids)
             )
 
         if stage in {
@@ -33827,6 +33844,11 @@ class InternalMCPChatOrchestrator:
         if contract_object.target_concept_ids:
             guidance_lines.append(
                 "- Target concept IDs: " + ", ".join(contract_object.target_concept_ids)
+            )
+        if contract_object.workflow_concept_ids:
+            guidance_lines.append(
+                "- Workflow concept IDs: "
+                + ", ".join(contract_object.workflow_concept_ids)
             )
 
         if not guidance_lines:
@@ -46717,6 +46739,11 @@ class InternalMCPChatOrchestrator:
             return True
         if candidate.get("concept_id") == TOOL_CALLING_WORKFLOW_ID:
             return True
+        if "workflow_execute" in required_tool_keys:
+            if _eligible_discovered_workflow_execute_candidates((candidate,)):
+                required_tool_keys.discard("workflow_execute")
+                if not required_tool_keys:
+                    return True
         for flag_key in (
             "covers_expected_tool_set",
             "satisfies_expected_outcome_contract",

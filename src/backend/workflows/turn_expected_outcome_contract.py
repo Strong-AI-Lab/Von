@@ -33,6 +33,9 @@ TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY = (
     "turn_expected_target_concept_ids"
 )
 TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY = "turn_expected_target_type_ids"
+TURN_EXPECTED_OUTCOME_WORKFLOW_CONCEPT_IDS_CONTEXT_KEY = (
+    "turn_expected_workflow_concept_ids"
+)
 TURN_EXPECTED_OUTCOME_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "summary": ("expected_outcome_summary",),
     "grounding_requirement": (
@@ -74,6 +77,17 @@ TURN_EXPECTED_OUTCOME_TARGET_TYPE_FIELDS: tuple[str, ...] = (
     "requested_extent_type_ids",
     "required_target_type_ids",
     TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY,
+)
+TURN_EXPECTED_OUTCOME_WORKFLOW_CONCEPT_FIELDS: tuple[str, ...] = (
+    "workflow_concept_id",
+    "workflow_concept_ids",
+    "target_workflow_id",
+    "target_workflow_ids",
+    "preferred_workflow_id",
+    "preferred_workflow_ids",
+    "workflow_execute_target",
+    "workflow_execute_targets",
+    TURN_EXPECTED_OUTCOME_WORKFLOW_CONCEPT_IDS_CONTEXT_KEY,
 )
 VONTOLOGY_CONCEPT_ID_PATTERN = re.compile(r"#V#[A-Za-z0-9_][A-Za-z0-9_.:/-]*")
 
@@ -205,6 +219,20 @@ def _extract_target_type_ids(
     return _dedupe_strings(ordered)
 
 
+def _extract_workflow_concept_ids(
+    *,
+    payload: Mapping[str, Any],
+    field_payload: Mapping[str, Any],
+) -> tuple[str, ...]:
+    ordered: list[str] = []
+    for source_payload in (payload, field_payload):
+        for field_name in TURN_EXPECTED_OUTCOME_WORKFLOW_CONCEPT_FIELDS:
+            if field_name not in source_payload:
+                continue
+            ordered.extend(_target_concept_id_values(source_payload.get(field_name)))
+    return _dedupe_strings(ordered)
+
+
 @dataclass(frozen=True)
 class TurnExpectedOutcomeContract:
     summary: str | None = None
@@ -216,6 +244,7 @@ class TurnExpectedOutcomeContract:
     required_tools: tuple[str, ...] = ()
     target_concept_ids: tuple[str, ...] = ()
     target_type_ids: tuple[str, ...] = ()
+    workflow_concept_ids: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
 
     @classmethod
@@ -268,6 +297,10 @@ class TurnExpectedOutcomeContract:
             payload=payload,
             field_payload=field_payload,
         )
+        workflow_concept_ids = _extract_workflow_concept_ids(
+            payload=payload,
+            field_payload=field_payload,
+        )
         return cls(
             summary=field_values["summary"],
             grounding_requirement=field_values["grounding_requirement"],
@@ -278,6 +311,7 @@ class TurnExpectedOutcomeContract:
             required_tools=required_tools,
             target_concept_ids=target_concept_ids,
             target_type_ids=target_type_ids,
+            workflow_concept_ids=workflow_concept_ids,
             sources=_dedupe_sources(list(source_values)),
         )
 
@@ -291,6 +325,7 @@ class TurnExpectedOutcomeContract:
         merged_required_tools: tuple[str, ...] = ()
         merged_target_concept_ids: list[str] = []
         merged_target_type_ids: list[str] = []
+        merged_workflow_concept_ids: list[str] = []
         for raw_contract in contracts:
             contract = (
                 raw_contract
@@ -302,6 +337,7 @@ class TurnExpectedOutcomeContract:
                 merged_required_tools = contract.required_tools
             merged_target_concept_ids.extend(contract.target_concept_ids)
             merged_target_type_ids.extend(contract.target_type_ids)
+            merged_workflow_concept_ids.extend(contract.workflow_concept_ids)
             if contract.is_empty():
                 continue
             for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS:
@@ -322,6 +358,7 @@ class TurnExpectedOutcomeContract:
             required_tools=merged_required_tools,
             target_concept_ids=_dedupe_strings(merged_target_concept_ids),
             target_type_ids=_dedupe_strings(merged_target_type_ids),
+            workflow_concept_ids=_dedupe_strings(merged_workflow_concept_ids),
             sources=_dedupe_sources(merged_sources),
         )
 
@@ -330,6 +367,7 @@ class TurnExpectedOutcomeContract:
             not self.required_tools
             and not self.target_concept_ids
             and not self.target_type_ids
+            and not self.workflow_concept_ids
             and not any(
                 isinstance(getattr(self, field_name), str)
                 and getattr(self, field_name).strip()
@@ -359,6 +397,8 @@ class TurnExpectedOutcomeContract:
             payload["target_concept_ids"] = list(self.target_concept_ids)
         if self.target_type_ids:
             payload["target_type_ids"] = list(self.target_type_ids)
+        if self.workflow_concept_ids:
+            payload["workflow_concept_ids"] = list(self.workflow_concept_ids)
         return payload
 
 
@@ -383,6 +423,7 @@ def build_turn_expected_outcome_boundary_payload(
         and not contract_object.required_tools
         and not contract_object.target_concept_ids
         and not contract_object.target_type_ids
+        and not contract_object.workflow_concept_ids
     ):
         return payload
 
@@ -398,6 +439,10 @@ def build_turn_expected_outcome_boundary_payload(
         payload[TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY] = list(
             contract_object.target_type_ids
         )
+    if contract_object.workflow_concept_ids:
+        payload[TURN_EXPECTED_OUTCOME_WORKFLOW_CONCEPT_IDS_CONTEXT_KEY] = list(
+            contract_object.workflow_concept_ids
+        )
 
     if not profile_payload:
         profile_from_contract: dict[str, Any] = dict(contract_payload)
@@ -412,6 +457,10 @@ def build_turn_expected_outcome_boundary_payload(
         if contract_object.target_type_ids:
             profile_from_contract["target_type_ids"] = list(
                 contract_object.target_type_ids
+            )
+        if contract_object.workflow_concept_ids:
+            profile_from_contract["workflow_concept_ids"] = list(
+                contract_object.workflow_concept_ids
             )
         payload["turn_expected_outcome_profile"] = profile_from_contract
     if contract_payload:

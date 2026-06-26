@@ -425,7 +425,8 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
         '"selector_guidance":"Search the concept, then inspect predicates.",'
         '"answering_guidance":"Group the retrieved predicates.",'
         '"reasoning":"This is a schema discovery request.",'
-        '"required_tools":["search_concepts","get_predicate_extent"]}'
+        '"required_tools":["search_concepts","get_predicate_extent"],'
+        '"target_workflow_id":"#V#predicate_schema_lookup_workflow"}'
         "\n```"
     )
 
@@ -438,6 +439,9 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
     assert result.outputs["validated_json"]["required_tools"] == [
         "search_concepts",
         "get_predicate_incidence",
+    ]
+    assert result.outputs["validated_json"]["workflow_concept_ids"] == [
+        "#V#predicate_schema_lookup_workflow"
     ]
 
 

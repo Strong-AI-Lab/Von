@@ -1538,6 +1538,8 @@ def _normalise_validated_json_payload_for_prompt(
         normalised["target_concept_ids"] = list(contract.target_concept_ids)
     if contract.target_type_ids:
         normalised["target_type_ids"] = list(contract.target_type_ids)
+    if contract.workflow_concept_ids:
+        normalised["workflow_concept_ids"] = list(contract.workflow_concept_ids)
     return normalised
 
 

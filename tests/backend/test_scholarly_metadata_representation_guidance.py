@@ -30,6 +30,26 @@ def test_expected_outcome_prompt_recognises_pasted_scholarly_metadata() -> None:
     assert "do not create title/field concepts as individuals" in lowered
     assert "bare non-arXiv scholarly article URLs" in prompt_text
     assert "workflow_execute" in prompt_text
+    assert "workflow_concept_ids" in prompt_text
+    assert "#V#scholarly_article_metadata_representation_workflow" in prompt_text
+    assert '"workflow_concept_ids":["#V#scholarly_article_metadata_representation_workflow"]' in (
+        prompt_text
+    )
+
+
+def test_expected_outcome_prompt_targets_arxiv_representation_workflow() -> None:
+    prompt_text = (
+        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
+    ).read_text(encoding="utf-8")
+
+    lowered = prompt_text.lower()
+    assert "arxiv paper urls" in lowered
+    assert "grounded prior-turn arxiv references" in lowered
+    assert "#V#arxiv_paper_representation_workflow" in prompt_text
+    assert "do not invent workflow ids" in lowered
+    assert '"workflow_concept_ids":["#V#arxiv_paper_representation_workflow"]' in (
+        prompt_text
+    )
 
 
 def test_expected_outcome_prompt_requires_represented_labels_to_write_and_readback() -> (

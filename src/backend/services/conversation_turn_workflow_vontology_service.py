@@ -365,6 +365,9 @@ def _ensure_conversation_turn_prompt_support(
                 "predicates, relation schema, usage, incidence",
                 "must contain only exact tool IDs",
                 "Never invent capability-shaped tool names",
+                "workflow_concept_ids",
+                "#V#arxiv_paper_representation_workflow",
+                "#V#scholarly_article_metadata_representation_workflow",
             ),
         )
     ):
