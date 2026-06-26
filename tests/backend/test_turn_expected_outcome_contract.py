@@ -28,6 +28,21 @@ def test_turn_expected_outcome_contract_preserves_target_type_ids() -> None:
         "#V#scholarly_article",
         "#V#scholarly_work",
     ]
+    target_contracts = contract.to_state_payload()["target_contracts"]
+    assert target_contracts == [
+        {
+            "schema_version": "turn_target_contract.v1",
+            "kind": "symbolic",
+            "binding_kind": "type",
+            "resolution_status": "resolved",
+            "matching_policy": "exact",
+            "concept_ids": [
+                "#V#scholarly_article",
+                "#V#scholarly_work",
+            ],
+            "source": "target_type_ids",
+        }
+    ]
 
 
 def test_turn_expected_outcome_boundary_profile_includes_target_type_ids() -> None:
@@ -45,6 +60,17 @@ def test_turn_expected_outcome_boundary_profile_includes_target_type_ids() -> No
         "#V#scholarly_article"
     ]
     assert payload["turn_expected_target_type_ids"] == ["#V#scholarly_article"]
+    assert payload["turn_expected_target_contracts"] == [
+        {
+            "schema_version": "turn_target_contract.v1",
+            "kind": "symbolic",
+            "binding_kind": "type",
+            "resolution_status": "resolved",
+            "matching_policy": "exact",
+            "concept_ids": ["#V#scholarly_article"],
+            "source": "target_type_ids",
+        }
+    ]
 
 
 def test_turn_expected_outcome_contract_accepts_explicit_required_tools_context_key() -> (
@@ -79,4 +105,39 @@ def test_turn_expected_outcome_contract_accepts_explicit_required_tools_context_
     assert payload["turn_expected_outcome_contract_state"]["required_tools"] == [
         "create_concepts",
         "get_text_relations_summary",
+    ]
+
+
+def test_turn_expected_outcome_contract_preserves_hybrid_target_contract() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "summary": "Answer from a resolved target if available.",
+            "target_contracts": [
+                {
+                    "kind": "hybrid",
+                    "binding_kind": "entity",
+                    "text": "the current project",
+                    "candidate_concept_ids": ["#V#project_a", "#V#project_b"],
+                    "resolution_status": "candidate_only",
+                    "matching_policy": "exact",
+                    "resolution_lineage": [{"source": "turn_context"}],
+                }
+            ],
+        }
+    )
+
+    state = contract.to_state_payload()
+
+    assert state["target_contracts"] == [
+        {
+            "schema_version": "turn_target_contract.v1",
+            "kind": "hybrid",
+            "binding_kind": "entity",
+            "resolution_status": "candidate_only",
+            "matching_policy": "exact",
+            "text": "the current project",
+            "candidate_concept_ids": ["#V#project_a", "#V#project_b"],
+            "resolution_lineage": [{"source": "turn_context"}],
+            "source": "target_contracts",
+        }
     ]

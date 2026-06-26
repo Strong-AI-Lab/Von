@@ -12,6 +12,9 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from .tool_metadata_service import get_tool_required_obligation_metadata
+from .tool_target_contract_validation import (
+    validate_tool_target_contract,
+)
 
 REQUIRED_TOOL_OBLIGATION_LEDGER_SCHEMA_VERSION = "required_tool_obligation_ledger.v1"
 
@@ -184,6 +187,14 @@ def _tool_from_planned_call(call: Mapping[str, Any]) -> str:
         or _safe_str(call.get("method"))
         or _safe_str(call.get("name"))
     )
+
+
+def _payload_from_planned_call(call: Mapping[str, Any]) -> Mapping[str, Any]:
+    for field_name in ("effective_payload", "payload", "arguments", "input"):
+        payload = call.get(field_name)
+        if isinstance(payload, Mapping):
+            return payload
+    return {}
 
 
 def _tool_from_equivalent_execution(execution: Mapping[str, Any]) -> str:
@@ -604,6 +615,7 @@ def build_required_tool_obligation_ledger(
     planned_tool_calls: Sequence[Mapping[str, Any]] | None = None,
     tool_call_validation_failure_context: Mapping[str, Any] | None = None,
     tool_call_validation_errors: Sequence[Mapping[str, Any]] | None = None,
+    target_contract_state: Any = None,
     allowed_tools: Sequence[Any] | None = None,
     method_catalogue: Mapping[str, Any] | None = None,
     max_tool_invocations: int | None = None,
@@ -664,6 +676,24 @@ def build_required_tool_obligation_ledger(
         tool_call_validation_failure_context=tool_call_validation_failure_context,
         tool_call_validation_errors=tool_call_validation_errors,
     )
+    for call in planned_tool_calls or ():
+        if not isinstance(call, Mapping):
+            continue
+        tool_name = _tool_from_planned_call(call)
+        if not tool_name:
+            continue
+        target_validation = validate_tool_target_contract(
+            tool_name=tool_name,
+            payload=_payload_from_planned_call(call),
+            target_contract_state=target_contract_state,
+        )
+        if target_validation.ok:
+            continue
+        _append_validation_errors(
+            validation_failures_by_tool,
+            tool_name=tool_name,
+            errors=target_validation.errors,
+        )
     attempted_counts: dict[str, int] = {}
     successful_counts: dict[str, int] = {}
     last_status_by_tool: dict[str, str] = {}
@@ -727,6 +757,21 @@ def build_required_tool_obligation_ledger(
             planned_counts.get(lowered, 0), attempted_counts[lowered]
         )
         status = _invocation_status(invocation)
+        validation_payload = _arguments_from_invocation(invocation)
+        if not validation_payload:
+            validation_payload = _payload_from_invocation(invocation)
+        target_validation = validate_tool_target_contract(
+            tool_name=tool_name,
+            payload=validation_payload,
+            target_contract_state=target_contract_state,
+        )
+        if not target_validation.ok:
+            _append_validation_errors(
+                validation_failures_by_tool,
+                tool_name=tool_name,
+                errors=target_validation.errors,
+            )
+            status = target_validation.first_error_code() or "target_contract_failed"
         last_status_by_tool[lowered] = status
         last_invocation_by_tool[lowered] = invocation
         operation_class = classify_required_tool_operation(tool_name)

@@ -11,6 +11,15 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping, Sequence
 
+from .turn_target_contract import (
+    TARGET_BINDING_ENTITY,
+    TARGET_BINDING_TYPE,
+    TURN_TARGET_CONTRACTS_CONTEXT_KEY,
+    TurnTargetContract,
+    dedupe_target_contracts,
+    extract_target_contracts_from_payload,
+)
+
 TURN_EXPECTED_OUTCOME_CONTRACT_SCHEMA_VERSION = "turn_expected_outcome_contract.v1"
 TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS: tuple[str, ...] = (
     "summary",
@@ -33,6 +42,7 @@ TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY = (
     "turn_expected_target_concept_ids"
 )
 TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY = "turn_expected_target_type_ids"
+TURN_EXPECTED_OUTCOME_TARGET_CONTRACTS_CONTEXT_KEY = TURN_TARGET_CONTRACTS_CONTEXT_KEY
 TURN_EXPECTED_OUTCOME_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "summary": ("expected_outcome_summary",),
     "grounding_requirement": (
@@ -205,6 +215,34 @@ def _extract_target_type_ids(
     return _dedupe_strings(ordered)
 
 
+def _target_contracts_for_expected_outcome_payload(
+    *,
+    payload: Mapping[str, Any],
+    field_payload: Mapping[str, Any],
+    target_concept_ids: Sequence[str],
+    target_type_ids: Sequence[str],
+) -> tuple[TurnTargetContract, ...]:
+    contracts: list[TurnTargetContract] = []
+    contracts.extend(extract_target_contracts_from_payload(payload))
+    if field_payload is not payload:
+        contracts.extend(extract_target_contracts_from_payload(field_payload))
+    concept_contract = TurnTargetContract.symbolic(
+        concept_ids=target_concept_ids,
+        binding_kind=TARGET_BINDING_ENTITY,
+        source="target_concept_ids",
+    )
+    type_contract = TurnTargetContract.symbolic(
+        concept_ids=target_type_ids,
+        binding_kind=TARGET_BINDING_TYPE,
+        source="target_type_ids",
+    )
+    if concept_contract is not None:
+        contracts.append(concept_contract)
+    if type_contract is not None:
+        contracts.append(type_contract)
+    return dedupe_target_contracts(contracts)
+
+
 @dataclass(frozen=True)
 class TurnExpectedOutcomeContract:
     summary: str | None = None
@@ -216,6 +254,7 @@ class TurnExpectedOutcomeContract:
     required_tools: tuple[str, ...] = ()
     target_concept_ids: tuple[str, ...] = ()
     target_type_ids: tuple[str, ...] = ()
+    target_contracts: tuple[TurnTargetContract, ...] = ()
     sources: tuple[str, ...] = ()
 
     @classmethod
@@ -268,6 +307,12 @@ class TurnExpectedOutcomeContract:
             payload=payload,
             field_payload=field_payload,
         )
+        target_contracts = _target_contracts_for_expected_outcome_payload(
+            payload=payload,
+            field_payload=field_payload,
+            target_concept_ids=target_concept_ids,
+            target_type_ids=target_type_ids,
+        )
         return cls(
             summary=field_values["summary"],
             grounding_requirement=field_values["grounding_requirement"],
@@ -278,6 +323,7 @@ class TurnExpectedOutcomeContract:
             required_tools=required_tools,
             target_concept_ids=target_concept_ids,
             target_type_ids=target_type_ids,
+            target_contracts=target_contracts,
             sources=_dedupe_sources(list(source_values)),
         )
 
@@ -291,6 +337,7 @@ class TurnExpectedOutcomeContract:
         merged_required_tools: tuple[str, ...] = ()
         merged_target_concept_ids: list[str] = []
         merged_target_type_ids: list[str] = []
+        merged_target_contracts: list[TurnTargetContract] = []
         for raw_contract in contracts:
             contract = (
                 raw_contract
@@ -302,6 +349,7 @@ class TurnExpectedOutcomeContract:
                 merged_required_tools = contract.required_tools
             merged_target_concept_ids.extend(contract.target_concept_ids)
             merged_target_type_ids.extend(contract.target_type_ids)
+            merged_target_contracts.extend(contract.target_contracts)
             if contract.is_empty():
                 continue
             for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS:
@@ -322,6 +370,7 @@ class TurnExpectedOutcomeContract:
             required_tools=merged_required_tools,
             target_concept_ids=_dedupe_strings(merged_target_concept_ids),
             target_type_ids=_dedupe_strings(merged_target_type_ids),
+            target_contracts=dedupe_target_contracts(merged_target_contracts),
             sources=_dedupe_sources(merged_sources),
         )
 
@@ -330,6 +379,7 @@ class TurnExpectedOutcomeContract:
             not self.required_tools
             and not self.target_concept_ids
             and not self.target_type_ids
+            and not self.target_contracts
             and not any(
                 isinstance(getattr(self, field_name), str)
                 and getattr(self, field_name).strip()
@@ -359,6 +409,10 @@ class TurnExpectedOutcomeContract:
             payload["target_concept_ids"] = list(self.target_concept_ids)
         if self.target_type_ids:
             payload["target_type_ids"] = list(self.target_type_ids)
+        if self.target_contracts:
+            payload["target_contracts"] = [
+                contract.to_state_payload() for contract in self.target_contracts
+            ]
         return payload
 
 
@@ -383,6 +437,7 @@ def build_turn_expected_outcome_boundary_payload(
         and not contract_object.required_tools
         and not contract_object.target_concept_ids
         and not contract_object.target_type_ids
+        and not contract_object.target_contracts
     ):
         return payload
 
@@ -398,6 +453,10 @@ def build_turn_expected_outcome_boundary_payload(
         payload[TURN_EXPECTED_OUTCOME_TARGET_TYPE_IDS_CONTEXT_KEY] = list(
             contract_object.target_type_ids
         )
+    if contract_object.target_contracts:
+        payload[TURN_EXPECTED_OUTCOME_TARGET_CONTRACTS_CONTEXT_KEY] = [
+            contract.to_state_payload() for contract in contract_object.target_contracts
+        ]
 
     if not profile_payload:
         profile_from_contract: dict[str, Any] = dict(contract_payload)
@@ -413,6 +472,11 @@ def build_turn_expected_outcome_boundary_payload(
             profile_from_contract["target_type_ids"] = list(
                 contract_object.target_type_ids
             )
+        if contract_object.target_contracts:
+            profile_from_contract["target_contracts"] = [
+                contract.to_state_payload()
+                for contract in contract_object.target_contracts
+            ]
         payload["turn_expected_outcome_profile"] = profile_from_contract
     if contract_payload:
         payload["turn_expected_outcome_contract"] = dict(contract_payload)

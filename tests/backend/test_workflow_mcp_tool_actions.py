@@ -303,9 +303,7 @@ def test_turn_recovery_tool_batch_omits_namespace_for_strict_mcp_fallback(
     )
 
     assert result.status == "success"
-    assert gateway.invocations == [
-        ("gmail_list_labels", {"profile": "zhan-gmail"})
-    ]
+    assert gateway.invocations == [("gmail_list_labels", {"profile": "zhan-gmail"})]
     assert result.outputs["completion_report"]["status"] == "completed"
 
 
@@ -500,6 +498,64 @@ def test_turn_recovery_tool_batch_binds_predicate_target_alias_to_contract_type(
     }
 
 
+def test_turn_recovery_tool_batch_blocks_symbolic_target_contract_mismatch(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import registry_factory
+    from src.backend.workflows.durable.turn_execution_actions import (
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        register_turn_execution_actions,
+    )
+
+    gateway = _FakeGateway(
+        definitions={"get_predicate_incidence": "read"},
+        payload_factory=lambda _tool_name, _payload: {"success": True},
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
+
+    result = registry.execute(
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "get_predicate_incidence",
+                    "payload": {"concept_id": "#V#michael_witbrock"},
+                }
+            ]
+        },
+        context={
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "required_tools": ["get_predicate_incidence"],
+                "target_type_ids": ["#V#scientific_paper"],
+            }
+        },
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == []
+    invocation = result.outputs["turn_recovery_tool_batch_execution"][
+        "tool_invocations"
+    ][0]
+    assert invocation["status"] == "failed"
+    assert invocation["error"] == "target_contract_symbolic_mismatch"
+    assert invocation["tool_call_validation_diagnostics"][0]["error_code"] == (
+        "target_contract_symbolic_mismatch"
+    )
+
+
 def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     gateway = _FakeGateway(
         definitions={"delete_concept": "write"},
@@ -529,6 +585,46 @@ def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     assert result.status == "failed"
     assert result.error == "workflow_mcp_write_policy_missing:delete_concept"
     assert result.outputs["mutation_guardrail_blocked"] is True
+    assert gateway.invocations == []
+
+
+def test_workflow_mcp_action_blocks_symbolic_target_contract_mismatch():
+    gateway = _FakeGateway(
+        definitions={"get_predicate_incidence": "read"},
+        payload_factory=lambda _tool_name, _payload: {"success": True},
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "get_predicate_incidence",
+            "tool_arguments": {"concept_id": "#V#michael_witbrock"},
+        },
+        context={
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "required_tools": ["get_predicate_incidence"],
+                "target_type_ids": ["#V#scientific_paper"],
+            }
+        },
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.error == (
+        "workflow_mcp_target_contract_validation_failed:"
+        "get_predicate_incidence:target_contract_symbolic_mismatch"
+    )
+    assert result.outputs["target_contract_validation_failed"] is True
+    assert result.outputs["tool_call_validation_diagnostics"][0]["error_code"] == (
+        "target_contract_symbolic_mismatch"
+    )
     assert gateway.invocations == []
 
 

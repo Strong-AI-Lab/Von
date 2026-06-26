@@ -46,6 +46,7 @@ from .tool_metadata_service import (
     is_tool_verification_read,
     is_tool_write,
 )
+from .tool_target_contract_validation import target_contract_state_from_context
 from .turn_decision_attribution_service import build_turn_decision_attribution
 from .turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
@@ -8729,6 +8730,9 @@ def build_turn_execution_record(
             execution_surface_failed_equivalent_observations
         ),
         tool_call_validation_failure_context=tool_call_validation_failure_context,
+        target_contract_state=target_contract_state_from_context(
+            workflow_required_effect_context_surfaces
+        ),
         existing_ledger=existing_required_tool_obligation_ledger,
         method_catalogue=method_catalogue,
     )

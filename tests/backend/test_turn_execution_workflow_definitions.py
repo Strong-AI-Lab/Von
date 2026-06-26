@@ -804,10 +804,16 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert "target_type_ids" in (
         expected_outcome_policy.get("json_field_defaults") or {}
     )
+    assert "target_contracts" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
     assert "target_concept_ids" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
     assert "target_type_ids" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
+    assert "target_contracts" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
     expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
@@ -849,6 +855,12 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and mapping.get("tool_output_field") == "validated_json.target_type_ids"
         for mapping in expected_outcome_mappings
     )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_target_contracts"
+        and mapping.get("tool_output_field") == "validated_json.target_contracts"
+        for mapping in expected_outcome_mappings
+    )
     assert "turn_expected_required_tools" in (
         expected_outcome.metadata.get("writes_context_keys") or []
     )
@@ -856,6 +868,9 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         expected_outcome.metadata.get("writes_context_keys") or []
     )
     assert "turn_expected_target_type_ids" in (
+        expected_outcome.metadata.get("writes_context_keys") or []
+    )
+    assert "turn_expected_target_contracts" in (
         expected_outcome.metadata.get("writes_context_keys") or []
     )
     expected_outcome_context_fields = (expected_outcome_action.llm_policy or {}).get(

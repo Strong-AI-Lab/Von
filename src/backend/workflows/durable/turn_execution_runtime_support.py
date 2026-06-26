@@ -21,6 +21,9 @@ from ...services.tool_evidence_projection_service import (
     render_surfaceable_concept_lines,
     surfaceable_concept_ids_from_evidence,
 )
+from ...services.tool_target_contract_validation import (
+    target_contract_state_from_context,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ..action_registry import WorkflowActionResult
 from ..definitions import (
@@ -1846,6 +1849,7 @@ def _completion_gate_record_has_stale_required_tool_obligation_effect(
                 if isinstance(invocation, Mapping)
             ],
             method_catalogue=_resolve_method_catalogue_snapshot(data=data),
+            target_contract_state=target_contract_state_from_context(data),
         )
     except Exception:
         return False
