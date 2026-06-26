@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "35",
+  "seed_version": "37",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -4185,6 +4185,11 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_workflow_concept_ids_to_turn_expected_workflow_concept_ids",
                 "context_key": "turn_expected_workflow_concept_ids",
                 "tool_output_field": "validated_json.workflow_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_target_contracts_to_turn_expected_target_contracts",
+                "context_key": "turn_expected_target_contracts",
+                "tool_output_field": "validated_json.target_contracts"
               }
             ],
             "validation_policy": {
@@ -4197,6 +4202,8 @@
                 "reasoning": "Fallback defaults applied because the expected-outcome inference omitted one or more contract fields.",
                 "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence.",
                 "target_concept_ids": [],
+                "target_type_ids": [],
+                "target_contracts": [],
                 "target_type_ids": [],
                 "workflow_concept_ids": []
               },
@@ -4211,6 +4218,8 @@
                 "required_tools",
                 "target_concept_ids",
                 "target_type_ids",
+                "target_contracts",
+                "target_type_ids",
                 "workflow_concept_ids"
               ]
             },
@@ -4224,6 +4233,8 @@
               "turn_expected_outcome_reasoning",
               "turn_expected_required_tools",
               "turn_expected_target_concept_ids",
+              "turn_expected_target_type_ids",
+              "turn_expected_target_contracts",
               "turn_expected_target_type_ids",
               "turn_expected_workflow_concept_ids"
             ],

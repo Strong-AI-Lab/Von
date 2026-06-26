@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Mapping, MutableMapping, Optional, Sequence, cast
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional, Sequence, cast
 
 from ..services.buttonify_service import (
     parse_buttonify_options_json,
@@ -27,6 +27,9 @@ from ..services.required_tool_obligation_service import (
     OPERATION_MUTATION_WRITE,
     build_required_tool_obligation_ledger,
     classify_required_tool_operation,
+)
+from ..services.tool_target_contract_validation import (
+    target_contract_state_from_context,
 )
 from ..services.workflow_llm_duration_stats_service import (
     record_workflow_llm_step_duration_observation,
@@ -1540,6 +1543,11 @@ def _normalise_validated_json_payload_for_prompt(
         normalised["target_type_ids"] = list(contract.target_type_ids)
     if contract.workflow_concept_ids:
         normalised["workflow_concept_ids"] = list(contract.workflow_concept_ids)
+    if contract.target_contracts:
+        normalised["target_contracts"] = [
+            target_contract.to_state_payload()
+            for target_contract in contract.target_contracts
+        ]
     return normalised
 
 
@@ -3249,6 +3257,7 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             method_catalogue if isinstance(method_catalogue, Mapping) else None
         ),
         max_tool_invocations=max_tool_invocations,
+        target_contract_state=target_contract_state_from_context(request.data),
         existing_ledger=(
             request.data.get("required_tool_obligation_ledger")
             if isinstance(request.data.get("required_tool_obligation_ledger"), Mapping)
@@ -3615,6 +3624,7 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             method_catalogue if isinstance(method_catalogue, Mapping) else None
         ),
         max_tool_invocations=max_tool_invocations,
+        target_contract_state=target_contract_state_from_context(shared_data),
         existing_ledger=(
             shared_data.get("required_tool_obligation_ledger")
             if isinstance(shared_data.get("required_tool_obligation_ledger"), Mapping)

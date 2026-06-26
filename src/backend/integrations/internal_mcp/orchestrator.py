@@ -88,6 +88,10 @@ from src.backend.services.agent_test_replay_mode_service import (
     AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
     use_represented_selector_llm_for_agent_test_replay,
 )
+from src.backend.services.tool_target_contract_validation import (
+    target_contract_state_from_context,
+    validate_tool_target_contract,
+)
 from src.backend.services.selected_workflow_handoff_service import (
     evaluate_selected_workflow_handoff,
     evaluate_workflow_required_effects_tool_policy as _evaluate_workflow_required_effects_tool_policy_support,
@@ -8910,6 +8914,7 @@ class InternalMCPChatOrchestrator:
             ),
             conversation_session_id=conversation_session_id,
             turn_id=data.get("turn_id"),
+            target_contract_state=target_contract_state_from_context(data),
         )
         if preflight.warnings:
             try:
@@ -20686,6 +20691,7 @@ class InternalMCPChatOrchestrator:
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         conversation_session_id: str | None = None,
         turn_id: str | None = None,
+        target_contract_state: Any = None,
     ) -> _ToolCallPreflightResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -20839,6 +20845,17 @@ class InternalMCPChatOrchestrator:
                 exists_cache=exists_cache,
                 resolution_cache=resolution_cache,
             )
+            target_validation = validate_tool_target_contract(
+                tool_name=tool_name,
+                payload=payload,
+                target_contract_state=target_contract_state,
+            )
+            if not target_validation.ok:
+                for diagnostic in target_validation.diagnostics:
+                    message = str(diagnostic.get("message") or "").strip()
+                    if message:
+                        errors.append(message)
+                    diagnostics.append(diagnostic)
             if schema is None:
                 continue
 

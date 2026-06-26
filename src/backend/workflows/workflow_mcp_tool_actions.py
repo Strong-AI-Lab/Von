@@ -30,6 +30,10 @@ from .write_tool_policy import (
     normalise_workflow_execution_side_effect_policy,
     normalise_workflow_step_mutation_authority_spec,
 )
+from ..services.tool_target_contract_validation import (
+    target_contract_state_from_context,
+    validate_tool_target_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +398,31 @@ def _handle_workflow_mcp_invoke_tool(
         )
         if blocked_result is not None:
             return blocked_result
+
+        target_validation = validate_tool_target_contract(
+            tool_name=resolved_tool_name,
+            payload=payload,
+            target_contract_state=target_contract_state_from_context(request.data),
+        )
+        if not target_validation.ok:
+            error_code = target_validation.first_error_code()
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    f"workflow_mcp_target_contract_validation_failed:"
+                    f"{resolved_tool_name}:{error_code or 'invalid_target'}"
+                ),
+                outputs={
+                    "mcp_tool": resolved_tool_name,
+                    "mcp_requested_tool": requested_tool_name,
+                    "mcp_resolved_tool": resolved_tool_name,
+                    "target_contract_validation_failed": True,
+                    "target_contract_validation_error_code": error_code,
+                    "tool_call_validation_diagnostics": list(
+                        target_validation.diagnostics
+                    ),
+                },
+            )
 
         result = gateway.invoke(resolved_tool_name, payload)
         action_result = workflow_action_result_from_mcp_payload(

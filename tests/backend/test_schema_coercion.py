@@ -329,6 +329,67 @@ def test_preflight_emits_contract_validation_diagnostics() -> None:
     assert diagnostic["contract"]["input_schema"]["additionalProperties"] is False
 
 
+def test_preflight_rejects_symbolic_target_contract_mismatch() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    catalogue = {
+        "get_predicate_incidence": {
+            "name": "get_predicate_incidence",
+            "description": "Inspect predicate incidence.",
+            "input_schema": {
+                "required": {},
+                "optional": {
+                    "concept_id": str,
+                    "instance_of": str,
+                    "argument_index": str,
+                    "relation_kind": str,
+                    "include_argument_type_counts": bool,
+                    "include_concept_preview": bool,
+                    "limit": int,
+                },
+                "allow_unknown": False,
+                "description": "Predicate incidence arguments",
+            },
+            "category": "read",
+        }
+    }
+
+    preflight = orchestrator._preflight_tool_calls(
+        [
+            {
+                "action": "call_tool",
+                "tool": "get_predicate_incidence",
+                "payload": {"concept_id": "#V#michael_witbrock"},
+            }
+        ],
+        catalogue,
+        allowed_tool_names=None,
+        user_namespace="#V#test_user",
+        selected_gmail_profile=None,
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "type",
+                    "concept_ids": ["#V#scientific_paper"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ]
+        },
+    )
+
+    assert preflight.errors == [
+        (
+            "Tool 'get_predicate_incidence' planned target arguments do not "
+            "match the resolved expected target contract."
+        )
+    ]
+    assert preflight.diagnostics[0]["error_code"] == (
+        "target_contract_symbolic_mismatch"
+    )
+    assert preflight.diagnostics[0]["payload"]["concept_id"] == "#V#michael_witbrock"
+
+
 def test_preflight_replaces_gmail_primary_placeholder_with_selected_profile() -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
     catalogue = {
@@ -461,9 +522,7 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
                 }
             }
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, _JsonSchemaGateway())
-    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _JsonSchemaGateway()))
     schema = orchestrator._tool_schema_for_name(
         "test.lookup_current_user_papers",
         orchestrator._gateway.describe_methods(),
@@ -679,7 +738,9 @@ def test_tool_call_preflight_allows_declared_follow_up_tools() -> None:
     assert preflight.errors == []
 
 
-def test_tool_result_formatting_keeps_top_level_fields_over_raw_nested_payload() -> None:
+def test_tool_result_formatting_keeps_top_level_fields_over_raw_nested_payload() -> (
+    None
+):
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
     payload = {
         "id": "msg-1",

@@ -451,9 +451,52 @@ def test_verification_read_success_on_other_target_does_not_close_failed_target(
         "unresolved_failed_target_count": 1,
         "unresolved_failed_targets": ["#V#target_a"],
     }
-    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
-        ledger["blocking_failure_codes"]
+    assert (
+        BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+        in (ledger["blocking_failure_codes"])
     )
+
+
+def test_wrong_symbolic_target_contract_evidence_does_not_satisfy_required_tool() -> (
+    None
+):
+    ledger = build_required_tool_obligation_ledger(
+        required_tools_by_source={
+            "turn_expected_outcome_contract": ["get_predicate_incidence"]
+        },
+        invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "payload": {"success": True, "concept_id": "#V#michael_witbrock"},
+            }
+        ],
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "type",
+                    "concept_ids": ["#V#scientific_paper"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ]
+        },
+        allowed_tools=["get_predicate_incidence"],
+        method_catalogue=_catalogue(["get_predicate_incidence"]),
+    )
+
+    obligation = _obligation_for_tool(ledger, "get_predicate_incidence")
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 0
+    assert obligation["satisfied"] is False
+    assert obligation["last_attempt_status"] == "target_contract_symbolic_mismatch"
+    assert obligation["blocking_reason"] == BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+    assert obligation["tool_call_validation_errors"][0]["error_code"] == (
+        "target_contract_symbolic_mismatch"
+    )
+    assert ledger["unsatisfied_required_tools"] == ["get_predicate_incidence"]
 
 
 def test_url_target_alias_closes_when_canonical_identifier_later_succeeds() -> None:

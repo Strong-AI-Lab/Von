@@ -33,6 +33,10 @@ from .turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
+from ...services.tool_target_contract_validation import (
+    target_contract_state_from_context,
+    validate_tool_target_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -482,6 +486,7 @@ def _turn_expected_outcome_contract_for_discovery_memo(
         "turn_selector_guidance",
         "turn_answering_guidance",
         "turn_expected_required_tools",
+        "turn_expected_target_contracts",
     ):
         value = data.get(key)
         if value is not None:
@@ -713,6 +718,7 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
             "turn_selector_guidance",
             "turn_answering_guidance",
             "turn_expected_outcome_reasoning",
+            "turn_expected_target_contracts",
             "turn_context_handoff_decision",
             "turn_context_handoff_mode",
             "turn_context_handoff_summary",
@@ -1136,6 +1142,28 @@ def _build_turn_execution_execute_tool_batch_handler(
                 tool_name=tool_name or "",
                 payload=payload,
             )
+            target_validation = validate_tool_target_contract(
+                tool_name=tool_name or "",
+                payload=payload,
+                target_contract_state=target_contract_state_from_context(request.data),
+            )
+            if not target_validation.ok:
+                record: dict[str, Any] = {
+                    "tool": tool_name or "unknown",
+                    "payload": _bounded_snapshot(payload),
+                    "status": "failed",
+                    "error": (
+                        target_validation.first_error_code()
+                        or "target_contract_validation_failed"
+                    ),
+                    "tool_call_validation_diagnostics": list(
+                        target_validation.diagnostics
+                    ),
+                }
+                if payload_bindings:
+                    record["payload_bindings"] = _bounded_snapshot(payload_bindings)
+                execution_records.append(record)
+                continue
 
             tool_context = {
                 str(key): value
