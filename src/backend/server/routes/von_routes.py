@@ -109,6 +109,7 @@ from ...services.turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
     update_tool_observation_summary,
 )
+from ...services.tool_observation_ledger_service import build_tool_observation_ledger
 from ...services.tool_evidence_projection_service import (
     project_nested_workflow_progress_evidence,
     project_surfaceable_concept_evidence,
@@ -7450,6 +7451,30 @@ def _finalise_llm_debug_info(
         )
         diagnostics_payload["code_version_details"] = code_version_details
 
+    aux_llm_calls_payload = (
+        llm_debug_info.get("aux_llm_calls")
+        if isinstance(llm_debug_info.get("aux_llm_calls"), list)
+        else []
+    )
+    tool_observation_ledger = build_tool_observation_ledger(
+        tool_invocations=turn_record_tool_invocations_payload,
+        turn_execution_diagnostics=(
+            diagnostics_payload if isinstance(diagnostics_payload, Mapping) else None
+        ),
+        aux_llm_calls=aux_llm_calls_payload,
+        existing_ledger=(
+            llm_debug_info.get("tool_observation_ledger")
+            if isinstance(llm_debug_info.get("tool_observation_ledger"), Mapping)
+            else None
+        ),
+    )
+    if int(tool_observation_ledger.get("observation_count") or 0) > 0:
+        llm_debug_info["tool_observation_ledger"] = dict(tool_observation_ledger)
+        if isinstance(diagnostics_payload, dict):
+            diagnostics_payload["tool_observation_ledger"] = dict(
+                tool_observation_ledger
+            )
+
     workflow_discovery_payload = workflow_discovery
     if workflow_discovery_payload is None:
         raw_discovery = llm_debug_info.get("workflow_discovery")
@@ -7500,11 +7525,7 @@ def _finalise_llm_debug_info(
                 if isinstance(llm_debug_info.get("turn_execution_diagnostics"), dict)
                 else None
             ),
-            aux_llm_calls=(
-                llm_debug_info.get("aux_llm_calls")
-                if isinstance(llm_debug_info.get("aux_llm_calls"), list)
-                else []
-            ),
+            aux_llm_calls=aux_llm_calls_payload,
             llm_calls=(
                 llm_debug_info.get("llm_interaction", {}).get("calls")
                 if isinstance(llm_debug_info.get("llm_interaction"), dict)
@@ -7542,6 +7563,11 @@ def _finalise_llm_debug_info(
                 if isinstance(
                     llm_debug_info.get("required_tool_obligation_ledger"), dict
                 )
+                else None
+            ),
+            tool_observation_ledger=(
+                tool_observation_ledger
+                if int(tool_observation_ledger.get("observation_count") or 0) > 0
                 else None
             ),
             method_catalogue=(

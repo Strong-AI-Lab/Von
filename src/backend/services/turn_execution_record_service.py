@@ -46,6 +46,7 @@ from .tool_metadata_service import (
     is_tool_verification_read,
     is_tool_write,
 )
+from .tool_observation_ledger_service import build_tool_observation_ledger
 from .tool_target_contract_validation import target_contract_state_from_context
 from .turn_decision_attribution_service import build_turn_decision_attribution
 from .turn_execution_diagnostic_event_service import (
@@ -8486,6 +8487,7 @@ def build_turn_execution_record(
     completion_report: Mapping[str, Any] | None = None,
     required_prompt_tools: Sequence[Any] | None = None,
     required_tool_obligation_ledger: Mapping[str, Any] | None = None,
+    tool_observation_ledger: Mapping[str, Any] | None = None,
     method_catalogue: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
@@ -8523,6 +8525,20 @@ def build_turn_execution_record(
     ]
     if not search_evidence_payload:
         search_evidence_payload = build_search_tool_evidence(tool_invocations)
+    tool_observation_ledger_payload = build_tool_observation_ledger(
+        tool_invocations=tool_invocations,
+        turn_execution_diagnostics=(
+            turn_execution_diagnostics
+            if isinstance(turn_execution_diagnostics, Mapping)
+            else None
+        ),
+        aux_llm_calls=aux_llm_calls,
+        existing_ledger=(
+            tool_observation_ledger
+            if isinstance(tool_observation_ledger, Mapping)
+            else None
+        ),
+    )
     resolved_turn_expected_outcome_contract = (
         _resolve_turn_expected_outcome_contract_snapshot(
             turn_expected_outcome_contract,
@@ -9128,6 +9144,16 @@ def build_turn_execution_record(
         )
 
     execution_summary_with_contract = dict(execution_summary)
+    if int(tool_observation_ledger_payload.get("observation_count") or 0) > 0:
+        execution_summary_with_contract["tool_observation_count"] = int(
+            tool_observation_ledger_payload.get("observation_count") or 0
+        )
+        execution_summary_with_contract["tool_observation_status_counts"] = dict(
+            tool_observation_ledger_payload.get("status_counts") or {}
+        )
+        execution_summary_with_contract["tool_observation_observed_tools"] = list(
+            tool_observation_ledger_payload.get("observed_tools") or []
+        )
     primary_required_effects_contract = (
         representation_effects_contract
         if isinstance(representation_effects_contract, Mapping)
@@ -9384,6 +9410,12 @@ def build_turn_execution_record(
         "execution": {
             "tool_invocations": serialised_invocations,
             "search_evidence": search_evidence_payload,
+            "tool_observation_ledger": (
+                dict(tool_observation_ledger_payload)
+                if int(tool_observation_ledger_payload.get("observation_count") or 0)
+                > 0
+                else None
+            ),
             "llm_calls": llm_call_log,
             "aux_llm_calls": aux_llm_call_log,
             "summary": execution_summary_with_contract,

@@ -71,6 +71,9 @@ from src.backend.services.turn_decision_attribution_service import (
 from src.backend.services.turn_context_adjudication_projection_service import (
     build_turn_context_adjudication_projection,
 )
+from src.backend.services.tool_observation_ledger_service import (
+    TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
+)
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:31b"
@@ -2708,6 +2711,55 @@ def _collect_progress_entries_from_payload(payload: Mapping[str, Any]) -> list[A
     return entries
 
 
+def _collect_action_tool_observation_ledgers(
+    *,
+    summary: Mapping[str, Any],
+    llm_debug_data: Mapping[str, Any] | None = None,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    ledgers: list[tuple[str, Mapping[str, Any]]] = []
+    seen: set[int] = set()
+
+    def append_ledger(source: str, ledger: Mapping[str, Any]) -> None:
+        if ledger.get("schema_version") != TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION:
+            return
+        observations = ledger.get("observations")
+        if not isinstance(observations, list) or not observations:
+            return
+        identity = id(ledger)
+        if identity in seen:
+            return
+        seen.add(identity)
+        ledgers.append((source, ledger))
+
+    telemetry = _as_mapping(summary.get("telemetry"))
+    append_ledger(
+        "telemetry.tool_observation_ledger",
+        _as_mapping(telemetry.get("tool_observation_ledger")),
+    )
+    append_ledger(
+        "summary.tool_observation_ledger",
+        _as_mapping(summary.get("tool_observation_ledger")),
+    )
+
+    debug = _as_mapping(llm_debug_data)
+    append_ledger(
+        "llm_debug_data.tool_observation_ledger",
+        _as_mapping(debug.get("tool_observation_ledger")),
+    )
+    diagnostics = _as_mapping(debug.get("turn_execution_diagnostics"))
+    append_ledger(
+        "turn_execution_diagnostics.tool_observation_ledger",
+        _as_mapping(diagnostics.get("tool_observation_ledger")),
+    )
+    turn_record = _as_mapping(debug.get("turn_execution_record"))
+    execution = _as_mapping(turn_record.get("execution"))
+    append_ledger(
+        "turn_execution_record.execution.tool_observation_ledger",
+        _as_mapping(execution.get("tool_observation_ledger")),
+    )
+    return ledgers
+
+
 def _collect_action_tool_observations(
     *,
     summary: Mapping[str, Any],
@@ -2733,8 +2785,28 @@ def _collect_action_tool_observations(
             "phase": _safe_text(entry.get("phase")) or None,
             "stage": _safe_text(entry.get("stage")) or None,
         }
+        for optional_key in (
+            "error",
+            "error_code",
+            "result_empty",
+            "attempted",
+            "call_id",
+        ):
+            if optional_key in entry:
+                compact[optional_key] = entry.get(optional_key)
         if compact not in observations:
             observations.append(compact)
+
+    ledgers = _collect_action_tool_observation_ledgers(
+        summary=summary,
+        llm_debug_data=llm_debug_data,
+    )
+    if ledgers:
+        for source, ledger in ledgers:
+            for entry in _as_list(ledger.get("observations")):
+                if isinstance(entry, Mapping):
+                    append_observation(source, entry)
+        return observations
 
     telemetry = _as_mapping(summary.get("telemetry"))
     for tool_name in _as_list(telemetry.get("observed_tools")):
@@ -2836,6 +2908,15 @@ def classify_replay_action_outcome(
     observed_tools: list[str] = []
     for observation in tool_observations:
         _append_unique_text(observed_tools, observation.get("tool"))
+    ledger_observations_present = any(
+        "tool_observation_ledger" in (_safe_text(observation.get("source")) or "")
+        for observation in tool_observations
+    )
+    observation_statuses = {
+        (_safe_text(observation.get("status")) or "").lower()
+        for observation in tool_observations
+        if _safe_text(observation.get("status"))
+    }
 
     text_reason = " ".join(
         [
@@ -2872,7 +2953,7 @@ def classify_replay_action_outcome(
         },
         tool_observations,
     ]
-    if debug:
+    if debug and not ledger_observations_present:
         tool_signal_sections.extend(
             [
                 debug.get("tool_invocations"),
@@ -2922,25 +3003,41 @@ def classify_replay_action_outcome(
     if observed_tools:
         evidence.append(f"observed_tools={','.join(observed_tools)}")
 
-    if invalid_tool_match:
+    ledger_invalid_args = bool(observation_statuses & {"invalid_args"})
+    ledger_unavailable = bool(observation_statuses & {"auth_failed", "unavailable"})
+    ledger_timeout_or_cancelled = bool(
+        observation_statuses & {"timeout", "cancelled", "canceled"}
+    )
+    ledger_empty_observation = bool(observation_statuses & {"empty_result"})
+
+    if ledger_invalid_args or invalid_tool_match:
         outcome = "tool_args_invalid"
-        evidence.append(f"invalid_tool_argument_signal={invalid_tool_match[:160]}")
-    elif unavailable_match:
+        if ledger_invalid_args:
+            evidence.append("tool_observation_ledger_status=invalid_args")
+        if invalid_tool_match:
+            evidence.append(f"invalid_tool_argument_signal={invalid_tool_match[:160]}")
+    elif ledger_unavailable or unavailable_match:
         outcome = "tool_unavailable_or_auth_failed"
-        evidence.append(f"tool_unavailable_signal={unavailable_match[:160]}")
-    elif timeout_detected or cancelled_detected or status == "error":
+        if ledger_unavailable:
+            evidence.append("tool_observation_ledger_status=auth_failed_or_unavailable")
+        if unavailable_match:
+            evidence.append(f"tool_unavailable_signal={unavailable_match[:160]}")
+    elif ledger_timeout_or_cancelled or timeout_detected or cancelled_detected or status == "error":
         outcome = "timeout_after_action" if action_started else "timeout_before_action"
         evidence.append(
             "timeout_or_cancellation_observed=true"
-            if timeout_detected or cancelled_detected
+            if ledger_timeout_or_cancelled or timeout_detected or cancelled_detected
             else "error_without_terminal_action_result=true"
         )
     elif requires_tool_use and not selected_workflow_id and not observed_tools:
         outcome = "no_workflow_selected"
         evidence.append("requires_tool_use_without_workflow_or_tool=true")
-    elif empty_observation_match and observed_tools:
+    elif (ledger_empty_observation or empty_observation_match) and observed_tools:
         outcome = "tool_executed_empty_observation"
-        evidence.append(f"empty_observation_signal={empty_observation_match[:160]}")
+        if ledger_empty_observation:
+            evidence.append("tool_observation_ledger_status=empty_result")
+        if empty_observation_match:
+            evidence.append(f"empty_observation_signal={empty_observation_match[:160]}")
     elif observed_tools and not response_text:
         outcome = "tool_executed_with_observation"
         evidence.append("tool_seen_but_no_response_text=true")
@@ -3934,6 +4031,18 @@ def _build_summary(
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
     dispatch = _as_mapping(routing.get("dispatch"))
     tool_history = _as_list(diagnostics.get("tool_history"))
+    tool_observation_ledger = _as_mapping(
+        llm_debug_data.get("tool_observation_ledger")
+    )
+    if not tool_observation_ledger:
+        tool_observation_ledger = _as_mapping(
+            diagnostics.get("tool_observation_ledger")
+        )
+    if not tool_observation_ledger:
+        turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
+        tool_observation_ledger = _as_mapping(
+            _as_mapping(turn_record.get("execution")).get("tool_observation_ledger")
+        )
     observed_tools = _collect_tool_names(diagnostics, llm_debug_data)
     response_text = (
         _safe_text(generate_payload.get("response"))
@@ -4015,6 +4124,12 @@ def _build_summary(
             )
             or None,
             "tool_history": tool_history,
+            "tool_observation_ledger": (
+                dict(tool_observation_ledger)
+                if tool_observation_ledger.get("schema_version")
+                == TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION
+                else None
+            ),
             "observed_tools": observed_tools,
             "tool_count": len(observed_tools) if observed_tools else len(tool_history),
             "workflow_routing_diagnostics": routing,

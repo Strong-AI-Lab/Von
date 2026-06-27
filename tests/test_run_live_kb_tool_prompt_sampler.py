@@ -1726,6 +1726,102 @@ def test_action_outcome_classifies_empty_tool_observation() -> None:
     assert outcome["observed_tools"] == ["search_arxiv"]
 
 
+def test_action_outcome_prefers_tool_observation_ledger_over_debug_inference() -> None:
+    summary = {
+        "status": "ok",
+        "prompt": {
+            "id": "one_recent_arxiv_paper",
+            "requires_tool_use": True,
+            "likely_tools": ["search_arxiv"],
+        },
+        "conversation": {"request_id": "request-arxiv"},
+        "response": {"text": "The answer text looks superficially complete."},
+        "telemetry": {
+            "tool_observation_ledger": {
+                "schema_version": "tool_observation_ledger.v1",
+                "observations": [
+                    {
+                        "source": "llm_debug.tool_invocations",
+                        "tool": "search_arxiv",
+                        "status": "empty_result",
+                        "result_summary": "No results",
+                        "result_empty": True,
+                    }
+                ],
+            }
+        },
+        "evaluation": {"reasons": []},
+    }
+    llm_debug_data = {
+        "tool_invocations": [
+            {
+                "tool": "search_arxiv",
+                "status": "ok",
+                "result_summary": "Found 1 result",
+                "effective_payload": {"items": [{"title": "Should not win"}]},
+            }
+        ]
+    }
+
+    outcome = sampler.classify_replay_action_outcome(
+        summary,
+        llm_debug_data=llm_debug_data,
+    )
+
+    assert outcome["outcome"] == "tool_executed_empty_observation"
+    assert outcome["observed_tools"] == ["search_arxiv"]
+    assert "tool_observation_ledger_status=empty_result" in outcome["evidence"]
+    assert outcome["tool_observations"][0]["source"] == (
+        "telemetry.tool_observation_ledger"
+    )
+
+
+def test_build_summary_projects_tool_observation_ledger() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "one_recent_arxiv_paper",
+            "category": "single_tool_arxiv",
+            "complexity_class": "vontology_plus_single_tool",
+            "prompt": "Recommend one recent arXiv paper.",
+            "knowledge_surfaces": ["arxiv"],
+            "likely_tools": ["search_arxiv"],
+            "requires_tool_use": True,
+        },
+        task_id="task-arxiv",
+        session_id="session-arxiv",
+        request_id="request-arxiv",
+        history_location={"history_index": 2, "session_id": "session-arxiv"},
+        generate_payload={"response": "No papers were found."},
+        llm_debug_data={
+            "tool_observation_ledger": {
+                "schema_version": "tool_observation_ledger.v1",
+                "observation_count": 1,
+                "observed_tools": ["search_arxiv"],
+                "status_counts": {"empty_result": 1},
+                "observations": [
+                    {
+                        "source": "llm_debug.tool_invocations",
+                        "tool": "search_arxiv",
+                        "status": "empty_result",
+                        "result_summary": "No results",
+                    }
+                ],
+            }
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_plus_single_tool"],
+        seed=17,
+        requested_model="gpt-5.4-nano",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+    )
+
+    assert summary["telemetry"]["tool_observation_ledger"]["status_counts"] == {
+        "empty_result": 1
+    }
+    assert summary["action_outcome"]["outcome"] == "tool_executed_empty_observation"
+
+
 def test_build_summary_includes_action_outcome() -> None:
     summary = sampler._build_summary(
         prompt_entry={
