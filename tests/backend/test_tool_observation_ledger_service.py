@@ -45,6 +45,25 @@ def test_ledger_records_auth_or_unavailable_failures() -> None:
     assert ledger["observations"][0]["status"] == "auth_failed"
 
 
+def test_ledger_records_pre_normalised_runtime_observations() -> None:
+    ledger = build_tool_observation_ledger(
+        tool_observations=[
+            {
+                "source": "background_task_progress",
+                "tool": "jira_get_issue",
+                "status": "tool_invoked",
+                "call_id": "call-1",
+                "result_summary": "Issue: JVNAUTOSCI-150",
+            }
+        ]
+    )
+
+    assert ledger["observed_tools"] == ["jira_get_issue"]
+    assert ledger["status_counts"] == {"ok": 1}
+    assert ledger["observations"][0]["source"] == "background_task_progress"
+    assert ledger["observations"][0]["result_summary"] == "Issue: JVNAUTOSCI-150"
+
+
 def test_ledger_distinguishes_empty_and_non_empty_observations_without_raw_result() -> None:
     ledger = build_tool_observation_ledger(
         tool_invocations=[

@@ -4641,7 +4641,26 @@ def _build_failed_replay_attempt_summary(
                 if _safe_text(arm.get("label") or arm.get("arm_id"))
             ],
         }
-    summary["action_outcome"] = classify_replay_action_outcome(summary)
+    action_outcome = classify_replay_action_outcome(summary)
+    tool_observation_ledger = build_tool_observation_ledger(
+        tool_observations=[
+            entry
+            for entry in _as_list(action_outcome.get("tool_observations"))
+            if isinstance(entry, Mapping)
+        ],
+    )
+    if int(tool_observation_ledger.get("observation_count") or 0) > 0:
+        telemetry = _as_mapping(summary.get("telemetry"))
+        telemetry["tool_observation_ledger"] = dict(tool_observation_ledger)
+        telemetry["observed_tools"] = list(
+            tool_observation_ledger.get("observed_tools") or []
+        )
+        telemetry["tool_count"] = len(
+            tool_observation_ledger.get("observed_tools") or []
+        )
+        summary["telemetry"] = telemetry
+        action_outcome = classify_replay_action_outcome(summary)
+    summary["action_outcome"] = action_outcome
     return summary
 
 

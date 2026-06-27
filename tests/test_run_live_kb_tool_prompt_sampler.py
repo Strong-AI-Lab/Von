@@ -1623,6 +1623,45 @@ def test_action_outcome_classifies_timeout_after_tool_start() -> None:
     assert outcome["action_started"] is True
 
 
+def test_failed_replay_summary_projects_tool_ledger_from_timeout_progress() -> None:
+    summary = sampler._build_failed_replay_attempt_summary(
+        exc=sampler.BackgroundGenerateTaskError(
+            "Background generate task did not complete before timeout",
+            task_id="task-jira",
+            status_payload={
+                "status": "running",
+                "progress": {
+                    "phase": "tool_execute",
+                    "stage": "tool_execute",
+                    "status": "tool_invoked",
+                    "tool": "jira_get_issue",
+                    "call_id": "call-1",
+                    "result_summary": "Issue: JVNAUTOSCI-150",
+                },
+            },
+            cancellation_payload={"success": True, "task_id": "task-jira"},
+        ),
+        attempt_index=1,
+        prompt_entry={
+            "id": "tell_me_about_jvnautosci_150_in_jira",
+            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+            "likely_tools": ["jira_get_issue"],
+            "requires_tool_use": True,
+        },
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        requested_model="gpt-5.4-nano",
+    )
+
+    ledger = summary["telemetry"]["tool_observation_ledger"]
+    assert ledger["schema_version"] == "tool_observation_ledger.v1"
+    assert ledger["observed_tools"] == ["jira_get_issue"]
+    assert ledger["status_counts"] == {"ok": 1}
+    assert summary["action_outcome"]["outcome"] == "timeout_after_action"
+    assert summary["action_outcome"]["tool_observations"][0]["source"] == (
+        "telemetry.tool_observation_ledger"
+    )
+
+
 def test_failed_replay_summary_preserves_planned_comparison_arms() -> None:
     summary = sampler._build_failed_replay_attempt_summary(
         exc=sampler.BackgroundGenerateTaskError(

@@ -473,6 +473,7 @@ def _iter_validation_failure_observations(
 def build_tool_observation_ledger(
     *,
     tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+    tool_observations: Sequence[Mapping[str, Any]] | None = None,
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
     existing_ledger: Mapping[str, Any] | None = None,
@@ -497,6 +498,15 @@ def build_tool_observation_ledger(
                 observations,
                 seen,
                 _observation_from_entry("llm_debug.tool_invocations", entry),
+            )
+
+    for entry in tool_observations or ():
+        if isinstance(entry, Mapping):
+            source = _safe_str(entry.get("source")) or "runtime.tool_observations"
+            _append_observation(
+                observations,
+                seen,
+                _observation_from_entry(source, entry),
             )
 
     diagnostic_entries, terminal_context = _iter_diagnostic_tool_entries(
