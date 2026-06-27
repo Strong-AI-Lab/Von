@@ -1131,6 +1131,59 @@ def test_turn_contract_required_tools_block_when_preflight_state_omitted() -> No
     )
 
 
+def test_conditional_required_tools_do_not_create_unconditional_mutation_blocker() -> (
+    None
+):
+    record = _build_record(
+        prompt_text=(
+            "Look in recent messages for an arXiv link and represent the paper if "
+            "one is found."
+        ),
+        response_text="No arXiv link was found in the requested message range.",
+        turn_expected_outcome_contract={
+            "summary": (
+                "Inspect recent mail and conditionally represent any grounded "
+                "arXiv paper target."
+            ),
+            "required_tools": [
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            ],
+            "conditional_required_tools": ["workflow_execute"],
+            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+        },
+        tool_invocations=[
+            {"tool": "gmail_list_profiles", "payload": {"success": True}},
+            {"tool": "gmail_list_messages", "payload": {"success": True}},
+            {"tool": "gmail_get_message", "payload": {"success": True}},
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    contract_state = execution.get("turn_expected_outcome_contract_state")
+    assert isinstance(contract_state, dict)
+    assert contract_state.get("conditional_required_tools") == ["workflow_execute"]
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert all(
+        effect.get("required_tools") != ["workflow_execute"]
+        for effect in required_effects
+        if isinstance(effect, dict)
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert "prompt_required_mutation_workflow_execute_missing" not in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+    assert all(
+        "workflow_execute" not in str(code)
+        for code in (completion_gate.get("blocking_failure_codes") or [])
+    )
+
+
 def test_turn_contract_search_bound_predicate_incidence_requires_searched_target() -> (
     None
 ):

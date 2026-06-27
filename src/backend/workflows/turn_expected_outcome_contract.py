@@ -38,6 +38,9 @@ TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING: dict[str, str] = {
     "reasoning": "turn_expected_outcome_reasoning",
 }
 TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY = "turn_expected_required_tools"
+TURN_EXPECTED_OUTCOME_CONDITIONAL_REQUIRED_TOOLS_CONTEXT_KEY = (
+    "turn_expected_conditional_required_tools"
+)
 TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY = (
     "turn_expected_target_concept_ids"
 )
@@ -66,6 +69,12 @@ TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES: dict[str, str] = {
 TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_FIELDS: tuple[str, ...] = (
     "required_tools",
     TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY,
+)
+TURN_EXPECTED_OUTCOME_CONDITIONAL_REQUIRED_TOOL_FIELDS: tuple[str, ...] = (
+    "conditional_required_tools",
+    TURN_EXPECTED_OUTCOME_CONDITIONAL_REQUIRED_TOOLS_CONTEXT_KEY,
+    "required_tools_if_target_resolved",
+    "required_tools_when_target_found",
 )
 TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_FIELDS: tuple[str, ...] = (
     "target_concept_id",
@@ -113,6 +122,51 @@ def _copy_string_key_mapping(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _nested_expected_outcome_payload_candidates(
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    candidates: list[Mapping[str, Any]] = []
+    seen_ids: set[int] = {id(payload)}
+
+    def _append(value: Any) -> None:
+        nested = _copy_string_key_mapping(value)
+        if nested is None:
+            return
+        nested_id = id(value)
+        if nested_id in seen_ids:
+            return
+        seen_ids.add(nested_id)
+        candidates.append(nested)
+
+    for key in (
+        "validated_json",
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_contract",
+        "expected_outcome_contract_state",
+        "expected_outcome_contract",
+        "turn_expected_outcome_profile",
+    ):
+        _append(payload.get(key))
+
+    for container_key in (
+        "outputs",
+        "action_outputs",
+        "last_action_outputs",
+        "llm_step_envelope",
+        "result",
+    ):
+        container = _copy_string_key_mapping(payload.get(container_key))
+        if container is None:
+            continue
+        _append(container.get("validated_json"))
+        _append(container.get("turn_expected_outcome_contract_state"))
+        _append(container.get("turn_expected_outcome_contract"))
+        _append(container.get("expected_outcome_contract_state"))
+        _append(container.get("expected_outcome_contract"))
+
+    return tuple(candidates)
 
 
 def _dedupe_sources(values: Any) -> tuple[str, ...]:
@@ -280,6 +334,7 @@ class TurnExpectedOutcomeContract:
     answering_guidance: str | None = None
     reasoning: str | None = None
     required_tools: tuple[str, ...] = ()
+    conditional_required_tools: tuple[str, ...] = ()
     target_concept_ids: tuple[str, ...] = ()
     target_type_ids: tuple[str, ...] = ()
     workflow_concept_ids: tuple[str, ...] = ()
@@ -294,6 +349,15 @@ class TurnExpectedOutcomeContract:
         source: str | None = None,
     ) -> TurnExpectedOutcomeContract:
         payload = _copy_string_key_mapping(value) or {}
+        nested_contracts = tuple(
+            cls.from_mapping(
+                nested,
+                source=f"{source}.nested_expected_outcome_payload"
+                if source
+                else "nested_expected_outcome_payload",
+            )
+            for nested in _nested_expected_outcome_payload_candidates(payload)
+        )
         field_payload = payload
         source_values = _dedupe_sources(payload.get("sources"))
         if payload.get(
@@ -328,6 +392,17 @@ class TurnExpectedOutcomeContract:
             if required_tool_values is not None:
                 break
         required_tools = _dedupe_required_tools(required_tool_values)
+        conditional_required_tool_values: Any = None
+        for source_payload in (payload, field_payload):
+            for field_name in TURN_EXPECTED_OUTCOME_CONDITIONAL_REQUIRED_TOOL_FIELDS:
+                if field_name in source_payload:
+                    conditional_required_tool_values = source_payload.get(field_name)
+                    break
+            if conditional_required_tool_values is not None:
+                break
+        conditional_required_tools = _dedupe_required_tools(
+            conditional_required_tool_values
+        )
         target_concept_ids = _extract_target_concept_ids(
             payload=payload,
             field_payload=field_payload,
@@ -346,7 +421,7 @@ class TurnExpectedOutcomeContract:
             target_concept_ids=target_concept_ids,
             target_type_ids=target_type_ids,
         )
-        return cls(
+        contract = cls(
             summary=field_values["summary"],
             grounding_requirement=field_values["grounding_requirement"],
             precision_policy=field_values["precision_policy"],
@@ -354,12 +429,16 @@ class TurnExpectedOutcomeContract:
             answering_guidance=field_values["answering_guidance"],
             reasoning=field_values["reasoning"],
             required_tools=required_tools,
+            conditional_required_tools=conditional_required_tools,
             target_concept_ids=target_concept_ids,
             target_type_ids=target_type_ids,
             workflow_concept_ids=workflow_concept_ids,
             target_contracts=target_contracts,
             sources=_dedupe_sources(list(source_values)),
         )
+        if nested_contracts:
+            return cls.merge_preferred(contract, *nested_contracts)
+        return contract
 
     @classmethod
     def merge_preferred(
@@ -369,6 +448,7 @@ class TurnExpectedOutcomeContract:
         merged_fields: dict[str, str] = {}
         merged_sources: list[str] = []
         merged_required_tools: tuple[str, ...] = ()
+        merged_conditional_required_tools: tuple[str, ...] = ()
         merged_target_concept_ids: list[str] = []
         merged_target_type_ids: list[str] = []
         merged_workflow_concept_ids: list[str] = []
@@ -382,6 +462,11 @@ class TurnExpectedOutcomeContract:
             merged_sources.extend(contract.sources)
             if not merged_required_tools and contract.required_tools:
                 merged_required_tools = contract.required_tools
+            if (
+                not merged_conditional_required_tools
+                and contract.conditional_required_tools
+            ):
+                merged_conditional_required_tools = contract.conditional_required_tools
             merged_target_concept_ids.extend(contract.target_concept_ids)
             merged_target_type_ids.extend(contract.target_type_ids)
             merged_workflow_concept_ids.extend(contract.workflow_concept_ids)
@@ -404,6 +489,7 @@ class TurnExpectedOutcomeContract:
             answering_guidance=merged_fields.get("answering_guidance"),
             reasoning=merged_fields.get("reasoning"),
             required_tools=merged_required_tools,
+            conditional_required_tools=merged_conditional_required_tools,
             target_concept_ids=_dedupe_strings(merged_target_concept_ids),
             target_type_ids=_dedupe_strings(merged_target_type_ids),
             workflow_concept_ids=_dedupe_strings(merged_workflow_concept_ids),
@@ -414,6 +500,7 @@ class TurnExpectedOutcomeContract:
     def is_empty(self) -> bool:
         return (
             not self.required_tools
+            and not self.conditional_required_tools
             and not self.target_concept_ids
             and not self.target_type_ids
             and not self.workflow_concept_ids
@@ -443,6 +530,10 @@ class TurnExpectedOutcomeContract:
         }
         if self.required_tools:
             payload["required_tools"] = list(self.required_tools)
+        if self.conditional_required_tools:
+            payload["conditional_required_tools"] = list(
+                self.conditional_required_tools
+            )
         if self.target_concept_ids:
             payload["target_concept_ids"] = list(self.target_concept_ids)
         if self.target_type_ids:
@@ -475,6 +566,7 @@ def build_turn_expected_outcome_boundary_payload(
     if (
         not contract_payload
         and not contract_object.required_tools
+        and not contract_object.conditional_required_tools
         and not contract_object.target_concept_ids
         and not contract_object.target_type_ids
         and not contract_object.workflow_concept_ids
@@ -485,6 +577,10 @@ def build_turn_expected_outcome_boundary_payload(
     if contract_object.required_tools:
         payload[TURN_EXPECTED_OUTCOME_REQUIRED_TOOLS_CONTEXT_KEY] = list(
             contract_object.required_tools
+        )
+    if contract_object.conditional_required_tools:
+        payload[TURN_EXPECTED_OUTCOME_CONDITIONAL_REQUIRED_TOOLS_CONTEXT_KEY] = list(
+            contract_object.conditional_required_tools
         )
     if contract_object.target_concept_ids:
         payload[TURN_EXPECTED_OUTCOME_TARGET_CONCEPT_IDS_CONTEXT_KEY] = list(
@@ -508,6 +604,10 @@ def build_turn_expected_outcome_boundary_payload(
         if contract_object.required_tools:
             profile_from_contract["required_tools"] = list(
                 contract_object.required_tools
+            )
+        if contract_object.conditional_required_tools:
+            profile_from_contract["conditional_required_tools"] = list(
+                contract_object.conditional_required_tools
             )
         if contract_object.target_concept_ids:
             profile_from_contract["target_concept_ids"] = list(

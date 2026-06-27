@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 
 from src.backend.services import concept_service
+from src.backend.services import (
+    conversation_turn_workflow_vontology_service as conversation_turn_service,
+)
 from src.backend.services.conversation_turn_workflow_vontology_service import (
     _ensure_conversation_turn_prompt_support,
     bootstrap_canonical_conversation_turn_workflows,
@@ -128,6 +131,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`selector_guidance`" in expected_outcome_text
     assert "`answering_guidance`" in expected_outcome_text
     assert "`required_tools`" in expected_outcome_text
+    assert "`conditional_required_tools`" in expected_outcome_text
     assert "exact internal tool IDs" in expected_outcome_text
     assert "prefer ontology-native predicate narrowing" in expected_outcome_text
     assert "`get_predicate_incidence` and then `find_relations_with_argument`" in (
@@ -174,6 +178,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         '"required_tools":["gmail_list_profiles","gmail_list_messages","gmail_get_message"]'
         in expected_outcome_text
     )
+    assert "Do not return only Gmail list tools" in expected_outcome_text
+    assert '"conditional_required_tools":["workflow_execute"]' in (
+        expected_outcome_text
+    )
     assert "read-only Jira retrieval" in expected_outcome_text
     assert "latest, most recent, newest" in expected_outcome_text
     assert "jira_get_issue" in expected_outcome_text
@@ -190,6 +198,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "must contain a concrete predicate before `ORDER BY`" in (
         expected_outcome_text
     )
+
     assert "never use a bare `ORDER BY updated DESC`" in expected_outcome_text
     assert "issuetype = Task ORDER BY created DESC" in expected_outcome_text
     assert "do not let later stages invent example aliases" in expected_outcome_text
@@ -412,6 +421,50 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "final-answer synthesis telemetry" in critic_text
     assert "final_answer_synthesis.tool_evidence_projection" in critic_text
     assert "operational status/ledger summary" in critic_text
+
+
+def test_expected_outcome_prompt_refresh_markers_cover_conditional_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_markers: dict[str, tuple[str, ...]] = {}
+
+    def _fake_needs_refresh(
+        prompt_concept_id: str,
+        *,
+        required_markers: tuple[str, ...],
+    ) -> bool:
+        if prompt_concept_id == EXPECTED_OUTCOME_PROMPT_CONCEPT_ID:
+            captured_markers[prompt_concept_id] = required_markers
+        return False
+
+    monkeypatch.setattr(
+        conversation_turn_service,
+        "ensure_prompt_concept_support",
+        lambda **_: {
+            "created_prompt_ids": [],
+            "validated_prompt_ids": [],
+            "missing_content_prompt_ids": [],
+            "linked_workflow_ids": [],
+            "errors_by_target": {},
+        },
+    )
+    monkeypatch.setattr(
+        conversation_turn_service,
+        "prompt_concept_has_content",
+        lambda _prompt_concept_id: True,
+    )
+    monkeypatch.setattr(
+        conversation_turn_service,
+        "_prompt_seed_needs_refresh",
+        _fake_needs_refresh,
+    )
+
+    _ensure_conversation_turn_prompt_support()
+
+    markers = captured_markers[EXPECTED_OUTCOME_PROMPT_CONCEPT_ID]
+    assert "`conditional_required_tools`" in markers
+    assert '"conditional_required_tools":["workflow_execute"]' in markers
+    assert "Do not return only Gmail list tools" in markers
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(
@@ -1273,6 +1326,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert "required_tools" in (
         expected_outcome_policy.get("required_json_fields") or []
     )
+    assert "conditional_required_tools" in (
+        expected_outcome_policy.get("json_field_defaults") or {}
+    )
+    assert "conditional_required_tools" in (
+        expected_outcome_policy.get("required_json_fields") or []
+    )
     assert "target_concept_ids" in (
         expected_outcome_policy.get("json_field_defaults") or {}
     )
@@ -1325,6 +1384,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert any(
         isinstance(mapping, dict)
+        and mapping.get("context_key")
+        == "turn_expected_conditional_required_tools"
+        and mapping.get("tool_output_field")
+        == "validated_json.conditional_required_tools"
+        for mapping in expected_outcome_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
         and mapping.get("context_key") == "turn_expected_target_concept_ids"
         and mapping.get("tool_output_field") == "validated_json.target_concept_ids"
         for mapping in expected_outcome_mappings
@@ -1348,6 +1415,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         for mapping in expected_outcome_mappings
     )
     assert "turn_expected_required_tools" in (
+        expected_outcome_metadata.get("writes_context_keys") or []
+    )
+    assert "turn_expected_conditional_required_tools" in (
         expected_outcome_metadata.get("writes_context_keys") or []
     )
     assert "turn_expected_target_concept_ids" in (

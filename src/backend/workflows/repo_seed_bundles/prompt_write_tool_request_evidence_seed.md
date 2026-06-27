@@ -18,6 +18,7 @@ Task:
 - If the request is unclear, return low confidence rather than guessing.
 - For additive ingestion tools, a directly supplied artefact or URL can count as an explicit request for that ingestion side effect when the current prompt clearly presents it for action.
 - For external-system side effects, including outbound Gmail/email sending through `gmail_send_message`, the current prompt must clearly ask Von to perform the external action; a draft, list, summary, or hypothetical plan is not enough.
+- For `workflow_execute`, use `explicit_request` when the current prompt clearly asks Von to run, execute, represent, materialise, save, add, or otherwise perform the concrete side effect represented by the workflow payload. Do not require the user to name `workflow_execute` literally when the payload names the matching workflow or side effect. Use `low_confidence` when the workflow payload is only a speculative option, a plan, or a tool that could help.
 
 Return strict JSON only with this shape:
 {

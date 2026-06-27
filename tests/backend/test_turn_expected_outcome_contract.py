@@ -154,6 +154,63 @@ def test_turn_expected_outcome_contract_accepts_explicit_required_tools_context_
     ]
 
 
+def test_turn_expected_outcome_contract_preserves_conditional_required_tools() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "summary": "Find a target, then mutate it if found.",
+            "required_tools": ["gmail_list_messages"],
+            "conditional_required_tools": ["workflow_execute"],
+        }
+    )
+
+    assert contract.required_tools == ("gmail_list_messages",)
+    assert contract.conditional_required_tools == ("workflow_execute",)
+
+    payload = build_turn_expected_outcome_boundary_payload(contract)
+
+    assert payload["turn_expected_required_tools"] == ["gmail_list_messages"]
+    assert payload["turn_expected_conditional_required_tools"] == [
+        "workflow_execute"
+    ]
+    assert payload["turn_expected_outcome_profile"]["conditional_required_tools"] == [
+        "workflow_execute"
+    ]
+    assert payload["turn_expected_outcome_contract_state"][
+        "conditional_required_tools"
+    ] == ["workflow_execute"]
+
+
+def test_turn_expected_outcome_contract_reads_nested_validated_json() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "outputs": {
+                "validated_json": {
+                    "summary": "Find an arXiv target, then represent it.",
+                    "required_tools": ["gmail_get_message"],
+                    "conditional_required_tools": ["workflow_execute"],
+                    "workflow_concept_ids": [
+                        "#V#arxiv_paper_representation_workflow"
+                    ],
+                    "target_contracts": [
+                        {
+                            "binding": "entity",
+                            "target_description": "the arXiv paper found in email",
+                            "target_type_description": "arXiv paper",
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    assert contract.required_tools == ("gmail_get_message",)
+    assert contract.conditional_required_tools == ("workflow_execute",)
+    assert contract.workflow_concept_ids == (
+        "#V#arxiv_paper_representation_workflow",
+    )
+    assert contract.target_contracts
+
+
 def test_turn_expected_outcome_contract_preserves_hybrid_target_contract() -> None:
     contract = TurnExpectedOutcomeContract.from_mapping(
         {

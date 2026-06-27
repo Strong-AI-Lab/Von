@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "37",
+  "seed_version": "38",
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -4172,6 +4172,11 @@
                 "tool_output_field": "validated_json.required_tools"
               },
               {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_conditional_required_tools_to_turn_expected_conditional_required_tools",
+                "context_key": "turn_expected_conditional_required_tools",
+                "tool_output_field": "validated_json.conditional_required_tools"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_target_concept_ids_to_turn_expected_target_concept_ids",
                 "context_key": "turn_expected_target_concept_ids",
                 "tool_output_field": "validated_json.target_concept_ids"
@@ -4199,6 +4204,7 @@
                 "grounding_requirement": "Use available conversation context and authoritative tool evidence; avoid unsupported claims.",
                 "precision_policy": "Prefer a concise answer with explicit uncertainty over unsupported specificity.",
                 "required_tools": [],
+                "conditional_required_tools": [],
                 "reasoning": "Fallback defaults applied because the expected-outcome inference omitted one or more contract fields.",
                 "selector_guidance": "Choose the workflow or tool route most likely to answer the user request with grounded evidence.",
                 "target_concept_ids": [],
@@ -4216,6 +4222,7 @@
                 "answering_guidance",
                 "reasoning",
                 "required_tools",
+                "conditional_required_tools",
                 "target_concept_ids",
                 "target_type_ids",
                 "target_contracts",
@@ -4232,6 +4239,7 @@
               "turn_answering_guidance",
               "turn_expected_outcome_reasoning",
               "turn_expected_required_tools",
+              "turn_expected_conditional_required_tools",
               "turn_expected_target_concept_ids",
               "turn_expected_target_type_ids",
               "turn_expected_target_contracts",

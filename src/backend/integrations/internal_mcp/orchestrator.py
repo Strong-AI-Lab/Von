@@ -70,6 +70,7 @@ from src.backend.services.minimal_imposition_runtime_profile_vontology_service i
     load_minimal_imposition_runtime_profile,
 )
 from src.backend.services.write_tool_request_evidence_vontology_service import (
+    augment_write_tool_request_evidence_with_turn_contract,
     infer_write_tool_request_evidence,
 )
 from src.backend.services.conversation_turn_memory_context_service import (
@@ -4505,6 +4506,28 @@ class InternalMCPChatOrchestrator:
                 caller_workflow_id=request.workflow_id,
                 caller_workflow_step_id=request.workflow_state_id,
                 caller_workflow_step_metadata=request.workflow_state_metadata,
+                turn_expected_outcome_contract_state=(
+                    request.data.get("turn_expected_outcome_contract_state")
+                    if isinstance(request.data, Mapping)
+                    and isinstance(
+                        request.data.get("turn_expected_outcome_contract_state"),
+                        Mapping,
+                    )
+                    else None
+                ),
+                activated_conditional_required_tools=(
+                    request.data.get("activated_conditional_required_tools")
+                    if isinstance(request.data, Mapping)
+                    and isinstance(
+                        request.data.get("activated_conditional_required_tools"),
+                        Sequence,
+                    )
+                    and not isinstance(
+                        request.data.get("activated_conditional_required_tools"),
+                        (str, bytes, bytearray),
+                    )
+                    else None
+                ),
                 guardrail_surface="workflow_action_fallback",
                 guardrail_stage="workflow_action",
             )
@@ -4872,6 +4895,7 @@ class InternalMCPChatOrchestrator:
             "status": "skipped_no_requested_tools",
             "requested_tool_count": len(requested_tool_list),
         }
+        turn_contract_request_evidence_diagnostics: dict[str, Any] = {}
         if requested_tool_list:
             request_evidence, request_evidence_diagnostics = (
                 infer_write_tool_request_evidence(
@@ -4891,6 +4915,45 @@ class InternalMCPChatOrchestrator:
                     },
                 )
             )
+            (
+                request_evidence,
+                turn_contract_request_evidence_diagnostics,
+            ) = augment_write_tool_request_evidence_with_turn_contract(
+                request_evidence=request_evidence,
+                requested_tools=requested_tool_list,
+                requested_tool_payloads={
+                    str(tool_name): dict(payload)
+                    for tool_name, payload in requested_tool_payloads.items()
+                    if isinstance(tool_name, str) and isinstance(payload, Mapping)
+                },
+                turn_expected_outcome_contract=(
+                    data.get("turn_expected_outcome_contract_state")
+                    if isinstance(
+                        data.get("turn_expected_outcome_contract_state"), Mapping
+                    )
+                    else (
+                        data.get("turn_expected_outcome_contract")
+                        if isinstance(data.get("turn_expected_outcome_contract"), Mapping)
+                        else None
+                    )
+                ),
+                activated_conditional_required_tools=(
+                    data.get("activated_conditional_required_tools")
+                    if isinstance(
+                        data.get("activated_conditional_required_tools"), Sequence
+                    )
+                    and not isinstance(
+                        data.get("activated_conditional_required_tools"),
+                        (str, bytes, bytearray),
+                    )
+                    else None
+                ),
+            )
+            if turn_contract_request_evidence_diagnostics:
+                request_evidence_diagnostics = dict(request_evidence_diagnostics)
+                request_evidence_diagnostics["turn_contract_request_evidence"] = dict(
+                    turn_contract_request_evidence_diagnostics
+                )
             if isinstance(aux_log, list):
                 aux_log.append(
                     {
@@ -4935,6 +4998,9 @@ class InternalMCPChatOrchestrator:
                         },
                         "request_evidence_diagnostics": dict(
                             request_evidence_diagnostics
+                        ),
+                        "turn_contract_request_evidence": dict(
+                            turn_contract_request_evidence_diagnostics
                         ),
                     }
                 )
@@ -7920,6 +7986,9 @@ class InternalMCPChatOrchestrator:
         selected_gmail_profile_for_retry = (
             self._selected_gmail_profile_for_workflow_data(data, env)
         )
+        invocations_for_requirements = cast(
+            Sequence[Mapping[str, Any]], _data_sequence_or_none("invocations") or ()
+        )
 
         tool_plan_stage_messages = self._build_turn_expected_outcome_stage_messages(
             data=data,
@@ -7966,7 +8035,7 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
             context_messages=tool_plan_context,
-            tool_invocations=(),
+            tool_invocations=invocations_for_requirements,
             url_requirement=(
                 prompt_requirement_url_policy
                 if isinstance(prompt_requirement_url_policy, Mapping)
@@ -7990,7 +8059,7 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
             allowed_tools=allowed_tools_tuple,
-            tool_invocations=(),
+            tool_invocations=invocations_for_requirements,
         )
         prompt_requirements = self._merge_prompt_requirements_with_existing_tool_policy(
             data=data,
@@ -8000,13 +8069,15 @@ class InternalMCPChatOrchestrator:
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
-            tool_invocations=(),
+            tool_invocations=invocations_for_requirements,
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
+        allowed_tool_names = {
+            str(tool_name).strip().lower()
+            for tool_name in (data.get("llm_allowed_tools") or [])
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
         required_prompt_tools = list(prompt_requirements.required_tools)
-        invocations_for_requirements = cast(
-            Sequence[Mapping[str, Any]], data.get("invocations") or []
-        )
         missing_required_tools_for_retry = self._missing_required_tools_for_retry(
             required_tools=required_prompt_tools,
             missing_tools=_data_list("missing_prompt_tools"),
@@ -9689,6 +9760,24 @@ class InternalMCPChatOrchestrator:
                     caller_workflow_id=request.workflow_id,
                     caller_workflow_step_id=request.workflow_state_id,
                     caller_workflow_step_metadata=request.workflow_state_metadata,
+                    turn_expected_outcome_contract_state=(
+                        data.get("turn_expected_outcome_contract_state")
+                        if isinstance(
+                            data.get("turn_expected_outcome_contract_state"), Mapping
+                        )
+                        else None
+                    ),
+                    activated_conditional_required_tools=(
+                        data.get("activated_conditional_required_tools")
+                        if isinstance(
+                            data.get("activated_conditional_required_tools"), Sequence
+                        )
+                        and not isinstance(
+                            data.get("activated_conditional_required_tools"),
+                            (str, bytes, bytearray),
+                        )
+                        else None
+                    ),
                     guardrail_surface="execution",
                     guardrail_stage="tool_execute",
                 )
@@ -10447,6 +10536,348 @@ class InternalMCPChatOrchestrator:
             augmented_context,
             max_chars=self._follow_up_context_chars,
         )
+
+        def _backfill_prompt_requirement_state() -> dict[str, Any]:
+            method_catalogue_for_requirements = (
+                self._resolve_method_catalogue_for_workflow_data(data)
+            )
+            selected_gmail_profile_for_retry = (
+                self._selected_gmail_profile_for_workflow_data(data, env)
+            )
+            prompt_for_requirements = data.get("prompt_for_requirements")
+            if (
+                not isinstance(prompt_for_requirements, str)
+                or not prompt_for_requirements.strip()
+            ):
+                prompt_for_requirements = (
+                    data.get("prompt") if isinstance(data.get("prompt"), str) else ""
+                )
+
+            invocations_for_requirements = cast(
+                Sequence[Mapping[str, Any]], data.get("invocations") or []
+            )
+            prompt_requirement_url_policy = data.get("prompt_requirement_url_policy")
+            prompt_requirements = self._evaluate_prompt_requirements(
+                prompt_text=prompt_for_requirements,
+                method_catalogue=(
+                    method_catalogue_for_requirements
+                    if isinstance(method_catalogue_for_requirements, Mapping)
+                    else None
+                ),
+                context_messages=follow_up_context,
+                tool_invocations=invocations_for_requirements,
+                url_requirement=(
+                    prompt_requirement_url_policy
+                    if isinstance(prompt_requirement_url_policy, Mapping)
+                    else None
+                ),
+            )
+            prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
+                evaluation=prompt_requirements,
+                turn_expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
+                    data
+                ),
+                method_catalogue=(
+                    method_catalogue_for_requirements
+                    if isinstance(method_catalogue_for_requirements, Mapping)
+                    else None
+                ),
+                allowed_tools=(
+                    tuple(data.get("llm_allowed_tools"))
+                    if isinstance(data.get("llm_allowed_tools"), Sequence)
+                    and not isinstance(
+                        data.get("llm_allowed_tools"), (str, bytes, bytearray)
+                    )
+                    else None
+                ),
+                tool_invocations=invocations_for_requirements,
+            )
+            prompt_requirements = (
+                self._merge_prompt_requirements_with_existing_tool_policy(
+                    data=data,
+                    evaluation=prompt_requirements,
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                    tool_invocations=invocations_for_requirements,
+                )
+            )
+            required_prompt_tools = list(prompt_requirements.required_tools)
+            missing_prompt_tools = list(prompt_requirements.missing_tools)
+            missing_required_tools_for_retry = self._missing_required_tools_for_retry(
+                required_tools=required_prompt_tools,
+                missing_tools=missing_prompt_tools,
+                tool_invocations=invocations_for_requirements,
+            )
+            missing_prompt_fetch_concept_ids = list(
+                prompt_requirements.missing_fetch_concept_ids
+            )
+            missing_prompt_read_file_copy_ids = list(
+                prompt_requirements.missing_read_file_copy_ids
+            )
+            missing_prompt_scholarly_representation_file_copy_ids = list(
+                prompt_requirements.missing_scholarly_representation_file_copy_ids
+            )
+            self._store_prompt_requirement_evaluation(data, prompt_requirements)
+            return {
+                "method_catalogue_for_requirements": method_catalogue_for_requirements,
+                "selected_gmail_profile_for_retry": selected_gmail_profile_for_retry,
+                "prompt_for_requirements": prompt_for_requirements,
+                "invocations_for_requirements": invocations_for_requirements,
+                "prompt_requirements": prompt_requirements,
+                "required_prompt_tools": required_prompt_tools,
+                "missing_required_tools_for_retry": missing_required_tools_for_retry,
+                "missing_prompt_fetch_concept_ids": missing_prompt_fetch_concept_ids,
+                "missing_prompt_read_file_copy_ids": missing_prompt_read_file_copy_ids,
+                "missing_prompt_scholarly_representation_file_copy_ids": (
+                    missing_prompt_scholarly_representation_file_copy_ids
+                ),
+                "required_prompt_create_type_name": (
+                    prompt_requirements.required_create_type_name
+                ),
+                "has_unmet_prompt_requirements": bool(
+                    missing_required_tools_for_retry
+                    or missing_prompt_fetch_concept_ids
+                    or missing_prompt_read_file_copy_ids
+                    or missing_prompt_scholarly_representation_file_copy_ids
+                    or prompt_requirements.required_create_type_name
+                ),
+            }
+
+        def _parent_forced_backfill_result(
+            requirement_state: Mapping[str, Any],
+            *,
+            reason_code: str,
+        ) -> WorkflowActionResult | None:
+            if not bool(requirement_state.get("has_unmet_prompt_requirements")):
+                return None
+            prompt_requirements = requirement_state.get("prompt_requirements")
+            if not isinstance(prompt_requirements, _PromptRequirementEvaluation):
+                return None
+            invocations_for_requirements = cast(
+                Sequence[Mapping[str, Any]],
+                requirement_state.get("invocations_for_requirements") or [],
+            )
+            parent_forced_tool_calls = self._infer_missing_tool_call_retry_tool_calls(
+                follow_up_context,
+                user_prompt=(
+                    requirement_state.get("prompt_for_requirements")
+                    if isinstance(
+                        requirement_state.get("prompt_for_requirements"), str
+                    )
+                    else (
+                        data.get("prompt") if isinstance(data.get("prompt"), str) else ""
+                    )
+                ),
+                turn_expected_outcome_contract=(
+                    self._build_turn_expected_outcome_contract_object(data)
+                ),
+                workflow_required_effects_contract=(
+                    data.get("workflow_required_effects_contract")
+                    if isinstance(data.get("workflow_required_effects_contract"), Mapping)
+                    else None
+                ),
+                workflow_required_effects_contract_source=(
+                    str(data.get("workflow_required_effects_contract_source")).strip()
+                    if isinstance(
+                        data.get("workflow_required_effects_contract_source"), str
+                    )
+                    and str(data.get("workflow_required_effects_contract_source")).strip()
+                    else None
+                ),
+                missing_required_tools=cast(
+                    Sequence[str],
+                    requirement_state.get("missing_required_tools_for_retry") or [],
+                ),
+                missing_required_fetch_concept_ids=cast(
+                    Sequence[str],
+                    requirement_state.get("missing_prompt_fetch_concept_ids") or [],
+                ),
+                missing_required_read_file_copy_ids=cast(
+                    Sequence[str],
+                    requirement_state.get("missing_prompt_read_file_copy_ids") or [],
+                ),
+                missing_required_scholarly_representation_file_copy_ids=cast(
+                    Sequence[str],
+                    requirement_state.get(
+                        "missing_prompt_scholarly_representation_file_copy_ids"
+                    )
+                    or [],
+                ),
+                required_create_type_name=cast(
+                    str | None,
+                    requirement_state.get("required_prompt_create_type_name"),
+                ),
+                required_url_extraction_url=(
+                    prompt_requirements.required_url_extraction_url
+                ),
+                tool_invocations=invocations_for_requirements,
+                tool_argument_defaults=(
+                    data.get("tool_argument_defaults")
+                    if isinstance(data.get("tool_argument_defaults"), Mapping)
+                    else None
+                ),
+                invoked_tool_names=(
+                    self._extract_successful_tool_names(invocations_for_requirements)
+                ),
+                user_concept_id=(
+                    str(data.get("user_concept_id")).strip()
+                    if isinstance(data.get("user_concept_id"), str)
+                    and str(data.get("user_concept_id")).strip()
+                    else None
+                ),
+                workflow_discovery_result=(
+                    data.get("workflow_discovery_result")
+                    if isinstance(data.get("workflow_discovery_result"), Mapping)
+                    else None
+                ),
+                workflow_execute_inputs=self._build_turn_launchability_probe_inputs(
+                    prompt_text=str(
+                        data.get("user_prompt") or data.get("prompt") or ""
+                    ).strip(),
+                    augmented_context=follow_up_context,
+                    workflow_discovery_result=(
+                        data.get("workflow_discovery_result")
+                        if isinstance(data.get("workflow_discovery_result"), Mapping)
+                        else None
+                    ),
+                    continuation_context=(
+                        data.get("continuation_context")
+                        if isinstance(data.get("continuation_context"), Mapping)
+                        else None
+                    ),
+                    user_namespace=getattr(env, "user_namespace", None),
+                    user_concept_id=(
+                        str(data.get("user_concept_id")).strip()
+                        if isinstance(data.get("user_concept_id"), str)
+                        and str(data.get("user_concept_id")).strip()
+                        else None
+                    ),
+                    org_concept_id=(
+                        str(data.get("org_concept_id")).strip()
+                        if isinstance(data.get("org_concept_id"), str)
+                        and str(data.get("org_concept_id")).strip()
+                        else None
+                    ),
+                    gmail_profile=(
+                        str(data.get("gmail_profile")).strip()
+                        if isinstance(data.get("gmail_profile"), str)
+                        and str(data.get("gmail_profile")).strip()
+                        else None
+                    ),
+                    base_data=data if isinstance(data, Mapping) else None,
+                ),
+                method_catalogue=(
+                    requirement_state.get("method_catalogue_for_requirements")
+                    if isinstance(
+                        requirement_state.get("method_catalogue_for_requirements"),
+                        Mapping,
+                    )
+                    else None
+                ),
+                selected_gmail_profile=(
+                    str(requirement_state.get("selected_gmail_profile_for_retry")).strip()
+                    if isinstance(
+                        requirement_state.get("selected_gmail_profile_for_retry"), str
+                    )
+                    and str(
+                        requirement_state.get("selected_gmail_profile_for_retry")
+                    ).strip()
+                    else None
+                ),
+                user_namespace=getattr(env, "user_namespace", None),
+                conversation_session_id=(
+                    str(data.get("conversation_session_id")).strip()
+                    if isinstance(data.get("conversation_session_id"), str)
+                    and str(data.get("conversation_session_id")).strip()
+                    else None
+                ),
+                turn_id=(
+                    str(data.get("turn_id")).strip()
+                    if isinstance(data.get("turn_id"), str)
+                    and str(data.get("turn_id")).strip()
+                    else None
+                ),
+            )
+            if not parent_forced_tool_calls:
+                return None
+
+            import json
+
+            public_parent_forced_tool_calls = (
+                self._strip_retry_tool_call_internal_metadata(
+                    parent_forced_tool_calls
+                )
+            )
+            retry_binding_sources = self._summarise_retry_tool_call_binding_sources(
+                parent_forced_tool_calls
+            )
+            current_response = (
+                json.dumps(public_parent_forced_tool_calls[0])
+                if len(public_parent_forced_tool_calls) == 1
+                else json.dumps(public_parent_forced_tool_calls)
+            )
+            if isinstance(aux_llm_calls, list):
+                try:
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "missing_tool_call_retry",
+                                "path": "legacy",
+                                "mechanism": "structured_parent_fallback",
+                                "stage": "backfill",
+                                "retry_reason": (
+                                    data.get("missing_tool_call_retry_reason") or ""
+                                ),
+                                "response_preview": current_response[:800],
+                                "retry_binding_sources": retry_binding_sources,
+                            },
+                            stage="missing_tool_recovery",
+                            component="internal_mcp_orchestrator",
+                            function="_action_tool_calling_backfill",
+                            decision_class="missing_tool_call_retry",
+                            decision_source="structured_retry_parent_fallback",
+                            changed_outcome=True,
+                            reason_code=reason_code,
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
+                except Exception:
+                    pass
+            return WorkflowActionResult(
+                outputs={
+                    "more_tool_calls": True,
+                    "tool_calls_present": True,
+                    "tool_calls_validated": False,
+                    "tool_calls": public_parent_forced_tool_calls,
+                    "current_response": current_response,
+                    "remaining_tool_calls": [],
+                    "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                    "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                    "missing_tool_call_retry_remaining": max(
+                        0,
+                        missing_tool_call_retry_budget
+                        - missing_tool_call_retry_attempts,
+                    ),
+                    "missing_tool_call_retry_suppressed": False,
+                    "missing_tool_call_retry_stop_reason": None,
+                    "missing_tool_call_recovery_outcome": (
+                        "retry_succeeded_parent_fallback"
+                    ),
+                    "result": True,
+                }
+            )
+
+        pre_summariser_requirement_state = _backfill_prompt_requirement_state()
+        pre_summariser_forced_result = _parent_forced_backfill_result(
+            pre_summariser_requirement_state,
+            reason_code="structured_tool_call_replayed_before_summariser",
+        )
+        if pre_summariser_forced_result is not None:
+            return pre_summariser_forced_result
+
         follow_up_stage_messages = [
             *self._build_synthesiser_context_prep_stage_messages(data),
             *self._build_turn_expected_outcome_stage_messages(
@@ -10472,6 +10903,7 @@ class InternalMCPChatOrchestrator:
             ),
         )
         data["tool_follow_up_context_lineage"] = dict(follow_up_context_telemetry)
+
         summariser_model = model_for_stage("summariser")
         if blocked_follow_up_tool_calls:
             if callable(emit_progress_cb):
@@ -14221,6 +14653,121 @@ class InternalMCPChatOrchestrator:
         return normalised or None
 
     @classmethod
+    def _successful_tool_invocation_text_samples(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        max_samples: int = 20,
+        max_chars_per_sample: int = 12000,
+    ) -> list[str]:
+        """Return bounded text evidence from successful tool results."""
+
+        if not tool_invocations or max_samples <= 0:
+            return []
+
+        samples: list[str] = []
+        for invocation in tool_invocations:
+            if len(samples) >= max_samples:
+                break
+            if not isinstance(invocation, Mapping):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+            for field_name in (
+                "result_summary",
+                "resultSummary",
+                "effective_payload",
+                "effectivePayload",
+                "payload",
+                "result",
+                "response",
+                "effective_arguments",
+                "effectiveArguments",
+                "arguments",
+            ):
+                if len(samples) >= max_samples:
+                    break
+                value = invocation.get(field_name)
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    sample = value
+                elif isinstance(value, (Mapping, Sequence)) and not isinstance(
+                    value, (bytes, bytearray)
+                ):
+                    sample = stable_json_dumps(value, max_chars=max_chars_per_sample)
+                else:
+                    sample = str(value)
+                sample = sample.strip()
+                if sample:
+                    samples.append(sample[:max_chars_per_sample])
+        return samples
+
+    @classmethod
+    def _turn_contract_has_structured_target_handle_evidence(
+        cls,
+        *,
+        contract_object: TurnExpectedOutcomeContract,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> bool:
+        """Detect concrete handles for workflow targets using existing parsers.
+
+        This is a support-surface fast path only: the represented turn contract
+        decides that a conditional workflow is required; Python merely detects
+        whether completed retrieval outputs now contain a concrete handle that a
+        named workflow target can accept.
+        """
+
+        workflow_ids = {
+            str(workflow_id).strip().lower()
+            for workflow_id in (contract_object.workflow_concept_ids or ())
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        }
+        if not workflow_ids:
+            return False
+
+        samples = cls._successful_tool_invocation_text_samples(tool_invocations)
+        if not samples:
+            return False
+
+        if any("arxiv" in workflow_id for workflow_id in workflow_ids):
+            return any(cls._extract_arxiv_id_from_text(sample) for sample in samples)
+        return False
+
+    @classmethod
+    def _activated_conditional_required_tools(
+        cls,
+        *,
+        contract_object: TurnExpectedOutcomeContract,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> tuple[str, ...]:
+        """Return conditional tools whose represented target is now grounded."""
+
+        if not contract_object.conditional_required_tools:
+            return ()
+
+        target_already_symbolic = bool(
+            contract_object.target_concept_ids
+            or contract_object.target_type_ids
+            or any(
+                target_contract.is_symbolically_resolved()
+                for target_contract in (contract_object.target_contracts or ())
+            )
+        )
+        target_handle_found = (
+            target_already_symbolic
+            or cls._turn_contract_has_structured_target_handle_evidence(
+                contract_object=contract_object,
+                tool_invocations=tool_invocations,
+            )
+        )
+        if not target_handle_found:
+            return ()
+        return cls._ordered_unique_tool_names(
+            contract_object.conditional_required_tools
+        )
+
+    @classmethod
     def _derive_prompt_tool_requirements(
         cls,
         user_prompt: Any,
@@ -14583,12 +15130,21 @@ class InternalMCPChatOrchestrator:
         payload: dict[str, Any] = contract_object.to_dict()
         if contract_object.required_tools:
             payload["required_tools"] = list(contract_object.required_tools)
+        if contract_object.conditional_required_tools:
+            payload["conditional_required_tools"] = list(
+                contract_object.conditional_required_tools
+            )
         if contract_object.target_concept_ids:
             payload["target_concept_ids"] = list(contract_object.target_concept_ids)
         if contract_object.target_type_ids:
             payload["target_type_ids"] = list(contract_object.target_type_ids)
         if contract_object.workflow_concept_ids:
             payload["workflow_concept_ids"] = list(contract_object.workflow_concept_ids)
+        if contract_object.target_contracts:
+            payload["target_contracts"] = [
+                contract.to_state_payload()
+                for contract in contract_object.target_contracts
+            ]
         return payload
 
     @classmethod
@@ -14628,6 +15184,7 @@ class InternalMCPChatOrchestrator:
         ),
         method_catalogue: Mapping[str, Any] | None = None,
         allowed_tools: Sequence[str] | None = None,
+        tool_invocations: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[str, ...]:
         contract_object = (
             turn_expected_outcome_contract
@@ -14636,7 +15193,16 @@ class InternalMCPChatOrchestrator:
                 turn_expected_outcome_contract
             )
         )
-        if not contract_object.required_tools:
+        activated_conditional_required_tools = (
+            cls._activated_conditional_required_tools(
+                contract_object=contract_object,
+                tool_invocations=tool_invocations,
+            )
+        )
+        if (
+            not contract_object.required_tools
+            and not activated_conditional_required_tools
+        ):
             return ()
 
         available_tools = {
@@ -14655,6 +15221,15 @@ class InternalMCPChatOrchestrator:
             if allowed_tools is not None
             else None
         )
+        if allowed_tool_names is not None and activated_conditional_required_tools:
+            allowed_tool_names = {
+                *allowed_tool_names,
+                *(
+                    str(tool_name).strip().lower()
+                    for tool_name in activated_conditional_required_tools
+                    if isinstance(tool_name, str) and str(tool_name).strip()
+                ),
+            }
         required_tools: list[str] = []
         seen: set[str] = set()
 
@@ -14685,7 +15260,10 @@ class InternalMCPChatOrchestrator:
                 required_tools.append(candidate_tool_name)
                 return
 
-        for tool_name in contract_object.required_tools:
+        for tool_name in (
+            *contract_object.required_tools,
+            *activated_conditional_required_tools,
+        ):
             _add_tool(str(tool_name).strip())
 
         required_lookup = {
@@ -14907,6 +15485,7 @@ class InternalMCPChatOrchestrator:
             turn_expected_outcome_contract=turn_expected_outcome_contract,
             method_catalogue=method_catalogue,
             allowed_tools=allowed_tools,
+            tool_invocations=tool_invocations,
         )
         contract_object = (
             turn_expected_outcome_contract
@@ -15019,10 +15598,22 @@ class InternalMCPChatOrchestrator:
         existing_allowed_tools = InternalMCPChatOrchestrator._ordered_unique_tool_names(
             data.get("llm_allowed_tools")
         )
+        activated_conditional_required_tools = (
+            InternalMCPChatOrchestrator._ordered_unique_tool_names(
+                data.get("activated_conditional_required_tools")
+            )
+        )
         if evaluation.required_tools and not existing_allowed_tools:
             data["llm_allowed_tools"] = list(evaluation.required_tools)
         elif existing_allowed_tools:
-            data["llm_allowed_tools"] = list(existing_allowed_tools)
+            data["llm_allowed_tools"] = list(
+                InternalMCPChatOrchestrator._ordered_unique_tool_names(
+                    [
+                        *existing_allowed_tools,
+                        *activated_conditional_required_tools,
+                    ]
+                )
+            )
         data["required_prompt_url_extraction_tool"] = (
             evaluation.required_url_extraction_tool
         )
@@ -15180,6 +15771,24 @@ class InternalMCPChatOrchestrator:
         existing_allowed_tools = cls._ordered_unique_tool_names(
             data.get("llm_allowed_tools")
         )
+        contract_object = cls._build_turn_expected_outcome_contract_object(data)
+        activated_conditional_required_tools = (
+            cls._activated_conditional_required_tools(
+                contract_object=contract_object,
+                tool_invocations=tool_invocations,
+            )
+        )
+        if activated_conditional_required_tools:
+            existing_allowed_tools = cls._ordered_unique_tool_names(
+                [
+                    *existing_allowed_tools,
+                    *activated_conditional_required_tools,
+                ]
+            )
+            if isinstance(data, MutableMapping):
+                data["activated_conditional_required_tools"] = list(
+                    activated_conditional_required_tools
+                )
         allowed_lookup = {
             tool_name.lower(): tool_name for tool_name in existing_allowed_tools
         }
@@ -28976,11 +29585,11 @@ class InternalMCPChatOrchestrator:
             if workflow_id:
                 payload: MutableMapping[str, Any] = {"workflow_id": workflow_id}
                 if isinstance(workflow_execute_inputs, Mapping):
-                    payload["inputs"] = {
-                        str(key): value
-                        for key, value in workflow_execute_inputs.items()
-                        if isinstance(key, str) and key.strip()
-                    }
+                    execute_inputs = self._copy_turn_launchability_inputs(
+                        workflow_execute_inputs
+                    )
+                    if execute_inputs:
+                        payload["inputs"] = execute_inputs
                 payload.setdefault("await_terminal", True)
                 payload.setdefault("include_trace", True)
                 forced_calls.append(
@@ -30393,6 +31002,8 @@ class InternalMCPChatOrchestrator:
         caller_workflow_id: str | None = None,
         caller_workflow_step_id: str | None = None,
         caller_workflow_step_metadata: Mapping[str, Any] | None = None,
+        turn_expected_outcome_contract_state: Mapping[str, Any] | None = None,
+        activated_conditional_required_tools: Sequence[Any] | None = None,
         guardrail_surface: str = "write_policy",
         guardrail_stage: str = "write_policy.decide",
     ) -> _ResolvedWritePolicyDecision:
@@ -30422,6 +31033,19 @@ class InternalMCPChatOrchestrator:
                     dict(caller_workflow_step_metadata)
                     if isinstance(caller_workflow_step_metadata, Mapping)
                     else None
+                ),
+                "turn_expected_outcome_contract_state": (
+                    dict(turn_expected_outcome_contract_state)
+                    if isinstance(turn_expected_outcome_contract_state, Mapping)
+                    else None
+                ),
+                "activated_conditional_required_tools": (
+                    list(activated_conditional_required_tools)
+                    if isinstance(activated_conditional_required_tools, Sequence)
+                    and not isinstance(
+                        activated_conditional_required_tools, (str, bytes, bytearray)
+                    )
+                    else []
                 ),
                 "write_policy_guardrail_surface": guardrail_surface,
                 "write_policy_guardrail_stage": guardrail_stage,
@@ -32481,16 +33105,65 @@ class InternalMCPChatOrchestrator:
         return [dict(item) for item in raw_candidates if isinstance(item, Mapping)]
 
     @staticmethod
+    def _copy_turn_launchability_json_like(value: Any) -> tuple[bool, Any]:
+        skipped = object()
+
+        def _copy_json_like(item: Any) -> Any:
+            if callable(item):
+                return skipped
+            if item is None or isinstance(item, (str, int, float, bool)):
+                return item
+            isoformat = getattr(item, "isoformat", None)
+            if callable(isoformat):
+                try:
+                    iso_value = isoformat()
+                except Exception:
+                    return skipped
+                return iso_value if isinstance(iso_value, str) else str(iso_value)
+            if isinstance(item, Mapping):
+                copied_mapping: dict[str, Any] = {}
+                for raw_key, raw_value in item.items():
+                    if not isinstance(raw_key, str) or not raw_key.strip():
+                        continue
+                    copied_value = _copy_json_like(raw_value)
+                    if copied_value is skipped:
+                        continue
+                    copied_mapping[raw_key] = copied_value
+                return copied_mapping
+            if isinstance(item, Sequence) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                copied_sequence: list[Any] = []
+                for raw_value in item:
+                    copied_value = _copy_json_like(raw_value)
+                    if copied_value is skipped:
+                        continue
+                    copied_sequence.append(copied_value)
+                return copied_sequence
+            return skipped
+
+        copied = _copy_json_like(value)
+        if copied is skipped:
+            return False, None
+        return True, copied
+
+    @staticmethod
     def _copy_turn_launchability_inputs(
         value: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping):
             return {}
+
         copied: dict[str, Any] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key.strip() or callable(item):
+            if not isinstance(key, str) or not key.strip():
                 continue
-            copied[key] = item
+            copied_ok, copied_value = (
+                InternalMCPChatOrchestrator._copy_turn_launchability_json_like(item)
+            )
+            if not copied_ok:
+                continue
+            copied[key] = copied_value
         return copied
 
     @classmethod
@@ -32515,25 +33188,39 @@ class InternalMCPChatOrchestrator:
         if isinstance(augmented_context, Sequence) and not isinstance(
             augmented_context, (str, bytes, bytearray)
         ):
-            inputs["augmented_context"] = list(augmented_context)
+            context_ok, context_payload = cls._copy_turn_launchability_json_like(
+                list(augmented_context)
+            )
+            if context_ok and isinstance(context_payload, list):
+                inputs["augmented_context"] = context_payload
         if isinstance(workflow_discovery_result, Mapping) and workflow_discovery_result:
-            inputs["workflow_discovery_result"] = dict(workflow_discovery_result)
+            discovery_payload = cls._copy_turn_launchability_inputs(
+                workflow_discovery_result
+            )
+            if discovery_payload:
+                inputs["workflow_discovery_result"] = discovery_payload
         if isinstance(continuation_context, Mapping) and continuation_context:
-            continuation_payload = dict(continuation_context)
-            inputs["continuation_context"] = continuation_payload
+            continuation_payload = cls._copy_turn_launchability_inputs(
+                continuation_context
+            )
+            if continuation_payload:
+                inputs["continuation_context"] = continuation_payload
             try:
                 from ...services.workflow_continuation_service import (
                     project_launch_inputs_from_continuation_context,
                 )
 
                 projected_inputs = project_launch_inputs_from_continuation_context(
-                    continuation_payload
+                    continuation_context
                 )
             except Exception:
                 projected_inputs = {}
             if isinstance(projected_inputs, Mapping) and projected_inputs:
-                inputs["workflow_continuation_launch_inputs"] = dict(projected_inputs)
-                for key, value in projected_inputs.items():
+                projected_payload = cls._copy_turn_launchability_inputs(
+                    projected_inputs
+                )
+                inputs["workflow_continuation_launch_inputs"] = projected_payload
+                for key, value in projected_payload.items():
                     if isinstance(key, str) and key.strip():
                         inputs.setdefault(key, value)
         if isinstance(user_namespace, str) and user_namespace.strip():
@@ -46465,7 +47152,7 @@ class InternalMCPChatOrchestrator:
             "turn_next_action_response_text",
             "llm_step_response",
         ):
-            candidate_response_text = self._coerce_non_empty_text(
+            candidate_response_text = coerce_user_visible_response_text(
                 tc_result.data.get(response_key)
             )
             if (

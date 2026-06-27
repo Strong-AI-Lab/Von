@@ -1537,6 +1537,10 @@ def _normalise_validated_json_payload_for_prompt(
         normalised["reasoning"] = contract.reasoning
     if contract.required_tools:
         normalised["required_tools"] = list(contract.required_tools)
+    if contract.conditional_required_tools:
+        normalised["conditional_required_tools"] = list(
+            contract.conditional_required_tools
+        )
     if contract.target_concept_ids:
         normalised["target_concept_ids"] = list(contract.target_concept_ids)
     if contract.target_type_ids:
@@ -2467,6 +2471,11 @@ def _build_result(
         llm_step_envelope["required_tool_obligation_blockers"] = list(
             required_tool_obligation_ledger.get("blocking_failure_codes") or []
         )
+    if isinstance(validated_outputs.get("validated_json"), Mapping):
+        llm_step_envelope["validated_json"] = dict(validated_outputs["validated_json"])
+        llm_step_envelope["validated_json_parse_mode"] = validated_outputs.get(
+            "validated_json_parse_mode"
+        )
     if max_tool_invocations is not None:
         llm_step_envelope["max_tool_invocations"] = int(max_tool_invocations)
     if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
@@ -3176,6 +3185,11 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         request.data
     )
     method_catalogue = request.environment.gateway.describe_methods()
+    initial_invocations_for_contract = (
+        request.data.get("invocations")
+        if isinstance(request.data.get("invocations"), list)
+        else ()
+    )
 
     from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 
@@ -3191,6 +3205,7 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
                 method_catalogue if isinstance(method_catalogue, Mapping) else None
             ),
             allowed_tools=allowed_tools,
+            tool_invocations=initial_invocations_for_contract,
         )
         if callable(infer_turn_contract_required_tools)
         else turn_expected_outcome_contract.required_tools
@@ -3609,9 +3624,33 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             selected_candidate = candidate
             break
 
+    final_contract_required_tools = (
+        infer_turn_contract_required_tools(
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
+            method_catalogue=(
+                method_catalogue if isinstance(method_catalogue, Mapping) else None
+            ),
+            allowed_tools=allowed_tools,
+            tool_invocations=invocations,
+        )
+        if callable(infer_turn_contract_required_tools)
+        else turn_expected_outcome_contract.required_tools
+    )
+    final_required_tool_sources = {
+        **required_tool_sources,
+        "turn_expected_outcome_contract": (
+            final_contract_required_tools
+            or turn_expected_outcome_contract.required_tools
+        ),
+    }
+    final_required_obligation_tools = _merge_required_prompt_tools(
+        request.data.get("required_prompt_tools"),
+        llm_policy_map.get("required_tools"),
+        final_contract_required_tools or turn_expected_outcome_contract.required_tools,
+    )
     planned_tool_calls = shared_data.get("tool_calls")
     final_required_tool_obligation_ledger = build_required_tool_obligation_ledger(
-        required_tools_by_source=required_tool_sources,
+        required_tools_by_source=final_required_tool_sources,
         invocations=invocations,
         planned_tool_calls=(
             planned_tool_calls if isinstance(planned_tool_calls, list) else None
@@ -3652,7 +3691,7 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         tool_messages=tool_messages,
         llm_calls=llm_calls,
         aux_llm_calls=aux_llm_calls,
-        required_prompt_tools=required_obligation_tools,
+        required_prompt_tools=final_required_obligation_tools,
         required_tool_obligation_ledger=final_required_tool_obligation_ledger,
         max_tool_invocations=max_tool_invocations,
         prompt_variant_selection=prompt_variant_selection,

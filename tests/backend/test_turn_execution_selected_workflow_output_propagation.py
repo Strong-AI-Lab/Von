@@ -179,6 +179,186 @@ def test_prompt_requirement_merge_preserves_workflow_tool_policy() -> None:
     ]
 
 
+def test_conditional_required_tools_stay_inactive_before_target_resolution() -> None:
+    data: dict[str, Any] = {
+        "required_prompt_tools": [
+            "gmail_list_profiles",
+            "gmail_list_messages",
+            "gmail_get_message",
+        ],
+        "llm_allowed_tools": [
+            "gmail_list_profiles",
+            "gmail_list_messages",
+            "gmail_get_message",
+        ],
+        "turn_expected_outcome_contract_state": {
+            "required_tools": [
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            ],
+            "conditional_required_tools": ["workflow_execute"],
+            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the arXiv target found in Gmail",
+                    "resolution_status": "unresolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        },
+    }
+    method_catalogue = {
+        "gmail_list_profiles": {},
+        "gmail_list_messages": {},
+        "gmail_get_message": {},
+        "workflow_execute": {},
+    }
+    invocations = [
+        {"tool": "gmail_get_message", "status": "ok", "result_summary": "No URL"}
+    ]
+
+    evaluation = InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+        evaluation=_PromptRequirementEvaluation(
+            required_tools=(
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            )
+        ),
+        turn_expected_outcome_contract=data["turn_expected_outcome_contract_state"],
+        method_catalogue=method_catalogue,
+        allowed_tools=data["llm_allowed_tools"],
+        tool_invocations=invocations,
+    )
+    merged = InternalMCPChatOrchestrator._merge_prompt_requirements_with_existing_tool_policy(
+        data=data,
+        evaluation=evaluation,
+        method_catalogue=method_catalogue,
+        tool_invocations=invocations,
+    )
+    InternalMCPChatOrchestrator._store_prompt_requirement_evaluation(data, merged)
+
+    assert "workflow_execute" not in merged.required_tools
+    assert "workflow_execute" not in data["llm_allowed_tools"]
+
+
+def test_conditional_required_tools_activate_after_arxiv_target_evidence() -> None:
+    data: dict[str, Any] = {
+        "required_prompt_tools": [
+            "gmail_list_profiles",
+            "gmail_list_messages",
+            "gmail_get_message",
+        ],
+        "llm_allowed_tools": [
+            "gmail_list_profiles",
+            "gmail_list_messages",
+            "gmail_get_message",
+        ],
+        "turn_expected_outcome_contract_state": {
+            "required_tools": [
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            ],
+            "conditional_required_tools": ["workflow_execute"],
+            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the arXiv target found in Gmail",
+                    "resolution_status": "unresolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        },
+    }
+    method_catalogue = {
+        "gmail_list_profiles": {},
+        "gmail_list_messages": {},
+        "gmail_get_message": {},
+        "workflow_execute": {},
+    }
+    invocations = [
+        {
+            "tool": "gmail_get_message",
+            "status": "ok",
+            "effective_payload": {
+                "subject": "https://arxiv.org/abs/2509.14786",
+                "snippet": "https://arxiv.org/abs/2509.14786 may be worth looking at",
+            },
+        }
+    ]
+
+    evaluation = InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+        evaluation=_PromptRequirementEvaluation(
+            required_tools=(
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            )
+        ),
+        turn_expected_outcome_contract=data["turn_expected_outcome_contract_state"],
+        method_catalogue=method_catalogue,
+        allowed_tools=data["llm_allowed_tools"],
+        tool_invocations=invocations,
+    )
+    merged = InternalMCPChatOrchestrator._merge_prompt_requirements_with_existing_tool_policy(
+        data=data,
+        evaluation=evaluation,
+        method_catalogue=method_catalogue,
+        tool_invocations=invocations,
+    )
+    InternalMCPChatOrchestrator._store_prompt_requirement_evaluation(data, merged)
+
+    assert list(merged.required_tools) == [
+        "gmail_list_profiles",
+        "gmail_list_messages",
+        "gmail_get_message",
+        "workflow_execute",
+    ]
+    assert data["activated_conditional_required_tools"] == ["workflow_execute"]
+    assert data["llm_allowed_tools"] == [
+        "gmail_list_profiles",
+        "gmail_list_messages",
+        "gmail_get_message",
+        "workflow_execute",
+    ]
+
+
+def test_conditional_required_tools_read_projected_result_summary_evidence() -> None:
+    contract = {
+        "required_tools": ["gmail_list_profiles", "gmail_list_messages"],
+        "conditional_required_tools": ["workflow_execute"],
+        "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+    }
+
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract=contract,
+        method_catalogue={
+            "gmail_list_profiles": {},
+            "gmail_list_messages": {},
+            "workflow_execute": {},
+        },
+        allowed_tools=[
+            "gmail_list_profiles",
+            "gmail_list_messages",
+        ],
+        tool_invocations=[
+            {
+                "tool": "gmail_get_message",
+                "success": True,
+                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
+            }
+        ],
+    )
+
+    assert "workflow_execute" in required_tools
+
+
 def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools() -> (
     None
 ):

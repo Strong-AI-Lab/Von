@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 
 from orchestrator_test_harness import build_db_independent_orchestrator
@@ -277,6 +278,10 @@ def test_runtime_profile_blocks_high_fan_out_process_sensitive_additive_write(
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.load_minimal_imposition_runtime_profile",
+        lambda **_: _runtime_profile(),
+    )
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"workflow_bind_event","payload":{"event_type":"task.created","workflow_id":"#V#rumination_workflow"}}',
@@ -392,6 +397,89 @@ def test_runtime_profile_requires_explicit_request_for_external_write(monkeypatc
     assert blocked.get("write_policy_intervention_kind") == "require_explicit_request"
 
 
+def test_write_policy_resolution_passes_turn_contract_to_workflow(monkeypatch):
+    gateway = _RuntimeProfileGateway()
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, gateway),
+        max_tool_invocations=1,
+    )
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any) -> Any:
+        captured["workflow_id"] = workflow_id
+        captured["data"] = dict(kwargs.get("data") or {})
+        return SimpleNamespace(
+            data={
+                "allowed_write_tools": ["workflow_execute"],
+                "write_policy_reason": "explicit_external_write_request",
+                "write_policy_decision_basis": "explicit_external_write_request",
+                "write_policy_outcome": "allowed",
+                "write_policy_user_denial_detected": False,
+                "write_policy_tool_outcomes": {"workflow_execute": "allowed"},
+                "write_policy_risk_classes": {
+                    "workflow_execute": "external_non_vontology"
+                },
+                "write_policy_blocked_reasons": {},
+                "write_policy_authority_block_sources": {},
+                "write_policy_scenario_ids": {
+                    "workflow_execute": "external_system_write"
+                },
+                "write_policy_risk_features": {},
+                "write_policy_unresolved_risk_factors": {},
+                "write_policy_intervention_kinds": {
+                    "workflow_execute": "auto_allow"
+                },
+                "write_policy_confidence_states": {
+                    "workflow_execute": "explicit_request"
+                },
+                "write_policy_request_evidence": {},
+                "write_policy_request_evidence_diagnostics": {},
+                "write_policy_profile_diagnostics": {},
+                "write_policy_requires_confirmation": [],
+                "mutation_guardrail_events": [],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    decision = orchestrator._resolve_allowed_write_tools(
+        prompt=(
+            "Look in last 10 email addresses for the most recent talking about "
+            "an arxiv file and represent the paper."
+        ),
+        requested_write_tools=["workflow_execute"],
+        requested_write_payloads={
+            "workflow_execute": {
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+            }
+        },
+        recent_user_prompts=[],
+        llm_client=_CapturingLLM([]),
+        model=None,
+        user_namespace="#V#user",
+        auxiliary_system_prompt=None,
+        trace=None,
+        turn_expected_outcome_contract_state={
+            "required_tools": ["gmail_get_message"],
+            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+        },
+        activated_conditional_required_tools=["workflow_execute"],
+        guardrail_surface="execution",
+        guardrail_stage="tool_execute",
+    )
+
+    assert decision.allowed_tools == frozenset({"workflow_execute"})
+    assert captured["workflow_id"] == "#V#write_tool_policy_workflow"
+    assert captured["data"]["turn_expected_outcome_contract_state"] == {
+        "required_tools": ["gmail_get_message"],
+        "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+    }
+    assert captured["data"]["activated_conditional_required_tools"] == [
+        "workflow_execute"
+    ]
+
+
 def test_runtime_profile_loader_failure_falls_back_to_baseline_policy(monkeypatch):
     monkeypatch.setattr(
         settings_service, "get_disable_write_tool_conservatism", lambda: False
@@ -405,6 +493,10 @@ def test_runtime_profile_loader_failure_falls_back_to_baseline_policy(monkeypatc
         monkeypatch,
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.load_minimal_imposition_runtime_profile",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("profile store unavailable")),
     )
     llm = _CapturingLLM(
         [

@@ -55,6 +55,8 @@ def test_ensure_prompt_support_seeds_missing_prompt(monkeypatch):
     )
     assert "external-system side effects" in seeded[0]["text"]
     assert "gmail_send_message" in seeded[0]["text"]
+    assert "workflow_execute" in seeded[0]["text"]
+    assert "represent, materialise" in seeded[0]["text"]
 
 
 def test_infer_write_tool_request_evidence_parses_structured_response(monkeypatch):
@@ -197,6 +199,141 @@ def test_ensure_prompt_support_reseeds_legacy_prompt_contract(monkeypatch):
     assert seeded[0]["subject_concept_id"] == (
         service.WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID
     )
+
+
+def test_prompt_refresh_detects_missing_workflow_execute_guidance(monkeypatch):
+    from src.backend.services import (
+        write_tool_request_evidence_vontology_service as service,
+    )
+
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda **_: [
+            {
+                "predicate": "hasContent",
+                "text": (
+                    "denial_state\nexternal-system side effects\n"
+                    "gmail_send_message"
+                ),
+            }
+        ],
+    )
+
+    assert service._write_tool_request_evidence_prompt_seed_needs_refresh() is True
+
+
+def test_turn_contract_evidence_allows_exact_workflow_execute_target():
+    from src.backend.services import (
+        write_tool_request_evidence_vontology_service as service,
+    )
+
+    evidence, diagnostics = (
+        service.augment_write_tool_request_evidence_with_turn_contract(
+            request_evidence={
+                "workflow_execute": {
+                    "request_state": "low_confidence",
+                    "confirmation_state": "low_confidence",
+                    "denial_state": "low_confidence",
+                    "rationale": "LLM was unsure.",
+                }
+            },
+            requested_tools=["workflow_execute"],
+            requested_tool_payloads={
+                "workflow_execute": {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                }
+            },
+            turn_expected_outcome_contract={
+                "required_tools": ["gmail_get_message"],
+                "workflow_concept_ids": [
+                    "#V#arxiv_paper_representation_workflow"
+                ],
+            },
+            activated_conditional_required_tools=["workflow_execute"],
+        )
+    )
+
+    assert diagnostics["status"] == "contract_evidence_applied"
+    assert diagnostics["applied_tools"] == ["workflow_execute"]
+    assert evidence["workflow_execute"]["request_state"] == "explicit_request"
+    assert evidence["workflow_execute"]["confirmation_state"] == "low_confidence"
+    assert evidence["workflow_execute"]["denial_state"] == "low_confidence"
+    assert (
+        "#V#arxiv_paper_representation_workflow"
+        in evidence["workflow_execute"]["rationale"]
+    )
+
+
+def test_turn_contract_evidence_requires_exact_workflow_execute_target():
+    from src.backend.services import (
+        write_tool_request_evidence_vontology_service as service,
+    )
+
+    evidence, diagnostics = (
+        service.augment_write_tool_request_evidence_with_turn_contract(
+            request_evidence={
+                "workflow_execute": {
+                    "request_state": "low_confidence",
+                    "confirmation_state": "low_confidence",
+                    "denial_state": "low_confidence",
+                    "rationale": "LLM was unsure.",
+                }
+            },
+            requested_tools=["workflow_execute"],
+            requested_tool_payloads={
+                "workflow_execute": {
+                    "workflow_id": "#V#unrelated_workflow",
+                }
+            },
+            turn_expected_outcome_contract={
+                "required_tools": ["workflow_execute"],
+                "workflow_concept_ids": [
+                    "#V#arxiv_paper_representation_workflow"
+                ],
+            },
+            activated_conditional_required_tools=[],
+        )
+    )
+
+    assert diagnostics["status"] == "no_contract_evidence_applied"
+    assert evidence["workflow_execute"]["request_state"] == "low_confidence"
+
+
+def test_turn_contract_evidence_does_not_override_explicit_denial():
+    from src.backend.services import (
+        write_tool_request_evidence_vontology_service as service,
+    )
+
+    evidence, diagnostics = (
+        service.augment_write_tool_request_evidence_with_turn_contract(
+            request_evidence={
+                "workflow_execute": {
+                    "request_state": "low_confidence",
+                    "confirmation_state": "low_confidence",
+                    "denial_state": "explicit_denial",
+                    "rationale": "The user explicitly denied the write.",
+                }
+            },
+            requested_tools=["workflow_execute"],
+            requested_tool_payloads={
+                "workflow_execute": {
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                }
+            },
+            turn_expected_outcome_contract={
+                "required_tools": ["workflow_execute"],
+                "workflow_concept_ids": [
+                    "#V#arxiv_paper_representation_workflow"
+                ],
+            },
+            activated_conditional_required_tools=[],
+        )
+    )
+
+    assert diagnostics["status"] == "no_contract_evidence_applied"
+    assert evidence["workflow_execute"]["request_state"] == "low_confidence"
+    assert evidence["workflow_execute"]["denial_state"] == "explicit_denial"
 
 
 def test_infer_write_tool_request_evidence_fails_closed_on_parse_error(monkeypatch):

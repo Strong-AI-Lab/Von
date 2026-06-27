@@ -11,6 +11,7 @@ from src.backend.services.turn_execution_record_service import (
     _derive_completion_gate,
     _derive_execution_signal_completion_blocker,
     build_turn_execution_correctness_summary,
+    build_turn_execution_record,
 )
 from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
@@ -131,6 +132,45 @@ def _patch_representation_profile_loader(monkeypatch) -> None:
             },
         ),
     )
+
+
+def _conversation_diagnostics_required_effects_contract() -> dict[str, Any]:
+    return {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "conversation_diagnostics",
+        "required_effects": [
+            {
+                "effect_id": "conversation_locator",
+                "effect_type": "diagnostic_evidence",
+                "required_tools": ["conversation_telemetry_get_locator"],
+                "activation_required_tools": [
+                    "conversation_telemetry_get_locator",
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "activation_required_tools_match": "any",
+                "missing_failure_code": "conversation_locator_missing",
+                "failed_failure_code": "conversation_locator_failed",
+            },
+            {
+                "effect_id": "conversation_history",
+                "effect_type": "diagnostic_evidence",
+                "required_tools": [
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "required_tools_match": "any",
+                "activation_required_tools": [
+                    "conversation_telemetry_get_locator",
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "activation_required_tools_match": "any",
+                "missing_failure_code": "conversation_history_missing",
+                "failed_failure_code": "conversation_history_failed",
+            },
+        ],
+    }
 
 
 def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
@@ -937,6 +977,12 @@ def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None
                 "workflow_id": "#V#tool_calling_workflow",
                 "verdict": "tool_seeking",
             },
+            "selected_workflow_trace": {
+                "workflow_required_effects_contract_source": "test_fixture",
+                "workflow_required_effects_contract": (
+                    _conversation_diagnostics_required_effects_contract()
+                ),
+            },
         },
     )
 
@@ -978,6 +1024,88 @@ def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None
         precondition.get("status") == "not_satisfied"
         for precondition in unresolved_preconditions
     )
+
+
+def test_turn_record_completion_gate_blocks_activated_conditional_required_tool(
+    monkeypatch,
+) -> None:
+    _patch_representation_profile_loader(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_model_snapshot",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_path",
+        lambda **_: {},
+    )
+
+    record = build_turn_execution_record(
+        request_id="req-turn-conditional-tool",
+        session_id="session-conditional-tool",
+        namespace="#V#test_namespace",
+        user_id="user-1",
+        org_id="org-1",
+        prompt_text=(
+            "Look in last 10 email addresses for the most recent talking about an "
+            "arxiv file and represent the paper."
+        ),
+        response_text="Message: https://arxiv.org/abs/2509.14786",
+        interaction_timestamp_utc="2026-06-26T20:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "tool_seeking",
+        },
+        tool_invocations=[
+            {
+                "tool": "gmail_get_message",
+                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
+                "effectivePayload": {
+                    "success": True,
+                    "body": "Most recent explicit arXiv link: 2509.14786",
+                },
+            }
+        ],
+        selected_workflow_trace={
+            "outputs": {
+                "validated_json": {
+                    "schema_version": "turn_expected_outcome_contract.v1",
+                    "required_tools": ["gmail_get_message"],
+                    "conditional_required_tools": ["workflow_execute"],
+                    "workflow_concept_ids": [
+                        "#V#arxiv_paper_representation_workflow"
+                    ],
+                    "target_contracts": [
+                        {
+                            "binding": "entity",
+                            "target_description": "the arXiv paper found in email",
+                            "target_type_description": "arXiv paper",
+                        }
+                    ],
+                }
+            }
+        },
+        method_catalogue={
+            "gmail_get_message": {},
+            "workflow_execute": {},
+        },
+    )
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    execution_summary = execution.get("summary")
+    assert isinstance(execution_summary, dict)
+    assert execution_summary.get("activated_conditional_required_tools") == [
+        "workflow_execute"
+    ]
+    ledger = execution_summary.get("required_tool_obligations")
+    assert isinstance(ledger, dict)
+    assert "workflow_execute" in ledger.get("unsatisfied_required_tools")
+    assert "required_tool_not_planned" in ledger.get("blocking_failure_codes")
 
 
 def test_turn_execution_correctness_flags_completed_planned_tool_run_without_success_as_false_success() -> (

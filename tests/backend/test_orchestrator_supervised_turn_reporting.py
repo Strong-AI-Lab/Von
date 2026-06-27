@@ -81,21 +81,40 @@ def _stub_represented_dispatch_policy(monkeypatch) -> None:
     )
 
 
-def test_generic_selected_workflow_modes_do_not_load_vontology_definitions(
+def test_generic_selected_workflow_modes_use_builtin_defaults_without_metadata(
     monkeypatch,
 ) -> None:
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=_DummyGateway(),
     )
+    resolved_workflow_ids: list[str] = []
 
-    def fail_definition_load(_workflow_id):
-        raise AssertionError("generic workflow mode should not load Vontology metadata")
+    def _resolve_empty_metadata_workflow(workflow_id: str | None):
+        assert workflow_id in {
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        }
+        resolved_workflow_ids.append(str(workflow_id))
+        return None, WorkflowDefinition(
+            workflow_id=str(workflow_id),
+            initial_state="complete",
+            states={
+                "complete": WorkflowStateSpec(
+                    state_id="complete",
+                    actions=(),
+                    terminal=True,
+                )
+            },
+            purpose="Built-in default test workflow.",
+            metadata={},
+        )
 
     monkeypatch.setattr(
         orchestrator,
         "_resolve_workflow_registration_and_definition",
-        fail_definition_load,
+        _resolve_empty_metadata_workflow,
     )
 
     assert (
@@ -116,6 +135,11 @@ def test_generic_selected_workflow_modes_do_not_load_vontology_definitions(
         )
         == "direct_response"
     )
+    assert set(resolved_workflow_ids) == {
+        TOOL_CALLING_WORKFLOW_ID,
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+    }
 
 
 def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_required(
@@ -199,6 +223,45 @@ def test_supervised_turn_prefers_gate_reported_response_when_completed_workflow_
     assert result.completion_gate_verdict is not None
     assert result.completion_gate_verdict.get("decision") == "escalation_required"
     assert result.completion_gate_verdict.get("requires_follow_up") is True
+
+
+def test_supervised_turn_does_not_promote_count_only_step_response(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "final_response": "",
+                "llm_step_response": "1 profiles",
+                "completion_gate_decision": "failed",
+                "completion_gate_requires_follow_up": True,
+                "completion_gate_safe_to_claim_completion": False,
+                "completion_gate_evidence_payload": {
+                    "terminal_outcome": "follow_up_required"
+                },
+            },
+        ),
+    )
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Look in my recent email and represent the arXiv paper.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="test-model",
+    )
+
+    assert result.response_text != "1 profiles"
+    assert result.response_text == (
+        "I couldn't complete that request because the authoritative "
+        "conversation-turn workflow did not produce a user-visible response."
+    )
 
 
 def test_sanitise_user_visible_action_output_strips_internal_status_suffix() -> None:

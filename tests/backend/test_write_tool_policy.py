@@ -299,6 +299,37 @@ def test_explicit_request_allows_gmail_send_external_write():
     assert decision.reason == REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST
 
 
+def test_explicit_request_evidence_allows_workflow_execute_external_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt=(
+            "Look in last 10 email addresses for the most recent talking about "
+            "an arxiv file and represent the paper."
+        ),
+        requested_tools=["workflow_execute"],
+        requested_tool_payloads={
+            "workflow_execute": {
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+            }
+        },
+        request_evidence=_request_evidence(
+            "workflow_execute",
+            request_state="explicit_request",
+            rationale=(
+                "represented expected-outcome contract requires this workflow"
+            ),
+        ),
+        recent_user_prompts=[],
+    )
+
+    assert "workflow_execute" in decision.allowed_tools
+    assert decision.reason == REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST
+
+
 def test_global_mutation_authority_caps_external_write():
     from src.backend.workflows.write_tool_policy import (
         MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,

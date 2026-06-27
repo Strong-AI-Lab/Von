@@ -47,6 +47,10 @@ def test_expected_outcome_prompt_targets_arxiv_representation_workflow() -> None
     assert "grounded prior-turn arxiv references" in lowered
     assert "#V#arxiv_paper_representation_workflow" in prompt_text
     assert "do not invent workflow ids" in lowered
+    assert "conditional_required_tools" in prompt_text
+    assert "gmail-to-arxiv conditional representation example" in lowered
+    assert "do not return only gmail list tools" in lowered
+    assert '"conditional_required_tools":["workflow_execute"]' in prompt_text
     assert '"workflow_concept_ids":["#V#arxiv_paper_representation_workflow"]' in (
         prompt_text
     )

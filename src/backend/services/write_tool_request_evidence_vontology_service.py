@@ -104,6 +104,7 @@ def _write_tool_request_evidence_prompt_seed_needs_refresh() -> bool:
             "denial_state" not in text
             or "external-system side effects" not in text
             or "gmail_send_message" not in text
+            or "workflow_execute" not in text
         ):
             return True
     return False
@@ -291,6 +292,124 @@ def _default_evidence_for_tool(tool_name: str) -> dict[str, Any]:
     }
 
 
+def _normalise_string_sequence(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = safe_str(item)
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        output.append(text)
+    return output
+
+
+def augment_write_tool_request_evidence_with_turn_contract(
+    *,
+    request_evidence: Mapping[str, Mapping[str, Any] | None] | None,
+    requested_tools: Sequence[str] | None,
+    requested_tool_payloads: Mapping[str, Mapping[str, Any] | None] | None = None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
+    activated_conditional_required_tools: Sequence[str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Add exact-symbol request evidence from the represented turn contract.
+
+    This is a fast structural path only. It does not interpret natural language:
+    the workflow/prompt-authored expected-outcome contract must already name the
+    requested tool, and the workflow_execute payload must name a workflow concept
+    already present in that contract.
+    """
+
+    requested = _clean_tool_names(requested_tools)
+    evidence = {
+        str(tool_name): dict(tool_evidence)
+        for tool_name, tool_evidence in (request_evidence or {}).items()
+        if isinstance(tool_name, str) and isinstance(tool_evidence, Mapping)
+    }
+    diagnostics: dict[str, Any] = {
+        "schema_version": WRITE_TOOL_REQUEST_EVIDENCE_SCHEMA_VERSION,
+        "status": "no_contract_evidence_applied",
+        "applied_tools": [],
+    }
+    if not requested or not isinstance(turn_expected_outcome_contract, Mapping):
+        return evidence, diagnostics
+
+    required_tools = {
+        item.lower()
+        for item in _normalise_string_sequence(
+            turn_expected_outcome_contract.get("required_tools")
+        )
+    }
+    activated_tools = {
+        item.lower()
+        for item in _normalise_string_sequence(activated_conditional_required_tools)
+    }
+    contract_workflow_ids = {
+        item.lower()
+        for item in _normalise_string_sequence(
+            turn_expected_outcome_contract.get("workflow_concept_ids")
+        )
+    }
+    if "workflow_execute" not in required_tools and "workflow_execute" not in activated_tools:
+        return evidence, diagnostics
+    if not contract_workflow_ids:
+        return evidence, diagnostics
+
+    payload_map = (
+        dict(requested_tool_payloads)
+        if isinstance(requested_tool_payloads, Mapping)
+        else {}
+    )
+    applied_tools: list[str] = []
+    for tool_name in requested:
+        if tool_name.lower() != "workflow_execute":
+            continue
+        payload = payload_map.get(tool_name) or payload_map.get(tool_name.lower())
+        if not isinstance(payload, Mapping):
+            continue
+        workflow_id = safe_str(payload.get("workflow_id") or payload.get("workflowId"))
+        if not workflow_id or workflow_id.lower() not in contract_workflow_ids:
+            continue
+        existing = evidence.get(tool_name.lower()) or evidence.get(tool_name) or {}
+        if (
+            isinstance(existing, Mapping)
+            and safe_str(existing.get("denial_state")) == CONFIDENCE_EXPLICIT_DENIAL
+        ):
+            continue
+        evidence[tool_name.lower()] = {
+            "schema_version": WRITE_TOOL_REQUEST_EVIDENCE_SCHEMA_VERSION,
+            "tool_name": tool_name,
+            "request_state": CONFIDENCE_EXPLICIT_REQUEST,
+            "confirmation_state": (
+                safe_str(existing.get("confirmation_state"))
+                if isinstance(existing, Mapping)
+                else CONFIDENCE_LOW
+            )
+            or CONFIDENCE_LOW,
+            "denial_state": (
+                safe_str(existing.get("denial_state"))
+                if isinstance(existing, Mapping)
+                else CONFIDENCE_LOW
+            )
+            or CONFIDENCE_LOW,
+            "rationale": (
+                "Represented turn expected-outcome contract requires "
+                f"workflow_execute for workflow {workflow_id}."
+            ),
+        }
+        applied_tools.append(tool_name)
+
+    if applied_tools:
+        diagnostics["status"] = "contract_evidence_applied"
+        diagnostics["applied_tools"] = applied_tools
+    return evidence, diagnostics
+
+
 def _normalise_request_state(value: Any) -> str:
     cleaned = str(value or "").strip()
     if cleaned in {CONFIDENCE_EXPLICIT_REQUEST, CONFIDENCE_RECENT_REQUEST}:
@@ -454,6 +573,7 @@ __all__ = [
     "WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID",
     "WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_LINK_PREDICATE",
     "_load_write_tool_request_evidence_prompt_seed_text",
+    "augment_write_tool_request_evidence_with_turn_contract",
     "ensure_write_tool_request_evidence_prompt_support",
     "infer_write_tool_request_evidence",
     "render_write_tool_request_evidence_prompt",

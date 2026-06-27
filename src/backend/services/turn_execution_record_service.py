@@ -3544,6 +3544,109 @@ def _resolve_turn_expected_outcome_contract_snapshot(
     return TurnExpectedOutcomeContract.merge_preferred(*resolved_sources)
 
 
+def _successful_tool_invocation_text_samples_for_turn_contract(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_samples: int = 20,
+    max_chars_per_sample: int = 12_000,
+) -> list[str]:
+    if not tool_invocations or max_samples <= 0:
+        return []
+
+    samples: list[str] = []
+    for invocation in tool_invocations:
+        if len(samples) >= max_samples:
+            break
+        if not isinstance(invocation, Mapping):
+            continue
+        if _classify_tool_invocation_status(invocation=invocation) != "ok":
+            continue
+        for field_name in (
+            "result_summary",
+            "resultSummary",
+            "effective_payload",
+            "effectivePayload",
+            "payload",
+            "result",
+            "response",
+            "effective_arguments",
+            "effectiveArguments",
+            "arguments",
+        ):
+            if len(samples) >= max_samples:
+                break
+            value = invocation.get(field_name)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                sample = value
+            elif isinstance(value, (Mapping, Sequence)) and not isinstance(
+                value, (bytes, bytearray)
+            ):
+                try:
+                    sample = json.dumps(value, sort_keys=True, default=str)
+                except Exception:
+                    sample = str(value)
+            else:
+                sample = str(value)
+            sample = sample.strip()
+            if sample:
+                samples.append(sample[:max_chars_per_sample])
+    return samples
+
+
+def _turn_contract_target_handle_evidence_observed(
+    *,
+    contract: TurnExpectedOutcomeContract,
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> bool:
+    if (
+        contract.target_concept_ids
+        or contract.target_type_ids
+        or any(
+            target_contract.is_symbolically_resolved()
+            for target_contract in (contract.target_contracts or ())
+        )
+    ):
+        return True
+
+    workflow_ids = {
+        workflow_id.lower()
+        for workflow_id in _dedupe_string_sequence(contract.workflow_concept_ids)
+    }
+    if not workflow_ids:
+        return False
+
+    samples = _successful_tool_invocation_text_samples_for_turn_contract(
+        tool_invocations
+    )
+    if not samples:
+        return False
+
+    # Fast-path only: the represented contract decides which conditional tools
+    # are required; Python just recognises a concrete handle for known target
+    # forms that existing Von parsers already understand.
+    if any("arxiv" in workflow_id for workflow_id in workflow_ids):
+        return any(extract_arxiv_id_candidates(sample) for sample in samples)
+    return False
+
+
+def _activated_turn_expected_conditional_required_tools(
+    *,
+    contract: TurnExpectedOutcomeContract,
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    conditional_tools = _dedupe_string_sequence(contract.conditional_required_tools)
+    if not conditional_tools:
+        return []
+    if not _turn_contract_target_handle_evidence_observed(
+        contract=contract,
+        tool_invocations=tool_invocations,
+    ):
+        return []
+    return conditional_tools
+
+
 def _normalise_discovery_stage_timings(
     raw_stage_timings: Any,
     *,
@@ -8510,6 +8613,12 @@ def build_turn_execution_record(
             completion_report,
         )
     )
+    activated_conditional_required_tools = (
+        _activated_turn_expected_conditional_required_tools(
+            contract=resolved_turn_expected_outcome_contract,
+            tool_invocations=tool_invocations,
+        )
+    )
     turn_expected_outcome_contract_payload = (
         resolved_turn_expected_outcome_contract.to_dict()
     )
@@ -8574,6 +8683,7 @@ def build_turn_execution_record(
         [
             *(required_prompt_tools or ()),
             *resolved_turn_expected_outcome_contract.required_tools,
+            *activated_conditional_required_tools,
             *_extract_string_sequence_from_mapping(
                 selected_workflow_trace_payload,
                 "required_prompt_tools",
@@ -8588,6 +8698,9 @@ def build_turn_execution_record(
         "required_prompt_tools": list(required_prompt_tools or ()),
         "turn_expected_outcome_contract": list(
             resolved_turn_expected_outcome_contract.required_tools
+        ),
+        "turn_expected_outcome_conditional_required_tools": list(
+            activated_conditional_required_tools
         ),
         "selected_workflow_trace_required_prompt_tools": (
             _extract_string_sequence_from_mapping(
@@ -8716,6 +8829,11 @@ def build_turn_execution_record(
         execution_summary["execution_surface_observations"] = [
             dict(observation) for observation in execution_surface_observations
         ]
+    if activated_conditional_required_tools:
+        execution_summary = dict(execution_summary)
+        execution_summary["activated_conditional_required_tools"] = list(
+            activated_conditional_required_tools
+        )
     required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
         invocations=serialised_invocations,

@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
+    InternalMCPChatOrchestrator,
     _WorkflowModelPolicyState,
 )
 from src.backend.services import prompt_template_service as pts
 from src.backend.workflows import llm_step_executor as lse
 from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
+    WorkflowActionResult,
     WorkflowEnvironment,
 )
 from src.backend.workflows.conversation_turn_llm_timeout import (
@@ -426,6 +429,7 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
         '"answering_guidance":"Group the retrieved predicates.",'
         '"reasoning":"This is a schema discovery request.",'
         '"required_tools":["search_concepts","get_predicate_extent"],'
+        '"conditional_required_tools":["workflow_execute"],'
         '"target_workflow_id":"#V#predicate_schema_lookup_workflow"}'
         "\n```"
     )
@@ -440,9 +444,115 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
         "search_concepts",
         "get_predicate_incidence",
     ]
+    assert result.outputs["validated_json"]["conditional_required_tools"] == [
+        "workflow_execute"
+    ]
     assert result.outputs["validated_json"]["workflow_concept_ids"] == [
         "#V#predicate_schema_lookup_workflow"
     ]
+
+
+def test_execute_llm_step_final_ledger_activates_conditional_required_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Gateway:
+        enabled = True
+
+        def describe_methods(self) -> dict[str, Any]:
+            return {
+                "gmail_list_profiles": {},
+                "gmail_list_messages": {},
+                "gmail_get_message": {},
+                "workflow_execute": {},
+            }
+
+    def _fake_plan(
+        _self: InternalMCPChatOrchestrator,
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        request.data["invocations"].extend(
+            [
+                {
+                    "tool": "gmail_list_profiles",
+                    "status": "ok",
+                    "success": True,
+                    "result_summary": "1 profiles",
+                },
+                {
+                    "tool": "gmail_list_messages",
+                    "status": "ok",
+                    "success": True,
+                    "result_summary": "Found 10 messages",
+                },
+                {
+                    "tool": "gmail_get_message",
+                    "status": "ok",
+                    "success": True,
+                    "result_summary": "Message: https://arxiv.org/abs/2509.14786",
+                },
+            ]
+        )
+        return WorkflowActionResult(
+            outputs={
+                "tool_calls_present": False,
+                "current_response": "Ready to represent arXiv:2509.14786.",
+                "final_response": "Ready to represent arXiv:2509.14786.",
+            }
+        )
+
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_action_tool_calling_plan",
+        _fake_plan,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_Gateway(),
+            model="test-model",
+        ),
+        data={
+            "policy_state": _WorkflowModelPolicyState(
+                enabled=False,
+                policy=None,
+                policy_id=None,
+                predicate_id=None,
+                errors=(),
+            ),
+            "registry_snapshot": {"models": []},
+            "turn_expected_outcome_contract_state": {
+                "required_tools": [
+                    "gmail_list_profiles",
+                    "gmail_list_messages",
+                    "gmail_get_message",
+                ],
+                "conditional_required_tools": ["workflow_execute"],
+                "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            },
+            "invocations": [],
+        },
+        prompt_contract={"prompt_text": "Use tools."},
+        llm_policy={
+            "tool_mode": "allowed",
+            "allowed_tools": [
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+                "workflow_execute",
+            ],
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert "workflow_execute" in result.outputs["required_prompt_tools"]
+    ledger = result.outputs["required_tool_obligation_ledger"]
+    assert "workflow_execute" in ledger["unsatisfied_required_tools"]
+    assert "workflow_execute" in result.outputs["missing_prompt_tools"]
 
 
 def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> None:
