@@ -1584,6 +1584,185 @@ def test_main_writes_single_attempt_failure_summary(
         "success": True,
         "task_id": "task-stalled",
     }
+    assert written["action_outcome"]["outcome"] == "timeout_before_action"
+    assert written["action_outcome"]["timeout_detected"] is True
+
+
+def test_action_outcome_classifies_timeout_after_tool_start() -> None:
+    summary = {
+        "status": "error",
+        "prompt": {"id": "represented_self_facts_vs_inferences"},
+        "conversation": {"background_task_id": "task-tool"},
+        "response": {
+            "text": "",
+            "failure": {
+                "type": "BackgroundGenerateTaskError",
+                "message": "Background generate task did not complete before timeout",
+                "background_task": {
+                    "task_id": "task-tool",
+                    "status_payload": {
+                        "status": "running",
+                        "progress": {
+                            "phase": "tool_execute",
+                            "stage": "tool_execute",
+                            "status": "tool_call_start",
+                            "tool": "fetch_concept",
+                        },
+                    },
+                },
+            },
+        },
+        "telemetry": {},
+        "evaluation": {"reasons": ["Background generate task timed out."]},
+    }
+
+    outcome = sampler.classify_replay_action_outcome(summary)
+
+    assert outcome["outcome"] == "timeout_after_action"
+    assert outcome["observed_tools"] == ["fetch_concept"]
+    assert outcome["action_started"] is True
+
+
+def test_failed_replay_summary_preserves_planned_comparison_arms() -> None:
+    summary = sampler._build_failed_replay_attempt_summary(
+        exc=sampler.BackgroundGenerateTaskError(
+            "Background generate task did not complete before timeout",
+            task_id="task-local",
+            status_payload={
+                "status": "running",
+                "progress": {"phase": "context_adjudication_decision"},
+            },
+        ),
+        attempt_index=1,
+        prompt_entry={"id": "case", "prompt": "Prompt"},
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        requested_model="qwen3:8b",
+        requested_model_arms=[
+            {
+                "arm_id": "arm_1",
+                "label": "qwen3:8b",
+                "requested_model": "qwen3:8b",
+                "requested_provider": "ollama",
+            },
+            {
+                "arm_id": "arm_2",
+                "label": "gpt-5.4-nano",
+                "requested_model": "gpt-5.4-nano",
+                "requested_provider": "openai",
+            },
+        ],
+    )
+
+    assert summary["comparison"]["aborted_before_comparison_complete"] is True
+    assert summary["comparison"]["planned_arm_labels"] == [
+        "qwen3:8b",
+        "gpt-5.4-nano",
+    ]
+    assert summary["selection"]["requested_model_arms"][1]["requested_model"] == (
+        "gpt-5.4-nano"
+    )
+
+
+def test_action_outcome_classifies_invalid_tool_arguments_from_debug_data() -> None:
+    summary = {
+        "status": "ok",
+        "prompt": {
+            "id": "one_recent_arxiv_paper",
+            "requires_tool_use": True,
+            "likely_tools": ["search_arxiv"],
+        },
+        "conversation": {"request_id": "request-arxiv"},
+        "response": {"text": "No papers were returned."},
+        "telemetry": {"observed_tools": ["search_arxiv"]},
+        "evaluation": {"reasons": []},
+    }
+    llm_debug_data = {
+        "tool_invocations": [
+            {
+                "tool": "search_arxiv",
+                "status": "ok",
+                "effective_payload": {
+                    "text": (
+                        "Input validation error: 'lastUpdatedDate' is not one of "
+                        "['relevance', 'date']"
+                    )
+                },
+            }
+        ]
+    }
+
+    outcome = sampler.classify_replay_action_outcome(
+        summary,
+        llm_debug_data=llm_debug_data,
+    )
+
+    assert outcome["outcome"] == "tool_args_invalid"
+    assert outcome["observed_tools"] == ["search_arxiv"]
+    assert any("invalid_tool_argument_signal" in item for item in outcome["evidence"])
+
+
+def test_action_outcome_classifies_empty_tool_observation() -> None:
+    summary = {
+        "status": "ok",
+        "prompt": {
+            "id": "one_recent_arxiv_paper",
+            "requires_tool_use": True,
+            "likely_tools": ["search_arxiv"],
+        },
+        "conversation": {"request_id": "request-arxiv"},
+        "response": {
+            "text": (
+                "The tool returned an empty `papers: []` result, so there is "
+                "nothing I can ground a recommendation on."
+            )
+        },
+        "telemetry": {"observed_tools": ["search_arxiv"]},
+        "evaluation": {"reasons": []},
+    }
+
+    outcome = sampler.classify_replay_action_outcome(summary)
+
+    assert outcome["outcome"] == "tool_executed_empty_observation"
+    assert outcome["observed_tools"] == ["search_arxiv"]
+
+
+def test_build_summary_includes_action_outcome() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "tell_me_about_jvnautosci_150_in_jira",
+            "category": "single_tool_jira_summary",
+            "complexity_class": "vontology_plus_single_tool",
+            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+            "knowledge_surfaces": ["jira"],
+            "likely_tools": ["jira_get_issue"],
+            "requires_tool_use": True,
+        },
+        task_id="task-jira",
+        session_id="session-jira",
+        request_id="request-jira",
+        history_location={"history_index": 2, "session_id": "session-jira"},
+        generate_payload={"response": "JVNAUTOSCI-150 is a Jira task."},
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                        "selected_execution_mode": "custom_workflow",
+                    }
+                },
+                "tool_history": [{"tool": "jira_get_issue", "status": "ok"}],
+            }
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_plus_single_tool"],
+        seed=17,
+        requested_model="gpt-5.4-nano",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+    )
+
+    assert summary["action_outcome"]["outcome"] == "answer_grounded"
+    assert summary["action_outcome"]["observed_tools"] == ["jira_get_issue"]
 
 
 def test_run_local_ollama_model_probe_stops_at_first_threshold_model(

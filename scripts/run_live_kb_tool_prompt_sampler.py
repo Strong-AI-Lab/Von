@@ -103,6 +103,7 @@ LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE_SCHEMA_VERSION = (
     "local_ollama_replay_model_catalogue.v1"
 )
 LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION = "local_ollama_replay_probe.v1"
+REPLAY_ACTION_OUTCOME_SCHEMA_VERSION = "replay_action_outcome.v1"
 DEFAULT_LOCAL_MODEL_PROBE_CACHE_PATH = Path(
     "artifacts/local_ollama_replay_model_probe_cache.json"
 )
@@ -242,6 +243,54 @@ GROUNDED_EMPTY_RESULT_MARKERS = (
     "could not find any matching tasks",
     "didn't find any matching tasks",
     "did not find any matching tasks",
+)
+ACTION_OUTCOME_INVALID_TOOL_ARGUMENT_MARKERS = (
+    "input validation error",
+    "invalid argument",
+    "invalid tool argument",
+    "schema validation",
+    "validation error",
+    "not one of",
+    "enum",
+)
+ACTION_OUTCOME_TOOL_UNAVAILABLE_MARKERS = (
+    "not authenticated",
+    "authentication failed",
+    "auth failed",
+    "authorisation failed",
+    "authorization failed",
+    "access denied",
+    "permission denied",
+    "not permitted",
+    "tool unavailable",
+    "tool is unavailable",
+    "oauth",
+)
+ACTION_OUTCOME_EMPTY_OBSERVATION_MARKERS = (
+    "no results",
+    "no result",
+    "no matching",
+    "no candidate",
+    "no candidates",
+    "empty result",
+    "returned an empty",
+    "papers: []",
+    "items: []",
+    "messages: []",
+    "issues: []",
+    "nothing i can ground",
+    "nothing to ground",
+)
+ACTION_OUTCOME_SKIP_SCAN_KEYS = frozenset(
+    {
+        "content",
+        "messages",
+        "prompt",
+        "raw_prompt",
+        "raw_response",
+        "tool_contracts",
+        "tool_names",
+    }
 )
 INVENTORY_ONLY_TOOLS = frozenset({"list_papers"})
 RELATIONSHIP_CLAIM_MARKERS = (
@@ -2572,6 +2621,383 @@ def _collect_tool_names(
     return tool_names
 
 
+def _append_unique_text(target: list[str], value: Any) -> None:
+    cleaned = _safe_text(value)
+    if cleaned and cleaned not in target:
+        target.append(cleaned)
+
+
+def _safe_lower_contains_any(text: str, markers: Sequence[str]) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in markers)
+
+
+def _iter_signal_strings(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 8:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, Mapping):
+        strings: list[str] = []
+        for key, item in value.items():
+            if _safe_text(key).lower() in ACTION_OUTCOME_SKIP_SCAN_KEYS:
+                continue
+            strings.extend(_iter_signal_strings(item, depth=depth + 1))
+        return strings
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        strings = []
+        for item in value:
+            strings.extend(_iter_signal_strings(item, depth=depth + 1))
+        return strings
+    return []
+
+
+def _first_signal_match(
+    sections: Sequence[Any],
+    markers: Sequence[str],
+) -> str | None:
+    for section in sections:
+        for text in _iter_signal_strings(section):
+            if _safe_lower_contains_any(text, markers):
+                return text[:500]
+    return None
+
+
+def _extract_failure_background_task(summary: Mapping[str, Any]) -> dict[str, Any]:
+    response = _as_mapping(summary.get("response"))
+    failure = _as_mapping(response.get("failure"))
+    return _as_mapping(failure.get("background_task"))
+
+
+def _collect_action_status_payloads(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    background_task = _extract_failure_background_task(summary)
+    for key in ("status_payload", "timeout_reconciliation"):
+        payload = _as_mapping(background_task.get(key))
+        if payload:
+            payloads.append(payload)
+    cancellation_payload = _as_mapping(background_task.get("cancellation_payload"))
+    for key in ("post_cancellation_status_payload", "final_status_payload"):
+        payload = _as_mapping(cancellation_payload.get(key))
+        if payload:
+            payloads.append(payload)
+    response = _as_mapping(summary.get("response"))
+    for key in (
+        "background_task_status",
+        "background_task_timeout_reconciliation",
+    ):
+        payload = _as_mapping(response.get(key))
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _collect_progress_entries_from_payload(payload: Mapping[str, Any]) -> list[Any]:
+    entries: list[Any] = []
+    progress = _as_mapping(payload.get("progress"))
+    if progress:
+        entries.append(progress)
+    entries.extend(_as_list(payload.get("progress_history")))
+    timeout_status = _as_mapping(payload.get("timeout_status_payload"))
+    if timeout_status:
+        entries.extend(_collect_progress_entries_from_payload(timeout_status))
+    final_status = _as_mapping(payload.get("final_status_payload"))
+    if final_status:
+        entries.extend(_collect_progress_entries_from_payload(final_status))
+    return entries
+
+
+def _collect_action_tool_observations(
+    *,
+    summary: Mapping[str, Any],
+    llm_debug_data: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+
+    def append_observation(source: str, entry: Mapping[str, Any]) -> None:
+        tool_name = _safe_text(entry.get("tool") or entry.get("method"))
+        if not tool_name:
+            return
+        compact = {
+            "source": source,
+            "tool": tool_name,
+            "status": _safe_text(
+                entry.get("status")
+                or entry.get("action_status")
+                or entry.get("outcome")
+                or entry.get("success")
+            )
+            or None,
+            "result_summary": _safe_text(entry.get("result_summary")) or None,
+            "phase": _safe_text(entry.get("phase")) or None,
+            "stage": _safe_text(entry.get("stage")) or None,
+        }
+        if compact not in observations:
+            observations.append(compact)
+
+    telemetry = _as_mapping(summary.get("telemetry"))
+    for tool_name in _as_list(telemetry.get("observed_tools")):
+        cleaned = _safe_text(tool_name)
+        if cleaned:
+            append_observation("telemetry.observed_tools", {"tool": cleaned})
+    for entry in _as_list(telemetry.get("tool_history")):
+        if isinstance(entry, Mapping):
+            append_observation("telemetry.tool_history", entry)
+    existing_outcome = _as_mapping(summary.get("action_outcome"))
+    for entry in _as_list(existing_outcome.get("tool_observations")):
+        if isinstance(entry, Mapping):
+            append_observation("action_outcome.tool_observations", entry)
+
+    debug = _as_mapping(llm_debug_data)
+    diagnostics = _as_mapping(debug.get("turn_execution_diagnostics"))
+    for entry in _as_list(diagnostics.get("tool_history")):
+        if isinstance(entry, Mapping):
+            append_observation("turn_execution_diagnostics.tool_history", entry)
+    for entry in _as_list(debug.get("tool_invocations")):
+        if isinstance(entry, Mapping):
+            append_observation("llm_debug_data.tool_invocations", entry)
+
+    for payload in _collect_action_status_payloads(summary):
+        for entry in _collect_progress_entries_from_payload(payload):
+            if isinstance(entry, Mapping):
+                append_observation("background_task_progress", entry)
+
+    return observations
+
+
+def _collect_action_phases(
+    *,
+    summary: Mapping[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    phases: list[str] = []
+    stages: list[str] = []
+    statuses: list[str] = []
+    telemetry = _as_mapping(summary.get("telemetry"))
+    for key, target in (
+        ("phase", phases),
+        ("stage", stages),
+        ("status", statuses),
+    ):
+        _append_unique_text(target, telemetry.get(key))
+    for payload in _collect_action_status_payloads(summary):
+        _append_unique_text(statuses, payload.get("status"))
+        for entry in _collect_progress_entries_from_payload(payload):
+            if not isinstance(entry, Mapping):
+                continue
+            _append_unique_text(phases, entry.get("phase"))
+            _append_unique_text(stages, entry.get("stage"))
+            _append_unique_text(statuses, entry.get("status"))
+    return phases, stages, statuses
+
+
+def _summary_response_text(summary: Mapping[str, Any]) -> str:
+    response = _as_mapping(summary.get("response"))
+    return (
+        _safe_text(response.get("text"))
+        or _safe_text(response.get("response"))
+        or _safe_text(response.get("response_text"))
+    )
+
+
+def _summary_requested_tool_use(summary: Mapping[str, Any]) -> bool:
+    prompt = _as_mapping(summary.get("prompt"))
+    if "requires_tool_use" in prompt:
+        return bool(prompt.get("requires_tool_use"))
+    return bool(_as_list(prompt.get("likely_tools")))
+
+
+def _summary_selected_workflow(summary: Mapping[str, Any]) -> str:
+    telemetry = _as_mapping(summary.get("telemetry"))
+    return _safe_text(telemetry.get("selected_workflow_id"))
+
+
+def classify_replay_action_outcome(
+    summary: Mapping[str, Any],
+    *,
+    llm_debug_data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify the generic action/observation state reached by a replay turn."""
+
+    debug = _as_mapping(llm_debug_data)
+    response = _as_mapping(summary.get("response"))
+    failure = _as_mapping(response.get("failure"))
+    telemetry = _as_mapping(summary.get("telemetry"))
+    evaluation = _as_mapping(summary.get("evaluation"))
+    prompt = _as_mapping(summary.get("prompt"))
+    response_scan = {
+        key: value for key, value in response.items() if key != "failure"
+    }
+    phases, stages, statuses = _collect_action_phases(summary=summary)
+    tool_observations = _collect_action_tool_observations(
+        summary=summary,
+        llm_debug_data=debug,
+    )
+    observed_tools: list[str] = []
+    for observation in tool_observations:
+        _append_unique_text(observed_tools, observation.get("tool"))
+
+    text_reason = " ".join(
+        [
+            _safe_text(failure.get("message")),
+            _safe_text(response.get("text")),
+            _safe_text(evaluation.get("response_preview")),
+            " ".join(
+                _safe_text(reason) for reason in _as_list(evaluation.get("reasons"))
+            ),
+        ]
+    ).strip()
+    timeout_reconciliation = _as_mapping(
+        _extract_failure_background_task(summary).get("timeout_reconciliation")
+    )
+    timeout_detected = (
+        "timeout" in text_reason.lower()
+        or "did not complete before timeout" in text_reason.lower()
+        or bool(timeout_reconciliation)
+    )
+    cancelled_detected = any(status.lower() == "cancelled" for status in statuses)
+    action_started = bool(observed_tools) or any(
+        token in {phase.lower(), stage.lower(), status.lower()}
+        for phase in phases or [""]
+        for stage in stages or [""]
+        for status in statuses or [""]
+        for token in {"tool_execute", "tool_call_start", "tool_call"}
+    )
+
+    tool_signal_sections: list[Any] = [
+        response_scan,
+        {
+            "response_preview": evaluation.get("response_preview"),
+            "missing_answer_evidence": evaluation.get("missing_answer_evidence"),
+        },
+        tool_observations,
+    ]
+    if debug:
+        tool_signal_sections.extend(
+            [
+                debug.get("tool_invocations"),
+                _as_mapping(debug.get("turn_execution_diagnostics")).get(
+                    "tool_history"
+                ),
+            ]
+        )
+
+    invalid_tool_match = _first_signal_match(
+        tool_signal_sections,
+        ACTION_OUTCOME_INVALID_TOOL_ARGUMENT_MARKERS,
+    )
+    unavailable_match = _first_signal_match(
+        tool_signal_sections,
+        ACTION_OUTCOME_TOOL_UNAVAILABLE_MARKERS,
+    )
+    empty_observation_match = _first_signal_match(
+        tool_signal_sections,
+        ACTION_OUTCOME_EMPTY_OBSERVATION_MARKERS,
+    )
+
+    reasons = [reason for reason in _as_list(evaluation.get("reasons")) if reason]
+    missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
+    response_text = _summary_response_text(summary)
+    requires_tool_use = _summary_requested_tool_use(summary)
+    selected_workflow_id = _summary_selected_workflow(summary)
+    status = _safe_text(summary.get("status"))
+
+    limitations: list[str] = []
+    if bool(telemetry.get("debug_readback_partial")):
+        limitations.append("debug_readback_partial")
+    if _safe_text(telemetry.get("history_lookup_error")):
+        limitations.append("history_lookup_error")
+    if not debug and status == "ok" and not bool(telemetry):
+        limitations.append("summary_lacks_debug_payload")
+
+    evidence: list[str] = []
+    if selected_workflow_id:
+        evidence.append(f"selected_workflow_id={selected_workflow_id}")
+    if phases:
+        evidence.append(f"phases={','.join(phases[:4])}")
+    if stages:
+        evidence.append(f"stages={','.join(stages[:4])}")
+    if statuses:
+        evidence.append(f"statuses={','.join(statuses[:4])}")
+    if observed_tools:
+        evidence.append(f"observed_tools={','.join(observed_tools)}")
+
+    if invalid_tool_match:
+        outcome = "tool_args_invalid"
+        evidence.append(f"invalid_tool_argument_signal={invalid_tool_match[:160]}")
+    elif unavailable_match:
+        outcome = "tool_unavailable_or_auth_failed"
+        evidence.append(f"tool_unavailable_signal={unavailable_match[:160]}")
+    elif timeout_detected or cancelled_detected or status == "error":
+        outcome = "timeout_after_action" if action_started else "timeout_before_action"
+        evidence.append(
+            "timeout_or_cancellation_observed=true"
+            if timeout_detected or cancelled_detected
+            else "error_without_terminal_action_result=true"
+        )
+    elif requires_tool_use and not selected_workflow_id and not observed_tools:
+        outcome = "no_workflow_selected"
+        evidence.append("requires_tool_use_without_workflow_or_tool=true")
+    elif empty_observation_match and observed_tools:
+        outcome = "tool_executed_empty_observation"
+        evidence.append(f"empty_observation_signal={empty_observation_match[:160]}")
+    elif observed_tools and not response_text:
+        outcome = "tool_executed_with_observation"
+        evidence.append("tool_seen_but_no_response_text=true")
+    elif observed_tools and (missing_answer_evidence or reasons):
+        outcome = "answer_ungrounded_in_observation"
+        if missing_answer_evidence:
+            evidence.append("missing_answer_evidence_present=true")
+        elif reasons:
+            evidence.append(f"evaluation_reason={_safe_text(reasons[0])[:160]}")
+    elif observed_tools and limitations:
+        outcome = "tool_executed_with_observation"
+        evidence.append("tool_seen_but_grounding_readback_limited=true")
+    elif observed_tools:
+        outcome = "answer_grounded"
+        evidence.append("tool_seen_and_no_generic_grounding_failure_detected=true")
+    elif requires_tool_use:
+        outcome = "answer_ungrounded_in_observation"
+        evidence.append("requires_tool_use_without_tool_observation=true")
+    elif response_text:
+        outcome = "answer_grounded"
+        evidence.append("response_text_present_for_non_tool_required_prompt=true")
+    else:
+        outcome = "harness_readback_inconclusive"
+        evidence.append("insufficient_response_or_action_evidence=true")
+
+    return {
+        "schema_version": REPLAY_ACTION_OUTCOME_SCHEMA_VERSION,
+        "outcome": outcome,
+        "request_id": (
+            _safe_text(_as_mapping(summary.get("conversation")).get("request_id"))
+            or _safe_text(
+                _as_mapping(summary.get("conversation")).get("background_task_id")
+            )
+            or None
+        ),
+        "background_task_id": (
+            _safe_text(
+                _as_mapping(summary.get("conversation")).get("background_task_id")
+            )
+            or _safe_text(_extract_failure_background_task(summary).get("task_id"))
+            or None
+        ),
+        "status": status or None,
+        "selected_workflow_id": selected_workflow_id or None,
+        "observed_tools": observed_tools,
+        "tool_observations": tool_observations[:12],
+        "phases": phases,
+        "stages": stages,
+        "statuses": statuses,
+        "timeout_detected": bool(timeout_detected or cancelled_detected),
+        "action_started": action_started,
+        "requires_tool_use": requires_tool_use,
+        "evidence": evidence,
+        "limitations": limitations,
+    }
+
+
 def _required_workflow_tool_groups(
     llm_debug_data: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -3640,6 +4066,10 @@ def _build_summary(
         diagnostics=attribution_diagnostics,
         aux_entries=_as_list(llm_debug_data.get("aux_llm_calls")),
     )
+    summary["action_outcome"] = classify_replay_action_outcome(
+        summary,
+        llm_debug_data=llm_debug_data,
+    )
     return summary
 
 
@@ -3846,6 +4276,7 @@ def _build_multi_arm_summary(
     telemetry_models: list[str] = []
     selected_workflow_ids: list[str] = []
     selected_execution_modes: list[str] = []
+    action_outcomes: list[dict[str, Any]] = []
     for arm_summary in arm_summaries:
         if not isinstance(arm_summary, Mapping):
             continue
@@ -3871,6 +4302,17 @@ def _build_multi_arm_summary(
         )
         if execution_mode and execution_mode not in selected_execution_modes:
             selected_execution_modes.append(execution_mode)
+        action_outcome = _as_mapping(arm_summary.get("action_outcome"))
+        if action_outcome:
+            action_outcomes.append(
+                {
+                    "arm_label": label or None,
+                    "outcome": _safe_text(action_outcome.get("outcome")) or None,
+                    "observed_tools": _as_list(action_outcome.get("observed_tools")),
+                    "timeout_detected": action_outcome.get("timeout_detected"),
+                    "action_started": action_outcome.get("action_started"),
+                }
+            )
     summary = {
         "status": "ok",
         "mode": "multi_arm_comparison",
@@ -3897,6 +4339,7 @@ def _build_multi_arm_summary(
             "telemetry_models": telemetry_models,
             "selected_workflow_ids": selected_workflow_ids,
             "selected_execution_modes": selected_execution_modes,
+            "action_outcomes": action_outcomes,
         },
         "arms": [dict(entry) for entry in arm_summaries if isinstance(entry, Mapping)],
     }
@@ -4005,6 +4448,7 @@ def _build_failed_replay_attempt_summary(
     prompt_entry: Mapping[str, Any],
     run_environment: Mapping[str, Any],
     requested_model: str | None,
+    requested_model_arms: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     failure: dict[str, Any] = {
         "type": type(exc).__name__,
@@ -4012,7 +4456,17 @@ def _build_failed_replay_attempt_summary(
     }
     if isinstance(exc, BackgroundGenerateTaskError):
         failure["background_task"] = exc.to_report()
-    return {
+    planned_arms = [
+        {
+            "arm_id": _safe_text(arm.get("arm_id")) or None,
+            "label": _safe_text(arm.get("label")) or None,
+            "requested_model": _safe_text(arm.get("requested_model")) or None,
+            "requested_provider": _safe_text(arm.get("requested_provider")) or None,
+        }
+        for arm in requested_model_arms
+        if isinstance(arm, Mapping)
+    ]
+    summary = {
         "status": "error",
         "attempt": {"attempt_index": attempt_index},
         "environment": dict(run_environment),
@@ -4021,6 +4475,7 @@ def _build_failed_replay_attempt_summary(
             "requested_provider": _infer_provider_from_model_identifier(
                 requested_model
             ),
+            "requested_model_arms": planned_arms,
         },
         "prompt": _build_prompt_summary(prompt_entry),
         "conversation": {
@@ -4043,6 +4498,19 @@ def _build_failed_replay_attempt_summary(
             "reasons": [str(exc)],
         },
     }
+    if len(planned_arms) > 1:
+        summary["comparison"] = {
+            "planned_arm_count": len(planned_arms),
+            "completed_arm_count": 0,
+            "aborted_before_comparison_complete": True,
+            "planned_arm_labels": [
+                _safe_text(arm.get("label") or arm.get("arm_id"))
+                for arm in planned_arms
+                if _safe_text(arm.get("label") or arm.get("arm_id"))
+            ],
+        }
+    summary["action_outcome"] = classify_replay_action_outcome(summary)
+    return summary
 
 
 def _build_repeated_replay_summary(
@@ -5012,6 +5480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt_entry=prompt_entry,
                 run_environment=run_environment,
                 requested_model=requested_model,
+                requested_model_arms=replay_arms,
             )
             should_user_be_happy = False
     else:
@@ -5053,6 +5522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         prompt_entry=prompt_entry,
                         run_environment=run_environment,
                         requested_model=requested_model,
+                        requested_model_arms=replay_arms,
                     )
                 )
         summary = _build_repeated_replay_summary(
