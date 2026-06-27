@@ -73,6 +73,7 @@ from src.backend.services.turn_context_adjudication_projection_service import (
 )
 from src.backend.services.tool_observation_ledger_service import (
     TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
+    build_tool_observation_ledger,
 )
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
@@ -4043,6 +4044,22 @@ def _build_summary(
         tool_observation_ledger = _as_mapping(
             _as_mapping(turn_record.get("execution")).get("tool_observation_ledger")
         )
+    if not tool_observation_ledger:
+        derived_tool_observation_ledger = build_tool_observation_ledger(
+            tool_invocations=[
+                entry
+                for entry in _as_list(llm_debug_data.get("tool_invocations"))
+                if isinstance(entry, Mapping)
+            ],
+            turn_execution_diagnostics=diagnostics,
+            aux_llm_calls=[
+                entry
+                for entry in _as_list(llm_debug_data.get("aux_llm_calls"))
+                if isinstance(entry, Mapping)
+            ],
+        )
+        if int(derived_tool_observation_ledger.get("observation_count") or 0) > 0:
+            tool_observation_ledger = derived_tool_observation_ledger
     observed_tools = _collect_tool_names(diagnostics, llm_debug_data)
     response_text = (
         _safe_text(generate_payload.get("response"))

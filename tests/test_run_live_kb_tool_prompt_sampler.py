@@ -1822,6 +1822,57 @@ def test_build_summary_projects_tool_observation_ledger() -> None:
     assert summary["action_outcome"]["outcome"] == "tool_executed_empty_observation"
 
 
+def test_build_summary_derives_tool_observation_ledger_from_partial_debug() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "tell_me_about_jvnautosci_150_in_jira",
+            "category": "single_tool_jira_summary",
+            "complexity_class": "vontology_plus_single_tool",
+            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+            "knowledge_surfaces": ["jira"],
+            "likely_tools": ["jira_get_issue"],
+            "requires_tool_use": True,
+        },
+        task_id="task-jira",
+        session_id="session-jira",
+        request_id="request-jira",
+        history_location={
+            "source": "background_task_result.llm_debug",
+            "partial_debug_payload": True,
+            "history_lookup_error": "Could not resolve assistant history location",
+        },
+        generate_payload={"response": "JVNAUTOSCI-150 is a Jira task."},
+        llm_debug_data={
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+            "tool_invocations": [
+                {
+                    "tool": "jira_get_issue",
+                    "status": "ok",
+                    "result_summary": "Issue: JVNAUTOSCI-150",
+                    "effective_payload": {"items": [{"key": "JVNAUTOSCI-150"}]},
+                }
+            ],
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_plus_single_tool"],
+        seed=17,
+        requested_model="gpt-5.4-nano",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+    )
+
+    ledger = summary["telemetry"]["tool_observation_ledger"]
+    assert ledger["schema_version"] == "tool_observation_ledger.v1"
+    assert ledger["observed_tools"] == ["jira_get_issue"]
+    assert ledger["status_counts"] == {"non_empty_result": 1}
+    assert summary["action_outcome"]["tool_observations"][0]["source"] == (
+        "telemetry.tool_observation_ledger"
+    )
+
+
 def test_build_summary_includes_action_outcome() -> None:
     summary = sampler._build_summary(
         prompt_entry={

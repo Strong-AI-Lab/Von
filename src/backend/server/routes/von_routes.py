@@ -12697,6 +12697,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "display_elements": None,
             "background_result_source": "generate_response_ready",
         }
+        background_ready_tool_observation_ledger = build_tool_observation_ledger(
+            tool_invocations=serialised_tool_invocations,
+            aux_llm_calls=auxiliary_llm_calls,
+        )
+        if (
+            int(background_ready_tool_observation_ledger.get("observation_count") or 0)
+            > 0
+        ):
+            background_ready_llm_debug["tool_observation_ledger"] = dict(
+                background_ready_tool_observation_ledger
+            )
         if isinstance(render_plan_debug, dict):
             background_ready_llm_debug["render_plan"] = dict(render_plan_debug)
         background_ready_body = _build_generate_success_body(
