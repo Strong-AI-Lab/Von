@@ -198,12 +198,12 @@ def test_conditional_required_tools_stay_inactive_before_target_resolution() -> 
                 "gmail_get_message",
             ],
             "conditional_required_tools": ["workflow_execute"],
-            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            "workflow_concept_ids": ["#V#represented_artefact_creation_workflow"],
             "target_contracts": [
                 {
                     "kind": "natural_language",
                     "binding_kind": "entity",
-                    "text": "the arXiv target found in Gmail",
+                    "text": "the represented artefact target found in mail",
                     "resolution_status": "unresolved",
                     "matching_policy": "exact",
                 }
@@ -245,7 +245,7 @@ def test_conditional_required_tools_stay_inactive_before_target_resolution() -> 
     assert "workflow_execute" not in data["llm_allowed_tools"]
 
 
-def test_conditional_required_tools_activate_after_arxiv_target_evidence() -> None:
+def test_conditional_required_tools_ignore_domain_text_for_unresolved_target() -> None:
     data: dict[str, Any] = {
         "required_prompt_tools": [
             "gmail_list_profiles",
@@ -269,7 +269,7 @@ def test_conditional_required_tools_activate_after_arxiv_target_evidence() -> No
                 {
                     "kind": "natural_language",
                     "binding_kind": "entity",
-                    "text": "the arXiv target found in Gmail",
+                    "text": "the retrieval target found in mail",
                     "resolution_status": "unresolved",
                     "matching_policy": "exact",
                 }
@@ -318,22 +318,21 @@ def test_conditional_required_tools_activate_after_arxiv_target_evidence() -> No
         "gmail_list_profiles",
         "gmail_list_messages",
         "gmail_get_message",
-        "workflow_execute",
     ]
-    assert data["activated_conditional_required_tools"] == ["workflow_execute"]
+    assert "activated_conditional_required_tools" not in data
     assert data["llm_allowed_tools"] == [
         "gmail_list_profiles",
         "gmail_list_messages",
         "gmail_get_message",
-        "workflow_execute",
     ]
 
 
-def test_conditional_required_tools_read_projected_result_summary_evidence() -> None:
+def test_conditional_required_tools_activate_for_symbolic_projected_target() -> None:
     contract = {
         "required_tools": ["gmail_list_profiles", "gmail_list_messages"],
         "conditional_required_tools": ["workflow_execute"],
-        "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+        "workflow_concept_ids": ["#V#represented_artefact_creation_workflow"],
+        "target_concept_ids": ["#V#grounded_artefact_candidate"],
     }
 
     required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
@@ -351,7 +350,7 @@ def test_conditional_required_tools_read_projected_result_summary_evidence() -> 
             {
                 "tool": "gmail_get_message",
                 "success": True,
-                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
+                "resultSummary": "Message grounded a concrete artefact candidate.",
             }
         ],
     )

@@ -14,7 +14,7 @@ from .text_value_service import get_texts_for_concept, upsert_text_for_concept
 
 _ARXIV_ID_PATTERN = re.compile(
     r"(?i)\b(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/)?"
-    r"((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5})(?:v\d+)?)\b"
+    r"((?:[a-z\-]+/\d{7})(?:v\d+)?|(?:\d{4}\.\d{4,5})(?:v\d+)?)\b"
 )
 
 _MAX_TOPIC_RELATIONS = 3
@@ -25,6 +25,11 @@ def _normalise_arxiv_id(arxiv_id: str) -> str:
     value = str(arxiv_id or "").strip()
     if value.lower().startswith("arxiv:"):
         value = value.split(":", 1)[1].strip()
+    value = re.sub(
+        r"(?i)^((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))v\d+$",
+        r"\1",
+        value,
+    )
     return value
 
 

@@ -14619,121 +14619,6 @@ class InternalMCPChatOrchestrator:
             urls.append(url)
         return urls
 
-    @staticmethod
-    def _extract_arxiv_id_from_text(text: Any) -> str | None:
-        """Extract the first canonical arXiv identifier from arbitrary text."""
-        import re as _re
-
-        try:
-            from src.backend.services.arxiv_paper_link_service import (
-                extract_arxiv_id_candidates,
-            )
-        except Exception:
-            return None
-
-        candidates = extract_arxiv_id_candidates(text)
-        if not candidates and isinstance(text, str):
-            fallback_match = _re.search(
-                r"(?i)\b(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/)?"
-                r"((?:[a-z\-]+/\d{7})|(?:[a-z\-]+/\d{7}v\d+)|(?:\d{4}\.\d{4,5})(?:v\d+)?)\b",
-                text,
-            )
-            if fallback_match:
-                candidates = [str(fallback_match.group(1) or "").strip().lower()]
-        if not candidates:
-            return None
-        first = candidates[0]
-        if not isinstance(first, str) or not first.strip():
-            return None
-        normalised = first.strip()
-        normalised = _re.sub(r"(?i)^arxiv:\s*", "", normalised)
-        normalised = _re.sub(
-            r"(?i)^((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))v\d+$", r"\1", normalised
-        )
-        return normalised or None
-
-    @classmethod
-    def _successful_tool_invocation_text_samples(
-        cls,
-        tool_invocations: Sequence[Mapping[str, Any]] | None,
-        *,
-        max_samples: int = 20,
-        max_chars_per_sample: int = 12000,
-    ) -> list[str]:
-        """Return bounded text evidence from successful tool results."""
-
-        if not tool_invocations or max_samples <= 0:
-            return []
-
-        samples: list[str] = []
-        for invocation in tool_invocations:
-            if len(samples) >= max_samples:
-                break
-            if not isinstance(invocation, Mapping):
-                continue
-            if not cls._tool_invocation_completed_successfully(invocation):
-                continue
-            for field_name in (
-                "result_summary",
-                "resultSummary",
-                "effective_payload",
-                "effectivePayload",
-                "payload",
-                "result",
-                "response",
-                "effective_arguments",
-                "effectiveArguments",
-                "arguments",
-            ):
-                if len(samples) >= max_samples:
-                    break
-                value = invocation.get(field_name)
-                if value is None:
-                    continue
-                if isinstance(value, str):
-                    sample = value
-                elif isinstance(value, (Mapping, Sequence)) and not isinstance(
-                    value, (bytes, bytearray)
-                ):
-                    sample = stable_json_dumps(value, max_chars=max_chars_per_sample)
-                else:
-                    sample = str(value)
-                sample = sample.strip()
-                if sample:
-                    samples.append(sample[:max_chars_per_sample])
-        return samples
-
-    @classmethod
-    def _turn_contract_has_structured_target_handle_evidence(
-        cls,
-        *,
-        contract_object: TurnExpectedOutcomeContract,
-        tool_invocations: Sequence[Mapping[str, Any]] | None,
-    ) -> bool:
-        """Detect concrete handles for workflow targets using existing parsers.
-
-        This is a support-surface fast path only: the represented turn contract
-        decides that a conditional workflow is required; Python merely detects
-        whether completed retrieval outputs now contain a concrete handle that a
-        named workflow target can accept.
-        """
-
-        workflow_ids = {
-            str(workflow_id).strip().lower()
-            for workflow_id in (contract_object.workflow_concept_ids or ())
-            if isinstance(workflow_id, str) and str(workflow_id).strip()
-        }
-        if not workflow_ids:
-            return False
-
-        samples = cls._successful_tool_invocation_text_samples(tool_invocations)
-        if not samples:
-            return False
-
-        if any("arxiv" in workflow_id for workflow_id in workflow_ids):
-            return any(cls._extract_arxiv_id_from_text(sample) for sample in samples)
-        return False
-
     @classmethod
     def _activated_conditional_required_tools(
         cls,
@@ -14746,7 +14631,7 @@ class InternalMCPChatOrchestrator:
         if not contract_object.conditional_required_tools:
             return ()
 
-        target_already_symbolic = bool(
+        target_resolved_symbolically = bool(
             contract_object.target_concept_ids
             or contract_object.target_type_ids
             or any(
@@ -14754,14 +14639,11 @@ class InternalMCPChatOrchestrator:
                 for target_contract in (contract_object.target_contracts or ())
             )
         )
-        target_handle_found = (
-            target_already_symbolic
-            or cls._turn_contract_has_structured_target_handle_evidence(
-                contract_object=contract_object,
-                tool_invocations=tool_invocations,
-            )
-        )
-        if not target_handle_found:
+        # Do not infer domain handles from arbitrary tool-output text here.
+        # Natural-language or hybrid targets must be resolved by represented
+        # workflow/tool metadata before a conditional write/execution tool
+        # becomes mandatory.
+        if not target_resolved_symbolically:
             return ()
         return cls._ordered_unique_tool_names(
             contract_object.conditional_required_tools

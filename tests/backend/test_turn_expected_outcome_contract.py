@@ -185,17 +185,19 @@ def test_turn_expected_outcome_contract_reads_nested_validated_json() -> None:
         {
             "outputs": {
                 "validated_json": {
-                    "summary": "Find an arXiv target, then represent it.",
+                    "summary": "Find a represented artefact target, then represent it.",
                     "required_tools": ["gmail_get_message"],
                     "conditional_required_tools": ["workflow_execute"],
                     "workflow_concept_ids": [
-                        "#V#arxiv_paper_representation_workflow"
+                        "#V#represented_artefact_creation_workflow"
                     ],
                     "target_contracts": [
                         {
                             "binding": "entity",
-                            "target_description": "the arXiv paper found in email",
-                            "target_type_description": "arXiv paper",
+                            "target_description": (
+                                "the represented artefact found in mail"
+                            ),
+                            "target_type_description": "represented artefact",
                         }
                     ],
                 }
@@ -206,7 +208,7 @@ def test_turn_expected_outcome_contract_reads_nested_validated_json() -> None:
     assert contract.required_tools == ("gmail_get_message",)
     assert contract.conditional_required_tools == ("workflow_execute",)
     assert contract.workflow_concept_ids == (
-        "#V#arxiv_paper_representation_workflow",
+        "#V#represented_artefact_creation_workflow",
     )
     assert contract.target_contracts
 

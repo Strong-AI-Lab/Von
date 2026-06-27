@@ -241,13 +241,13 @@ def test_turn_contract_evidence_allows_exact_workflow_execute_target():
             requested_tools=["workflow_execute"],
             requested_tool_payloads={
                 "workflow_execute": {
-                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "workflow_id": "#V#represented_artefact_creation_workflow",
                 }
             },
             turn_expected_outcome_contract={
-                "required_tools": ["gmail_get_message"],
+                "required_tools": ["search_concepts"],
                 "workflow_concept_ids": [
-                    "#V#arxiv_paper_representation_workflow"
+                    "#V#represented_artefact_creation_workflow"
                 ],
             },
             activated_conditional_required_tools=["workflow_execute"],
@@ -260,7 +260,7 @@ def test_turn_contract_evidence_allows_exact_workflow_execute_target():
     assert evidence["workflow_execute"]["confirmation_state"] == "low_confidence"
     assert evidence["workflow_execute"]["denial_state"] == "low_confidence"
     assert (
-        "#V#arxiv_paper_representation_workflow"
+        "#V#represented_artefact_creation_workflow"
         in evidence["workflow_execute"]["rationale"]
     )
 
@@ -289,7 +289,7 @@ def test_turn_contract_evidence_requires_exact_workflow_execute_target():
             turn_expected_outcome_contract={
                 "required_tools": ["workflow_execute"],
                 "workflow_concept_ids": [
-                    "#V#arxiv_paper_representation_workflow"
+                    "#V#represented_artefact_creation_workflow"
                 ],
             },
             activated_conditional_required_tools=[],
@@ -318,13 +318,13 @@ def test_turn_contract_evidence_does_not_override_explicit_denial():
             requested_tools=["workflow_execute"],
             requested_tool_payloads={
                 "workflow_execute": {
-                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "workflow_id": "#V#represented_artefact_creation_workflow",
                 }
             },
             turn_expected_outcome_contract={
                 "required_tools": ["workflow_execute"],
                 "workflow_concept_ids": [
-                    "#V#arxiv_paper_representation_workflow"
+                    "#V#represented_artefact_creation_workflow"
                 ],
             },
             activated_conditional_required_tools=[],

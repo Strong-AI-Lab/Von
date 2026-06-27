@@ -1045,11 +1045,8 @@ def test_turn_record_completion_gate_blocks_activated_conditional_required_tool(
         namespace="#V#test_namespace",
         user_id="user-1",
         org_id="org-1",
-        prompt_text=(
-            "Look in last 10 email addresses for the most recent talking about an "
-            "arxiv file and represent the paper."
-        ),
-        response_text="Message: https://arxiv.org/abs/2509.14786",
+        prompt_text="Represent the grounded artefact found during mail review.",
+        response_text="Message grounded represented artefact candidate.",
         interaction_timestamp_utc="2026-06-26T20:00:00Z",
         workflow_routing={
             "workflow_id": "#V#tool_calling_workflow",
@@ -1058,10 +1055,10 @@ def test_turn_record_completion_gate_blocks_activated_conditional_required_tool(
         tool_invocations=[
             {
                 "tool": "gmail_get_message",
-                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
+                "resultSummary": "Message grounded represented artefact candidate.",
                 "effectivePayload": {
                     "success": True,
-                    "body": "Most recent explicit arXiv link: 2509.14786",
+                    "body": "A concrete artefact target was resolved.",
                 },
             }
         ],
@@ -1072,13 +1069,16 @@ def test_turn_record_completion_gate_blocks_activated_conditional_required_tool(
                     "required_tools": ["gmail_get_message"],
                     "conditional_required_tools": ["workflow_execute"],
                     "workflow_concept_ids": [
-                        "#V#arxiv_paper_representation_workflow"
+                        "#V#represented_artefact_creation_workflow"
                     ],
+                    "target_concept_ids": ["#V#grounded_artefact_candidate"],
                     "target_contracts": [
                         {
-                            "binding": "entity",
-                            "target_description": "the arXiv paper found in email",
-                            "target_type_description": "arXiv paper",
+                            "kind": "symbolic",
+                            "binding_kind": "entity",
+                            "concept_ids": ["#V#grounded_artefact_candidate"],
+                            "resolution_status": "resolved",
+                            "matching_policy": "exact",
                         }
                     ],
                 }

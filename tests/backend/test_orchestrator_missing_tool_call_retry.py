@@ -14,6 +14,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _MissingToolCallDetectorSpec,
 )
 from src.backend.workflows.turn_expected_outcome_contract import (
+    TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
 )
 
@@ -2107,291 +2108,68 @@ def test_tool_calling_plan_parent_retry_uses_catalogue_defaults_for_required_too
     ]
 
 
-def test_tool_calling_plan_activates_conditional_workflow_execute_after_target_evidence():
-    orchestrator = _build_orchestrator_stub()
-
-    orchestrator._build_stage_llm_context = cast(
-        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
-    )
-    orchestrator._run_llm_with_fallbacks = cast(
-        Any,
-        lambda **kwargs: (
-            "I found arXiv:2509.14786 but cannot represent it.",
-            "qwen3:8b",
-            None,
-        ),
-    )
-    orchestrator._run_missing_tool_call_recovery_workflow = cast(
-        Any, lambda **kwargs: {}
-    )
-    workflow_id = "#V#arxiv_paper_representation_workflow"
-    data = {
-        "prompt": (
-            "Look in last 10 email addresses for the most recent talking about "
-            "an arxiv file and represent the paper."
-        ),
-        "augmented_context": [],
-        "policy_state": SimpleNamespace(enabled=False, policy=None),
-        "registry_snapshot": {},
-        "user_concept_id": "#V#michael_witbrock",
-        "org_concept_id": "#V#sail",
-        "model_for_stage": lambda stage: "qwen3:8b",
-        "record_llm_call": lambda **kwargs: None,
-        "aux_llm_calls": [],
-        "llm_calls": [],
-        "emit_progress": None,
-        "emit_phase_transition": None,
-        "missing_tool_call_retry_attempts": 0,
-        "missing_tool_call_retry_budget": 2,
-        "required_prompt_tools": [
-            "gmail_list_profiles",
-            "gmail_list_messages",
-            "gmail_get_message",
-        ],
-        "llm_allowed_tools": [
-            "gmail_list_profiles",
-            "gmail_list_messages",
-            "gmail_get_message",
-        ],
-        "turn_expected_outcome_contract_state": {
-            "required_tools": [
-                "gmail_list_profiles",
-                "gmail_list_messages",
-                "gmail_get_message",
-            ],
-            "conditional_required_tools": ["workflow_execute"],
-            "workflow_concept_ids": [workflow_id],
-            "target_contracts": [
-                {
-                    "kind": "natural_language",
-                    "binding_kind": "entity",
-                    "text": "the arXiv target found in Gmail",
-                    "resolution_status": "unresolved",
-                    "matching_policy": "exact",
-                }
-            ],
-        },
-        "workflow_discovery_result": {
-            "candidates": [
-                {
-                    "concept_id": workflow_id,
-                    "name": "arXiv Paper Representation Workflow",
-                    "candidate_source": "workflow_discovery",
-                    "routing_eligible": True,
-                    "is_executable": True,
-                    "is_policy_safe": True,
-                    "turn_launchable": True,
-                    "routing_profile": {"role": "execution"},
-                },
-                {
-                    "concept_id": "#V#tool_calling_workflow",
-                    "candidate_source": "selector_default",
-                },
-            ]
-        },
-        "invocations": [
-            {"tool": "gmail_list_profiles", "status": "ok"},
-            {"tool": "gmail_list_messages", "status": "ok"},
-            {
-                "tool": "gmail_get_message",
-                "status": "ok",
-                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
-            },
-        ],
-    }
-    request = SimpleNamespace(
-        data=data,
-        environment=SimpleNamespace(
-            llm_client=object(),
-            model="qwen3:8b",
-            max_tool_invocations=4,
-            default_gmail_profile="vonwitbrock-gmail",
-            user_namespace="#V#user@org",
-        ),
-        trace=None,
-        workflow_id="#V#tool_calling_workflow",
-        workflow_state_id="respond",
-        workflow_state_metadata={},
-        action_id="tool_calling.respond",
-    )
-
-    result = orchestrator._action_tool_calling_plan(cast(Any, request))
-
-    assert data["activated_conditional_required_tools"] == ["workflow_execute"]
-    assert data["llm_allowed_tools"] == [
-        "gmail_list_profiles",
-        "gmail_list_messages",
-        "gmail_get_message",
-        "workflow_execute",
-    ]
-    assert data["missing_prompt_tools"] == ["workflow_execute"]
-    assert result.outputs["tool_calls_present"] is True
-    assert result.outputs["missing_tool_call_recovery_outcome"] == (
-        "retry_succeeded_parent_fallback"
-    )
-    tool_calls = result.outputs["tool_calls"]
-    assert isinstance(tool_calls, list)
-    assert len(tool_calls) == 1
-    tool_call = tool_calls[0]
-    assert tool_call["action"] == "call_tool"
-    assert tool_call["tool"] == "workflow_execute"
-    payload = tool_call["payload"]
-    assert payload["workflow_id"] == workflow_id
-    assert payload["await_terminal"] is True
-    assert payload["include_trace"] is True
-    inputs = payload["inputs"]
-    assert inputs["prompt"] == data["prompt"]
-    assert inputs["user_prompt"] == data["prompt"]
-    assert inputs["workflow_discovery_result"] == data["workflow_discovery_result"]
-    assert inputs["user_namespace"] == "#V#user@org"
-    assert inputs["user_concept_id"] == "#V#michael_witbrock"
-    assert inputs["org_concept_id"] == "#V#sail"
-    assert "policy_state" not in inputs
-    assert "model_for_stage" not in inputs
-    assert "record_llm_call" not in inputs
-
-
-def test_tool_calling_backfill_forces_conditional_workflow_execute_before_summariser():
-    orchestrator = _build_orchestrator_stub()
-
-    orchestrator._build_follow_up_llm_context = cast(
-        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
-    )
-    orchestrator._build_stage_llm_context = cast(
-        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
-    )
-
-    def _fail_summariser(**_kwargs):
-        raise AssertionError("summariser should not run before required workflow_execute")
-
-    orchestrator._run_llm_with_fallbacks = cast(Any, _fail_summariser)
-    orchestrator._run_missing_tool_call_recovery_workflow = cast(
-        Any, lambda **kwargs: {}
-    )
-    workflow_id = "#V#arxiv_paper_representation_workflow"
-    observed_at = datetime(2026, 6, 26, 20, 34, 7, tzinfo=timezone.utc)
-    data = {
-        "prompt": (
-            "Look in last 10 email addresses for the most recent talking about "
-            "an arxiv file and represent the paper."
-        ),
-        "augmented_context": [
-            {
-                "source": "gmail_get_message",
-                "observed_at": observed_at,
-                "callback": lambda: None,
-            }
-        ],
-        "policy_state": SimpleNamespace(enabled=False, policy=None),
-        "registry_snapshot": {},
-        "user_concept_id": "#V#michael_witbrock",
-        "org_concept_id": "#V#sail",
-        "model_for_stage": lambda stage: "qwen3:8b",
-        "record_llm_call": lambda **kwargs: None,
-        "aux_llm_calls": [],
-        "llm_calls": [],
-        "emit_progress": None,
-        "iteration_count": 12,
-        "remaining_tool_calls": [],
-        "missing_tool_call_retry_attempts": 0,
-        "missing_tool_call_retry_budget": 2,
-        "required_prompt_tools": [
-            "gmail_list_profiles",
-            "gmail_list_messages",
-            "gmail_get_message",
-        ],
-        "llm_allowed_tools": [
-            "gmail_list_profiles",
-            "gmail_list_messages",
-            "gmail_get_message",
-        ],
-        "turn_expected_outcome_contract_state": {
-            "required_tools": [
-                "gmail_list_profiles",
-                "gmail_list_messages",
-                "gmail_get_message",
-            ],
-            "conditional_required_tools": ["workflow_execute"],
-            "workflow_concept_ids": [workflow_id],
-            "target_contracts": [
-                {
-                    "kind": "natural_language",
-                    "binding_kind": "entity",
-                    "text": "the arXiv target found in Gmail",
-                    "resolution_status": "unresolved",
-                    "matching_policy": "exact",
-                }
-            ],
-        },
-        "workflow_discovery_result": {
-            "candidates": [
-                {
-                    "concept_id": workflow_id,
-                    "name": "arXiv Paper Representation Workflow",
-                    "candidate_source": "workflow_discovery",
-                    "routing_eligible": True,
-                    "is_executable": True,
-                    "is_policy_safe": True,
-                    "turn_launchable": True,
-                    "observed_at": observed_at,
-                    "routing_profile": {"role": "execution"},
-                },
-                {
-                    "concept_id": "#V#tool_calling_workflow",
-                    "candidate_source": "selector_default",
-                },
-            ]
-        },
-        "invocations": [
-            {"tool": "gmail_list_profiles", "status": "ok"},
-            {"tool": "gmail_list_messages", "status": "ok"},
-            {
-                "tool": "gmail_get_message",
-                "status": "ok",
-                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
-            },
-        ],
-    }
-    request = SimpleNamespace(
-        data=data,
-        environment=SimpleNamespace(
-            llm_client=object(),
-            model="qwen3:8b",
-            max_tool_invocations=64,
-            default_gmail_profile="vonwitbrock-gmail",
-            user_namespace="#V#user@org",
-        ),
-        trace=None,
-        workflow_id="#V#tool_calling_workflow",
-        workflow_state_id="backfill",
-        workflow_state_metadata={},
-        action_id="tool_calling.backfill",
-    )
-
-    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
-
-    assert data["activated_conditional_required_tools"] == ["workflow_execute"]
-    assert result.outputs["more_tool_calls"] is True
-    assert result.outputs["missing_tool_call_recovery_outcome"] == (
-        "retry_succeeded_parent_fallback"
-    )
-    tool_calls = result.outputs["tool_calls"]
-    assert isinstance(tool_calls, list)
-    assert len(tool_calls) == 1
-    assert tool_calls[0]["tool"] == "workflow_execute"
-    payload = tool_calls[0]["payload"]
-    json.dumps(payload)
-    assert payload["workflow_id"] == workflow_id
-    inputs = payload["inputs"]
-    assert inputs["augmented_context"] == [
+def test_conditional_tools_do_not_activate_from_domain_text_for_unresolved_target():
+    contract = TurnExpectedOutcomeContract.from_mapping(
         {
-            "source": "gmail_get_message",
-            "observed_at": observed_at.isoformat(),
+            "required_tools": [
+                "gmail_list_profiles",
+                "gmail_list_messages",
+                "gmail_get_message",
+            ],
+            "conditional_required_tools": ["workflow_execute"],
+            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the arXiv target found in Gmail",
+                    "resolution_status": "unresolved",
+                    "matching_policy": "exact",
+                }
+            ],
         }
-    ]
-    assert inputs["workflow_discovery_result"]["candidates"][0]["observed_at"] == (
-        observed_at.isoformat()
     )
+
+    activated = InternalMCPChatOrchestrator._activated_conditional_required_tools(
+        contract_object=contract,
+        tool_invocations=[
+            {"tool": "gmail_list_profiles", "status": "ok"},
+            {"tool": "gmail_list_messages", "status": "ok"},
+            {
+                "tool": "gmail_get_message",
+                "status": "ok",
+                "resultSummary": "Message: https://arxiv.org/abs/2509.14786",
+            },
+        ],
+    )
+
+    assert activated == ()
+
+
+def test_conditional_tools_activate_for_symbolically_resolved_target_contract():
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "required_tools": ["fetch_concept"],
+            "conditional_required_tools": ["workflow_execute"],
+            "workflow_concept_ids": ["#V#represented_artefact_creation_workflow"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#resolved_target"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        }
+    )
+
+    activated = InternalMCPChatOrchestrator._activated_conditional_required_tools(
+        contract_object=contract,
+        tool_invocations=[],
+    )
+
+    assert activated == ("workflow_execute",)
 
 
 def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_required_surfaces_remain():

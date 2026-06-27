@@ -444,14 +444,11 @@ def test_write_policy_resolution_passes_turn_contract_to_workflow(monkeypatch):
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
     decision = orchestrator._resolve_allowed_write_tools(
-        prompt=(
-            "Look in last 10 email addresses for the most recent talking about "
-            "an arxiv file and represent the paper."
-        ),
+        prompt="Create a represented artefact for the resolved target.",
         requested_write_tools=["workflow_execute"],
         requested_write_payloads={
             "workflow_execute": {
-                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "workflow_id": "#V#represented_artefact_creation_workflow",
             }
         },
         recent_user_prompts=[],
@@ -461,8 +458,8 @@ def test_write_policy_resolution_passes_turn_contract_to_workflow(monkeypatch):
         auxiliary_system_prompt=None,
         trace=None,
         turn_expected_outcome_contract_state={
-            "required_tools": ["gmail_get_message"],
-            "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+            "required_tools": ["search_concepts"],
+            "workflow_concept_ids": ["#V#represented_artefact_creation_workflow"],
         },
         activated_conditional_required_tools=["workflow_execute"],
         guardrail_surface="execution",
@@ -472,8 +469,8 @@ def test_write_policy_resolution_passes_turn_contract_to_workflow(monkeypatch):
     assert decision.allowed_tools == frozenset({"workflow_execute"})
     assert captured["workflow_id"] == "#V#write_tool_policy_workflow"
     assert captured["data"]["turn_expected_outcome_contract_state"] == {
-        "required_tools": ["gmail_get_message"],
-        "workflow_concept_ids": ["#V#arxiv_paper_representation_workflow"],
+        "required_tools": ["search_concepts"],
+        "workflow_concept_ids": ["#V#represented_artefact_creation_workflow"],
     }
     assert captured["data"]["activated_conditional_required_tools"] == [
         "workflow_execute"

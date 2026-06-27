@@ -3544,93 +3544,6 @@ def _resolve_turn_expected_outcome_contract_snapshot(
     return TurnExpectedOutcomeContract.merge_preferred(*resolved_sources)
 
 
-def _successful_tool_invocation_text_samples_for_turn_contract(
-    tool_invocations: Sequence[Mapping[str, Any]] | None,
-    *,
-    max_samples: int = 20,
-    max_chars_per_sample: int = 12_000,
-) -> list[str]:
-    if not tool_invocations or max_samples <= 0:
-        return []
-
-    samples: list[str] = []
-    for invocation in tool_invocations:
-        if len(samples) >= max_samples:
-            break
-        if not isinstance(invocation, Mapping):
-            continue
-        if _classify_tool_invocation_status(invocation=invocation) != "ok":
-            continue
-        for field_name in (
-            "result_summary",
-            "resultSummary",
-            "effective_payload",
-            "effectivePayload",
-            "payload",
-            "result",
-            "response",
-            "effective_arguments",
-            "effectiveArguments",
-            "arguments",
-        ):
-            if len(samples) >= max_samples:
-                break
-            value = invocation.get(field_name)
-            if value is None:
-                continue
-            if isinstance(value, str):
-                sample = value
-            elif isinstance(value, (Mapping, Sequence)) and not isinstance(
-                value, (bytes, bytearray)
-            ):
-                try:
-                    sample = json.dumps(value, sort_keys=True, default=str)
-                except Exception:
-                    sample = str(value)
-            else:
-                sample = str(value)
-            sample = sample.strip()
-            if sample:
-                samples.append(sample[:max_chars_per_sample])
-    return samples
-
-
-def _turn_contract_target_handle_evidence_observed(
-    *,
-    contract: TurnExpectedOutcomeContract,
-    tool_invocations: Sequence[Mapping[str, Any]] | None,
-) -> bool:
-    if (
-        contract.target_concept_ids
-        or contract.target_type_ids
-        or any(
-            target_contract.is_symbolically_resolved()
-            for target_contract in (contract.target_contracts or ())
-        )
-    ):
-        return True
-
-    workflow_ids = {
-        workflow_id.lower()
-        for workflow_id in _dedupe_string_sequence(contract.workflow_concept_ids)
-    }
-    if not workflow_ids:
-        return False
-
-    samples = _successful_tool_invocation_text_samples_for_turn_contract(
-        tool_invocations
-    )
-    if not samples:
-        return False
-
-    # Fast-path only: the represented contract decides which conditional tools
-    # are required; Python just recognises a concrete handle for known target
-    # forms that existing Von parsers already understand.
-    if any("arxiv" in workflow_id for workflow_id in workflow_ids):
-        return any(extract_arxiv_id_candidates(sample) for sample in samples)
-    return False
-
-
 def _activated_turn_expected_conditional_required_tools(
     *,
     contract: TurnExpectedOutcomeContract,
@@ -3639,10 +3552,15 @@ def _activated_turn_expected_conditional_required_tools(
     conditional_tools = _dedupe_string_sequence(contract.conditional_required_tools)
     if not conditional_tools:
         return []
-    if not _turn_contract_target_handle_evidence_observed(
-        contract=contract,
-        tool_invocations=tool_invocations,
-    ):
+    target_resolved_symbolically = bool(
+        contract.target_concept_ids
+        or contract.target_type_ids
+        or any(
+            target_contract.is_symbolically_resolved()
+            for target_contract in (contract.target_contracts or ())
+        )
+    )
+    if not target_resolved_symbolically:
         return []
     return conditional_tools
 

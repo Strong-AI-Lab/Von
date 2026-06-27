@@ -48,9 +48,13 @@ def test_expected_outcome_prompt_targets_arxiv_representation_workflow() -> None
     assert "#V#arxiv_paper_representation_workflow" in prompt_text
     assert "do not invent workflow ids" in lowered
     assert "conditional_required_tools" in prompt_text
-    assert "gmail-to-arxiv conditional representation example" in lowered
-    assert "do not return only gmail list tools" in lowered
-    assert '"conditional_required_tools":["workflow_execute"]' in prompt_text
+    assert (
+        "when the turn first requires another retrieval surface to find whether "
+        "an arxiv target exists"
+    ) in lowered
+    assert "put only the retrieval tools in `required_tools`" in lowered
+    assert "put `workflow_execute` in `conditional_required_tools`" in lowered
+    assert "gmail-to-arxiv conditional representation example" not in lowered
     assert '"workflow_concept_ids":["#V#arxiv_paper_representation_workflow"]' in (
         prompt_text
     )

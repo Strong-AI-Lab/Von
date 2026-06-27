@@ -521,11 +521,12 @@ def test_arxiv_id_extraction_canonical_formats(text: str, expected_id: str) -> N
     Capability regression here means users sending arXiv URLs/IDs would
     not get proper paper download/analysis.
     """
-    from src.backend.integrations.internal_mcp.orchestrator import (
-        InternalMCPChatOrchestrator,
+    from src.backend.services.arxiv_paper_link_service import (
+        extract_arxiv_id_candidates,
     )
 
-    result = InternalMCPChatOrchestrator._extract_arxiv_id_from_text(text)
+    candidates = extract_arxiv_id_candidates(text)
+    result = candidates[0] if candidates else None
     assert result == expected_id, (
         f"ArXiv extraction failed for '{text}': got '{result}', "
         f"expected '{expected_id}'"
@@ -534,8 +535,8 @@ def test_arxiv_id_extraction_canonical_formats(text: str, expected_id: str) -> N
 
 def test_arxiv_id_extraction_returns_none_for_non_arxiv() -> None:
     """Non-arXiv text must return None, not a false positive."""
-    from src.backend.integrations.internal_mcp.orchestrator import (
-        InternalMCPChatOrchestrator,
+    from src.backend.services.arxiv_paper_link_service import (
+        extract_arxiv_id_candidates,
     )
 
     non_arxiv = [
@@ -547,9 +548,9 @@ def test_arxiv_id_extraction_returns_none_for_non_arxiv() -> None:
     ]
 
     for text in non_arxiv:
-        result = InternalMCPChatOrchestrator._extract_arxiv_id_from_text(text)
-        assert result is None, (
-            f"False positive arXiv ID from non-arXiv text: '{text}' → '{result}'"
+        result = extract_arxiv_id_candidates(text)
+        assert result == [], (
+            f"False positive arXiv ID from non-arXiv text: '{text}' -> '{result}'"
         )
 
 
