@@ -2864,6 +2864,59 @@ def _collect_action_phases(
     return phases, stages, statuses
 
 
+def _collect_action_workflow_projection(summary: Mapping[str, Any]) -> dict[str, Any]:
+    telemetry = _as_mapping(summary.get("telemetry"))
+    projection: dict[str, Any] = {}
+
+    def set_if_missing(key: str, value: Any, *, source: str) -> None:
+        cleaned = _safe_text(value)
+        if not cleaned or projection.get(key):
+            return
+        projection[key] = cleaned
+        projection.setdefault("source", source)
+
+    set_if_missing(
+        "selected_workflow_id",
+        telemetry.get("selected_workflow_id"),
+        source="telemetry",
+    )
+    set_if_missing(
+        "selected_execution_mode",
+        telemetry.get("selected_execution_mode"),
+        source="telemetry",
+    )
+    for payload in _collect_action_status_payloads(summary):
+        for entry in _collect_progress_entries_from_payload(payload):
+            if not isinstance(entry, Mapping):
+                continue
+            nested_event = _as_mapping(entry.get("selected_workflow_execution_event"))
+            for source, candidate in (
+                ("background_task_progress", entry),
+                (
+                    "background_task_progress.selected_workflow_execution_event",
+                    nested_event,
+                ),
+            ):
+                set_if_missing(
+                    "selected_workflow_id",
+                    candidate.get("dispatch_workflow_id")
+                    or candidate.get("selected_workflow_id")
+                    or (
+                        candidate.get("workflow_id")
+                        if source.endswith("selected_workflow_execution_event")
+                        else None
+                    ),
+                    source=source,
+                )
+                set_if_missing(
+                    "selected_execution_mode",
+                    candidate.get("selected_execution_mode")
+                    or candidate.get("execution_mode"),
+                    source=source,
+                )
+    return projection
+
+
 def _summary_response_text(summary: Mapping[str, Any]) -> str:
     response = _as_mapping(summary.get("response"))
     return (
@@ -2881,8 +2934,9 @@ def _summary_requested_tool_use(summary: Mapping[str, Any]) -> bool:
 
 
 def _summary_selected_workflow(summary: Mapping[str, Any]) -> str:
-    telemetry = _as_mapping(summary.get("telemetry"))
-    return _safe_text(telemetry.get("selected_workflow_id"))
+    return _safe_text(
+        _collect_action_workflow_projection(summary).get("selected_workflow_id")
+    )
 
 
 def classify_replay_action_outcome(
@@ -4630,6 +4684,22 @@ def _build_failed_replay_attempt_summary(
             "reasons": [str(exc)],
         },
     }
+    workflow_projection = _collect_action_workflow_projection(summary)
+    if workflow_projection:
+        telemetry = _as_mapping(summary.get("telemetry"))
+        selected_workflow_id = _safe_text(
+            workflow_projection.get("selected_workflow_id")
+        )
+        selected_execution_mode = _safe_text(
+            workflow_projection.get("selected_execution_mode")
+        )
+        if selected_workflow_id:
+            telemetry["selected_workflow_id"] = selected_workflow_id
+        if selected_execution_mode:
+            telemetry["selected_execution_mode"] = selected_execution_mode
+        if _safe_text(workflow_projection.get("source")):
+            telemetry["workflow_projection_source"] = workflow_projection["source"]
+        summary["telemetry"] = telemetry
     if len(planned_arms) > 1:
         summary["comparison"] = {
             "planned_arm_count": len(planned_arms),

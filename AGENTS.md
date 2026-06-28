@@ -48,6 +48,13 @@ Read the following before planning or implementing work in the matching area:
 
 If the task crosses multiple areas, read all relevant documents.
 
+Mandatory reading is a grounding step, not a licence to freeze a past agent's
+partial model of correct Von behaviour. If current code, Vontology artefacts,
+workflow telemetry, replay evidence, or user-visible behaviour contradicts the
+docs, treat the live authority surface as the evidence to explain. Update the
+docs, Jira/task notes, or both when the lesson is durable; do not force the
+system to match stale guidance.
+
 ### 2.4 Operational companion
 
 For practical engineering guidance distilled from prior implementation and
@@ -88,7 +95,7 @@ For frontend/browser user-view validation practice, also see
 21. For research-sensitive, architecture-shaping, or long-horizon-agent tasks, do a short targeted literature review before finalising the plan.
 22. Run targeted impacted validation by default, including real call-path tests where relevant. Do not claim broader coverage than you actually ran.
 23. End-to-end or user-visible acceptance requires direct evidence on the exact path or the nearest real path, not only nearby unit tests.
-24. Substantial-task reflection is mandatory. Extract durable lessons, update docs when warranted, and create Jira tasks for real process gaps.
+24. Substantial-task reflection is mandatory. Extract durable lessons, update docs when warranted, and create Jira tasks for real process gaps. Prefer guidance that states invariants, authority order, and review questions over guidance that fossilises one incident's implementation shape.
 25. Prefer durable capability improvements over case-specific patches. If a proper noun from the triggering task appears in core logic, treat that as a design smell unless there is a strong reason.
 26. Notice when functions or methods are becoming large, tangled, or repeatedly patched. Treat that as a design signal, not merely a style issue. Prefer refactoring toward clear reusable support-surface functions with explicit inputs/outputs and better test seams.
 27. When coordination or decision-making logic inside Python looks like authored workflow policy, actively consider whether it should instead live in Von workflows, Vontology artefacts, prompt/programme artefacts, or other represented authority surfaces. Refactoring should reduce hidden code-side policy, not merely rearrange it.

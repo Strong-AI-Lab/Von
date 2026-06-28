@@ -1371,3 +1371,7 @@ the change.
   grows beyond a compact operational note.
 - If a lesson is truly constitutional rather than practical, promote a shorter
   version into `AGENTS.md` instead.
+- When live replay, telemetry, Vontology read-back, or current code disproves
+  an operational note, update the note or open a precise follow-up task. Do not
+  preserve guidance that mainly records a stale partial model of correct Von
+  behaviour.

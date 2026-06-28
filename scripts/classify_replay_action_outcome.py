@@ -41,6 +41,7 @@ def _classify_path(path: Path, *, recompute: bool = False) -> dict[str, Any]:
         ),
         "outcome": action_outcome.get("outcome"),
         "request_id": action_outcome.get("request_id"),
+        "selected_workflow_id": action_outcome.get("selected_workflow_id"),
         "observed_tools": action_outcome.get("observed_tools", []),
         "timeout_detected": action_outcome.get("timeout_detected"),
         "action_started": action_outcome.get("action_started"),

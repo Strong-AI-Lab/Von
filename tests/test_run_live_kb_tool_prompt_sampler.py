@@ -1662,6 +1662,65 @@ def test_failed_replay_summary_projects_tool_ledger_from_timeout_progress() -> N
     )
 
 
+def test_failed_replay_summary_projects_workflow_from_timeout_progress() -> None:
+    summary = sampler._build_failed_replay_attempt_summary(
+        exc=sampler.BackgroundGenerateTaskError(
+            "Background generate task did not complete before timeout",
+            task_id="task-workflow",
+            status_payload={
+                "status": "running",
+                "progress_history": [
+                    {
+                        "status": "workflow_step_start",
+                        "workflow_id": "#V#conversation_turn_execution_workflow",
+                    },
+                    {
+                        "phase": "selected_workflow_execution",
+                        "stage": "selected_workflow_execution",
+                        "status": "workflow_step_complete",
+                        "selected_workflow_id": "#V#tool_calling_workflow",
+                        "selected_execution_mode": "custom_workflow",
+                        "selected_workflow_execution_event": {
+                            "selected_workflow_id": "#V#tool_calling_workflow",
+                            "workflow_id": "#V#tool_calling_workflow",
+                            "selected_execution_mode": "custom_workflow",
+                        },
+                    },
+                    {
+                        "phase": "tool_execute",
+                        "stage": "tool_execute",
+                        "status": "tool_call_start",
+                        "tool": "workflow_execute",
+                        "call_id": "call-1",
+                    },
+                ],
+            },
+            cancellation_payload={"success": True, "task_id": "task-workflow"},
+        ),
+        attempt_index=1,
+        prompt_entry={
+            "id": "execute_represented_workflow",
+            "prompt": "Execute the represented workflow and read back evidence.",
+            "likely_tools": ["workflow_execute"],
+            "requires_tool_use": True,
+        },
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+        requested_model="gpt-5.4-nano",
+    )
+
+    assert summary["telemetry"]["selected_workflow_id"] == "#V#tool_calling_workflow"
+    assert summary["telemetry"]["selected_execution_mode"] == "custom_workflow"
+    assert summary["telemetry"]["workflow_projection_source"] == (
+        "background_task_progress"
+    )
+    assert summary["action_outcome"]["selected_workflow_id"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert "selected_workflow_id=#V#tool_calling_workflow" in summary[
+        "action_outcome"
+    ]["evidence"]
+
+
 def test_failed_replay_summary_preserves_planned_comparison_arms() -> None:
     summary = sampler._build_failed_replay_attempt_summary(
         exc=sampler.BackgroundGenerateTaskError(
