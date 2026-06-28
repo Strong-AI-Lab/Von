@@ -275,10 +275,19 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
         namespace="#V#user@org",
         namespace_source="request.namespace",
         timeout_seconds=12.5,
+        registration_timeout_seconds=7.5,
     )
 
     assert result["success"] is True
     assert captured_download["timeout_seconds"] == 12.5
+    assert result["download_timeout_seconds"] == 12.5
+    assert result["registration_timeout_seconds"] == 7.5
+    assert result["timeout_policy"] == {
+        "download_timeout_seconds": 12.5,
+        "registration_timeout_seconds": 7.5,
+        "download_phase": "remote_download",
+        "registration_phase": "file_copy_registration",
+    }
     assert captured["original_filename"] == "paper.pdf"
     assert captured["organisation_concept_id"] == "#V#org"
     assert captured["namespace"] == "#V#user@org"
@@ -300,11 +309,6 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
 def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
     from src.backend.services import remote_file_copy_ingestion_service as svc
 
-    monkeypatch.setattr(
-        svc,
-        "_configured_total_timeout_seconds",
-        lambda _override=None: 0.02,
-    )
     monkeypatch.setattr(
         svc,
         "download_remote_file_copy_bytes",
@@ -341,12 +345,26 @@ def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
         organisation_concept_id="#V#org",
         namespace="#V#user@org",
         namespace_source="request.namespace",
-        timeout_seconds=0.02,
+        timeout_seconds=5,
+        registration_timeout_seconds=0.02,
     )
 
     assert result["success"] is False
     assert result["error"] == "remote_file_copy_timeout"
-    assert result["timeout_seconds"] == 0.02
+    assert result["timeout_phase"] == "file_copy_registration"
+    assert result["timeout_seconds"] == 5.0
+    assert result["download_timeout_seconds"] == 5.0
+    assert result["registration_timeout_seconds"] == 0.02
+    assert result["download"]["status"] == "completed"
+    assert result["registration"] == {
+        "status": "timed_out",
+        "timeout_seconds": 0.02,
+        "may_complete_late": True,
+        "recovery_affordance": (
+            "Read back the file-copy result or retry the registration phase "
+            "before re-downloading the remote artefact."
+        ),
+    }
     assert result["requested_url"] == "https://example.com/paper"
     assert result["response"]["status_code"] == 200
     assert worker_released.wait(timeout=1.0)

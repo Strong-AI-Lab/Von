@@ -79,6 +79,20 @@ TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
 REQUESTED_EVIDENCE_LINEAGE_SCHEMA_VERSION = "requested_evidence_lineage.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
+_EXECUTION_SURFACE_CONTEXT_FIELDS: tuple[str, ...] = (
+    "error",
+    "error_code",
+    "failure_code",
+    "message",
+    "timeout_phase",
+    "phase",
+    "workflow_instance_id",
+    "instance_id",
+    "execution_id",
+    "terminal_status",
+    "final_state",
+)
+
 _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS = frozenset(
     {"#V#prompt_turn_execution_narrate_completion_report"}
 )
@@ -1588,19 +1602,26 @@ def _normalise_workflow_execution_action_observations(
         action_id = _safe_str(raw.get("action_id"))
         if not action_id:
             continue
-        normalised.append(
-            {
-                "source": "workflow_action_execution",
-                "tool": action_id,
-                "action_id": action_id,
-                "workflow_id": _safe_str(raw.get("workflow_id")) or workflow_id,
-                "state_id": _safe_str(raw.get("state_id")),
-                "status": _safe_str(raw.get("action_status"))
-                or _safe_str(raw.get("outcome")),
-                "outcome": _safe_str(raw.get("outcome"))
-                or _safe_str(raw.get("action_status")),
-            }
-        )
+        observation = {
+            "source": "workflow_action_execution",
+            "tool": action_id,
+            "action_id": action_id,
+            "workflow_id": _safe_str(raw.get("workflow_id")) or workflow_id,
+            "state_id": _safe_str(raw.get("state_id")),
+            "status": _safe_str(raw.get("action_status"))
+            or _safe_str(raw.get("outcome")),
+            "outcome": _safe_str(raw.get("outcome"))
+            or _safe_str(raw.get("action_status")),
+        }
+        for field_name in _EXECUTION_SURFACE_CONTEXT_FIELDS:
+            value = _safe_str(raw.get(field_name))
+            if value:
+                observation[field_name] = value
+        for field_name in ("details", "error_details"):
+            value = raw.get(field_name)
+            if isinstance(value, Mapping):
+                observation[field_name] = dict(value)
+        normalised.append(observation)
     return normalised
 
 
@@ -2179,6 +2200,7 @@ def _append_execution_surface_observation_once(
     workflow_id: str = "",
     state_id: str = "",
     action_id: str = "",
+    details: Mapping[str, Any] | None = None,
 ) -> None:
     cleaned_tool_name = _safe_str(tool_name)
     if not cleaned_tool_name:
@@ -2203,16 +2225,24 @@ def _append_execution_surface_observation_once(
         )
         if existing_fingerprint == fingerprint:
             return
-    values.append(
-        {
-            "tool": cleaned_tool_name,
-            "status": cleaned_status,
-            "source": _safe_str(source) or "execution_surface",
-            "workflow_id": _safe_str(workflow_id),
-            "state_id": _safe_str(state_id),
-            "action_id": _safe_str(action_id) or cleaned_tool_name,
-        }
-    )
+    observation = {
+        "tool": cleaned_tool_name,
+        "status": cleaned_status,
+        "source": _safe_str(source) or "execution_surface",
+        "workflow_id": _safe_str(workflow_id),
+        "state_id": _safe_str(state_id),
+        "action_id": _safe_str(action_id) or cleaned_tool_name,
+    }
+    if isinstance(details, Mapping):
+        for field_name in _EXECUTION_SURFACE_CONTEXT_FIELDS:
+            value = _safe_str(details.get(field_name))
+            if value:
+                observation[field_name] = value
+        for field_name in ("details", "error_details"):
+            value = details.get(field_name)
+            if isinstance(value, Mapping):
+                observation[field_name] = dict(value)
+    values.append(observation)
 
 
 def _augment_tool_outcomes_with_execution_surfaces(
@@ -2313,6 +2343,7 @@ def _augment_tool_outcomes_with_execution_surfaces(
                         ),
                         state_id=_safe_str(raw_observation.get("state_id")),
                         action_id=action_id,
+                        details=raw_observation,
                     )
 
     return (

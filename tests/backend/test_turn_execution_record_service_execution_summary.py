@@ -13,6 +13,7 @@ from src.backend.services.turn_execution_record_service import (
 )
 from src.backend.services.required_tool_obligation_service import (
     BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
+    BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED,
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
     BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
     build_required_tool_obligation_ledger,
@@ -2502,3 +2503,102 @@ def test_turn_execution_record_counts_selected_workflow_action_for_required_tool
     )
     assert obligation["execution_surfaces"][0]["state_id"] == "fetch_arxiv_metadata"
     assert summary["required_tool_obligation_blocking_failure_codes"] == []
+
+
+def test_turn_execution_record_preserves_failed_workflow_action_recovery_evidence(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "import_url_file_copy": ToolMetadata(
+                tool_name="import_url_file_copy",
+                operation_category="write",
+                evidence_role="mutation",
+            )
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        record = build_turn_execution_record(
+            request_id="req-workflow-action-failed-required-tool",
+            session_id="session-1",
+            namespace="#V#user@test",
+            user_id="#V#user",
+            org_id="#V#org",
+            prompt_text="Represent this paper: https://arxiv.org/abs/2106.03245",
+            response_text="The paper download completed but registration timed out.",
+            interaction_timestamp_utc="2026-06-07T00:00:00Z",
+            workflow_routing={
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+                "source": "selector",
+            },
+            tool_invocations=[],
+            selected_workflow_trace={
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "child_workflow_completed": False,
+                "child_workflow_final_state": "failed",
+                "workflow_execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "completed": False,
+                    "terminal_status": "failed",
+                    "final_state": "failed",
+                    "step_result_envelope_count": 1,
+                    "action_started_count": 1,
+                    "action_completed_count": 1,
+                    "action_success_count": 0,
+                    "action_failure_count": 1,
+                    "action_unknown_count": 0,
+                    "successful_action_ids": [],
+                    "failed_action_ids": ["import_url_file_copy"],
+                    "action_observations": [
+                        {
+                            "action_id": "import_url_file_copy",
+                            "state_id": "download_paper",
+                            "action_status": "failed",
+                            "outcome": "failed",
+                            "error": "Registration exceeded the phase timeout.",
+                            "error_code": "remote_file_copy_timeout",
+                            "timeout_phase": "file_copy_registration",
+                            "workflow_instance_id": "#V#wf_instance_1",
+                            "execution_id": "trace-1",
+                        }
+                    ],
+                    "runtime_event_count": 0,
+                    "terminal_effect_count": 0,
+                    "terminal_effects": [],
+                    "durable_side_effect_count": 0,
+                    "durable_side_effects": [],
+                },
+            },
+            turn_expected_outcome_contract={
+                "required_tools": ["import_url_file_copy"],
+            },
+            method_catalogue={"import_url_file_copy": {}},
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    summary = record["execution"]["summary"]
+    ledger = summary["required_tool_obligations"]
+    obligation = ledger["obligations"][0]
+    assert obligation["tool_name"] == "import_url_file_copy"
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 0
+    assert obligation["blocking_reason"] == BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
+    surface = obligation["execution_surfaces"][0]
+    assert surface["source"] == "workflow_action_execution"
+    assert surface["error_code"] == "remote_file_copy_timeout"
+    assert surface["timeout_phase"] == "file_copy_registration"
+    assert surface["workflow_instance_id"] == "#V#wf_instance_1"
+    assert "import_url_file_copy" in summary["execution_surface_failed_tool_names"]
+    assert BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED in (
+        summary["required_tool_obligation_blocking_failure_codes"]
+    )

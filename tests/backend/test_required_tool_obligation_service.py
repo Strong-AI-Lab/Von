@@ -4,6 +4,7 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
     BLOCKER_REQUIRED_TOOL_METADATA_MISSING,
     BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
+    BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED,
     BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED,
     BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED,
     BLOCKER_TOOL_BUDGET_EXHAUSTED_BEFORE_REQUIRED_TOOLS,
@@ -250,6 +251,75 @@ def test_workflow_action_execution_satisfies_matching_required_tool(
     ]
     assert ledger["observed_invocation_count"] == 1
     assert ledger["unsatisfied_required_tools"] == []
+
+
+def test_failed_workflow_action_execution_preserves_recovery_evidence(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "import_url_file_copy": ToolMetadata(
+                tool_name="import_url_file_copy",
+                operation_category="write",
+                evidence_role="mutation",
+            )
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "represented_contract": ["import_url_file_copy"]
+            },
+            invocations=[],
+            observed_equivalent_failed_executions=[
+                {
+                    "tool": "import_url_file_copy",
+                    "action_id": "import_url_file_copy",
+                    "source": "workflow_action_execution",
+                    "workflow_id": "#V#arxiv_paper_representation_workflow",
+                    "state_id": "download_paper",
+                    "status": "failed",
+                    "error": "Registration exceeded the phase timeout.",
+                    "error_code": "remote_file_copy_timeout",
+                    "timeout_phase": "file_copy_registration",
+                    "workflow_instance_id": "#V#wf_instance_1",
+                    "execution_id": "trace-1",
+                }
+            ],
+            allowed_tools=["import_url_file_copy"],
+            method_catalogue=_catalogue(["import_url_file_copy"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(ledger, "import_url_file_copy")
+    assert obligation["planned_count"] == 1
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 0
+    assert obligation["satisfied"] is False
+    assert obligation["blocking_reason"] == BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
+    assert obligation["execution_surfaces"] == [
+        {
+            "source": "workflow_action_execution",
+            "status": "failed",
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "state_id": "download_paper",
+            "action_id": "import_url_file_copy",
+            "error": "Registration exceeded the phase timeout.",
+            "error_code": "remote_file_copy_timeout",
+            "timeout_phase": "file_copy_registration",
+            "workflow_instance_id": "#V#wf_instance_1",
+            "execution_id": "trace-1",
+        }
+    ]
+    assert ledger["observed_invocation_count"] == 1
+    assert ledger["unsatisfied_required_tools"] == ["import_url_file_copy"]
 
 
 def test_schema_validation_failure_marks_required_mutation_payload_unresolved() -> None:

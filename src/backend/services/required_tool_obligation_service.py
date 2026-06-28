@@ -24,6 +24,20 @@ OPERATION_MUTATION_WRITE = "mutation_write"
 OPERATION_EXTERNAL_SIDE_EFFECT = "external_side_effect"
 OPERATION_WORKFLOW_EXECUTE = "workflow_execute"
 
+_EQUIVALENT_EXECUTION_CONTEXT_FIELDS: tuple[str, ...] = (
+    "error",
+    "error_code",
+    "failure_code",
+    "message",
+    "timeout_phase",
+    "phase",
+    "workflow_instance_id",
+    "instance_id",
+    "execution_id",
+    "terminal_status",
+    "final_state",
+)
+
 BLOCKER_REQUIRED_TOOL_NOT_PLANNED = "required_tool_not_planned"
 BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY = (
     "required_tool_not_available_on_gateway"
@@ -215,7 +229,7 @@ def _normalise_equivalent_execution_record(
     if not tool_name:
         return None
     status = _safe_str(execution.get("status")) or _safe_str(execution.get("outcome"))
-    return {
+    record = {
         "tool": tool_name,
         "status": status or fallback_status,
         "source": _safe_str(execution.get("source")) or "equivalent_execution_surface",
@@ -223,6 +237,15 @@ def _normalise_equivalent_execution_record(
         "state_id": _safe_str(execution.get("state_id")),
         "action_id": _safe_str(execution.get("action_id")) or tool_name,
     }
+    for field_name in _EQUIVALENT_EXECUTION_CONTEXT_FIELDS:
+        value = _safe_str(execution.get(field_name))
+        if value:
+            record[field_name] = value
+    for field_name in ("details", "error_details"):
+        value = execution.get(field_name)
+        if isinstance(value, Mapping):
+            record[field_name] = dict(value)
+    return record
 
 
 def _payload_from_invocation(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -714,6 +737,14 @@ def build_required_tool_obligation_ledger(
             "state_id": _safe_str(surface.get("state_id")),
             "action_id": _safe_str(surface.get("action_id")) or cleaned_tool_name,
         }
+        for field_name in _EQUIVALENT_EXECUTION_CONTEXT_FIELDS:
+            value = _safe_str(surface.get(field_name))
+            if value:
+                normalised[field_name] = value
+        for field_name in ("details", "error_details"):
+            value = surface.get(field_name)
+            if isinstance(value, Mapping):
+                normalised[field_name] = dict(value)
         existing = execution_surfaces_by_tool.setdefault(
             cleaned_tool_name.lower(),
             [],
@@ -885,11 +916,21 @@ def build_required_tool_obligation_ledger(
             planned_counts.get(lowered, 0), attempted_counts[lowered]
         )
         last_status_by_tool[lowered] = "error"
-        last_invocation_by_tool[lowered] = {
+        last_error = (
+            _safe_str(record.get("error"))
+            or _safe_str(record.get("message"))
+            or "Equivalent execution surface reported failure."
+        )
+        last_invocation = {
             "tool": tool_name,
             "status": "error",
-            "error": "Equivalent execution surface reported failure.",
+            "error": last_error,
         }
+        for field_name in _EQUIVALENT_EXECUTION_CONTEXT_FIELDS:
+            value = _safe_str(record.get(field_name))
+            if value:
+                last_invocation[field_name] = value
+        last_invocation_by_tool[lowered] = last_invocation
         add_execution_surface(tool_name, record)
         attempted_operation_classes.append(classify_required_tool_operation(tool_name))
 

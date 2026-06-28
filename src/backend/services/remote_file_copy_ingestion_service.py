@@ -20,6 +20,7 @@ _DEFAULT_MAX_REDIRECTS = 5
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 _DEFAULT_READ_TIMEOUT_SECONDS = 30
 _DEFAULT_TOTAL_TIMEOUT_SECONDS = 40
+_DEFAULT_REGISTRATION_TIMEOUT_SECONDS = 120
 _DEFAULT_USER_AGENT = "VonRemoteFileCopyIngestion/1.0"
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _CAPTURED_RESPONSE_HEADERS: tuple[str, ...] = (
@@ -94,6 +95,21 @@ def _configured_total_timeout_seconds(override: float | int | None = None) -> fl
         _coerce_configured_int(
             os.getenv("VON_REMOTE_FILE_COPY_TOTAL_TIMEOUT_SECONDS"),
             default=_DEFAULT_TOTAL_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=600,
+        )
+    )
+
+
+def _configured_registration_timeout_seconds(
+    override: float | int | None = None,
+) -> float:
+    if isinstance(override, (int, float)) and not isinstance(override, bool):
+        return max(0.001, min(float(override), 600.0))
+    return float(
+        _coerce_configured_int(
+            os.getenv("VON_REMOTE_FILE_COPY_REGISTRATION_TIMEOUT_SECONDS"),
+            default=_DEFAULT_REGISTRATION_TIMEOUT_SECONDS,
             minimum=1,
             maximum=600,
         )
@@ -655,24 +671,25 @@ def import_remote_url_file_copy(
     max_bytes: int | None = None,
     max_redirects: int | None = None,
     timeout_seconds: float | int | None = None,
+    registration_timeout_seconds: float | int | None = None,
 ) -> dict[str, Any]:
     """Download a remote artefact, persist it durably, and register a file copy."""
 
-    resolved_timeout_seconds = _configured_total_timeout_seconds(timeout_seconds)
+    download_timeout_seconds = _configured_total_timeout_seconds(timeout_seconds)
+    resolved_registration_timeout_seconds = _configured_registration_timeout_seconds(
+        registration_timeout_seconds
+    )
     started_at = time.monotonic()
 
     def _elapsed_seconds() -> float:
         return round(max(0.0, time.monotonic() - started_at), 3)
-
-    def _remaining_seconds() -> float:
-        return (started_at + resolved_timeout_seconds) - time.monotonic()
 
     download_result = download_remote_file_copy_bytes(
         url=url,
         filename=filename,
         max_bytes=max_bytes,
         max_redirects=max_redirects,
-        timeout_seconds=resolved_timeout_seconds,
+        timeout_seconds=download_timeout_seconds,
     )
     if not download_result.get("success"):
         return download_result
@@ -715,34 +732,37 @@ def import_remote_url_file_copy(
             "redirect_chain_json": json.dumps(redirects, ensure_ascii=False),
         },
     }
-    remaining = _remaining_seconds()
-    if remaining <= 0:
-        return {
-            "success": False,
-            "error": "remote_file_copy_timeout",
-            "message": "Remote artefact ingestion exceeded the total timeout before file-copy registration.",
-            "requested_url": download_result.get("requested_url"),
-            "final_url": download_result.get("final_url"),
-            "redirects": redirects,
-            "redirect_count": len(redirects),
-            "download_hops": download_result.get("hops"),
-            "timeout_seconds": resolved_timeout_seconds,
-            "elapsed_seconds": _elapsed_seconds(),
-            "response": {
-                "status_code": download_result.get("status_code"),
-                "size_bytes": download_result.get("size_bytes"),
-                "headers": response_headers,
-            },
-            "filename_resolution": {
-                "original_filename": download_result.get("original_filename"),
-                "source": download_result.get("filename_source"),
-            },
-            "content_type_resolution": {
-                "effective_content_type": download_result.get("content_type"),
-                "response_content_type": download_result.get("response_content_type"),
-                "source": download_result.get("content_type_source"),
-            },
-        }
+    timeout_policy = {
+        "download_timeout_seconds": download_timeout_seconds,
+        "registration_timeout_seconds": resolved_registration_timeout_seconds,
+        "download_phase": "remote_download",
+        "registration_phase": "file_copy_registration",
+    }
+    download_context = {
+        "requested_url": download_result.get("requested_url"),
+        "final_url": download_result.get("final_url"),
+        "redirects": redirects,
+        "redirect_count": len(redirects),
+        "download_hops": download_result.get("hops"),
+        "timeout_seconds": download_timeout_seconds,
+        "download_timeout_seconds": download_timeout_seconds,
+        "registration_timeout_seconds": resolved_registration_timeout_seconds,
+        "timeout_policy": timeout_policy,
+        "response": {
+            "status_code": download_result.get("status_code"),
+            "size_bytes": download_result.get("size_bytes"),
+            "headers": response_headers,
+        },
+        "filename_resolution": {
+            "original_filename": download_result.get("original_filename"),
+            "source": download_result.get("filename_source"),
+        },
+        "content_type_resolution": {
+            "effective_content_type": download_result.get("content_type"),
+            "response_content_type": download_result.get("response_content_type"),
+            "source": download_result.get("content_type_source"),
+        },
+    }
 
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1,
@@ -750,35 +770,37 @@ def import_remote_url_file_copy(
     )
     future = executor.submit(import_bytes_file_copy, **import_kwargs)
     try:
-        import_result = future.result(timeout=max(0.001, remaining))
+        import_result = future.result(
+            timeout=max(0.001, resolved_registration_timeout_seconds)
+        )
     except concurrent.futures.TimeoutError:
         future.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         return {
             "success": False,
             "error": "remote_file_copy_timeout",
-            "message": "Remote artefact file-copy registration exceeded the total timeout.",
-            "requested_url": download_result.get("requested_url"),
-            "final_url": download_result.get("final_url"),
-            "redirects": redirects,
-            "redirect_count": len(redirects),
-            "download_hops": download_result.get("hops"),
-            "timeout_seconds": resolved_timeout_seconds,
+            "message": (
+                "Remote artefact file-copy registration exceeded the registration "
+                "timeout after the download completed."
+            ),
+            "timeout_phase": "file_copy_registration",
             "elapsed_seconds": _elapsed_seconds(),
-            "response": {
+            "download": {
+                "status": "completed",
+                "timeout_seconds": download_timeout_seconds,
                 "status_code": download_result.get("status_code"),
                 "size_bytes": download_result.get("size_bytes"),
-                "headers": response_headers,
             },
-            "filename_resolution": {
-                "original_filename": download_result.get("original_filename"),
-                "source": download_result.get("filename_source"),
+            "registration": {
+                "status": "timed_out",
+                "timeout_seconds": resolved_registration_timeout_seconds,
+                "may_complete_late": True,
+                "recovery_affordance": (
+                    "Read back the file-copy result or retry the registration phase "
+                    "before re-downloading the remote artefact."
+                ),
             },
-            "content_type_resolution": {
-                "effective_content_type": download_result.get("content_type"),
-                "response_content_type": download_result.get("response_content_type"),
-                "source": download_result.get("content_type_source"),
-            },
+            **download_context,
         }
     finally:
         if future.done():
@@ -808,6 +830,10 @@ def import_remote_url_file_copy(
                     ),
                     "source": download_result.get("content_type_source"),
                 },
+                "elapsed_seconds": _elapsed_seconds(),
+                "download_timeout_seconds": download_timeout_seconds,
+                "registration_timeout_seconds": resolved_registration_timeout_seconds,
+                "timeout_policy": timeout_policy,
             }
         )
         return merged_failure
@@ -815,25 +841,8 @@ def import_remote_url_file_copy(
     result = dict(import_result)
     result.update(
         {
-            "requested_url": download_result.get("requested_url"),
-            "final_url": download_result.get("final_url"),
-            "redirects": redirects,
-            "redirect_count": len(redirects),
-            "response": {
-                "status_code": download_result.get("status_code"),
-                "size_bytes": download_result.get("size_bytes"),
-                "headers": response_headers,
-            },
-            "filename_resolution": {
-                "original_filename": download_result.get("original_filename"),
-                "source": download_result.get("filename_source"),
-            },
-            "content_type_resolution": {
-                "effective_content_type": download_result.get("content_type"),
-                "response_content_type": download_result.get("response_content_type"),
-                "source": download_result.get("content_type_source"),
-            },
-            "download_hops": download_result.get("hops"),
+            **download_context,
+            "elapsed_seconds": _elapsed_seconds(),
         }
     )
     return result

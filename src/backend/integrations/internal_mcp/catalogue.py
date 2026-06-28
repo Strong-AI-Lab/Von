@@ -5522,6 +5522,29 @@ def _import_url_file_copy(**kwargs):
                 suggestions=["Provide timeout_seconds as a positive number"],
             )
 
+    registration_timeout_seconds = kwargs.get("registration_timeout_seconds")
+    if registration_timeout_seconds is not None:
+        try:
+            registration_timeout_seconds = float(registration_timeout_seconds)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid registration_timeout_seconds: must be a number",
+                details={"registration_timeout_seconds": registration_timeout_seconds},
+                suggestions=[
+                    "Provide registration_timeout_seconds as a positive number"
+                ],
+            )
+        if registration_timeout_seconds <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "registration_timeout_seconds must be positive",
+                details={"registration_timeout_seconds": registration_timeout_seconds},
+                suggestions=[
+                    "Provide registration_timeout_seconds as a positive number"
+                ],
+            )
+
     index_in_rag = _coerce_bool_input(kwargs.get("index_in_rag"), default=False)
 
     def _run_import():
@@ -5545,6 +5568,7 @@ def _import_url_file_copy(**kwargs):
             max_bytes=max_bytes,
             max_redirects=max_redirects,
             timeout_seconds=timeout_seconds,
+            registration_timeout_seconds=registration_timeout_seconds,
         )
         if not isinstance(result, dict):
             return result
@@ -8595,6 +8619,7 @@ def _import_url_file_copy_input_schema() -> Schema:
             "max_bytes": (int, type(None)),
             "max_redirects": (int, type(None)),
             "timeout_seconds": (int, float, type(None)),
+            "registration_timeout_seconds": (int, float, type(None)),
             "index_in_rag": (bool, type(None)),
         },
         allow_unknown=True,
@@ -8622,7 +8647,13 @@ def _import_url_file_copy_output_schema() -> Schema:
             "redirects": (list, type(None)),
             "download_hops": (list, type(None)),
             "timeout_seconds": (int, float, type(None)),
+            "download_timeout_seconds": (int, float, type(None)),
+            "registration_timeout_seconds": (int, float, type(None)),
+            "timeout_phase": (str, type(None)),
+            "timeout_policy": (dict, type(None)),
             "elapsed_seconds": (int, float, type(None)),
+            "download": (dict, type(None)),
+            "registration": (dict, type(None)),
             "storage": (dict, type(None)),
             "artifact_record": (dict, type(None)),
             "response": (dict, type(None)),
@@ -15476,12 +15507,32 @@ def _workflow_execute(**kwargs):
     source_event_type_raw = kwargs.get("source_event_type")
     source_event_id_raw = kwargs.get("source_event_id")
     event_idempotency_key_raw = kwargs.get("event_idempotency_key")
-    await_terminal = _coerce_bool_input(kwargs.get("await_terminal"), default=False)
+    await_terminal_raw = kwargs.get("await_terminal")
+    include_step_result_envelopes_raw = kwargs.get("include_step_result_envelopes")
+    include_trace_raw = kwargs.get("include_trace")
+    await_terminal = _coerce_bool_input(await_terminal_raw, default=False)
     include_step_result_envelopes = _coerce_bool_input(
-        kwargs.get("include_step_result_envelopes"),
+        include_step_result_envelopes_raw,
         default=False,
     )
-    include_trace = _coerce_bool_input(kwargs.get("include_trace"), default=False)
+    include_trace = _coerce_bool_input(include_trace_raw, default=False)
+    boolean_input_normalisation = {
+        "await_terminal": _bool_input_normalisation_record(
+            await_terminal_raw,
+            normalised=await_terminal,
+            default=False,
+        ),
+        "include_step_result_envelopes": _bool_input_normalisation_record(
+            include_step_result_envelopes_raw,
+            normalised=include_step_result_envelopes,
+            default=False,
+        ),
+        "include_trace": _bool_input_normalisation_record(
+            include_trace_raw,
+            normalised=include_trace,
+            default=False,
+        ),
+    }
 
     try:
         timeout_seconds = float(
@@ -15578,7 +15629,7 @@ def _workflow_execute(**kwargs):
                         durable_system_status = None
             else:
                 instance = manager.get_instance(instance_id)
-        return build_workflow_execution_response(
+        response = build_workflow_execution_response(
             submission,
             workflow_inputs=inputs,
             instance=instance,
@@ -15591,6 +15642,12 @@ def _workflow_execute(**kwargs):
             include_trace=include_trace,
             durable_system_status=durable_system_status,
         )
+        workflow_execution = response.get("workflow_execution")
+        if isinstance(workflow_execution, dict):
+            workflow_execution["input_normalisation"] = {
+                "boolean_fields": boolean_input_normalisation,
+            }
+        return response
     except Exception as e:
         return make_error_response(
             "workflow_execute_failed",
@@ -25056,6 +25113,39 @@ def _coerce_bool_input(value: Any, *, default: bool) -> bool:
     return default
 
 
+def _bool_input_normalisation_record(
+    value: Any,
+    *,
+    normalised: bool,
+    default: bool,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "supplied": value is not None,
+        "normalised": bool(normalised),
+        "default": bool(default),
+    }
+    if value is not None:
+        record["raw_type"] = type(value).__name__
+        recognised = True
+        if isinstance(value, str):
+            recognised = value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+        elif not isinstance(value, (bool, int, float)):
+            recognised = False
+        record["recognised"] = recognised
+        record["coerced"] = recognised and not isinstance(value, bool)
+        record["used_default"] = not recognised
+    return record
+
+
 def _normalise_jira_label(value: Any, *, default: str | None = None) -> str | None:
     candidate = value if value is not None else default
     if not isinstance(candidate, str):
@@ -32099,11 +32189,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "source_event_type": (str, type(None)),
                     "source_event_id": (str, type(None)),
                     "event_idempotency_key": (str, type(None)),
-                    "await_terminal": bool,
+                    "await_terminal": (bool, str, int, float),
                     "timeout_seconds": (int, float),
                     "poll_interval_seconds": (int, float),
-                    "include_step_result_envelopes": bool,
-                    "include_trace": bool,
+                    "include_step_result_envelopes": (bool, str, int, float),
+                    "include_trace": (bool, str, int, float),
                 },
                 allow_unknown=True,
                 description="Launch a durable workflow instance and optionally await a terminal result.",

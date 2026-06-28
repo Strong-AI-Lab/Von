@@ -1286,11 +1286,11 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
             "org_id": "#V#org",
             "namespace": "#V#user@org",
             "inputs": {"fixture_id": "fixture-1"},
-            "await_terminal": True,
+            "await_terminal": "yes",
             "timeout_seconds": 5,
             "poll_interval_seconds": 0,
-            "include_step_result_envelopes": True,
-            "include_trace": True,
+            "include_step_result_envelopes": "yes",
+            "include_trace": 1,
         },
     ).payload
 
@@ -1308,6 +1308,22 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert metadata.get("summary", {}).get("event_count") == 1
     assert execution.get("execution_trace_id") == "trace-1550"
     assert payload.get("execution_trace", {}).get("execution_id") == "trace-1550"
+    boolean_fields = (
+        execution.get("input_normalisation", {}).get("boolean_fields", {})
+    )
+    assert boolean_fields["await_terminal"] == {
+        "supplied": True,
+        "normalised": True,
+        "default": False,
+        "raw_type": "str",
+        "recognised": True,
+        "coerced": True,
+        "used_default": False,
+    }
+    assert boolean_fields["include_step_result_envelopes"]["normalised"] is True
+    assert boolean_fields["include_step_result_envelopes"]["raw_type"] == "str"
+    assert boolean_fields["include_trace"]["normalised"] is True
+    assert boolean_fields["include_trace"]["raw_type"] == "int"
 
 
 def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):
