@@ -106,6 +106,30 @@ For frontend/browser user-view validation practice, also see
 39. Do not use a legacy Python workflow handler as a temporary staging area for authored behaviour while intending to "move it to workflow later". That pattern usually becomes the implementation. Prototype or materialise the workflow/prompt/Vontology artefact first; add Python only for the named reusable primitive, validation, telemetry, or canonical tool bridge that the artefact needs.
 40. When a task claims to repair a live user-visible turn, workflow failure, or motivating prompt family, closure requires replay of the exact triggering prompt or conversation/session reference on the real user-facing path, plus a small nearby prompt family where appropriate. Unit tests, materialised artefacts, synthetic helper calls, or a single nearby pass are not sufficient. The final claim must reconcile the user-visible answer, selector/discovery/dispatch telemetry, workflow/tool execution state, Thinking-card or debug surfaces, and read-back or typed failure evidence. Treat partial or contradictory diagnostic content as hypotheses, not truth.
 
+### 3.1 Opportunity-preservation gate
+
+Von should increase the chances that a reasonably capable model can succeed by
+using the affordances Von provides: represented workflows, tools, ontology,
+knowledge storage, RAG, introspection, telemetry, and durable memory. A change
+that removes those opportunities, hides them behind Python-only terminal
+failures, or turns recoverable represented states into irrecoverable support
+errors is a regression unless explicitly justified by safety, security, or a
+named missing primitive.
+
+For every implementation change in a workflow-, prompt-, KB-, RAG-, tool-, or
+telemetry-adjacent task, pause and ask:
+
+> Did this make it easier or harder for a reasonably intelligent AI model,
+> operating through Von's represented affordances, to recover, inspect, choose,
+> retry, explain, and succeed?
+
+If the answer is "harder", do not normalise the change as a local fix. Rework it
+so Python exposes typed facts, bounded primitives, validation, persistence, or
+telemetry, while represented workflow/prompt/Vontology artefacts own the
+recovery and success policy. If the harder path is genuinely required, record
+the safety or capability reason in the Jira task and in telemetry-visible
+diagnostics.
+
 ## 4. Workflow, prompt, and KB authority
 
 ### 4.1 Before coding behaviour changes
@@ -120,6 +144,11 @@ Before implementing behaviour, name the intended authoritative artefacts in Jira
 
 Also state what code will remain support-only.
 Treat those artefacts as implementation surfaces, not as commentary about an implementation whose real policy still lives elsewhere in Python.
+
+Also state the opportunity-preservation expectation from §3.1: what existing Von
+affordances the change must preserve or expose, and what barriers to model-led
+workflow/tool/KB success the change is meant to remove. A plan that cannot name
+this should not start with code.
 
 For reusable grounded-retrieval failures, especially entity-relative information requests, task notes and Jira updates must also state:
 
@@ -275,6 +304,7 @@ When scanning for such opportunities, prefer opening tasks where you can state t
 6. **Relationship to other tasks.** Link related issues and explain the relationship (shared root cause, same pipeline stage, discovered together, one blocks another). A link without explanation is insufficient.
 7. **Key file references.** List the primary files the implementer will need to read, with the relevant function or section name.
 8. **User-impact summary.** Add a brief plain-language comment (not just in the description — also as a visible Jira comment) explaining what the task means for people who actually use Von. State concretely what users will see differently after the work is done, or state explicitly that nothing changes for users and why the work matters anyway (e.g. test quality, reliability, performance). This summary exists so that humans can triage, prioritise, and communicate about the task without decoding the technical diagnosis. It also forces the agent to confirm it has actually reasoned about user impact rather than only code mechanics.
+9. **Opportunity-preservation meta-requirement.** State how the task prevents Python support layers, schema gates, timeout handling, completion gates, tests, or diagnostics from removing opportunities for a reasonably intelligent model to succeed through Von's workflows, tools, ontology, knowledge storage, RAG, introspection, telemetry, and durable memory. Each subtask must include the per-change question from §3.1 and must treat "harder for the model to recover and succeed through Von affordances" as a failed design review unless a named safety/security reason justifies it.
 
 When creating diagnostic or bug tasks from a failed-turn analysis:
 
