@@ -13,7 +13,10 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from .computer_file_copy_service import import_bytes_file_copy
+from .computer_file_copy_service import (
+    build_file_copy_registration_lookup,
+    import_bytes_file_copy,
+)
 
 _DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 _DEFAULT_MAX_REDIRECTS = 5
@@ -732,6 +735,16 @@ def import_remote_url_file_copy(
             "redirect_chain_json": json.dumps(redirects, ensure_ascii=False),
         },
     }
+    registration_lookup = build_file_copy_registration_lookup(
+        data=import_kwargs["data"],
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        original_filename=import_kwargs["original_filename"],
+        type_concept_id=type_concept_id,
+        source_identifier=import_kwargs["source_identifier"],
+        source_uri=import_kwargs["source_uri"],
+    )
     timeout_policy = {
         "download_timeout_seconds": download_timeout_seconds,
         "registration_timeout_seconds": resolved_registration_timeout_seconds,
@@ -748,6 +761,7 @@ def import_remote_url_file_copy(
         "download_timeout_seconds": download_timeout_seconds,
         "registration_timeout_seconds": resolved_registration_timeout_seconds,
         "timeout_policy": timeout_policy,
+        "registration_lookup": registration_lookup,
         "response": {
             "status_code": download_result.get("status_code"),
             "size_bytes": download_result.get("size_bytes"),
@@ -799,6 +813,10 @@ def import_remote_url_file_copy(
                     "Read back the file-copy result or retry the registration phase "
                     "before re-downloading the remote artefact."
                 ),
+                "readback_affordance": {
+                    "lookup": registration_lookup,
+                    "retriable_without_policy_change": True,
+                },
             },
             **download_context,
         }
@@ -834,6 +852,7 @@ def import_remote_url_file_copy(
                 "download_timeout_seconds": download_timeout_seconds,
                 "registration_timeout_seconds": resolved_registration_timeout_seconds,
                 "timeout_policy": timeout_policy,
+                "registration_lookup": registration_lookup,
             }
         )
         return merged_failure

@@ -298,6 +298,25 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     assert isinstance(metadata, dict)
     assert metadata["response_status_code"] == "200"
     assert metadata["redirect_count"] == 1
+    assert result["registration_lookup"] == {
+        "sha256": (
+            "d23c47e2668cdbc7f204ad3988579fb541ac7ca8abf6038d07236b8a2ba02c1f"
+        ),
+        "size_bytes": 7,
+        "original_filename": "paper.pdf",
+        "safe_filename": "paper.pdf",
+        "blob_key": (
+            "imports/user/"
+            "d23c47e2668cdbc7f204ad3988579fb541ac7ca8abf6038d07236b8a2ba02c1f/"
+            "paper.pdf"
+        ),
+        "type_concept_id": "#V#computer_file_copy",
+        "user_concept_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+        "namespace": "#V#user@org",
+        "source_identifier": "https://example.com/paper",
+        "source_uri": "https://cdn.example.com/paper.pdf",
+    }
     assert result["response"]["status_code"] == 200
     assert result["response"]["size_bytes"] == 7
     assert result["filename_resolution"]["source"] == "response.content_disposition"
@@ -356,6 +375,26 @@ def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
     assert result["download_timeout_seconds"] == 5.0
     assert result["registration_timeout_seconds"] == 0.02
     assert result["download"]["status"] == "completed"
+    expected_lookup = {
+        "sha256": (
+            "d23c47e2668cdbc7f204ad3988579fb541ac7ca8abf6038d07236b8a2ba02c1f"
+        ),
+        "size_bytes": 7,
+        "original_filename": "paper.pdf",
+        "safe_filename": "paper.pdf",
+        "blob_key": (
+            "imports/user/"
+            "d23c47e2668cdbc7f204ad3988579fb541ac7ca8abf6038d07236b8a2ba02c1f/"
+            "paper.pdf"
+        ),
+        "type_concept_id": "#V#computer_file_copy",
+        "user_concept_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+        "namespace": "#V#user@org",
+        "source_identifier": "https://example.com/paper",
+        "source_uri": "https://cdn.example.com/paper.pdf",
+    }
+    assert result["registration_lookup"] == expected_lookup
     assert result["registration"] == {
         "status": "timed_out",
         "timeout_seconds": 0.02,
@@ -364,6 +403,10 @@ def test_import_remote_url_file_copy_times_out_registration(monkeypatch):
             "Read back the file-copy result or retry the registration phase "
             "before re-downloading the remote artefact."
         ),
+        "readback_affordance": {
+            "lookup": expected_lookup,
+            "retriable_without_policy_change": True,
+        },
     }
     assert result["requested_url"] == "https://example.com/paper"
     assert result["response"]["status_code"] == 200

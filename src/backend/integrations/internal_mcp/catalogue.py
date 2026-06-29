@@ -8654,6 +8654,7 @@ def _import_url_file_copy_output_schema() -> Schema:
             "elapsed_seconds": (int, float, type(None)),
             "download": (dict, type(None)),
             "registration": (dict, type(None)),
+            "registration_lookup": (dict, type(None)),
             "storage": (dict, type(None)),
             "artifact_record": (dict, type(None)),
             "response": (dict, type(None)),

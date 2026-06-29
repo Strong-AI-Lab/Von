@@ -1031,6 +1031,56 @@ def _safe_filename_for_blob_key(original_filename: str | None) -> str:
     return safe_filename or "file.bin"
 
 
+def build_file_copy_registration_lookup(
+    *,
+    data: bytes,
+    user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    original_filename: str,
+    type_concept_id: str = "#V#computer_file_copy",
+    source_identifier: str | None = None,
+    source_uri: str | None = None,
+    blob_key: str | None = None,
+) -> dict[str, Any]:
+    """Return the deterministic identity used to register a file-copy concept."""
+
+    data_bytes = bytes(data)
+    clean_filename = original_filename.strip()
+    (
+        effective_user_concept_id,
+        effective_organisation_concept_id,
+        canonical_namespace,
+    ) = _resolve_file_copy_actor_scope(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    sha256 = hashlib.sha256(data_bytes).hexdigest()
+    safe_filename = _safe_filename_for_blob_key(clean_filename)
+    resolved_blob_key = (
+        blob_key.strip()
+        if isinstance(blob_key, str) and blob_key.strip()
+        else (
+            f"imports/{_slugify_concept_id_for_blob_key(effective_user_concept_id or '')}/"
+            f"{sha256}/{safe_filename}"
+        )
+    )
+    return {
+        "sha256": sha256,
+        "size_bytes": len(data_bytes),
+        "original_filename": clean_filename,
+        "safe_filename": safe_filename,
+        "blob_key": resolved_blob_key,
+        "type_concept_id": type_concept_id,
+        "user_concept_id": effective_user_concept_id,
+        "organisation_concept_id": effective_organisation_concept_id,
+        "namespace": canonical_namespace,
+        "source_identifier": source_identifier,
+        "source_uri": source_uri,
+    }
+
+
 def import_bytes_file_copy(
     *,
     data: bytes,
@@ -1079,17 +1129,21 @@ def import_bytes_file_copy(
         canonical_namespace=canonical_namespace,
     )
 
-    sha256 = hashlib.sha256(data_bytes).hexdigest()
-    size_bytes = len(data_bytes)
-    uploaded_at = _now_utc_iso()
-    user_slug = _slugify_concept_id_for_blob_key(effective_user_concept_id)
-    safe_filename = _safe_filename_for_blob_key(original_filename)
-
-    resolved_blob_key = (
-        blob_key.strip()
-        if isinstance(blob_key, str) and blob_key.strip()
-        else f"imports/{user_slug}/{sha256}/{safe_filename}"
+    registration_lookup = build_file_copy_registration_lookup(
+        data=data_bytes,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        original_filename=original_filename,
+        type_concept_id=type_concept_id,
+        source_identifier=source_identifier,
+        source_uri=source_uri,
+        blob_key=blob_key,
     )
+    sha256 = str(registration_lookup["sha256"])
+    size_bytes = int(registration_lookup["size_bytes"])
+    uploaded_at = _now_utc_iso()
+    resolved_blob_key = str(registration_lookup["blob_key"])
 
     existing = find_existing_computer_file_copy_instance(
         user_concept_id=effective_user_concept_id,
@@ -1125,6 +1179,7 @@ def import_bytes_file_copy(
                 "status": "reused_existing",
             },
             "typing_result": None,
+            "registration_lookup": registration_lookup,
             "reused_existing": True,
         }
 
@@ -1172,6 +1227,7 @@ def import_bytes_file_copy(
             "error": "blob_store_upload_failed",
             "message": str(exc),
             "blob_key": resolved_blob_key,
+            "registration_lookup": registration_lookup,
         }
 
     try:
@@ -1196,6 +1252,7 @@ def import_bytes_file_copy(
             "error": "file_copy_register_failed",
             "message": str(exc),
             "blob_key": resolved_blob_key,
+            "registration_lookup": registration_lookup,
         }
 
     typing_result: dict[str, Any] | None = None
@@ -1243,6 +1300,7 @@ def import_bytes_file_copy(
         "artifact_record": artifact_record,
         "typing": typing_persist_result,
         "typing_result": typing_result,
+        "registration_lookup": registration_lookup,
         "reused_existing": False,
     }
 
