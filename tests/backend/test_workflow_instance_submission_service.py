@@ -573,6 +573,45 @@ def test_verify_workflow_runnable_attempts_shared_registry_refresh_for_missing_w
     )
 
 
+def test_verify_workflow_runnable_missing_definition_skips_action_registry() -> None:
+    registry = MagicMock()
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._resolve_registered_workflow_runtime",
+        return_value=(registry, None, "unknown", ("#V#known_workflow",)),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(None, ("workflow_concept_not_found",)),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        side_effect=AssertionError("action registry should not be loaded"),
+    ):
+        verification = verify_workflow_runnable("#V#definitely_missing_workflow")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_definition_not_registered" in verification.errors
+    telemetry = verification.verification_telemetry or {}
+    assert telemetry.get("missing_definition_fast_path") is True
+    timings = telemetry.get("timings_ms") or {}
+    assert "cache_prepare_ms" in timings
+
+
+def test_verify_workflow_runnable_noncanonical_id_skips_authority_resolution() -> None:
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._resolve_registered_workflow_runtime",
+        side_effect=AssertionError("authority resolution should not run"),
+    ):
+        verification = verify_workflow_runnable("arxiv_paper_representation_ingestion")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_definition_not_registered" in verification.errors
+    assert "workflow_id_not_canonical_concept_id" in verification.errors
+    assert "workflow_id_not_canonical_concept_id" in verification.warnings
+    telemetry = verification.verification_telemetry or {}
+    assert telemetry.get("reason") == "non_canonical_workflow_id"
+    assert telemetry.get("missing_definition_fast_path") is True
+
+
 def test_submit_verified_workflow_instance_uses_namespace_actor_for_authority_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

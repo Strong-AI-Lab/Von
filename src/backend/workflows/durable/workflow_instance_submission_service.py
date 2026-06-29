@@ -944,6 +944,27 @@ def verify_workflow_runnable(
                 },
             },
         )
+    if not workflow_id.startswith("#V#"):
+        return _build_fail_closed_verification(
+            workflow_id=workflow_id,
+            error_code="workflow_definition_not_registered",
+            additional_errors=("workflow_id_not_canonical_concept_id",),
+            warnings=("workflow_id_not_canonical_concept_id",),
+            definition_identity=build_workflow_definition_identity(
+                workflow_id=workflow_id,
+                source="unknown",
+                definition=None,
+                authoritative_definition=None,
+            ),
+            telemetry={
+                "cache_hit": False,
+                "reason": "non_canonical_workflow_id",
+                "missing_definition_fast_path": True,
+                "timings_ms": {
+                    "total_ms": round((perf_counter() - verify_started) * 1000.0, 3),
+                },
+            },
+        )
 
     try:
         feature_signature = _build_runnable_feature_signature()
@@ -997,6 +1018,106 @@ def verify_workflow_runnable(
             definition=definition,
             authoritative_definition=None,
         )
+
+        if definition is None:
+            prep_ms = round((perf_counter() - prep_started) * 1000.0, 3)
+            cache_lookup_started = perf_counter()
+            cache_key, definition_hash = _build_runnable_cache_key(
+                workflow_id=workflow_id,
+                definition_identity=definition_identity,
+                fallback_enabled=False,
+                fallback_tool_names=(),
+                action_registry_action_ids=(),
+                feature_signature=feature_signature,
+            )
+            stale_evicted = _evict_stale_workflow_entries(
+                workflow_id=workflow_id,
+                definition_hash=definition_hash,
+            )
+            now_monotonic = monotonic()
+            cached = _read_cached_runnable_verification(
+                cache_key=cache_key or "",
+                now_monotonic=now_monotonic,
+            )
+            cache_lookup_ms = round(
+                (perf_counter() - cache_lookup_started) * 1000.0,
+                3,
+            )
+            cache_generation = _current_runnable_cache_generation()
+            if cached is not None:
+                existing_telemetry = (
+                    dict(cached.verification_telemetry)
+                    if isinstance(cached.verification_telemetry, Mapping)
+                    else {}
+                )
+                return _with_verification_telemetry(
+                    cached,
+                    {
+                        **existing_telemetry,
+                        "cache_hit": True,
+                        "cache_generation": cache_generation,
+                        "cache_stale_entries_evicted": stale_evicted,
+                        "feature_signature": dict(feature_signature),
+                        "missing_definition_fast_path": True,
+                        "timings_ms": {
+                            **dict(existing_telemetry.get("timings_ms") or {}),
+                            "cache_prepare_ms": prep_ms,
+                            "cache_lookup_ms": cache_lookup_ms,
+                            "total_ms": round(
+                                (perf_counter() - verify_started) * 1000.0,
+                                3,
+                            ),
+                        },
+                    },
+                )
+
+            verification = _verify_workflow_runnable_uncached(
+                workflow_id=workflow_id,
+                definition=None,
+                registration_source=registration_source,
+                fallback_enabled=False,
+                fallback_tool_names=(),
+                action_registry=None,
+                known_workflow_ids=known_workflow_ids,
+                workflow_definition_loader=None,
+                cache_generation=cache_generation,
+                feature_signature=feature_signature,
+            )
+            telemetry = (
+                dict(verification.verification_telemetry)
+                if isinstance(verification.verification_telemetry, Mapping)
+                else {}
+            )
+            verification_with_telemetry = _with_verification_telemetry(
+                verification,
+                {
+                    **telemetry,
+                    "cache_hit": False,
+                    "cache_generation": cache_generation,
+                    "cache_stale_entries_evicted": stale_evicted,
+                    "feature_signature": dict(feature_signature),
+                    "missing_definition_fast_path": True,
+                    "timings_ms": {
+                        **dict(telemetry.get("timings_ms") or {}),
+                        "cache_prepare_ms": prep_ms,
+                        "cache_lookup_ms": cache_lookup_ms,
+                        "total_ms": round(
+                            (perf_counter() - verify_started) * 1000.0,
+                            3,
+                        ),
+                    },
+                },
+            )
+            ttl_seconds = _read_runnable_cache_ttl_seconds()
+            _write_cached_runnable_verification(
+                cache_key=cache_key or "",
+                workflow_id=workflow_id,
+                definition_hash=definition_hash,
+                verification=verification_with_telemetry,
+                now_monotonic=now_monotonic,
+                ttl_seconds=ttl_seconds,
+            )
+            return verification_with_telemetry
 
         action_registry = (
             action_registry_override

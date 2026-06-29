@@ -3356,6 +3356,47 @@ def _evaluate_user_happiness(
 
     lowered_response = response_text.lower()
     tool_names = _collect_tool_names(diagnostics, llm_debug_data)
+    tool_observations = _collect_action_tool_observations(
+        summary={
+            "response": {
+                "background_task_status": generate_payload.get(
+                    "background_task_status"
+                ),
+                "background_task_timeout_reconciliation": generate_payload.get(
+                    "background_task_timeout_reconciliation"
+                ),
+            }
+        },
+        llm_debug_data=llm_debug_data,
+    )
+    successful_observed_tools = {
+        _safe_text(observation.get("tool")).lower()
+        for observation in tool_observations
+        if _safe_text(observation.get("tool"))
+        and (
+            _safe_text(observation.get("status")).lower()
+            in {"ok", "success", "succeeded", "completed", "true"}
+        )
+    }
+    for observation in tool_observations:
+        tool_name = _safe_text(observation.get("tool"))
+        if not tool_name:
+            continue
+        status = _safe_text(observation.get("status")).lower()
+        error_code = _safe_text(observation.get("error_code"))
+        error_text = _safe_text(observation.get("error"))
+        failed = bool(error_code or error_text) or status in {
+            "error",
+            "failed",
+            "failure",
+            "false",
+        }
+        if not failed or tool_name.lower() in successful_observed_tools:
+            continue
+        detail = error_code or error_text or status
+        reasons.append(
+            f"Tool {tool_name} failed without a later successful observation: {detail}."
+        )
     requires_tool_use = bool(prompt_entry.get("requires_tool_use"))
     allows_grounded_empty_result = bool(
         prompt_entry.get("allows_grounded_empty_result")

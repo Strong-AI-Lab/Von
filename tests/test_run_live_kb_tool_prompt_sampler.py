@@ -230,6 +230,50 @@ def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
     assert any("Dispatch failed" in reason for reason in evaluation["reasons"])
 
 
+def test_evaluate_user_happiness_flags_unrecovered_tool_observation_error() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "arxiv_ingest",
+            "prompt": "Ingest https://arxiv.org/abs/2406.15341 into Von.",
+            "knowledge_surfaces": ["turn_context"],
+        },
+        generate_payload={
+            "response": "Linked concept: #V#write_tool_policy_workflow.",
+        },
+        llm_debug_data={
+            "tool_invocations": [
+                {
+                    "tool": "workflow_execute",
+                    "status": "error",
+                    "error_code": "workflow_not_runnable",
+                }
+            ],
+            "tool_observation_ledger": {
+                "schema_version": sampler.TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
+                "observations": [
+                    {
+                        "tool": "workflow_execute",
+                        "status": "error",
+                        "error_code": "workflow_not_runnable",
+                        "error": (
+                            "Workflow 'arxiv_paper_representation_ingestion' "
+                            "is not runnable; instance was not created."
+                        ),
+                    }
+                ],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "Tool workflow_execute failed without a later successful observation"
+        in reason
+        for reason in evaluation["reasons"]
+    )
+
+
 def test_evaluate_user_happiness_flags_partial_completion_gate() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={
