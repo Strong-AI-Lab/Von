@@ -137,6 +137,39 @@ recovery and success policy. If the harder path is genuinely required, record
 the safety or capability reason in the Jira task and in telemetry-visible
 diagnostics.
 
+### 3.2 Contracts as adaptive coordination agreements
+
+In Von, "contract" has two meanings. For safety, security, tool schemas, storage
+invariants, namespace propagation, and destructive mutation boundaries, a
+contract is a hard interface or guardrail.
+
+For workflow intent, expected outcomes, representation profiles, prompt guidance,
+routing evidence, and completion criteria, a contract is better understood as a
+represented coordination agreement or memorandum of understanding. It states the
+current shared expectation: what the system is probably trying to do, which
+affordances look relevant, what evidence would normally count as success, and
+what should be made visible for diagnosis.
+
+These behavioural agreements must remain inspectable, revisable, and adaptable
+case by case by the LLM or ML policy using current evidence. They should guide
+model judgement, not replace it with hidden Python enforcement. If the model
+departs from one, the system should preserve the reason and evidence in
+telemetry rather than treating every departure as a violation.
+
+Before adding or enforcing a contract-like artefact, ask:
+
+- Is this a hard safety/interface invariant, or an adaptive behavioural
+  agreement?
+- Does this make it easier or harder for a capable model to inspect, recover,
+  revise its plan, and succeed?
+- Is Python merely validating shape, safety, availability, or execution
+  boundaries, or is it silently enforcing authored task policy?
+
+Prefer terms such as "agreement", "profile", "expectation", "guidance",
+"evidence expectation", or "completion memorandum" in new human-facing docs when
+the artefact is meant to guide intelligent adaptation rather than impose a hard
+interface.
+
 ## 4. Workflow, prompt, and KB authority
 
 ### 4.1 Before coding behaviour changes
@@ -178,6 +211,9 @@ Pause and rethink if you are about to introduce:
 - Python branch tables that emit user-facing wording, follow-up phrasing, recovery summaries, or "what to say when X" copy per failure category, mode, or persona
 - Python branches keyed on a new user-controllable mode/flag/preference whose effect is user-facing semantics rather than wiring
 - domain-specific Python services or tools whose main job is to orchestrate Vontology mutations that a workflow/prompt could plan from represented predicates and tool metadata
+- turning adaptive workflow, prompt, expected-outcome, or representation
+  agreements into deterministic Python gates that prevent model-led
+  interpretation, recovery, or justified case-by-case departure
 - treating an existing legacy Python registry, default-metadata table, or branch table as precedent for adding one more case-specific policy path
 - starting a workflow-authoritative task by extending a domain-specific workflow handler or verifier before proving the represented workflow/tool-language surface cannot own the behaviour
 
