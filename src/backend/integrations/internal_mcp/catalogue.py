@@ -14831,6 +14831,23 @@ def _workflow_list_definitions(**kwargs):
 
     limit = min(int(kwargs.get("limit", 50)), 200)
     requested_workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
+    raw_metadata_mode = (
+        _clean_optional_string(kwargs.get("metadata_mode")) or "auto"
+    ).lower()
+    valid_metadata_modes = {"auto", "fast", "authoritative"}
+    if raw_metadata_mode not in valid_metadata_modes:
+        return make_error_response(
+            "invalid_metadata_mode",
+            (
+                "metadata_mode must be one of auto, fast, or authoritative for "
+                "workflow_list_definitions."
+            ),
+            details={
+                "metadata_mode": raw_metadata_mode,
+                "valid_metadata_modes": sorted(valid_metadata_modes),
+            },
+        )
+    authoritative_metadata_limit = 10
 
     try:
         # Diagnostics should be read-only: avoid bootstrap writes on introspection
@@ -14840,14 +14857,32 @@ def _workflow_list_definitions(**kwargs):
         if requested_workflow_id:
             ids = [wid for wid in ids if wid == requested_workflow_id]
 
-        # Enriched descriptions
+        should_resolve_authoritative_metadata = False
+        metadata_reason_code = "fast_bulk_listing_default"
+        if raw_metadata_mode == "fast":
+            metadata_reason_code = "fast_metadata_requested"
+        elif requested_workflow_id:
+            should_resolve_authoritative_metadata = True
+            metadata_reason_code = "exact_workflow_id_authoritative_metadata"
+        elif raw_metadata_mode == "authoritative":
+            if limit <= authoritative_metadata_limit:
+                should_resolve_authoritative_metadata = True
+                metadata_reason_code = "bounded_authoritative_metadata_requested"
+            else:
+                metadata_reason_code = "authoritative_metadata_limit_exceeded"
+
+        # Enriched descriptions. Exact workflow lookups can hydrate Vontology
+        # metadata while preserving lazy definition state; broad listings stay
+        # fast unless explicitly requested with a bounded limit.
         definitions = []
         for wid in ids[:limit]:
             definitions.append(
                 build_workflow_listing_entry(
                     registry=registry,
                     workflow_id=wid,
-                    resolve_vontology_metadata=False,
+                    resolve_vontology_metadata=should_resolve_authoritative_metadata,
+                    metadata_mode=raw_metadata_mode,
+                    metadata_reason_code=metadata_reason_code,
                 )
             )
 
@@ -14862,6 +14897,13 @@ def _workflow_list_definitions(**kwargs):
             "definitions": definitions,
             "count": len(definitions),
             "workflow_id_filter": requested_workflow_id,
+            "metadata_resolution_summary": {
+                "schema_version": "workflow_listing_metadata_resolution_summary.v1",
+                "requested_mode": raw_metadata_mode,
+                "authoritative_metadata_limit": authoritative_metadata_limit,
+                "resolved_vontology_metadata": should_resolve_authoritative_metadata,
+                "reason_code": metadata_reason_code,
+            },
             "parity_inventory": get_or_build_workflow_registry_inventory_snapshot(
                 registry=registry,
                 allow_sync_build=False,
@@ -31939,6 +31981,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 optional={
                     "limit": int,
                     "workflow_id": (str, type(None)),
+                    "metadata_mode": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="List available workflow definitions.",

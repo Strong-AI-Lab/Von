@@ -503,12 +503,18 @@ def test_workflow_list_definitions_filters_by_workflow_id(monkeypatch):
         "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
         lambda registry, allow_sync_build=False: {"inventory": "ok"},
     )
-    monkeypatch.setattr(
-        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
-        lambda registry, workflow_id, **kwargs: {
+    listing_kwargs = {}
+
+    def _build_listing_entry(registry, workflow_id, **kwargs):
+        listing_kwargs.update(kwargs)
+        return {
             "workflow_id": workflow_id,
             "name": workflow_id,
-        },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
+        _build_listing_entry,
     )
     monkeypatch.setattr(
         "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
@@ -531,6 +537,81 @@ def test_workflow_list_definitions_filters_by_workflow_id(monkeypatch):
     assert result["workflow_id_filter"] == "#V#wf_beta"
     assert result["count"] == 1
     assert result["definitions"] == [{"workflow_id": "#V#wf_beta", "name": "#V#wf_beta"}]
+    assert listing_kwargs["resolve_vontology_metadata"] is True
+    assert listing_kwargs["metadata_mode"] == "auto"
+    assert listing_kwargs["metadata_reason_code"] == (
+        "exact_workflow_id_authoritative_metadata"
+    )
+    assert result["metadata_resolution_summary"]["requested_mode"] == "auto"
+    assert result["metadata_resolution_summary"]["resolved_vontology_metadata"] is True
+
+
+def test_workflow_list_definitions_authoritative_metadata_requires_bounded_limit(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    class _StubRegistry:
+        def all_workflow_ids(self):
+            return ["#V#wf_alpha", "#V#wf_beta"]
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda defer_parity_work=True: _StubRegistry(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
+        lambda registry, allow_sync_build=False: {"inventory": "ok"},
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
+        lambda: {"baseline": True},
+    )
+    monkeypatch.setattr(
+        cat,
+        "build_workflow_surface_capability_matrix",
+        lambda internal_method_names=None: {"capabilities": []},
+    )
+    monkeypatch.setattr(
+        cat,
+        "build_default_catalogue",
+        lambda: SimpleNamespace(list_methods=lambda: ["workflow_list_definitions"]),
+    )
+
+    listing_calls = []
+
+    def _build_listing_entry(registry, workflow_id, **kwargs):
+        listing_calls.append((workflow_id, dict(kwargs)))
+        return {"workflow_id": workflow_id}
+
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
+        _build_listing_entry,
+    )
+
+    bounded = cat._workflow_list_definitions(
+        metadata_mode="authoritative",
+        limit=2,
+    )
+
+    assert bounded["success"] is True
+    assert bounded["metadata_resolution_summary"]["requested_mode"] == "authoritative"
+    assert bounded["metadata_resolution_summary"]["resolved_vontology_metadata"] is True
+    assert {call[1]["resolve_vontology_metadata"] for call in listing_calls} == {True}
+
+    listing_calls.clear()
+    broad = cat._workflow_list_definitions(
+        metadata_mode="authoritative",
+        limit=50,
+    )
+
+    assert broad["success"] is True
+    assert broad["metadata_resolution_summary"]["requested_mode"] == "authoritative"
+    assert broad["metadata_resolution_summary"]["resolved_vontology_metadata"] is False
+    assert broad["metadata_resolution_summary"]["reason_code"] == (
+        "authoritative_metadata_limit_exceeded"
+    )
+    assert {call[1]["resolve_vontology_metadata"] for call in listing_calls} == {False}
 
 
 def test_workflow_list_use_episodes_returns_filtered_payload(monkeypatch):

@@ -20,6 +20,9 @@ from .workflow_registry import WorkflowRegistry
 
 _PENDING_DEFINITION_IDENTITY_REASON = "lazy_definition_not_loaded"
 _PENDING_DEFINITION_IDENTITY_BUILD_STATE = "pending_lazy_definition"
+WORKFLOW_LISTING_METADATA_RESOLUTION_SCHEMA_VERSION = (
+    "workflow_listing_metadata_resolution.v1"
+)
 
 
 def build_pending_workflow_definition_identity(
@@ -50,6 +53,8 @@ def build_workflow_listing_entry(
     registry: WorkflowRegistry,
     workflow_id: str,
     resolve_vontology_metadata: bool = True,
+    metadata_mode: str | None = None,
+    metadata_reason_code: str | None = None,
 ) -> dict[str, Any]:
     """Build a workflow-listing summary without forcing lazy definition loads."""
 
@@ -120,6 +125,20 @@ def build_workflow_listing_entry(
             source=source,
         )
 
+    effective_metadata_mode = (
+        "authoritative" if bool(resolve_vontology_metadata) else "fast"
+    )
+    requested_metadata_mode = str(metadata_mode or effective_metadata_mode).strip()
+    if not requested_metadata_mode:
+        requested_metadata_mode = effective_metadata_mode
+    reason_code = str(metadata_reason_code or "").strip()
+    if not reason_code:
+        reason_code = (
+            "vontology_metadata_resolved"
+            if bool(resolve_vontology_metadata)
+            else "fast_registration_metadata_only"
+        )
+
     return {
         "workflow_id": workflow_id,
         "description": description,
@@ -131,10 +150,20 @@ def build_workflow_listing_entry(
         "background_launch_policy_source": background_launch_policy_source,
         "definition_identity": definition_identity,
         "definition_loaded": definition is not None,
+        "metadata_resolution": {
+            "schema_version": WORKFLOW_LISTING_METADATA_RESOLUTION_SCHEMA_VERSION,
+            "requested_mode": requested_metadata_mode,
+            "effective_mode": effective_metadata_mode,
+            "resolved_vontology_metadata": bool(resolve_vontology_metadata),
+            "definition_loaded": definition is not None,
+            "description_source": description_source,
+            "reason_code": reason_code,
+        },
     }
 
 
 __all__ = [
+    "WORKFLOW_LISTING_METADATA_RESOLUTION_SCHEMA_VERSION",
     "build_pending_workflow_definition_identity",
     "build_workflow_listing_entry",
 ]
