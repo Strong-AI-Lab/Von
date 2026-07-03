@@ -406,6 +406,147 @@ def test_classify_replay_passes_when_expected_workflow_and_projection_seen() -> 
     assert analysis["missing_contract_ids"] == []
 
 
+def test_classify_replay_ignores_gmail_arxiv_progress_fact_names() -> None:
+    case = replay.ReplayCase(
+        case_id="arxiv-paper-representation",
+        prompt="Ingest https://arxiv.org/abs/2406.15341",
+        expected_workflow_id="#V#arxiv_paper_representation_workflow",
+        expected_progress_fact_ids=(),
+        expected_contract_ids=(),
+    )
+
+    analysis = replay.classify_replay(
+        case=case,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={},
+        task_evidence={
+            "last_task_status": {"status": "completed"},
+            "task_result": {
+                "result": {
+                    "response_text": (
+                        "Verified workflow experience profile concept: "
+                        "#V#workflow_llm_experience_profile_v_conversation_turn_execution_workflow_gpt_5_4_nano."
+                    )
+                }
+            },
+            "thinking_card_progress_facts": [
+                {
+                    "fact_id": "arxiv_paper_title",
+                    "contract_id": "#V#gmail_arxiv_paper_title_progress_fact",
+                },
+                {
+                    "fact_id": "arxiv_paper_id",
+                    "contract_id": "#V#gmail_arxiv_metadata_arxiv_id_progress_fact",
+                },
+            ],
+        },
+        selected_workflow_ids=["#V#arxiv_paper_representation_workflow"],
+        observed_workflow_ids=["#V#arxiv_paper_representation_workflow"],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "pass"
+    assert analysis["blocker"] is None
+
+
+def test_classify_replay_ignores_gmail_auth_text_in_llm_prompts() -> None:
+    case = replay.ReplayCase(
+        case_id="arxiv-paper-representation",
+        prompt="Ingest https://arxiv.org/abs/2406.15341",
+        expected_workflow_id="#V#arxiv_paper_representation_workflow",
+        expected_progress_fact_ids=(),
+        expected_contract_ids=(),
+    )
+
+    analysis = replay.classify_replay(
+        case=case,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={},
+        task_evidence={
+            "last_task_status": {"status": "completed"},
+            "progress_snapshots": [
+                {
+                    "diagnostic_events": [
+                        {
+                            "llm_request": {
+                                "context_messages": [
+                                    {
+                                        "content": {
+                                            "text": (
+                                                "AUTHENTICATION STATUS: Authenticated. "
+                                                "Use Gmail tools only when the user asks "
+                                                "for mail; if not authenticated, explain "
+                                                "that OAuth tokens are required."
+                                            )
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "stage_diagnostics": [
+                        {
+                            "latest_llm_exchange": {
+                                "prompt_preview": {
+                                    "text": (
+                                        "Prompt text says Gmail OAuth tokens may "
+                                        "be required if mail is not connected."
+                                    )
+                                }
+                            }
+                        }
+                    ],
+                }
+            ],
+        },
+        selected_workflow_ids=["#V#arxiv_paper_representation_workflow"],
+        observed_workflow_ids=["#V#arxiv_paper_representation_workflow"],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "pass"
+    assert analysis["blocker"] is None
+
+
+def test_classify_replay_reports_explicit_gmail_oauth_failure_text() -> None:
+    case = replay.ReplayCase(
+        case_id="generic-gmail-posthoc-failure",
+        prompt="Inspect Gmail",
+        expected_workflow_id="#V#tool_calling_workflow",
+        expected_progress_fact_ids=(),
+        expected_contract_ids=(),
+    )
+
+    analysis = replay.classify_replay(
+        case=case,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={},
+        task_evidence={
+            "last_task_status": {"status": "completed"},
+            "task_result": {
+                "result": {
+                    "response_text": (
+                        "Gmail OAuth token is missing; the Gmail profile is not "
+                        "authenticated."
+                    )
+                }
+            },
+        },
+        selected_workflow_ids=["#V#tool_calling_workflow"],
+        observed_workflow_ids=["#V#tool_calling_workflow"],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "gmail_oauth_or_profile_blocker"
+
+
 def test_classify_replay_reports_selector_blocker_before_running_timeout() -> None:
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
