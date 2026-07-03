@@ -367,8 +367,8 @@ def _ensure_conversation_turn_prompt_support(
                 "Never invent capability-shaped tool names",
                 "workflow_concept_ids",
                 "`conditional_required_tools`",
-                '"conditional_required_tools":["workflow_execute"]',
-                "Do not return only Gmail list tools",
+                "put `workflow_execute` in `conditional_required_tools`",
+                "Do not substitute Gmail listing, reading, or label-modification tools",
                 "#V#arxiv_paper_representation_workflow",
                 "#V#scholarly_article_metadata_representation_workflow",
                 "Distinguish prior *referents* from prior *obligations*",
@@ -433,8 +433,17 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_SELECTOR_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _NARRATION_PROMPT_CONCEPT_ID
+    if (
+        force_prompt_seed
+        or not prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID)
+        or _prompt_seed_needs_refresh(
+            _NARRATION_PROMPT_CONCEPT_ID,
+            required_markers=(
+                "Grounding a concrete result to the right target",
+                "verified this turn",
+                "Do not collapse a multi-target request to a single concept",
+            ),
+        )
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_NARRATION_PROMPT_CONCEPT_ID,

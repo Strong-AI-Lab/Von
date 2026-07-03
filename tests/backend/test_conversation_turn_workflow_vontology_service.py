@@ -178,8 +178,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         '"required_tools":["gmail_list_profiles","gmail_list_messages","gmail_get_message"]'
         in expected_outcome_text
     )
-    assert "Do not return only Gmail list tools" in expected_outcome_text
-    assert '"conditional_required_tools":["workflow_execute"]' in (
+    assert (
+        "Do not substitute Gmail listing, reading, or label-modification tools"
+        in expected_outcome_text
+    )
+    assert "put `workflow_execute` in `conditional_required_tools`" in (
         expected_outcome_text
     )
     assert "read-only Jira retrieval" in expected_outcome_text
@@ -463,8 +466,11 @@ def test_expected_outcome_prompt_refresh_markers_cover_conditional_tools(
 
     markers = captured_markers[EXPECTED_OUTCOME_PROMPT_CONCEPT_ID]
     assert "`conditional_required_tools`" in markers
-    assert '"conditional_required_tools":["workflow_execute"]' in markers
-    assert "Do not return only Gmail list tools" in markers
+    assert "put `workflow_execute` in `conditional_required_tools`" in markers
+    assert (
+        "Do not substitute Gmail listing, reading, or label-modification tools"
+        in markers
+    )
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(

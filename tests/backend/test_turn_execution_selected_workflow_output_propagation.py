@@ -1578,3 +1578,63 @@ def test_selected_workflow_renderer_preserves_subworkflow_result_response() -> N
     )
 
     assert response == "Here is the requested mail review table."
+
+
+def test_selected_workflow_renderer_grounds_concept_lines_in_this_turn_child_result() -> (
+    None
+):
+    # JVNAUTOSCI-2564: an aggregate/session-influenced payload (here the child's
+    # completion_report) carries a STALE concept handle from an earlier target,
+    # while the child_result_snapshot holds THIS turn's actually verified handles.
+    # The rendered response must lead with this turn's verified concept, not the
+    # stale one that is merely salient elsewhere. Domain-agnostic identifiers.
+    response = render_selected_workflow_user_response(
+        selected_workflow_id="#V#representation_workflow",
+        child_completed=True,
+        final_state="#V#workflow_step_representation_workflow_completed",
+        failure_detail=None,
+        child_outputs={
+            "completion_report": {
+                "paper_concept_id": "#V#prior_target_concept_stale",
+                "file_copy_concept_id": "#V#prior_file_copy_stale",
+            },
+        },
+        child_result_snapshot={
+            "paper_concept_id": "#V#this_turn_verified_concept",
+            "file_copy_concept_id": "#V#this_turn_verified_file_copy",
+        },
+    )
+
+    assert isinstance(response, str)
+    assert "#V#this_turn_verified_concept" in response
+    assert "#V#this_turn_verified_file_copy" in response
+    # The stale prior-target concept must not be presented as this turn's result.
+    assert "#V#prior_target_concept_stale" not in response
+    assert "#V#prior_file_copy_stale" not in response
+    # This turn's verified concept leads the artefact evidence.
+    assert response.index("#V#this_turn_verified_concept") < (
+        response.index("prior") if "prior" in response else len(response)
+    )
+
+
+def test_selected_workflow_renderer_uses_aggregate_handles_when_no_child_snapshot() -> (
+    None
+):
+    # When there is no child_result_snapshot (e.g. a non-delegating workflow),
+    # the aggregate payload handles are still surfaced unchanged — the fix only
+    # lets an authoritative this-turn snapshot win, it does not drop evidence.
+    response = render_selected_workflow_user_response(
+        selected_workflow_id="#V#representation_workflow",
+        child_completed=True,
+        final_state="#V#workflow_step_representation_workflow_completed",
+        failure_detail=None,
+        child_outputs={
+            "completion_report": {
+                "paper_concept_id": "#V#only_available_concept",
+            },
+        },
+        child_result_snapshot=None,
+    )
+
+    assert isinstance(response, str)
+    assert "#V#only_available_concept" in response
