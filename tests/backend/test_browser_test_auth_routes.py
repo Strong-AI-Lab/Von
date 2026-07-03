@@ -95,7 +95,15 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
         },
     )
 
-    def _fake_login(window_session_id=None):
+    login_calls = []
+
+    def _fake_login(window_session_id=None, refresh_fixture=None):
+        login_calls.append(
+            {
+                "window_session_id": window_session_id,
+                "refresh_fixture": refresh_fixture,
+            }
+        )
         session["user_email"] = "zhanvonwitbrock@gmail.com"
         session["google_user_info"] = {
             "name": "Zhan von Witbrock",
@@ -115,6 +123,8 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
             "active_chat_session_id": "browser-fixture-messages-acceptance",
             "fixture": {
                 "fixture_id": "browser_user_view.v1",
+                "status": "not_refreshed",
+                "refresh_requested": False,
                 "messages": {"total": 3, "created": 3, "reused": 0},
             },
         }
@@ -136,3 +146,9 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
     assert payload["organisation"]["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
     assert payload["window_session_id"] == "ws_browser_test"
     assert payload["fixture"]["messages"]["total"] == 3
+    assert login_calls == [
+        {
+            "window_session_id": "ws_browser_test",
+            "refresh_fixture": None,
+        }
+    ]

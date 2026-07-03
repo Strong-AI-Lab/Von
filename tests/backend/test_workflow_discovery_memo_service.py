@@ -146,6 +146,59 @@ def test_turn_workflow_discovery_memo_invalidates_on_contract_change(
     assert calls == 2
 
 
+def test_turn_workflow_discovery_memo_does_not_cache_operational_empty_result(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda *, latency_sensitive=False: _runtime_state("v1"),
+    )
+    calls = 0
+
+    def _discover(user_input: str, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "query": user_input,
+            "matches": [],
+            "candidates": [],
+            "candidate_count": 0,
+            "match_count": 0,
+            "errors": [
+                "capability_index_wait_timed_out",
+                "capability_index_build_in_progress",
+            ],
+            "match_absence_reason": (
+                "capability_index_wait_timed_out_build_in_progress"
+            ),
+        }
+
+    first = discover_workflows_for_turn_memoized(
+        "Represent this arXiv paper.",
+        namespace="#V#user@org",
+        turn_scope="turn-1",
+        discovery_func=_discover,
+    )
+    second = discover_workflows_for_turn_memoized(
+        "Represent this arXiv paper.",
+        namespace="#V#user@org",
+        turn_scope="turn-1",
+        discovery_func=_discover,
+    )
+
+    assert calls == 2
+    assert first is not None
+    assert second is not None
+    assert first["workflow_discovery_cache"]["cache_hit"] is False
+    assert second["workflow_discovery_cache"]["cache_hit"] is False
+    assert first["workflow_discovery_cache"]["cache_skipped_reason"] == (
+        "zero_candidate_operational_blocker"
+    )
+    assert second["workflow_discovery_cache"]["cache_skipped_reason"] == (
+        "zero_candidate_operational_blocker"
+    )
+
+
 def test_turn_workflow_discovery_memo_ranks_with_requested_query(
     monkeypatch,
 ) -> None:

@@ -353,10 +353,12 @@ let footerDbRetryTimerId = null;
 let footerDbLoadGeneration = 0;
 let footerServerReachability = null;
 let footerLlmExecutionRefreshScheduled = false;
+let footerWorkflowCapabilityRetryTimerId = null;
 const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
 const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
 const FOOTER_DB_RETRY_MIN_MS = 1500;
 const FOOTER_DB_RETRY_MAX_MS = 20000;
+const FOOTER_WORKFLOW_CAPABILITY_RETRY_MS = 60000;
 
 function normaliseFooterServerReachability(value) {
   return (typeof value === 'boolean') ? value : null;
@@ -464,6 +466,25 @@ function clearFooterDbRetryTimer() {
     clearTimeout(footerDbRetryTimerId);
     footerDbRetryTimerId = null;
   }
+}
+
+function clearFooterWorkflowCapabilityRetryTimer() {
+  if (footerWorkflowCapabilityRetryTimerId) {
+    clearTimeout(footerWorkflowCapabilityRetryTimerId);
+    footerWorkflowCapabilityRetryTimerId = null;
+  }
+}
+
+function scheduleFooterWorkflowCapabilityRefresh() {
+  clearFooterWorkflowCapabilityRetryTimer();
+  const inJest = typeof globalThis.process !== 'undefined' && globalThis.process?.env?.JEST_WORKER_ID;
+  if (inJest) return;
+  footerWorkflowCapabilityRetryTimerId = setTimeout(() => {
+    footerWorkflowCapabilityRetryTimerId = null;
+    if (document.getElementById('modelInfoFooter')) {
+      void setModelInfoFooterText();
+    }
+  }, FOOTER_WORKFLOW_CAPABILITY_RETRY_MS);
 }
 
 function normaliseFooterTelemetryStrings(values) {
@@ -888,6 +909,77 @@ export function openSettingsForModelControls() {
   return openSettingsTabAndFocus('von:focus-model-settings');
 }
 
+export function openSettingsForWorkflowCapabilityIndexStatus() {
+  return openSettingsTabAndFocus('von:focus-workflow-capability-index-status');
+}
+
+function normaliseWorkflowCapabilityIndexFooterStatus(report) {
+  if (!report || typeof report !== 'object') return null;
+  if (report.ready === true) return { ready: true };
+
+  const status = (typeof report.status === 'string' && report.status.trim())
+    ? report.status.trim()
+    : 'not_ready';
+  const summary = (typeof report.summary === 'string' && report.summary.trim())
+    ? report.summary.trim()
+    : 'Workflow capability index not ready.';
+  const detail = (typeof report.detail === 'string' && report.detail.trim())
+    ? report.detail.trim()
+    : 'Represented workflow discovery cannot rely on the authoritative capability index.';
+  const namespaceState = report.namespace_state && typeof report.namespace_state === 'object'
+    ? report.namespace_state
+    : null;
+  const namespaceDetail = (typeof namespaceState?.detail === 'string' && namespaceState.detail.trim())
+    ? namespaceState.detail.trim()
+    : '';
+  const namespaceStatus = (typeof namespaceState?.status === 'string' && namespaceState.status.trim())
+    ? namespaceState.status.trim()
+    : '';
+  const querySurfaceReady = report.query_surface_ready === true;
+  const userVisibleSeverity = (typeof report.user_visible_severity === 'string' && report.user_visible_severity.trim())
+    ? report.user_visible_severity.trim().toLowerCase()
+    : 'error';
+  const severity = userVisibleSeverity === 'ok' ? 'warning' : 'fatal';
+  const labelMap = {
+    building: 'building',
+    rebuilding: 'rebuilding',
+    warming: 'warming',
+    error: 'error',
+    rebuild_required: 'rebuild required',
+    not_ready: 'unavailable',
+  };
+  const displayStatus = labelMap[status] || status.replace(/_/g, ' ');
+  const titleParts = [
+    'Represented workflow discovery is not fully available.',
+    'Click to open RAG & workflow index status.',
+    `Status: ${displayStatus}`,
+    `Summary: ${summary}`,
+    `Detail: ${detail}`,
+  ];
+  if (Number.isFinite(Number(report.size))) {
+    titleParts.push(`Indexed workflow entries: ${Number(report.size)}`);
+  }
+  titleParts.push(`Query surface ready: ${querySurfaceReady ? 'yes' : 'no'}`);
+  if (namespaceStatus) titleParts.push(`Namespace status: ${namespaceStatus}`);
+  if (namespaceDetail) titleParts.push(`Namespace detail: ${namespaceDetail}`);
+  if (typeof report.last_error === 'string' && report.last_error.trim()) {
+    titleParts.push(`Last error: ${report.last_error.trim()}`);
+  }
+  if (typeof report.query_surface_last_error === 'string' && report.query_surface_last_error.trim()) {
+    titleParts.push(`Query warm-up error: ${report.query_surface_last_error.trim()}`);
+  }
+
+  return {
+    ready: false,
+    status,
+    displayStatus,
+    severity,
+    summary,
+    detail,
+    title: titleParts.join('\n'),
+  };
+}
+
 export async function setModelInfoFooterText() {
   const footer = document.getElementById('modelInfoFooter');
   if (!footer) return;
@@ -896,6 +988,7 @@ export async function setModelInfoFooterText() {
   footerDbLoadGeneration += 1;
   const dbLoadGeneration = footerDbLoadGeneration;
   clearFooterDbRetryTimer();
+  clearFooterWorkflowCapabilityRetryTimer();
 
   const settings = await getSettings();
   if (!settings || Object.keys(settings).length === 0) {
@@ -941,6 +1034,7 @@ export async function setModelInfoFooterText() {
   }
 
   const executionTelemetry = readLatestLlmExecutionTelemetry();
+  const workflowCapabilityStatus = normaliseWorkflowCapabilityIndexFooterStatus(settings.workflow_capability_index);
 
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
@@ -1177,6 +1271,25 @@ export async function setModelInfoFooterText() {
     placeholder.appendChild(label);
     placeholder.appendChild(value);
     segments.push(placeholder);
+  }
+
+  if (workflowCapabilityStatus && workflowCapabilityStatus.ready === false) {
+    const workflowIndexSegment = makeActionButton(
+      'Workflow Index',
+      workflowCapabilityStatus.displayStatus,
+      () => { openSettingsForWorkflowCapabilityIndexStatus(); },
+      {
+        ariaLabel: 'Open workflow capability index status',
+        title: workflowCapabilityStatus.title,
+      }
+    );
+    workflowIndexSegment.classList.add(
+      'workflow-index-status-badge',
+      workflowCapabilityStatus.severity === 'fatal' ? 'fatal' : 'warning',
+    );
+    segments.push(workflowIndexSegment);
+    readinessIssues.add('workflow capability index');
+    scheduleFooterWorkflowCapabilityRefresh();
   }
 
   // Admin safety signal: show a persistent badge when write-tool conservatism is enabled.

@@ -329,7 +329,10 @@ def upsert_text_for_concept(
 
     if relation_created:
         _invalidate_stats_for_predicate_change(predicate)
-    if relation_created or context_updated:
+    if relation_created:
+        # Workflow routing projections are derived from the relation text and
+        # predicate, not relation provenance/context. Context-only seed
+        # refreshes must not churn the capability index.
         _invalidate_workflow_routing_projection_for_text_relation_change(
             subject_concept_id=subject_concept_id,
             predicate=predicate,

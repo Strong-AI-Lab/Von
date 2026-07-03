@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
@@ -23,6 +24,7 @@ from typing import Any, Dict, List
 
 from .. import WorkflowRegistry
 from ..engine import WorkflowDefinition
+from ..definitions import CONVERSATION_TURN_WORKFLOW_IDS
 from ..workflow_registry import LazyWorkflowRegistration, WorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import (
@@ -57,6 +59,73 @@ _shared_workflow_registry_lock = Lock()
 _shared_workflow_registry: WorkflowRegistry | None = None
 _shared_action_registry_lock = Lock()
 _shared_action_registry: ActionRegistry | None = None
+
+
+def _core_workflow_definition_prewarm_enabled() -> bool:
+    raw_value = os.getenv("VON_CORE_WORKFLOW_PREWARM_ENABLED")
+    if raw_value is None:
+        return True
+    return _truthy_env_value(raw_value)
+
+
+def _start_core_workflow_definition_prewarm(registry: WorkflowRegistry) -> bool:
+    """Warm core turn workflow definitions outside the user request path."""
+
+    if not _core_workflow_definition_prewarm_enabled():
+        return False
+
+    workflow_ids = tuple(
+        workflow_id
+        for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS
+        if isinstance(workflow_id, str) and workflow_id.strip()
+    )
+    if not workflow_ids:
+        return False
+
+    def _prewarm() -> None:
+        start = time.monotonic()
+        loaded: list[str] = []
+        missing: list[str] = []
+        errors: dict[str, str] = {}
+        for workflow_id in workflow_ids:
+            try:
+                definition = registry.get(workflow_id)
+                if definition is None:
+                    missing.append(workflow_id)
+                else:
+                    loaded.append(workflow_id)
+            except Exception as exc:
+                errors[workflow_id] = type(exc).__name__
+                logger.debug(
+                    "[workflow_registry] Core workflow prewarm failed for %s: %s",
+                    workflow_id,
+                    exc,
+                    exc_info=True,
+                )
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        logger.info(
+            "[workflow_registry] Core workflow prewarm completed loaded=%d "
+            "missing=%d errors=%d duration_ms=%.0f",
+            len(loaded),
+            len(missing),
+            len(errors),
+            elapsed_ms,
+        )
+        if missing or errors:
+            logger.warning(
+                "[workflow_registry] Core workflow prewarm incomplete missing=%s "
+                "errors=%s",
+                missing[:10],
+                errors,
+            )
+
+    thread = threading.Thread(
+        target=_prewarm,
+        name="workflow-registry-core-prewarm",
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 def _truthy_env_value(value: str | None) -> bool:
@@ -180,6 +249,13 @@ def get_shared_workflow_registry_read_only(
         registry = _shared_workflow_registry
 
     if created_registry and registry is not None:
+        try:
+            _start_core_workflow_definition_prewarm(registry)
+        except Exception:
+            logger.debug(
+                "shared workflow registry could not start core workflow prewarm",
+                exc_info=True,
+            )
         try:
             from ...services.workflow_capability_service import (
                 prewarm_workflow_capability_index,

@@ -83,6 +83,12 @@ def health_summary() -> Dict[str, Any]:
         using_fallback=using_fallback,
     )
     effective_uri_sanitized = connection_location.get("sanitized_uri")
+    try:
+        fallback_policy = getattr(
+            _mc, "get_mongo_fallback_policy_state", lambda: {}
+        )()
+    except Exception:
+        fallback_policy = {}
     return {
         "connected": connected,
         "using_fallback": using_fallback,
@@ -90,6 +96,7 @@ def health_summary() -> Dict[str, Any]:
         "effective_uri": effective_uri_sanitized,
         "effective_uri_sanitized": effective_uri_sanitized,
         "effective_mongo_location": connection_location,
+        "fallback_policy": fallback_policy,
         "uptime_seconds": uptime,
         "metrics": metrics,
     }

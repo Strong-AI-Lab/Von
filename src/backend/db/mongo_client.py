@@ -399,6 +399,10 @@ def _mongo_auto_recovery_ping_timeout_ms() -> int:
     return _get_positive_int_env("VON_MONGO_AUTO_RECOVERY_PING_TIMEOUT_MS", 1500)
 
 
+def _mongo_dns_fallback_sticky_seconds() -> float:
+    return _get_positive_float_env("VON_MONGO_DNS_FALLBACK_STICKY_SECONDS", 300.0)
+
+
 def _mongo_server_selection_timeout_ms() -> int:
     return _get_positive_int_env("MONGO_SERVER_SELECTION_TIMEOUT_MS", 5000)
 
@@ -532,6 +536,8 @@ _mongo_client_mock = None
 _using_fallback_real = False
 _effective_uri_real = MONGO_URI  # The URI actually used to create the real client
 _last_auto_recovery_check_at = 0.0
+_dns_fallback_preferred_until_monotonic = 0.0
+_dns_fallback_preference_reason: str | None = None
 _COLLECTION_INDEXES_LOCK = threading.Lock()
 _COLLECTION_INDEXES_READY: set[tuple[int, str, str]] = set()
 
@@ -568,6 +574,81 @@ def _new_mongo_client(
     )
 
 
+def _dns_fallback_is_preferred() -> bool:
+    return bool(
+        MONGO_DNS_FALLBACK_URI
+        and _dns_fallback_preferred_until_monotonic > time.monotonic()
+    )
+
+
+def _mark_dns_fallback_preferred(reason: str) -> None:
+    """Prefer the configured direct-host Atlas fallback for a bounded window."""
+
+    global _dns_fallback_preferred_until_monotonic
+    global _dns_fallback_preference_reason
+    sticky_seconds = _mongo_dns_fallback_sticky_seconds()
+    if not MONGO_DNS_FALLBACK_URI or sticky_seconds <= 0:
+        _dns_fallback_preferred_until_monotonic = 0.0
+        _dns_fallback_preference_reason = None
+        return
+    _dns_fallback_preferred_until_monotonic = time.monotonic() + sticky_seconds
+    _dns_fallback_preference_reason = reason
+
+
+def _clear_dns_fallback_preference() -> None:
+    global _dns_fallback_preferred_until_monotonic
+    global _dns_fallback_preference_reason
+    _dns_fallback_preferred_until_monotonic = 0.0
+    _dns_fallback_preference_reason = None
+
+
+def _try_connect_uri(
+    uri: str,
+    *,
+    fallback_label: str | None = None,
+    server_selection_timeout_ms: int | None = None,
+) -> MongoClient:
+    client = _new_mongo_client(
+        uri,
+        server_selection_timeout_ms=server_selection_timeout_ms,
+    )
+    client.admin.command("ismaster")
+    if (
+        fallback_label == "dns fallback"
+        and MONGO_DNS_FALLBACK_URI
+        and uri == MONGO_DNS_FALLBACK_URI
+    ):
+        _mark_dns_fallback_preferred(f"connected via {fallback_label}")
+    elif uri == MONGO_URI:
+        _clear_dns_fallback_preference()
+    return client
+
+
+def _try_preferred_dns_fallback_first() -> bool:
+    """Connect to the direct-host Atlas fallback while the sticky window is active."""
+
+    global _mongo_client_real, _effective_uri_real, _using_fallback_real
+    if not _dns_fallback_is_preferred() or not MONGO_DNS_FALLBACK_URI:
+        return False
+    try:
+        logger.warning(
+            "[mongo_fallback] Preferring configured direct-host Mongo URI during DNS fallback recovery window."
+        )
+        _mongo_client_real = _try_connect_uri(
+            MONGO_DNS_FALLBACK_URI,
+            fallback_label="dns fallback",
+            server_selection_timeout_ms=3000,
+        )
+        _effective_uri_real = MONGO_DNS_FALLBACK_URI
+        _using_fallback_real = True
+        return True
+    except Exception as exc:
+        logger.warning("[mongo_fallback] Preferred DNS fallback connection failed: %s", exc)
+        _mongo_client_real = None
+        _clear_dns_fallback_preference()
+        return False
+
+
 def _should_run_auto_recovery_check() -> bool:
     global _last_auto_recovery_check_at
     if not _mongo_auto_recovery_enabled():
@@ -586,8 +667,12 @@ def _invalidate_real_client_for_recovery(reason: str) -> None:
     global _mongo_client_real, _effective_uri_real, _using_fallback_real
     logger.warning("[mongo_recovery] Invalidating Mongo client: %s", reason)
     _mongo_client_real = None
-    _effective_uri_real = MONGO_URI
-    _using_fallback_real = False
+    if _dns_fallback_is_preferred() and MONGO_DNS_FALLBACK_URI:
+        _effective_uri_real = MONGO_DNS_FALLBACK_URI
+        _using_fallback_real = True
+    else:
+        _effective_uri_real = MONGO_URI
+        _using_fallback_real = False
 
 
 def _ensure_active_client_is_healthy() -> None:
@@ -627,10 +712,13 @@ def get_db() -> Database | None:
 
     if _mongo_client_real is None:
         try:
+            if _try_preferred_dns_fallback_first():
+                _last_auto_recovery_check_at = time.monotonic()
+                if _mongo_client_real:
+                    print_connection_info()
+                    return _mongo_client_real[db_name]
             # Create a fresh client when none exists, or when recovery invalidated it.
-            _mongo_client_real = _new_mongo_client(MONGO_URI)
-            # The ismaster command is cheap and does not require auth.
-            _mongo_client_real.admin.command("ismaster")
+            _mongo_client_real = _try_connect_uri(MONGO_URI)
             _effective_uri_real = MONGO_URI
             _using_fallback_real = False
             _last_auto_recovery_check_at = time.monotonic()
@@ -696,6 +784,14 @@ def get_db() -> Database | None:
                         fallback_uri, server_selection_timeout_ms=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
+                    if (
+                        fallback_label == "dns fallback"
+                        and MONGO_DNS_FALLBACK_URI
+                        and fallback_uri == MONGO_DNS_FALLBACK_URI
+                    ):
+                        _mark_dns_fallback_preferred(
+                            "primary connection failure"
+                        )
                     _effective_uri_real = fallback_uri
                     _using_fallback_real = True
                     _last_auto_recovery_check_at = time.monotonic()
@@ -747,6 +843,12 @@ def get_db() -> Database | None:
                         fallback_uri, server_selection_timeout_ms=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
+                    if (
+                        fallback_label == "dns fallback"
+                        and MONGO_DNS_FALLBACK_URI
+                        and fallback_uri == MONGO_DNS_FALLBACK_URI
+                    ):
+                        _mark_dns_fallback_preferred("primary DNS/SRV error")
                     _effective_uri_real = fallback_uri
                     _using_fallback_real = True
                     _last_auto_recovery_check_at = time.monotonic()
@@ -803,6 +905,21 @@ def is_using_fallback_uri() -> bool:
     return _using_fallback_real
 
 
+def get_mongo_fallback_policy_state() -> dict[str, object]:
+    """Return paste-safe fallback/recovery state for operator diagnostics."""
+
+    remaining_seconds = max(
+        0.0, _dns_fallback_preferred_until_monotonic - time.monotonic()
+    )
+    return {
+        "dns_fallback_configured": bool(MONGO_DNS_FALLBACK_URI),
+        "dns_fallback_sticky": bool(remaining_seconds > 0),
+        "dns_fallback_sticky_seconds_remaining": round(remaining_seconds, 3),
+        "dns_fallback_sticky_seconds_configured": _mongo_dns_fallback_sticky_seconds(),
+        "dns_fallback_preference_reason": _dns_fallback_preference_reason,
+    }
+
+
 def close_connection():
     """Closes the MongoDB connection."""
     global _mongo_client_real, _mongo_client_mock, _last_auto_recovery_check_at
@@ -812,6 +929,7 @@ def close_connection():
     # mongomock doesn't require close(), but clear ref for correctness.
     _mongo_client_mock = None
     _last_auto_recovery_check_at = 0.0
+    _clear_dns_fallback_preference()
     with _COLLECTION_INDEXES_LOCK:
         _COLLECTION_INDEXES_READY.clear()
 

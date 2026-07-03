@@ -425,7 +425,10 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
     )
 
     with app.test_request_context("/von/api/auth/browser-test-login"):
-        result = service.login_browser_test_user(window_session_id="ws_fixture")
+        result = service.login_browser_test_user(
+            window_session_id="ws_fixture",
+            refresh_fixture=True,
+        )
 
     assert len(message_specs_seen) == 4
     sender_ids = {item["sender_id"] for item in message_specs_seen}
@@ -444,6 +447,72 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
         == "Workflow Reviewer Existing Alias"
     )
     assert result["fixture"]["counterparts"][1]["name"] == "Paper Scout Existing Alias"
+    assert result["fixture"]["status"] == "refreshed"
+
+
+def test_login_browser_test_user_skips_fixture_refresh_by_default(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "browser-test-secret"
+
+    config = service.BrowserTestAuthConfig(
+        enabled=True,
+        pseudouser_name="Zhan von Witbrock",
+        pseudouser_email="zhanvonwitbrock@gmail.com",
+        pseudouser_concept_id="#V#zhan_von_witbrock",
+        organisation_concept_id="#V#university_of_auckland_strong_ai_lab",
+    )
+
+    def _fake_ensure_person_concept(*, concept_id, name, email):
+        return {
+            "concept_id": concept_id,
+            "direct_concept_name": name,
+        }
+
+    fixture_calls: list[str] = []
+
+    monkeypatch.setattr(service, "get_browser_test_auth_config", lambda: config)
+    monkeypatch.setattr(service, "_refresh_fixture_on_login_default", lambda: False)
+    monkeypatch.setattr(
+        service,
+        "_ensure_org_exists",
+        lambda organisation_concept_id: {
+            "concept_id": organisation_concept_id,
+            "direct_concept_name": "University Of Auckland Strong AI Lab",
+        },
+    )
+    monkeypatch.setattr(service, "_ensure_person_concept", _fake_ensure_person_concept)
+    monkeypatch.setattr(service, "_ensure_org_membership", lambda **kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "derive_namespace",
+        lambda user_slug, org_slug: f"#V#{user_slug}@{org_slug}",
+    )
+    monkeypatch.setattr(service, "set_window_organisation", lambda **kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "set_window_chat_session",
+        lambda **kwargs: fixture_calls.append("chat_session"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_fixture_message",
+        lambda *, spec: fixture_calls.append("message"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_fixture_chat_session",
+        lambda **kwargs: fixture_calls.append("chat_history"),
+    )
+
+    with app.test_request_context("/von/api/auth/browser-test-login"):
+        result = service.login_browser_test_user(window_session_id="ws_fixture")
+
+    assert fixture_calls == []
+    assert result["active_chat_session_id"] is None
+    assert result["fixture"]["status"] == "not_refreshed"
+    assert result["fixture"]["refresh_requested"] is False
+    assert result["fixture"]["messages"]["total"] == 0
+    assert result["fixture"]["chat_sessions"]["total"] == 0
 
 
 def test_describe_browser_test_mode_surfaces_disabled_setup_hint_and_default_identity(

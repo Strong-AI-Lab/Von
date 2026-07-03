@@ -18,6 +18,29 @@ The harness does not add workflow policy to Python. Workflow-specific
 expectations are replay-case data and assertions over emitted telemetry and
 progress facts.
 
+Before submitting `/von/generate`, the harness now records and enforces the
+operational preconditions that make the replay user-equivalent:
+
+- Mongo read/write health via `/admin/db/health?probe=rw`;
+- effective session user/org context via `/von/api/session/context`;
+- target user/org model readiness via `/api/settings/llm/info`, including
+  selected Ollama model availability when the target model is local;
+- workflow capability-index availability via
+  `/api/workflows/capability-index/status`;
+- Gmail OAuth/profile readiness only for replay cases that actually require
+  Gmail.
+
+If one of these preconditions is unavailable, the report is still useful
+evidence, but it is classified as a typed blocker and the harness does not
+submit a misleading turn by default.
+
+For replay runs the login request explicitly sets `refresh_fixture=false`.
+Browser-test fixture preparation is real represented data and can be useful for
+browser user-view checks, but it is not part of the auth precondition for a
+workflow selector replay. Keeping it separate prevents login from silently
+triggering fixture writes, recommendation-workflow events, or capability-index
+rebuilds before the replay reaches `/von/generate`.
+
 ## Gmail/arXiv 2421 Case
 
 To run the motivating `JVNAUTOSCI-2421` acceptance prompt:
@@ -39,13 +62,42 @@ already proves that no configured profile or token set is available. Pass
 `--run-despite-gmail-preflight-blocker` only when deliberately gathering
 downstream selector or workflow evidence despite that known external blocker.
 
+The harness also stops before `/von/generate` when the workflow capability index
+status endpoint reports that represented workflow discovery is unavailable.
+That is a hard replay precondition: selector evidence captured while the
+authoritative discovery surface is missing is not user-equivalent evidence. The
+preflight waits through a bounded transient build/reload window before blocking,
+and records the sampled status snapshots in the JSON report.
+Pass `--run-despite-workflow-capability-preflight-blocker` only for diagnostic
+experiments that should still be classified as blocked by that precondition.
+
+For exact user-turn investigations, use an ad-hoc prompt plus explicit target
+context instead of forcing the nearest named replay case. Example:
+
+```sh
+./.venv/bin/python scripts/run_authenticated_browser_workflow_replay.py \
+  --base-url http://localhost:5001 \
+  --allow-non-agent-test-server \
+  --case jvnautosci-2560-exact-arxiv \
+  --prompt 'Please ingest https://arxiv.org/abs/2406.15341 into Von, including the normal download/file-copy path if available, then read back the represented paper concept, file-copy, and blob evidence so I can see what was stored.' \
+  --expected-workflow-id '#V#arxiv_paper_representation_workflow' \
+  --target-user-concept-id '#V#michael_witbrock' \
+  --target-organisation-concept-id '#V#university_of_auckland_strong_ai_lab' \
+  --thinking-card-mode debug \
+  --output-json tmp/jvnautosci-2560-exact-arxiv-replay.json
+```
+
 ## Evidence Captured
 
 The JSON report records:
 
 - local and server branch/commit/environment evidence;
 - browser-test auth login result and authenticated status;
-- Gmail profile/OAuth preflight;
+- target user/org session context;
+- Mongo read/write preflight;
+- effective model readiness preflight;
+- workflow capability index preflight, including user-visible blocker state;
+- Gmail profile/OAuth preflight when relevant;
 - chat session and `/von/generate` submission identifiers;
 - task terminal status and result;
 - live Thinking-card progress snapshots;
@@ -57,9 +109,15 @@ The JSON report records:
 Typed blockers include:
 
 - `browser_test_auth_blocker`;
+- `target_session_context_blocker`;
+- `database_runtime_blocker`;
+- `llm_runtime_blocker`;
+- `workflow_capability_index_blocker`;
 - `gmail_oauth_or_profile_blocker`;
+- `context_build_blocker`;
+- `workflow_action_terminal_state_blocker`;
 - `task_terminal_state_blocker`;
-- `selector_blocker`;
+- `selector_or_dispatch_blocker`;
 - `thinking_card_projection_blocker`.
 
 For the Gmail/arXiv case, a full pass requires selecting

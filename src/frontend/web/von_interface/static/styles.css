@@ -6134,6 +6134,36 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border-color: #fcd34d;
 }
 
+.workflow-index-status-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.workflow-index-status-badge.warning {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
+.workflow-index-status-badge.fatal {
+    position: relative;
+    background: #7f1d1d;
+    color: #ffffff;
+    border-color: #b91c1c;
+    animation: dbBadgeFlash 1.2s ease-in-out infinite;
+}
+
+.workflow-index-status-badge.fatal .concept-footer-button {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.45);
+    color: #ffffff;
+}
+
 /* Admin override badge (write-tool conservatism disabled) */
 .write-policy-override-badge {
     display: inline-block;

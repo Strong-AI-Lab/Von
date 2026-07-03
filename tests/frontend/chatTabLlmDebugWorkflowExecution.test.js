@@ -358,6 +358,74 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(payload.messages).toBeUndefined();
     });
 
+    test('locator falls back to hydrated top-level prompt and routing diagnostics', async () => {
+        const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
+
+        setLlmDebugDataForTurn('assistant-top-level-diagnostics', {
+            model: 'gpt-5.2-test',
+            messages: [],
+            response: 'ok',
+            prompt_preview: 'Please ingest https://arxiv.org/abs/2406.15341 into Von.',
+            workflow_routing_diagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selector_verdict: 'selected',
+                selector_source: 'selector',
+                selector: {
+                    prompt_id: '#V#chat_turn_classifier_prompt',
+                    candidate_list: {
+                        text: '- #V#tool_calling_workflow: Tool Calling Workflow',
+                        char_count: 46
+                    },
+                    response: {
+                        text: '{"workflow_id":"#V#tool_calling_workflow"}',
+                        char_count: 43
+                    }
+                }
+            },
+            turn_execution_diagnostics: {
+                generated_at_utc: '2026-07-01T16:08:05.572Z',
+                request_id: 'req-top-level-diagnostics',
+                history_location: {
+                    session_id: 'session-top-level-diagnostics',
+                    history_index: 8
+                },
+                workflow_discovery: {
+                    matches: [
+                        {
+                            concept_id: '#V#source_neutral_paper_reference_ingestion_workflow'
+                        }
+                    ]
+                }
+            }
+        });
+
+        await showLlmDebugPopup('assistant-top-level-diagnostics');
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
+
+        expect(payload.prompt_preview).toBe(
+            'Please ingest https://arxiv.org/abs/2406.15341 into Von.'
+        );
+        expect(payload.workflow_routing_diagnostics).toEqual(expect.objectContaining({
+            selected_workflow_id: '#V#tool_calling_workflow',
+            selector_verdict: 'selected',
+            selector_source: 'selector'
+        }));
+        expect(payload.workflow_routing_diagnostics.selector).toEqual(
+            expect.objectContaining({
+                prompt_id: '#V#chat_turn_classifier_prompt',
+                candidate_list: expect.objectContaining({
+                    preview: '- #V#tool_calling_workflow: Tool Calling Workflow'
+                }),
+                response: expect.objectContaining({
+                    preview: '{"workflow_id":"#V#tool_calling_workflow"}'
+                })
+            })
+        );
+    });
+
     test('copy payload keeps auxiliary traces separate from the selected-workflow trace', async () => {
         const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
 

@@ -378,9 +378,6 @@ def _authoritative_registry_fingerprint_rows(
                     {
                         "workflow_id": workflow_id,
                         "source": source,
-                        "purpose": str(
-                            getattr(registration, "purpose", "") or ""
-                        ).strip(),
                     }
                 )
     return tuple(sorted(rows_out, key=lambda item: item["workflow_id"]))
@@ -1067,31 +1064,29 @@ class WorkflowCapabilityIndex:
             )
             return False
 
-        manifest_workflow_ids = tuple(
-            sorted(str(item) for item in manifest_entries.keys())
-        )
-        registry_workflow_ids = _authoritative_registry_workflow_ids(registry)
         current_registry_fingerprint = _authoritative_registry_fingerprint_digest(
             registry
         )
         manifest_registry_fingerprint = str(
             manifest.get("registry_fingerprint_digest") or ""
         ).strip()
-        if registry_workflow_ids and manifest_workflow_ids != registry_workflow_ids:
-            _set_workflow_capability_manifest_state(
-                status="registry_workflow_set_mismatch",
-                detail=(
-                    "Authoritative workflow registry IDs differ from the "
-                    "materialised routing projection manifest."
-                ),
-                path=manifest_path,
-                digest=manifest_entry_digest,
+        if not manifest_registry_fingerprint:
+            manifest_workflow_ids = tuple(
+                sorted(str(item) for item in manifest_entries.keys())
             )
-            return False
-        if (
-            manifest_registry_fingerprint
-            and manifest_registry_fingerprint != current_registry_fingerprint
-        ):
+            registry_workflow_ids = _authoritative_registry_workflow_ids(registry)
+            if registry_workflow_ids and manifest_workflow_ids != registry_workflow_ids:
+                _set_workflow_capability_manifest_state(
+                    status="registry_workflow_set_mismatch",
+                    detail=(
+                        "Authoritative workflow registry IDs differ from the "
+                        "legacy materialised routing projection manifest."
+                    ),
+                    path=manifest_path,
+                    digest=manifest_entry_digest,
+                )
+                return False
+        elif manifest_registry_fingerprint != current_registry_fingerprint:
             _set_workflow_capability_manifest_state(
                 status="registry_fingerprint_mismatch",
                 detail=(
@@ -2367,6 +2362,10 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         **runtime_state,
         "status": status,
         "warning_level": warning_level,
+        "workflow_discovery_available": bool(ready),
+        "user_visible_blocker": not bool(ready),
+        "user_visible_severity": "ok" if ready else "error",
+        "footer_red_flag": not bool(ready),
         "summary": summary,
         "detail": detail,
         "background_initialisation": background_initialisation_event,

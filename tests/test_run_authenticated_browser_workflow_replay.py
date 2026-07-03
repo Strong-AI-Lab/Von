@@ -3,6 +3,82 @@ from __future__ import annotations
 import scripts.run_authenticated_browser_workflow_replay as replay
 
 
+def test_establish_browser_test_session_skips_fixture_refresh(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+    def _fake_request_json(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"success": True, "user_concept_id": "#V#zhan_von_witbrock"}
+
+    monkeypatch.setattr(replay, "_request_json", _fake_request_json)
+    session = _FakeSession()
+
+    result = replay.establish_browser_test_session(
+        session=session,  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        window_session_id="window-1",
+        timeout_seconds=12.0,
+    )
+
+    assert result["success"] is True
+    assert session.headers["X-Von-Window-Session"] == "window-1"
+    assert captured["kwargs"]["json"] == {
+        "window_session_id": "window-1",
+        "refresh_fixture": False,
+    }
+
+
+def test_workflow_capability_preflight_waits_through_transient_build(
+    monkeypatch,
+) -> None:
+    payloads = [
+        {
+            "ready": False,
+            "workflow_discovery_available": False,
+            "status": "building",
+            "build_in_progress": True,
+            "size": 0,
+            "detail": "Workflow capability index still building.",
+        },
+        {
+            "ready": True,
+            "workflow_discovery_available": True,
+            "status": "ready",
+            "build_in_progress": False,
+            "size": 83,
+            "detail": "Workflow capability index ready.",
+        },
+    ]
+    sleeps: list[float] = []
+
+    def _fake_request_json(*_args, **_kwargs):
+        return payloads.pop(0)
+
+    monkeypatch.setattr(replay, "_request_json", _fake_request_json)
+    monkeypatch.setattr(replay.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    preflight = replay.build_workflow_capability_preflight(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        timeout_seconds=30.0,
+        poll_interval_seconds=0.5,
+    )
+
+    assert preflight["workflow_discovery_available"] is True
+    assert preflight["preflight_wait"]["completed"] is True
+    assert preflight["preflight_wait"]["attempt_count"] == 2
+    assert [item["status"] for item in preflight["preflight_wait"]["snapshots"]] == [
+        "building",
+        "ready",
+    ]
+    assert sleeps == [0.5]
+
+
 def test_extract_progress_facts_from_nested_progress_payloads() -> None:
     payload = {
         "progress_snapshots": [
@@ -58,6 +134,9 @@ def test_build_report_uses_task_status_snapshots_for_route_and_progress_evidence
         window_session_id="window-1",
         auth_login={"success": True},
         auth_status={"authenticated": True},
+        target_session_context={"target_session_context_ready": True},
+        database_preflight={"database_runtime_available": True},
+        llm_preflight={"llm_runtime_available": True},
         gmail_preflight={"gmail_capability_ready": True},
         chat_session={},
         submission={"task_id": "task-1"},
@@ -123,6 +202,126 @@ def test_classify_replay_reports_auth_blocker_before_workflow_assertions() -> No
     assert "disabled" in analysis["blocker"]["reason"]
 
 
+def test_classify_replay_keeps_secondary_preflight_blockers_visible() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": False, "error": "Browser-test auth is disabled"},
+        auth_status={"authenticated": False},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={"last_task_status": {"status": "unknown"}},
+        selected_workflow_ids=[],
+        observed_workflow_ids=[],
+        selector_diagnostics=[],
+        progress_facts=[],
+        workflow_capability_preflight={
+            "ready": False,
+            "workflow_discovery_available": False,
+            "status": "error",
+            "summary": "Workflow capability index requires rebuild.",
+        },
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "browser_test_auth_blocker"
+    assert [item["type"] for item in analysis["precondition_blockers"]] == [
+        "browser_test_auth_blocker",
+        "workflow_capability_index_blocker",
+    ]
+    workflow_blocker = analysis["precondition_blockers"][1]
+    assert workflow_blocker["workflow_capability_preflight"]["status"] == "error"
+
+
+def test_classify_replay_reports_database_blocker_before_selector() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        database_preflight={
+            "database_runtime_available": False,
+            "connected": False,
+            "error": "Mongo read/write health was not stable.",
+        },
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={"last_task_status": {"status": "completed"}},
+        selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "database_runtime_blocker"
+    assert analysis["precondition_blockers"][0]["type"] == "database_runtime_blocker"
+
+
+def test_classify_replay_reports_llm_model_blocker_before_selector() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        llm_preflight={
+            "llm_runtime_available": False,
+            "provider": "ollama",
+            "model_checked": "gemma4:e4b",
+            "selected_model_available": False,
+            "error": "The effective replay model is not ready.",
+        },
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={"last_task_status": {"status": "completed"}},
+        selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "llm_runtime_blocker"
+    assert analysis["blocker"]["llm_preflight"]["model_checked"] == "gemma4:e4b"
+
+
+def test_apply_target_session_context_reports_mismatch(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+    def _fake_request_json(_session, method, url, **kwargs):
+        calls.append((method, url, dict(kwargs)))
+        if url.endswith("/set_user_concept"):
+            return {"status": "updated", "user_id": "#V#michael_witbrock"}
+        if url.endswith("/set_organisation"):
+            return {
+                "status": "updated",
+                "organisation_id": "#V#university_of_auckland_strong_ai_lab",
+            }
+        if url.endswith("/session/context"):
+            return {
+                "authenticated": True,
+                "user_id": "#V#zhan_von_witbrock",
+                "organisation_id": "#V#university_of_auckland_strong_ai_lab",
+                "namespace": "#V#zhan_von_witbrock@university_of_auckland_strong_ai_lab",
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(replay, "_request_json", _fake_request_json)
+    session = _FakeSession()
+
+    result = replay.apply_target_session_context(
+        session=session,  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="#V#university_of_auckland_strong_ai_lab",
+    )
+
+    assert result["target_session_context_ready"] is False
+    assert result["mismatch_reasons"] == [
+        "requested user #V#michael_witbrock but effective user is #V#zhan_von_witbrock"
+    ]
+    assert session.headers["X-User-Concept-ID"] == "#V#michael_witbrock"
+    assert [call[0] for call in calls] == ["POST", "POST", "GET"]
+
+
 def test_classify_replay_reports_gmail_profile_blocker_when_auth_ready() -> None:
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
@@ -142,6 +341,37 @@ def test_classify_replay_reports_gmail_profile_blocker_when_auth_ready() -> None
 
     assert analysis["verdict"] == "blocked"
     assert analysis["blocker"]["type"] == "gmail_oauth_or_profile_blocker"
+
+
+def test_classify_replay_reports_workflow_capability_index_blocker_before_selector() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={"last_task_status": {"status": "completed"}},
+        selected_workflow_ids=["#V#tool_calling_workflow"],
+        observed_workflow_ids=[],
+        selector_diagnostics=[
+            {"selected_workflow_id": "#V#tool_calling_workflow"}
+        ],
+        progress_facts=[],
+        workflow_capability_preflight={
+            "ready": False,
+            "workflow_discovery_available": False,
+            "status": "building",
+            "summary": "Workflow capability index still building.",
+            "detail": "Workflow discovery is waiting on the authoritative capability index.",
+        },
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "workflow_capability_index_blocker"
+    assert analysis["blocker"]["workflow_capability_preflight"]["status"] == "building"
+    assert analysis["workflow_capability_preflight"]["workflow_discovery_available"] is False
+    assert analysis["precondition_blockers"][0]["type"] == (
+        "workflow_capability_index_blocker"
+    )
 
 
 def test_classify_replay_passes_when_expected_workflow_and_projection_seen() -> None:
@@ -199,6 +429,42 @@ def test_classify_replay_reports_selector_blocker_before_running_timeout() -> No
     assert "#V#kb_mutation_postcondition_critic_workflow" in analysis["blocker"][
         "observed_workflow_ids"
     ]
+
+
+def test_classify_replay_reports_context_build_blocker_before_selector() -> None:
+    analysis = replay.classify_replay(
+        case=replay.GMAIL_ARXIV_REPLAY_CASE,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={
+            "last_task_status": {
+                "status": "cancelled",
+                "progress": {
+                    "stage": "context_build",
+                    "phase": "context_build",
+                    "subtask": "request setup",
+                },
+            }
+        },
+        selected_workflow_ids=[],
+        observed_workflow_ids=[],
+        selector_diagnostics=[
+            {"status": "running"},
+            {"phase": "context_build", "status": "thinking"},
+            {"status": "cancelled"},
+        ],
+        progress_facts=[],
+        workflow_capability_preflight={
+            "ready": True,
+            "workflow_discovery_available": True,
+            "status": "ready",
+        },
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "context_build_blocker"
+    assert "no selector candidate set" in analysis["blocker"]["reason"]
 
 
 def test_classify_replay_reports_expected_workflow_action_blocker() -> None:
