@@ -13,6 +13,9 @@ from .services.google_oauth_config import (
     load_secret_from_env_or_file,
 )
 
+_DEFAULT_GOOGLE_OAUTH_CLOCK_SKEW_SECONDS = 10
+_MAX_GOOGLE_OAUTH_CLOCK_SKEW_SECONDS = 300
+
 
 @runtime_checkable
 class CredentialsProtocol(Protocol):  # Minimal shape we rely on for static checking
@@ -40,12 +43,17 @@ class GoogleAuthService:
         )
         configure_oauthlib_insecure_transport(self.redirect_uri)
         # Optional tolerance for minor system clock differences when verifying ID tokens.
-        # Keep small (e.g., 5-10s). Default 0s to preserve strict behaviour.
+        # Google callbacks can arrive a few seconds before local time catches token iat.
         try:
-            skew_raw = os.getenv("GOOGLE_OAUTH_CLOCK_SKEW_SECONDS", "0").strip()
-            self.clock_skew_seconds = max(0, min(int(skew_raw or "0"), 300))
+            skew_raw = os.getenv(
+                "GOOGLE_OAUTH_CLOCK_SKEW_SECONDS",
+                str(_DEFAULT_GOOGLE_OAUTH_CLOCK_SKEW_SECONDS),
+            ).strip()
+            self.clock_skew_seconds = max(
+                0, min(int(skew_raw or "0"), _MAX_GOOGLE_OAUTH_CLOCK_SKEW_SECONDS)
+            )
         except Exception:
-            self.clock_skew_seconds = 0
+            self.clock_skew_seconds = _DEFAULT_GOOGLE_OAUTH_CLOCK_SKEW_SECONDS
         parsed_redirect = urlparse(self.redirect_uri)
         # Derive canonical host (scheme://host:port) from configured redirect for validation
         if parsed_redirect.scheme and parsed_redirect.netloc:

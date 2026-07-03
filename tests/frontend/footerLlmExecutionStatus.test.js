@@ -317,4 +317,43 @@ describe('footer latest LLM execution status', () => {
         expect(footerContainer.getAttribute('data-keep-title')).toBe('true');
         expect(footerContainer.title).toContain('Footer partially ready.');
     });
+
+    test('shows fatal workflow index footer badge when capability index is unavailable', async () => {
+        installFetchMock({
+            settingsPayload: {
+                resolved_llm: { provider: 'openai', model: 'gpt-5.4-mini' },
+                workflow_capability_index: {
+                    ready: false,
+                    workflow_discovery_available: false,
+                    user_visible_severity: 'error',
+                    status: 'building',
+                    summary: 'Workflow capability index still building.',
+                    detail: 'Workflow discovery is waiting on the authoritative capability index to finish building.',
+                    size: 0,
+                    query_surface_ready: false,
+                    namespace_state: {
+                        status: 'missing_index',
+                        detail: 'No persisted index exists for this namespace yet.'
+                    }
+                }
+            }
+        });
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+        await flushUiTicks();
+
+        const badge = document.querySelector('.workflow-index-status-badge');
+        const footerContainer = document.querySelector('.footer-container');
+        const button = badge?.querySelector('.concept-footer-button');
+        expect(badge).toBeTruthy();
+        expect(badge.classList.contains('fatal')).toBe(true);
+        expect(badge.textContent).toContain('Workflow Index');
+        expect(badge.textContent).toContain('building');
+        expect(button?.getAttribute('aria-label')).toBe('Open workflow capability index status');
+        expect(button?.title).toContain('Represented workflow discovery is not fully available.');
+        expect(button?.title).toContain('Namespace status: missing_index');
+        expect(footerContainer.classList.contains('footer-not-ready')).toBe(true);
+        expect(footerContainer.title).toContain('workflow capability index');
+    });
 });

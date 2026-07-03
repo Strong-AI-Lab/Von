@@ -57,11 +57,13 @@ _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _LOOPBACK_REMOTES = {"127.0.0.1", "::1", "localhost", ""}
 _BROWSER_TEST_ENV_KEYS = (
     "VON_BROWSER_TEST_AUTH_ENABLED",
+    "VON_BROWSER_TEST_REFRESH_FIXTURE_ON_LOGIN",
     "VON_BROWSER_TEST_PSEUDOUSER_NAME",
     "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
     "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
     "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
 )
+_BROWSER_TEST_FIXTURE_STABLE_SEEDED_AT = "2026-03-14T00:00:00+00:00"
 _BROWSER_TEST_RECOMMENDATION_PAPER_ID = (
     "#V#browser_test_paper_workflow_grounded_neuro_symbolic_planning"
 )
@@ -103,6 +105,10 @@ def _truthy_env(name: str, default: bool = False) -> bool:
 
 def _trimmed_env(name: str) -> str:
     return str(os.getenv(name) or "").strip()
+
+
+def _refresh_fixture_on_login_default() -> bool:
+    return _truthy_env("VON_BROWSER_TEST_REFRESH_FIXTURE_ON_LOGIN", default=False)
 
 
 def _browser_test_identity_source() -> str:
@@ -390,7 +396,7 @@ def _build_fixture_message_metadata(*, spec: Mapping[str, Any]) -> dict[str, Any
         {
             "browser_test_fixture_id": _BROWSER_TEST_FIXTURE_ID,
             "browser_test_message_key": str(spec["key"]),
-            "browser_test_seeded_at": _current_iso(),
+            "browser_test_seeded_at": _BROWSER_TEST_FIXTURE_STABLE_SEEDED_AT,
         }
     )
     target_user_concept_id = str(spec.get("target_user_concept_id") or "").strip()
@@ -481,6 +487,7 @@ def _paper_recommendation_fixture_spec(
         "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
         "decision_mode": "browser_test_fixture",
         "trigger_source": "browser_test_fixture_refresh",
+        "updated_at": _BROWSER_TEST_FIXTURE_STABLE_SEEDED_AT,
         "rationale_summary": _BROWSER_TEST_RECOMMENDATION_RATIONALE,
         "rationale": [_BROWSER_TEST_RECOMMENDATION_RATIONALE],
         "evidence": [
@@ -839,9 +846,100 @@ def _build_counterpart_specs() -> Iterable[dict[str, str]]:
     )
 
 
+def _skipped_fixture_refresh_payload(
+    *,
+    counterpart_docs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "fixture_id": _BROWSER_TEST_FIXTURE_ID,
+        "status": "not_refreshed",
+        "refresh_requested": False,
+        "refresh_on_login_default": _refresh_fixture_on_login_default(),
+        "reason": "Browser-test login established an authenticated session without refreshing fixture data.",
+        "counterparts": counterpart_docs,
+        "messages": {
+            "total": 0,
+            "created": 0,
+            "reused": 0,
+            "concept_ids": [],
+        },
+        "chat_sessions": {
+            "total": 0,
+            "created_entries": 0,
+            "sessions": [],
+        },
+    }
+
+
+def _ensure_browser_test_fixture_state(
+    *,
+    pseudouser_concept_id: str,
+    counterpart_docs: list[dict[str, Any]],
+    namespace: str,
+    organisation_concept_id: str,
+    role_in_org: str,
+) -> tuple[dict[str, Any], Optional[str]]:
+    counterpart_by_fixture_concept_id = {
+        item["fixture_concept_id"]: item for item in counterpart_docs
+    }
+    reviewer = counterpart_by_fixture_concept_id["#V#browser_test_workflow_reviewer"]
+    scout = counterpart_by_fixture_concept_id["#V#browser_test_paper_scout"]
+
+    message_results = [
+        _ensure_fixture_message(
+            spec=spec,
+        )
+        for spec in _message_fixture_specs(
+            pseudouser_concept_id=pseudouser_concept_id,
+            reviewer_concept_id=reviewer["concept_id"],
+            scout_concept_id=scout["concept_id"],
+            organisation_concept_id=organisation_concept_id,
+        )
+    ]
+    chat_results = [
+        _ensure_fixture_chat_session(
+            user_concept_id=pseudouser_concept_id,
+            namespace=namespace,
+            organisation_concept_id=organisation_concept_id,
+            role_in_org=role_in_org,
+            spec=spec,
+        )
+        for spec in _chat_fixture_specs()
+    ]
+    active_chat_session_id = chat_results[0]["session_id"] if chat_results else None
+    created_message_count = sum(1 for item in message_results if item.get("created"))
+    reused_message_count = len(message_results) - created_message_count
+    created_history_entries = sum(
+        int(item.get("created_entries") or 0) for item in chat_results
+    )
+
+    return (
+        {
+            "fixture_id": _BROWSER_TEST_FIXTURE_ID,
+            "status": "refreshed",
+            "refresh_requested": True,
+            "refresh_on_login_default": _refresh_fixture_on_login_default(),
+            "counterparts": counterpart_docs,
+            "messages": {
+                "total": len(message_results),
+                "created": created_message_count,
+                "reused": reused_message_count,
+                "concept_ids": [item.get("concept_id") for item in message_results],
+            },
+            "chat_sessions": {
+                "total": len(chat_results),
+                "created_entries": created_history_entries,
+                "sessions": chat_results,
+            },
+        },
+        active_chat_session_id,
+    )
+
+
 def login_browser_test_user(
     *,
     window_session_id: Optional[str] = None,
+    refresh_fixture: Optional[bool] = None,
 ) -> dict[str, Any]:
     config = get_browser_test_auth_config()
     organisation_doc = _ensure_org_exists(config.organisation_concept_id)
@@ -914,35 +1012,25 @@ def login_browser_test_user(
             user_id=pseudouser_concept_id,
         )
 
-    counterpart_by_fixture_concept_id = {
-        item["fixture_concept_id"]: item for item in counterpart_docs
-    }
-    reviewer = counterpart_by_fixture_concept_id["#V#browser_test_workflow_reviewer"]
-    scout = counterpart_by_fixture_concept_id["#V#browser_test_paper_scout"]
-
-    message_results = [
-        _ensure_fixture_message(
-            spec=spec,
-        )
-        for spec in _message_fixture_specs(
+    should_refresh_fixture = (
+        _refresh_fixture_on_login_default()
+        if refresh_fixture is None
+        else bool(refresh_fixture)
+    )
+    if should_refresh_fixture:
+        fixture_payload, active_chat_session_id = _ensure_browser_test_fixture_state(
             pseudouser_concept_id=pseudouser_concept_id,
-            reviewer_concept_id=reviewer["concept_id"],
-            scout_concept_id=scout["concept_id"],
-            organisation_concept_id=config.organisation_concept_id,
-        )
-    ]
-    chat_results = [
-        _ensure_fixture_chat_session(
-            user_concept_id=pseudouser_concept_id,
             namespace=namespace,
             organisation_concept_id=config.organisation_concept_id,
             role_in_org=role_in_org,
-            spec=spec,
+            counterpart_docs=counterpart_docs,
         )
-        for spec in _chat_fixture_specs()
-    ]
+    else:
+        fixture_payload = _skipped_fixture_refresh_payload(
+            counterpart_docs=counterpart_docs,
+        )
+        active_chat_session_id = None
 
-    active_chat_session_id = chat_results[0]["session_id"] if chat_results else None
     if (
         active_chat_session_id
         and isinstance(window_session_id, str)
@@ -953,12 +1041,6 @@ def login_browser_test_user(
             chat_session_id=active_chat_session_id,
             user_id=pseudouser_concept_id,
         )
-
-    created_message_count = sum(1 for item in message_results if item.get("created"))
-    reused_message_count = len(message_results) - created_message_count
-    created_history_entries = sum(
-        int(item.get("created_entries") or 0) for item in chat_results
-    )
 
     return {
         "user": {
@@ -977,21 +1059,7 @@ def login_browser_test_user(
         "namespace": namespace,
         "window_session_id": window_session_id,
         "active_chat_session_id": active_chat_session_id,
-        "fixture": {
-            "fixture_id": _BROWSER_TEST_FIXTURE_ID,
-            "counterparts": counterpart_docs,
-            "messages": {
-                "total": len(message_results),
-                "created": created_message_count,
-                "reused": reused_message_count,
-                "concept_ids": [item.get("concept_id") for item in message_results],
-            },
-            "chat_sessions": {
-                "total": len(chat_results),
-                "created_entries": created_history_entries,
-                "sessions": chat_results,
-            },
-        },
+        "fixture": fixture_payload,
     }
 
 

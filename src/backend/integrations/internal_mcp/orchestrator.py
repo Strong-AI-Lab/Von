@@ -33381,15 +33381,8 @@ class InternalMCPChatOrchestrator:
 
             routing_profile = candidate.get("routing_profile")
             if not isinstance(routing_profile, Mapping):
-                registration = self._workflow_registry.get_registration(concept_id)
-                definition = getattr(registration, "definition", None)
-                definition_metadata = (
-                    getattr(definition, "metadata", None)
-                    if definition is not None
-                    else None
-                )
-                if isinstance(definition_metadata, Mapping):
-                    routing_profile = definition_metadata.get("routing_profile")
+                metadata = self._peek_workflow_registration_metadata(concept_id)
+                routing_profile = metadata.get("routing_profile")
             if isinstance(routing_profile, Mapping):
                 item["routing_profile"] = dict(routing_profile)
 
@@ -34469,6 +34462,81 @@ class InternalMCPChatOrchestrator:
             and clean_discovery_input != clean_requested
         )
 
+    @staticmethod
+    def _workflow_discovery_candidate_count(
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> int:
+        if not isinstance(workflow_discovery_result, Mapping):
+            return 0
+        for key in ("candidate_count", "match_count"):
+            raw_value = workflow_discovery_result.get(key)
+            if raw_value is None:
+                continue
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                return parsed
+        for key in ("candidates", "matches", "routing_matches"):
+            raw_candidates = workflow_discovery_result.get(key)
+            if isinstance(raw_candidates, list):
+                return len(raw_candidates)
+        return 0
+
+    @classmethod
+    def _workflow_discovery_has_zero_candidate_operational_blocker(
+        cls,
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> bool:
+        if not isinstance(workflow_discovery_result, Mapping):
+            return False
+        if cls._workflow_discovery_candidate_count(workflow_discovery_result) > 0:
+            return False
+
+        reason_text: list[str] = []
+        for key in (
+            "match_absence_reason",
+            "blocker_reason",
+            "budget_exhaustion_stage",
+            "budget_exhaustion_detail",
+        ):
+            value = workflow_discovery_result.get(key)
+            if isinstance(value, str) and value.strip():
+                reason_text.append(value.strip().lower())
+        errors = workflow_discovery_result.get("errors")
+        if isinstance(errors, list):
+            reason_text.extend(
+                str(item).strip().lower()
+                for item in errors
+                if isinstance(item, str) and str(item).strip()
+            )
+        stage_timings = workflow_discovery_result.get("stage_timings")
+        if isinstance(stage_timings, list):
+            for stage in stage_timings:
+                if not isinstance(stage, Mapping):
+                    continue
+                for key in ("stage", "status", "error"):
+                    value = stage.get(key)
+                    if isinstance(value, str) and value.strip():
+                        reason_text.append(value.strip().lower())
+                stage_errors = stage.get("errors")
+                if isinstance(stage_errors, list):
+                    reason_text.extend(
+                        str(item).strip().lower()
+                        for item in stage_errors
+                        if isinstance(item, str) and str(item).strip()
+                    )
+
+        if bool(workflow_discovery_result.get("budget_exhausted")):
+            return True
+        return any(
+            "capability_index" in reason
+            or "workflow_discovery_budget_exhausted" in reason
+            or "query_surface" in reason
+            for reason in reason_text
+        )
+
     @classmethod
     def _should_refresh_turn_workflow_discovery_result(
         cls,
@@ -34482,6 +34550,10 @@ class InternalMCPChatOrchestrator:
             or not workflow_discovery_result
         ):
             return False
+        if cls._workflow_discovery_has_zero_candidate_operational_blocker(
+            workflow_discovery_result
+        ):
+            return True
         clean_requested_query = (
             requested_query.strip() if isinstance(requested_query, str) else ""
         )
@@ -34737,6 +34809,59 @@ class InternalMCPChatOrchestrator:
                 seen_action_ids.add(lowered_action_id)
                 action_ids.append(action_id)
         return tuple(action_ids)
+
+    def _peek_workflow_registration_metadata(
+        self,
+        workflow_id: str,
+    ) -> Mapping[str, Any]:
+        """Return eager or lazy workflow metadata without resolving lazy graphs."""
+
+        registration = None
+        try:
+            peek_registration = getattr(self._workflow_registry, "peek_registration")
+        except Exception:
+            peek_registration = None
+        if callable(peek_registration):
+            try:
+                registration = peek_registration(workflow_id)
+            except Exception:
+                registration = None
+
+        if registration is None:
+            try:
+                eager_ids = set(self._workflow_registry.eager_workflow_ids())
+            except Exception:
+                eager_ids = set()
+            if workflow_id in eager_ids:
+                try:
+                    registration = self._workflow_registry.get_registration(workflow_id)
+                except Exception:
+                    registration = None
+
+        if registration is None:
+            return {}
+
+        definition = getattr(registration, "definition", None)
+        metadata = (
+            getattr(definition, "metadata", None) if definition is not None else None
+        )
+        routing_profile = (
+            metadata.get("routing_profile")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        return {
+            "purpose": str(
+                getattr(registration, "purpose", None)
+                or getattr(definition, "purpose", None)
+                or ""
+            ).strip(),
+            "source": str(getattr(registration, "source", "") or "").strip(),
+            "definition_loaded": definition is not None,
+            "routing_profile": (
+                dict(routing_profile) if isinstance(routing_profile, Mapping) else None
+            ),
+        }
 
     def _build_agent_test_required_tool_workflow_candidates(
         self,
@@ -35243,6 +35368,20 @@ class InternalMCPChatOrchestrator:
                         "VON_TURN_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
                         "0.75",
                     )
+            if self._workflow_discovery_has_zero_candidate_operational_blocker(
+                raw_discovery if isinstance(raw_discovery, Mapping) else None
+            ):
+                recovery_timeout_raw = os.getenv(
+                    "VON_TURN_WORKFLOW_DISCOVERY_RECOVERY_TIMEOUT_SECONDS",
+                    "15.0",
+                )
+                try:
+                    discovery_timeout_seconds = max(
+                        float(discovery_timeout_seconds),
+                        float(recovery_timeout_raw),
+                    )
+                except (TypeError, ValueError):
+                    discovery_timeout_seconds = recovery_timeout_raw
             turn_scope = None
             for scope_key in ("turn_id", "request_id"):
                 scope_value = data.get(scope_key)
@@ -47215,6 +47354,47 @@ class InternalMCPChatOrchestrator:
                 ordered.append(tool_name)
         return tuple(ordered)
 
+    @staticmethod
+    def _selector_contract_workflow_concept_ids(
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> tuple[str, ...]:
+        if not isinstance(workflow_discovery_result, Mapping):
+            return ()
+        sources: list[Any] = [
+            workflow_discovery_result.get("workflow_concept_ids"),
+            workflow_discovery_result.get("turn_expected_workflow_concept_ids"),
+        ]
+        for key in (
+            "contract_projection",
+            "turn_expected_outcome_contract",
+            "turn_expected_outcome_contract_state",
+        ):
+            raw_payload = workflow_discovery_result.get(key)
+            if isinstance(raw_payload, Mapping):
+                sources.append(raw_payload.get("workflow_concept_ids"))
+                sources.append(raw_payload.get("turn_expected_workflow_concept_ids"))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for source in sources:
+            if isinstance(source, str):
+                raw_items: Sequence[Any] = (source,)
+            elif isinstance(source, Sequence):
+                raw_items = source
+            else:
+                continue
+            for raw_item in raw_items:
+                if not isinstance(raw_item, str):
+                    continue
+                workflow_id = raw_item.strip()
+                if not workflow_id:
+                    continue
+                dedupe_key = workflow_id.lower()
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                ordered.append(workflow_id)
+        return tuple(ordered)
+
     def _build_selector_default_candidates(
         self,
         *,
@@ -47233,12 +47413,14 @@ class InternalMCPChatOrchestrator:
             if isinstance(tool_name, str) and str(tool_name).strip()
         )
         for workflow_id in candidate_ids:
-            registration = self._workflow_registry.get_registration(workflow_id)
-            if registration is None:
+            registration_metadata = self._peek_workflow_registration_metadata(
+                workflow_id
+            )
+            if not registration_metadata:
                 continue
             name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
             name = name.replace("_", " ").strip().title() or workflow_id
-            description = str(getattr(registration, "purpose", "") or "").strip()
+            description = str(registration_metadata.get("purpose") or "").strip()
             item = {
                 "concept_id": workflow_id,
                 "name": name,
@@ -47361,11 +47543,57 @@ class InternalMCPChatOrchestrator:
                     candidate_tool_keys.add(raw_item.strip().lower())
         return required_tool_keys.issubset(candidate_tool_keys)
 
+    @staticmethod
+    def _selector_candidate_covers_workflow_execute_obligation(
+        candidate: Mapping[str, Any],
+        required_tools: Sequence[str],
+    ) -> tuple[bool, list[str], list[str]]:
+        required_tool_names = [
+            str(tool_name).strip()
+            for tool_name in (required_tools or ())
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        ]
+        required_tool_keys = {tool_name.lower() for tool_name in required_tool_names}
+        if "workflow_execute" not in required_tool_keys:
+            return False, [], required_tool_names
+        if not _eligible_discovered_workflow_execute_candidates((candidate,)):
+            return False, [], required_tool_names
+
+        covered = [
+            tool_name
+            for tool_name in required_tool_names
+            if tool_name.lower() == "workflow_execute"
+        ]
+        remaining = [
+            tool_name
+            for tool_name in required_tool_names
+            if tool_name.lower() != "workflow_execute"
+        ]
+        return True, covered, remaining
+
+    @staticmethod
+    def _selector_candidate_is_contract_named_launchable_workflow(
+        candidate: Mapping[str, Any],
+        workflow_concept_ids: Sequence[str],
+    ) -> bool:
+        concept_id = str(candidate.get("concept_id") or "").strip()
+        if not concept_id:
+            return False
+        contract_workflow_ids = {
+            str(workflow_id).strip().lower()
+            for workflow_id in (workflow_concept_ids or ())
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        }
+        if concept_id.lower() not in contract_workflow_ids:
+            return False
+        return bool(_eligible_discovered_workflow_execute_candidates((candidate,)))
+
     def _partition_discovered_candidates_by_required_tools(
         self,
         candidates: Sequence[Mapping[str, Any]],
         *,
         required_tools: Sequence[str],
+        contract_workflow_concept_ids: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not required_tools:
             return [dict(candidate) for candidate in candidates], []
@@ -47374,6 +47602,47 @@ class InternalMCPChatOrchestrator:
         for candidate in candidates:
             item = dict(candidate)
             if self._selector_candidate_covers_required_tools(item, required_tools):
+                included.append(item)
+                continue
+            (
+                covers_workflow_execute,
+                covered_required_tools,
+                remaining_required_tools,
+            ) = self._selector_candidate_covers_workflow_execute_obligation(
+                item,
+                required_tools,
+            )
+            if covers_workflow_execute:
+                item["required_tools"] = [
+                    str(tool_name).strip()
+                    for tool_name in required_tools
+                    if isinstance(tool_name, str) and str(tool_name).strip()
+                ]
+                item["required_tool_coverage"] = {
+                    "coverage_basis": "workflow_execute_primary_obligation",
+                    "covered_required_tools": covered_required_tools,
+                    "remaining_turn_level_required_tools": remaining_required_tools,
+                }
+                included.append(item)
+                continue
+            if self._selector_candidate_is_contract_named_launchable_workflow(
+                item,
+                contract_workflow_concept_ids,
+            ):
+                concept_id = str(item.get("concept_id") or "").strip()
+                item["candidate_reason"] = (
+                    "contract_named_launchable_workflow_preserved"
+                )
+                item["required_tools"] = [
+                    str(tool_name).strip()
+                    for tool_name in required_tools
+                    if isinstance(tool_name, str) and str(tool_name).strip()
+                ]
+                item["required_tool_coverage"] = {
+                    "coverage_basis": "contract_named_launchable_workflow",
+                    "covered_workflow_concept_ids": [concept_id] if concept_id else [],
+                    "remaining_turn_level_required_tools": list(item["required_tools"]),
+                }
                 included.append(item)
                 continue
             concept_id = str(item.get("concept_id") or "").strip()
@@ -47421,12 +47690,16 @@ class InternalMCPChatOrchestrator:
         required_tools = self._selector_contract_required_tools(
             workflow_discovery_result
         )
+        contract_workflow_concept_ids = self._selector_contract_workflow_concept_ids(
+            workflow_discovery_result
+        )
         (
             local_discovered_matches,
             required_tool_excluded_matches,
         ) = self._partition_discovered_candidates_by_required_tools(
             local_discovered_matches,
             required_tools=required_tools,
+            contract_workflow_concept_ids=contract_workflow_concept_ids,
         )
         default_candidates, excluded_default_candidates = (
             self._build_selector_default_candidates(required_tools=required_tools)

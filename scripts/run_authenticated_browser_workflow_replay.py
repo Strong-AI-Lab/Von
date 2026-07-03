@@ -80,6 +80,7 @@ class ReplayCase:
     expected_workflow_id: str | None
     expected_progress_fact_ids: tuple[str, ...]
     expected_contract_ids: tuple[str, ...]
+    requires_gmail: bool = False
 
 
 GMAIL_ARXIV_REPLAY_CASE = ReplayCase(
@@ -88,6 +89,7 @@ GMAIL_ARXIV_REPLAY_CASE = ReplayCase(
     expected_workflow_id=GMAIL_ARXIV_WORKFLOW_ID,
     expected_progress_fact_ids=GMAIL_ARXIV_FACT_IDS,
     expected_contract_ids=GMAIL_ARXIV_CONTRACT_IDS,
+    requires_gmail=True,
 )
 
 
@@ -110,6 +112,13 @@ def _safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _normalise_concept_id(value: Any) -> str | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    return text if text.startswith("#V#") else f"#V#{text}"
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -289,7 +298,10 @@ def establish_browser_test_session(
             f"{base_url}/von/api/auth/browser-test-login",
             expected_status=200,
             timeout_seconds=timeout_seconds,
-            json={"window_session_id": window_session_id},
+            json={
+                "window_session_id": window_session_id,
+                "refresh_fixture": False,
+            },
         )
     except Exception as exc:
         payload = exc.payload if isinstance(exc, JsonRequestError) else {}
@@ -300,6 +312,114 @@ def establish_browser_test_session(
             "payload": payload,
             "browser_test_mode": _as_mapping(payload.get("browser_test_mode")),
         }
+
+
+def apply_target_session_context(
+    *,
+    session: requests.Session,
+    base_url: str,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+) -> dict[str, Any]:
+    """Align the replay session with the requested target user/org context."""
+
+    result: dict[str, Any] = {
+        "requested_user_concept_id": _safe_text(user_concept_id) or None,
+        "requested_organisation_concept_id": (
+            _safe_text(organisation_concept_id) or None
+        ),
+        "updates": [],
+    }
+    target_user = _safe_text(user_concept_id)
+    target_org = _safe_text(organisation_concept_id)
+    if target_user:
+        session.headers.update({"X-User-Concept-ID": target_user})
+        try:
+            result["updates"].append(
+                {
+                    "step": "set_user_concept",
+                    "payload": _request_json(
+                        session,
+                        "POST",
+                        f"{base_url}/von/api/session/set_user_concept",
+                        timeout_seconds=20.0,
+                        json={"user_concept_id": target_user},
+                    ),
+                }
+            )
+        except JsonRequestError as exc:
+            result["updates"].append(
+                {
+                    "step": "set_user_concept",
+                    "error": str(exc),
+                    "status_code": exc.status_code,
+                    "payload": exc.payload,
+                }
+            )
+    if target_org:
+        try:
+            result["updates"].append(
+                {
+                    "step": "set_organisation",
+                    "payload": _request_json(
+                        session,
+                        "POST",
+                        f"{base_url}/von/api/session/set_organisation",
+                        timeout_seconds=20.0,
+                        json={"organisation_concept_id": target_org},
+                    ),
+                }
+            )
+        except JsonRequestError as exc:
+            result["updates"].append(
+                {
+                    "step": "set_organisation",
+                    "error": str(exc),
+                    "status_code": exc.status_code,
+                    "payload": exc.payload,
+                }
+            )
+    try:
+        result["session_context"] = _request_json(
+            session,
+            "GET",
+            f"{base_url}/von/api/session/context",
+            timeout_seconds=20.0,
+        )
+    except JsonRequestError as exc:
+        result["session_context"] = {
+            "authenticated": False,
+            "error": str(exc),
+            "status_code": exc.status_code,
+            "payload": exc.payload,
+        }
+    context = _as_mapping(result.get("session_context"))
+    update_errors = [
+        item
+        for item in _as_list(result.get("updates"))
+        if isinstance(item, Mapping) and item.get("error")
+    ]
+    requested_user = _normalise_concept_id(user_concept_id)
+    requested_org = _normalise_concept_id(organisation_concept_id)
+    actual_user = _normalise_concept_id(context.get("user_id"))
+    actual_org = _normalise_concept_id(context.get("organisation_id"))
+    mismatch_reasons: list[str] = []
+    if requested_user and actual_user != requested_user:
+        mismatch_reasons.append(
+            f"requested user {requested_user} but effective user is {actual_user}"
+        )
+    if requested_org and actual_org != requested_org:
+        mismatch_reasons.append(
+            f"requested organisation {requested_org} but effective organisation is {actual_org}"
+        )
+    result["target_session_context_ready"] = bool(
+        context.get("authenticated") is True and not update_errors and not mismatch_reasons
+    )
+    if mismatch_reasons:
+        result["mismatch_reasons"] = mismatch_reasons
+    if update_errors:
+        result["update_errors"] = [dict(item) for item in update_errors]
+    return result
 
 
 def create_replay_chat_session(
@@ -370,7 +490,14 @@ def build_gmail_preflight(
     session: requests.Session,
     base_url: str,
     gmail_profile: str | None,
+    required: bool = True,
 ) -> dict[str, Any]:
+    if not required:
+        return {
+            "required": False,
+            "gmail_capability_ready": True,
+            "reason": "Replay case does not require Gmail.",
+        }
     settings = _query_settings(session=session, base_url=base_url)
     profiles = _as_list(settings.get("gmail_profiles"))
     default_profile = _safe_text(settings.get("gmail_default_profile")) or None
@@ -382,6 +509,7 @@ def build_gmail_preflight(
     )
     return {
         "requested_gmail_profile": requested_profile,
+        "required": True,
         "configured_gmail_profiles": profiles,
         "default_gmail_profile": default_profile,
         "gmail_profiles_configured": bool(profiles),
@@ -396,6 +524,280 @@ def build_gmail_preflight(
             and oauth_status.get("has_tokens") is True
         ),
     }
+
+
+def _db_probe_ready(payload: Mapping[str, Any]) -> bool:
+    probe = _as_mapping(payload.get("probe"))
+    return bool(
+        payload.get("connected") is True
+        and probe.get("ok") is True
+        and probe.get("ping_ok") is True
+        and probe.get("read_ok") is True
+        and probe.get("write_ok") is not False
+    )
+
+
+def build_database_preflight(
+    *,
+    session: requests.Session,
+    base_url: str,
+    attempt_count: int = 3,
+    poll_interval_seconds: float = 0.75,
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    total_attempts = max(int(attempt_count or 0), 1)
+    for index in range(total_attempts):
+        started_at = time.monotonic()
+        try:
+            payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}/admin/db/health",
+                expected_status=(200, 503),
+                timeout_seconds=60.0,
+                params={"probe": "rw"},
+            )
+        except JsonRequestError as exc:
+            payload = {
+                "connected": False,
+                "error": str(exc),
+                "status_code": exc.status_code,
+                "payload": exc.payload,
+            }
+        except Exception as exc:
+            payload = {
+                "connected": False,
+                "error": str(exc),
+            }
+        attempt = dict(payload)
+        attempt["attempt"] = index + 1
+        attempt["elapsed_ms"] = round((time.monotonic() - started_at) * 1000.0, 3)
+        attempt["database_runtime_available"] = _db_probe_ready(attempt)
+        attempts.append(attempt)
+        if index + 1 < total_attempts:
+            time.sleep(max(float(poll_interval_seconds or 0.0), 0.0))
+
+    latest = dict(attempts[-1])
+    latest["database_runtime_available"] = bool(
+        attempts and all(_db_probe_ready(item) for item in attempts)
+    )
+    latest["preflight_attempts"] = attempts
+    latest["preflight_wait"] = {
+        "attempt_count": total_attempts,
+        "poll_interval_seconds": max(float(poll_interval_seconds or 0.0), 0.0),
+    }
+    if not latest["database_runtime_available"] and not _safe_text(
+        latest.get("error")
+    ):
+        latest["error"] = (
+            "Mongo read/write health was not stable across replay preflight "
+            "samples."
+        )
+    return latest
+
+
+def _normalised_ollama_model_names(payload: Mapping[str, Any]) -> set[str]:
+    names: set[str] = set()
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        raw_models = payload if isinstance(payload, list) else []
+    for item in raw_models:
+        if isinstance(item, Mapping):
+            candidates = (item.get("name"), item.get("model"), item.get("id"))
+        else:
+            candidates = (item,)
+        for candidate in candidates:
+            name = _safe_text(candidate)
+            if not name:
+                continue
+            names.add(name)
+            if name.endswith(":latest"):
+                names.add(name.removesuffix(":latest"))
+            elif ":" not in name:
+                names.add(f"{name}:latest")
+    return names
+
+
+def build_llm_preflight(
+    *,
+    session: requests.Session,
+    base_url: str,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    explicit_model: str | None,
+) -> dict[str, Any]:
+    params: dict[str, str] = {}
+    target_user = _safe_text(user_concept_id)
+    target_org = _safe_text(organisation_concept_id)
+    if target_user:
+        params["user_concept_id"] = target_user
+    if target_org:
+        params["organisation_concept_id"] = target_org
+    try:
+        llm_info = _request_json(
+            session,
+            "GET",
+            f"{base_url}/api/settings/llm/info",
+            timeout_seconds=45.0,
+            params=params,
+        )
+    except JsonRequestError as exc:
+        return {
+            "llm_runtime_available": False,
+            "error": str(exc),
+            "status_code": exc.status_code,
+            "payload": exc.payload,
+            "target_user_concept_id": target_user or None,
+            "target_organisation_concept_id": target_org or None,
+        }
+    except Exception as exc:
+        return {
+            "llm_runtime_available": False,
+            "error": str(exc),
+            "target_user_concept_id": target_user or None,
+            "target_organisation_concept_id": target_org or None,
+        }
+
+    provider = _safe_text(llm_info.get("provider")).lower()
+    selected_model = _safe_text(llm_info.get("model"))
+    model_override = _safe_text(explicit_model)
+    model_to_check = model_override or selected_model
+    preflight = {
+        **dict(llm_info),
+        "target_user_concept_id": target_user or None,
+        "target_organisation_concept_id": target_org or None,
+        "model_override": model_override or None,
+        "model_checked": model_to_check or None,
+        "selected_model_available": True,
+        "llm_runtime_available": bool(
+            llm_info.get("ping_ok") is True
+            and _safe_text(llm_info.get("status")).lower() == "ready"
+        ),
+    }
+    if provider == "ollama" and model_to_check:
+        try:
+            models_payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}/api/settings/ollama/models",
+                timeout_seconds=45.0,
+                params={"nocache": "1"},
+            )
+            available_model_names = _normalised_ollama_model_names(models_payload)
+            preflight["available_ollama_model_names"] = sorted(
+                available_model_names
+            )[:200]
+            preflight["selected_model_available"] = (
+                model_to_check in available_model_names
+            )
+        except JsonRequestError as exc:
+            preflight["ollama_models_error"] = str(exc)
+            preflight["ollama_models_status_code"] = exc.status_code
+            preflight["selected_model_available"] = False
+        except Exception as exc:
+            preflight["ollama_models_error"] = str(exc)
+            preflight["selected_model_available"] = False
+    preflight["llm_runtime_available"] = bool(
+        preflight["llm_runtime_available"]
+        and preflight.get("selected_model_available") is not False
+    )
+    if not preflight["llm_runtime_available"] and not _safe_text(
+        preflight.get("error")
+    ):
+        preflight["error"] = (
+            "The effective replay model is not ready or not available for the "
+            "target user/org context."
+        )
+    return preflight
+
+
+def build_workflow_capability_preflight(
+    *,
+    session: requests.Session,
+    base_url: str,
+    timeout_seconds: float = 90.0,
+    poll_interval_seconds: float = 1.5,
+) -> dict[str, Any]:
+    snapshots: list[dict[str, Any]] = []
+    effective_timeout = max(float(timeout_seconds or 0.0), 0.0)
+    deadline = time.monotonic() + effective_timeout
+    attempt_count = 0
+    last_preflight: dict[str, Any] = {}
+
+    while True:
+        attempt_count += 1
+        try:
+            payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}/api/workflows/capability-index/status",
+                timeout_seconds=20.0,
+            )
+        except JsonRequestError as exc:
+            payload = {
+                "error": str(exc),
+                "status_code": exc.status_code,
+                "payload": exc.payload,
+                "ready": False,
+                "workflow_discovery_available": False,
+            }
+        except Exception as exc:
+            payload = {
+                "error": str(exc),
+                "ready": False,
+                "workflow_discovery_available": False,
+            }
+
+        preflight = dict(payload)
+        if "workflow_discovery_available" not in preflight:
+            preflight["workflow_discovery_available"] = payload.get("ready") is True
+        last_preflight = preflight
+        namespace_state = _as_mapping(preflight.get("namespace_state"))
+        status = _safe_text(preflight.get("status")).lower()
+        snapshots.append(
+            {
+                "attempt": attempt_count,
+                "status": preflight.get("status"),
+                "ready": preflight.get("ready"),
+                "workflow_discovery_available": preflight.get(
+                    "workflow_discovery_available"
+                ),
+                "build_in_progress": preflight.get("build_in_progress"),
+                "size": preflight.get("size"),
+                "last_manifest_status": preflight.get("last_manifest_status"),
+                "last_invalidation_reason": preflight.get("last_invalidation_reason"),
+                "namespace_status": namespace_state.get("status"),
+                "detail": preflight.get("detail"),
+            }
+        )
+        if preflight.get("workflow_discovery_available") is True:
+            break
+
+        transient = bool(preflight.get("build_in_progress")) or status in {
+            "building",
+            "rebuilding",
+            "warming",
+        }
+        if _safe_text(namespace_state.get("status")).lower() == "rebuild_in_progress":
+            transient = True
+        if not transient:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(float(poll_interval_seconds or 0.0), 0.2))
+
+    last_preflight["preflight_wait"] = {
+        "timeout_seconds": effective_timeout,
+        "poll_interval_seconds": max(float(poll_interval_seconds or 0.0), 0.2),
+        "attempt_count": attempt_count,
+        "completed": last_preflight.get("workflow_discovery_available") is True,
+        "timed_out": (
+            last_preflight.get("workflow_discovery_available") is not True
+            and time.monotonic() >= deadline
+        ),
+        "snapshots": snapshots[-8:],
+    }
+    return last_preflight
 
 
 def submit_background_generate(
@@ -708,6 +1110,67 @@ def _contains_gmail_oauth_blocker_text(value: Any) -> bool:
     return gmailish and authish
 
 
+def _selector_route_evidence_present(
+    selected_workflow_ids: Sequence[str],
+    observed_workflow_ids: Sequence[str],
+    selector_diagnostics: Sequence[Mapping[str, Any]],
+) -> bool:
+    if selected_workflow_ids or observed_workflow_ids:
+        return True
+    route_keys = {
+        "selected_workflow_id",
+        "dispatch_workflow_id",
+        "workflow_id",
+        "workflow_selection",
+        "workflow_routing_diagnostics",
+        "selected_workflow_execution",
+        "discovered_workflow_ids",
+        "candidate_workflow_ids",
+        "eligible_specialised_candidate_ids",
+        "selector_candidate_ids",
+        "selector_discovered_workflow_ids",
+        "selector_excluded_candidate_ids",
+    }
+    for item in selector_diagnostics:
+        if any(key in item for key in route_keys):
+            return True
+    return False
+
+
+def _context_build_progress_blocker(
+    *,
+    terminal_status: str,
+    last_task_status: Mapping[str, Any],
+    selector_diagnostics: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    progress = _as_mapping(last_task_status.get("progress"))
+    observed_stage_values = {
+        _safe_text(progress.get("stage")),
+        _safe_text(progress.get("phase")),
+        _safe_text(progress.get("workflow_task")),
+    }
+    for item in selector_diagnostics:
+        observed_stage_values.add(_safe_text(item.get("stage")))
+        observed_stage_values.add(_safe_text(item.get("phase")))
+        observed_stage_values.add(_safe_text(item.get("workflow_task")))
+    observed_stage_values.discard("")
+    if "context_build" not in observed_stage_values:
+        return None
+
+    return {
+        "type": "context_build_blocker",
+        "reason": (
+            "The background turn did not reach workflow selection before it "
+            f"ended with status {terminal_status!r}; the last visible stage "
+            "was context_build/request setup, so no selector candidate set was "
+            "presented to the selector LLM in this replay."
+        ),
+        "terminal_task_status": terminal_status,
+        "last_task_status": dict(last_task_status),
+        "selector_diagnostics": [dict(item) for item in selector_diagnostics],
+    }
+
+
 def _terminal_workflow_action_blocker(
     *,
     terminal_status: str,
@@ -744,17 +1207,152 @@ def _terminal_workflow_action_blocker(
     }
 
 
+def build_precondition_blockers(
+    *,
+    auth_login: Mapping[str, Any],
+    auth_status: Mapping[str, Any],
+    target_session_context: Mapping[str, Any] | None = None,
+    database_preflight: Mapping[str, Any] | None = None,
+    llm_preflight: Mapping[str, Any] | None = None,
+    workflow_capability_preflight: Mapping[str, Any] | None = None,
+    gmail_preflight: Mapping[str, Any] | None = None,
+    workflow_capability_forced: bool = False,
+    database_forced: bool = False,
+    llm_forced: bool = False,
+    gmail_forced: bool = False,
+) -> list[dict[str, Any]]:
+    """Return explicit replay infrastructure blockers.
+
+    These are operational preconditions for a user-equivalent replay.  Keeping
+    them as a list prevents one infrastructure failure from hiding another.
+    """
+
+    blockers: list[dict[str, Any]] = []
+    target_context = dict(
+        target_session_context
+        if isinstance(target_session_context, Mapping)
+        else {"target_session_context_ready": True}
+    )
+    verified_target_context_ready = bool(
+        isinstance(target_session_context, Mapping)
+        and target_context.get("target_session_context_ready") is True
+    )
+    auth_ready = bool(
+        auth_login.get("success")
+        or auth_status.get("authenticated")
+        or verified_target_context_ready
+    )
+    if not auth_ready:
+        blockers.append(
+            {
+                "type": "browser_test_auth_blocker",
+                "reason": _safe_text(auth_login.get("error"))
+                or _safe_text(auth_status.get("error"))
+                or "No authenticated browser-test or trusted local replay context was established.",
+            }
+        )
+
+    if target_context.get("target_session_context_ready") is False:
+        blockers.append(
+            {
+                "type": "target_session_context_blocker",
+                "reason": _safe_text(target_context.get("error"))
+                or "; ".join(
+                    _safe_text(item)
+                    for item in _as_list(target_context.get("mismatch_reasons"))
+                    if _safe_text(item)
+                )
+                or "Replay session did not resolve to the requested user/org context.",
+                "target_session_context": target_context,
+            }
+        )
+
+    db_preflight = dict(
+        database_preflight
+        if isinstance(database_preflight, Mapping)
+        else {"database_runtime_available": True}
+    )
+    if (
+        db_preflight.get("database_runtime_available") is not True
+        and not database_forced
+    ):
+        blockers.append(
+            {
+                "type": "database_runtime_blocker",
+                "reason": _safe_text(db_preflight.get("error"))
+                or "Mongo read/write health is not stable enough for replay.",
+                "database_preflight": db_preflight,
+            }
+        )
+
+    llm_payload = dict(
+        llm_preflight
+        if isinstance(llm_preflight, Mapping)
+        else {"llm_runtime_available": True}
+    )
+    if llm_payload.get("llm_runtime_available") is not True and not llm_forced:
+        blockers.append(
+            {
+                "type": "llm_runtime_blocker",
+                "reason": _safe_text(llm_payload.get("error"))
+                or "The effective replay LLM is not ready for the target user/org.",
+                "llm_preflight": llm_payload,
+            }
+        )
+
+    workflow_preflight = dict(
+        workflow_capability_preflight
+        if isinstance(workflow_capability_preflight, Mapping)
+        else {"workflow_discovery_available": True}
+    )
+    if (
+        workflow_preflight.get("workflow_discovery_available") is not True
+        and not workflow_capability_forced
+    ):
+        blockers.append(
+            {
+                "type": "workflow_capability_index_blocker",
+                "reason": _safe_text(workflow_preflight.get("detail"))
+                or _safe_text(workflow_preflight.get("summary"))
+                or _safe_text(workflow_preflight.get("error"))
+                or (
+                    "Workflow discovery cannot rely on the authoritative "
+                    "capability index."
+                ),
+                "workflow_capability_preflight": workflow_preflight,
+            }
+        )
+
+    gmail_payload = dict(gmail_preflight if isinstance(gmail_preflight, Mapping) else {})
+    if not gmail_payload.get("gmail_capability_ready") and not gmail_forced:
+        blockers.append(
+            {
+                "type": "gmail_oauth_or_profile_blocker",
+                "reason": (
+                    "Gmail profile/tokens are not ready for an authenticated "
+                    "Gmail-backed replay."
+                ),
+                "gmail_preflight": gmail_payload,
+            }
+        )
+    return blockers
+
+
 def classify_replay(
     *,
     case: ReplayCase,
     auth_login: Mapping[str, Any],
     auth_status: Mapping[str, Any],
+    target_session_context: Mapping[str, Any] | None = None,
+    database_preflight: Mapping[str, Any] | None = None,
+    llm_preflight: Mapping[str, Any] | None = None,
     gmail_preflight: Mapping[str, Any],
     task_evidence: Mapping[str, Any],
     selected_workflow_ids: Sequence[str],
     observed_workflow_ids: Sequence[str],
     selector_diagnostics: Sequence[Mapping[str, Any]],
     progress_facts: Sequence[Mapping[str, Any]],
+    workflow_capability_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     missing_fact_ids = sorted(set(case.expected_progress_fact_ids) - _fact_ids(progress_facts))
     missing_contract_ids = sorted(set(case.expected_contract_ids) - _contract_ids(progress_facts))
@@ -762,26 +1360,43 @@ def classify_replay(
         not case.expected_workflow_id
         or case.expected_workflow_id in set(selected_workflow_ids)
     )
-    route_evidence_present = bool(
-        selected_workflow_ids or observed_workflow_ids or selector_diagnostics
+    route_evidence_present = _selector_route_evidence_present(
+        selected_workflow_ids,
+        observed_workflow_ids,
+        selector_diagnostics,
     )
     last_task_status = _as_mapping(task_evidence.get("last_task_status"))
     terminal_status = _safe_text(last_task_status.get("status")) or "unknown"
+    workflow_preflight = dict(
+        workflow_capability_preflight
+        if isinstance(workflow_capability_preflight, Mapping)
+        else {"workflow_discovery_available": True}
+    )
+    precondition_blockers = build_precondition_blockers(
+        auth_login=auth_login,
+        auth_status=auth_status,
+        target_session_context=target_session_context,
+        database_preflight=database_preflight,
+        llm_preflight=llm_preflight,
+        workflow_capability_preflight=workflow_preflight,
+        gmail_preflight=gmail_preflight,
+        gmail_forced=not case.requires_gmail,
+    )
+    context_build_blocker = (
+        _context_build_progress_blocker(
+            terminal_status=terminal_status,
+            last_task_status=last_task_status,
+            selector_diagnostics=selector_diagnostics,
+        )
+        if terminal_status != "completed" and not route_evidence_present
+        else None
+    )
 
     blocker: dict[str, Any] | None = None
-    if not auth_login.get("success") or not auth_status.get("authenticated"):
-        blocker = {
-            "type": "browser_test_auth_blocker",
-            "reason": _safe_text(auth_login.get("error"))
-            or _safe_text(auth_status.get("error"))
-            or "Browser-test login did not establish an authenticated session.",
-        }
-    elif not gmail_preflight.get("gmail_capability_ready"):
-        blocker = {
-            "type": "gmail_oauth_or_profile_blocker",
-            "reason": "Gmail profile/tokens are not ready for an authenticated Gmail-backed replay.",
-            "gmail_preflight": dict(gmail_preflight),
-        }
+    if precondition_blockers:
+        blocker = dict(precondition_blockers[0])
+    elif context_build_blocker is not None:
+        blocker = context_build_blocker
     elif (
         not selected_expected_workflow
         and (route_evidence_present or terminal_status == "completed")
@@ -847,6 +1462,11 @@ def classify_replay(
         "selected_workflow_ids": list(selected_workflow_ids),
         "observed_workflow_ids": list(observed_workflow_ids),
         "selector_diagnostics": [dict(item) for item in selector_diagnostics],
+        "target_session_context": dict(target_session_context or {}),
+        "database_preflight": dict(database_preflight or {}),
+        "llm_preflight": dict(llm_preflight or {}),
+        "workflow_capability_preflight": workflow_preflight,
+        "precondition_blockers": [dict(item) for item in precondition_blockers],
         "observed_progress_fact_ids": sorted(_fact_ids(progress_facts)),
         "observed_contract_ids": sorted(_contract_ids(progress_facts)),
         "missing_progress_fact_ids": missing_fact_ids,
@@ -862,10 +1482,14 @@ def build_replay_report(
     window_session_id: str,
     auth_login: Mapping[str, Any],
     auth_status: Mapping[str, Any],
+    target_session_context: Mapping[str, Any],
+    database_preflight: Mapping[str, Any],
+    llm_preflight: Mapping[str, Any],
     gmail_preflight: Mapping[str, Any],
     chat_session: Mapping[str, Any],
     submission: Mapping[str, Any],
     task_evidence: Mapping[str, Any],
+    workflow_capability_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_result = _as_mapping(task_evidence.get("task_result"))
     task_statuses = _as_list(task_evidence.get("task_statuses"))
@@ -893,12 +1517,21 @@ def build_replay_report(
         case=case,
         auth_login=auth_login,
         auth_status=auth_status,
+        target_session_context=target_session_context,
+        database_preflight=database_preflight,
+        llm_preflight=llm_preflight,
         gmail_preflight=gmail_preflight,
         task_evidence=task_evidence,
         selected_workflow_ids=selected_workflow_ids,
         observed_workflow_ids=observed_workflow_ids,
         selector_diagnostics=selector_diagnostics,
         progress_facts=progress_facts,
+        workflow_capability_preflight=workflow_capability_preflight,
+    )
+    workflow_preflight = dict(
+        workflow_capability_preflight
+        if isinstance(workflow_capability_preflight, Mapping)
+        else {"workflow_discovery_available": True}
     )
     return {
         "schema_version": "authenticated_browser_workflow_replay.v1",
@@ -913,6 +1546,10 @@ def build_replay_report(
         "window_session_id": window_session_id,
         "auth_login": dict(auth_login),
         "auth_status": dict(auth_status),
+        "target_session_context": dict(target_session_context),
+        "database_preflight": dict(database_preflight),
+        "llm_preflight": dict(llm_preflight),
+        "workflow_capability_preflight": workflow_preflight,
         "gmail_preflight": dict(gmail_preflight),
         "chat_session": dict(chat_session),
         "submission": dict(submission),
@@ -940,12 +1577,21 @@ def run_replay(
     base_url: str,
     gmail_profile: str | None,
     model: str | None,
+    target_user_concept_id: str | None,
+    target_organisation_concept_id: str | None,
     presenter_mode: bool,
     thinking_card_mode: str,
     timeout_seconds: float,
     poll_interval_seconds: float,
     auth_login_timeout_seconds: float,
+    database_preflight_attempts: int,
+    database_preflight_poll_interval_seconds: float,
+    workflow_capability_preflight_timeout_seconds: float,
+    workflow_capability_preflight_poll_interval_seconds: float,
     allow_non_agent_test_server: bool,
+    run_despite_database_preflight_blocker: bool,
+    run_despite_llm_preflight_blocker: bool,
+    run_despite_workflow_capability_preflight_blocker: bool,
     run_despite_gmail_preflight_blocker: bool,
     cancel_on_timeout: bool,
 ) -> dict[str, Any]:
@@ -967,11 +1613,38 @@ def run_replay(
     user_concept_id = _safe_text(auth_login.get("user_concept_id"))
     if user_concept_id:
         session.headers.update({"X-User-Concept-ID": user_concept_id})
+    effective_target_user = _safe_text(target_user_concept_id) or user_concept_id
+    target_session_context = apply_target_session_context(
+        session=session,
+        base_url=base_url,
+        user_concept_id=effective_target_user,
+        organisation_concept_id=target_organisation_concept_id,
+    )
     auth_status = get_auth_status(session=session, base_url=base_url)
+    database_preflight = build_database_preflight(
+        session=session,
+        base_url=base_url,
+        attempt_count=database_preflight_attempts,
+        poll_interval_seconds=database_preflight_poll_interval_seconds,
+    )
+    llm_preflight = build_llm_preflight(
+        session=session,
+        base_url=base_url,
+        user_concept_id=effective_target_user,
+        organisation_concept_id=target_organisation_concept_id,
+        explicit_model=model,
+    )
+    workflow_capability_preflight = build_workflow_capability_preflight(
+        session=session,
+        base_url=base_url,
+        timeout_seconds=workflow_capability_preflight_timeout_seconds,
+        poll_interval_seconds=workflow_capability_preflight_poll_interval_seconds,
+    )
     gmail_preflight = build_gmail_preflight(
         session=session,
         base_url=base_url,
         gmail_profile=gmail_profile,
+        required=case.requires_gmail,
     )
     chat_session = {}
     submission = {}
@@ -986,9 +1659,51 @@ def run_replay(
         gmail_preflight.get("gmail_capability_ready")
         or run_despite_gmail_preflight_blocker
     )
-    if (
+    workflow_capability_ready_or_forced = bool(
+        workflow_capability_preflight.get("workflow_discovery_available")
+        or run_despite_workflow_capability_preflight_blocker
+    )
+    database_ready_or_forced = bool(
+        database_preflight.get("database_runtime_available")
+        or run_despite_database_preflight_blocker
+    )
+    llm_ready_or_forced = bool(
+        llm_preflight.get("llm_runtime_available")
+        or run_despite_llm_preflight_blocker
+    )
+    target_context_ready = bool(
+        target_session_context.get("target_session_context_ready") is not False
+    )
+    auth_ready = bool(
         auth_login.get("success")
-        and auth_status.get("authenticated")
+        or auth_status.get("authenticated")
+        or target_context_ready
+    )
+    active_precondition_blockers = build_precondition_blockers(
+        auth_login=auth_login,
+        auth_status=auth_status,
+        target_session_context=target_session_context,
+        database_preflight=database_preflight,
+        llm_preflight=llm_preflight,
+        workflow_capability_preflight=workflow_capability_preflight,
+        gmail_preflight=gmail_preflight,
+        database_forced=run_despite_database_preflight_blocker,
+        llm_forced=run_despite_llm_preflight_blocker,
+        workflow_capability_forced=run_despite_workflow_capability_preflight_blocker,
+        gmail_forced=run_despite_gmail_preflight_blocker,
+    )
+    if active_precondition_blockers:
+        submission = {
+            "skipped": True,
+            "skip_reason": "preflight_blocker",
+            "precondition_blockers": active_precondition_blockers,
+        }
+    elif (
+        auth_ready
+        and target_context_ready
+        and database_ready_or_forced
+        and llm_ready_or_forced
+        and workflow_capability_ready_or_forced
         and gmail_ready_or_forced
     ):
         chat_session = create_replay_chat_session(
@@ -1028,6 +1743,10 @@ def run_replay(
         window_session_id=window_session_id,
         auth_login=auth_login,
         auth_status=auth_status,
+        target_session_context=target_session_context,
+        database_preflight=database_preflight,
+        llm_preflight=llm_preflight,
+        workflow_capability_preflight=workflow_capability_preflight,
         gmail_preflight=gmail_preflight,
         chat_session=chat_session,
         submission=submission,
@@ -1046,7 +1765,33 @@ def _write_output(path: str | None, report: Mapping[str, Any]) -> None:
     output_path.write_text(output, encoding="utf-8")
 
 
-def _resolve_case(case_id: str) -> ReplayCase:
+def _resolve_case(
+    case_id: str,
+    *,
+    prompt: str | None = None,
+    expected_workflow_id: str | None = None,
+    expected_progress_fact_ids: Sequence[str] | None = None,
+    expected_contract_ids: Sequence[str] | None = None,
+    requires_gmail: bool = False,
+) -> ReplayCase:
+    prompt_text = _safe_text(prompt)
+    if prompt_text:
+        return ReplayCase(
+            case_id=_safe_text(case_id) or f"ad_hoc_{uuid.uuid4()}",
+            prompt=prompt_text,
+            expected_workflow_id=_safe_text(expected_workflow_id) or None,
+            expected_progress_fact_ids=tuple(
+                item
+                for item in (_safe_text(value) for value in (expected_progress_fact_ids or ()))
+                if item
+            ),
+            expected_contract_ids=tuple(
+                item
+                for item in (_safe_text(value) for value in (expected_contract_ids or ()))
+                if item
+            ),
+            requires_gmail=requires_gmail,
+        )
     cleaned = _safe_text(case_id)
     if cleaned in {"gmail-arxiv-2421", GMAIL_ARXIV_REPLAY_CASE.case_id}:
         return GMAIL_ARXIV_REPLAY_CASE
@@ -1061,14 +1806,81 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     parser.add_argument("--case", default="gmail-arxiv-2421")
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help=(
+            "Run an ad-hoc replay prompt instead of a named replay case. "
+            "Workflow expectations remain optional telemetry assertions."
+        ),
+    )
+    parser.add_argument(
+        "--expected-workflow-id",
+        default=None,
+        help="Expected selected workflow ID for ad-hoc replay analysis.",
+    )
+    parser.add_argument(
+        "--expected-progress-fact-id",
+        action="append",
+        default=[],
+        help="Expected progress fact ID; may be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--expected-contract-id",
+        action="append",
+        default=[],
+        help="Expected progress contract ID; may be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--requires-gmail",
+        action="store_true",
+        help="Require Gmail profile/OAuth preflight for an ad-hoc prompt.",
+    )
     parser.add_argument("--base-url", default=get_default_agent_test_base_url())
     parser.add_argument("--gmail-profile", default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--target-user-concept-id", default=None)
+    parser.add_argument(
+        "--target-organisation-concept-id",
+        "--target-organization-concept-id",
+        dest="target_organisation_concept_id",
+        default=None,
+    )
     parser.add_argument("--thinking-card-mode", default="debug")
     parser.add_argument("--presenter-mode", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=240.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--auth-login-timeout-seconds", type=float, default=180.0)
+    parser.add_argument(
+        "--database-preflight-attempts",
+        type=int,
+        default=3,
+        help=(
+            "Number of Mongo read/write health samples required before replay "
+            "submission."
+        ),
+    )
+    parser.add_argument(
+        "--database-preflight-poll-interval-seconds",
+        type=float,
+        default=0.75,
+        help="Delay between Mongo read/write preflight samples.",
+    )
+    parser.add_argument(
+        "--workflow-capability-preflight-timeout-seconds",
+        type=float,
+        default=90.0,
+        help=(
+            "Maximum time to wait for represented workflow discovery to become "
+            "available before classifying the replay as blocked."
+        ),
+    )
+    parser.add_argument(
+        "--workflow-capability-preflight-poll-interval-seconds",
+        type=float,
+        default=1.5,
+        help="Polling interval for the workflow capability preflight wait.",
+    )
     parser.add_argument("--output-json", default=None)
     parser.add_argument(
         "--skip-cancel-on-timeout",
@@ -1087,6 +1899,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--run-despite-database-preflight-blocker",
+        action="store_true",
+        help=(
+            "Submit /von/generate even when Mongo read/write preflight is "
+            "unhealthy. Use only for diagnostic run-throughs."
+        ),
+    )
+    parser.add_argument(
+        "--run-despite-llm-preflight-blocker",
+        action="store_true",
+        help=(
+            "Submit /von/generate even when the target user's effective model "
+            "is unavailable. Use only for diagnostic run-throughs."
+        ),
+    )
+    parser.add_argument(
+        "--run-despite-workflow-capability-preflight-blocker",
+        action="store_true",
+        help=(
+            "Submit /von/generate even when the workflow capability index "
+            "preflight says represented workflow discovery is unavailable. "
+            "Use only for diagnostic run-throughs, not acceptance evidence."
+        ),
+    )
+    parser.add_argument(
         "--allow-non-agent-test-server",
         action="store_true",
         help=(
@@ -1096,18 +1933,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    case = _resolve_case(args.case)
+    case = _resolve_case(
+        args.case,
+        prompt=args.prompt,
+        expected_workflow_id=args.expected_workflow_id,
+        expected_progress_fact_ids=args.expected_progress_fact_id,
+        expected_contract_ids=args.expected_contract_id,
+        requires_gmail=bool(args.requires_gmail),
+    )
     report = run_replay(
         case=case,
         base_url=str(args.base_url).rstrip("/"),
         gmail_profile=args.gmail_profile,
         model=args.model,
+        target_user_concept_id=args.target_user_concept_id,
+        target_organisation_concept_id=args.target_organisation_concept_id,
         presenter_mode=bool(args.presenter_mode),
         thinking_card_mode=args.thinking_card_mode,
         timeout_seconds=float(args.timeout_seconds),
         poll_interval_seconds=float(args.poll_interval_seconds),
         auth_login_timeout_seconds=float(args.auth_login_timeout_seconds),
+        database_preflight_attempts=int(args.database_preflight_attempts),
+        database_preflight_poll_interval_seconds=float(
+            args.database_preflight_poll_interval_seconds
+        ),
+        workflow_capability_preflight_timeout_seconds=float(
+            args.workflow_capability_preflight_timeout_seconds
+        ),
+        workflow_capability_preflight_poll_interval_seconds=float(
+            args.workflow_capability_preflight_poll_interval_seconds
+        ),
         allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
+        run_despite_database_preflight_blocker=bool(
+            args.run_despite_database_preflight_blocker
+        ),
+        run_despite_llm_preflight_blocker=bool(
+            args.run_despite_llm_preflight_blocker
+        ),
+        run_despite_workflow_capability_preflight_blocker=bool(
+            args.run_despite_workflow_capability_preflight_blocker
+        ),
         run_despite_gmail_preflight_blocker=bool(
             args.run_despite_gmail_preflight_blocker
         ),

@@ -20,6 +20,11 @@ from src.backend.workflows import (
     WorkflowRegistration,
     WorkflowStateSpec,
 )
+from src.backend.workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_NARRATION_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
 from src.backend.workflows.workflow_registry import WorkflowRegistry
 from orchestrator_test_harness import build_db_independent_orchestrator
 
@@ -164,6 +169,79 @@ class TestDiscoverySelectorPassthrough:
         assert len(included) == 0
         assert len(excluded) == 1
         assert "non_executable" in excluded[0].get("routing_exclusion_reason", "")
+
+    def test_missing_routing_profile_does_not_materialise_lazy_candidate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orchestrator = _build_orchestrator(monkeypatch)
+
+        def _unexpected_lazy_load(workflow_id: str) -> WorkflowDefinition:
+            raise AssertionError(f"selector preparation loaded {workflow_id}")
+
+        registry = WorkflowRegistry(definition_loader=_unexpected_lazy_load)
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#lazy_discovered_workflow",
+                purpose="Lazy discovered workflow",
+                source="vontology",
+            )
+        )
+        orchestrator._workflow_registry = registry
+
+        included, excluded = orchestrator._prepare_selector_discovered_matches(
+            {
+                "candidates": [
+                    {
+                        "concept_id": "#V#lazy_discovered_workflow",
+                        "description": "Lazy discovered workflow",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "routing_eligible": True,
+                    }
+                ]
+            },
+            turn_text="use the lazy discovered workflow",
+        )
+
+        assert [item["concept_id"] for item in included] == [
+            "#V#lazy_discovered_workflow"
+        ]
+        assert excluded == []
+
+
+class TestSelectorDefaultCandidates:
+    def test_default_candidates_do_not_materialise_lazy_workflows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orchestrator = _build_orchestrator(monkeypatch)
+
+        def _unexpected_lazy_load(workflow_id: str) -> WorkflowDefinition:
+            raise AssertionError(f"default candidate builder loaded {workflow_id}")
+
+        registry = WorkflowRegistry(definition_loader=_unexpected_lazy_load)
+        for workflow_id in (
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        ):
+            registry.register_lazy(
+                LazyWorkflowRegistration(
+                    workflow_id=workflow_id,
+                    purpose=f"Purpose for {workflow_id}",
+                    source="vontology",
+                )
+            )
+        orchestrator._workflow_registry = registry
+
+        candidates, excluded = orchestrator._build_selector_default_candidates()
+
+        assert [item["concept_id"] for item in candidates] == [
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        ]
+        assert excluded == []
+        assert candidates[1]["description"] == f"Purpose for {TOOL_CALLING_WORKFLOW_ID}"
 
 
 # ---------------------------------------------------------------------------

@@ -147,6 +147,57 @@ def _candidate_count(payload: Mapping[str, Any]) -> int:
     return 0
 
 
+def _has_zero_candidate_operational_blocker(payload: Mapping[str, Any]) -> bool:
+    if _candidate_count(payload) > 0:
+        return False
+
+    def _iter_reason_text() -> list[str]:
+        values: list[str] = []
+        for key in (
+            "match_absence_reason",
+            "blocker_reason",
+            "budget_exhaustion_stage",
+            "budget_exhaustion_detail",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip().lower())
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            values.extend(
+                str(item).strip().lower()
+                for item in errors
+                if isinstance(item, str) and str(item).strip()
+            )
+        stage_timings = payload.get("stage_timings")
+        if isinstance(stage_timings, list):
+            for stage in stage_timings:
+                if not isinstance(stage, Mapping):
+                    continue
+                for key in ("stage", "status", "error"):
+                    value = stage.get(key)
+                    if isinstance(value, str) and value.strip():
+                        values.append(value.strip().lower())
+                stage_errors = stage.get("errors")
+                if isinstance(stage_errors, list):
+                    values.extend(
+                        str(item).strip().lower()
+                        for item in stage_errors
+                        if isinstance(item, str) and str(item).strip()
+                    )
+        return values
+
+    if bool(payload.get("budget_exhausted")):
+        return True
+    reasons = _iter_reason_text()
+    return any(
+        "capability_index" in reason
+        or "workflow_discovery_budget_exhausted" in reason
+        or "query_surface" in reason
+        for reason in reasons
+    )
+
+
 def _discovery_ranking_input(
     *,
     user_input: str,
@@ -366,6 +417,25 @@ def discover_workflows_for_turn_memoized(
         if clean_user_input:
             payload["query"] = clean_user_input
     candidate_count = _candidate_count(payload)
+    if _has_zero_candidate_operational_blocker(payload):
+        lookup_elapsed_ms = (time.perf_counter() - lookup_started) * 1000.0
+        annotated = _annotate_payload(
+            payload,
+            cache_hit=False,
+            cache_key_digest=cache_key_digest,
+            turn_scope=turn_scope,
+            candidate_count=candidate_count,
+            lookup_elapsed_ms=lookup_elapsed_ms,
+            capability_index_version=capability_version,
+            uncached_elapsed_ms=uncached_elapsed_ms,
+        )
+        cache_payload = annotated.setdefault("workflow_discovery_cache", {})
+        if isinstance(cache_payload, dict):
+            cache_payload["cache_skipped_reason"] = (
+                "zero_candidate_operational_blocker"
+            )
+        return annotated
+
     with _CACHE_LOCK:
         _CACHE[cache_key_digest] = _MemoEntry(
             created_monotonic=time.perf_counter(),

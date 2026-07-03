@@ -53,6 +53,7 @@ def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
 ):
     sentinel_registry = object()
     observed: list[tuple[bool, object | None]] = []
+    core_prewarm: list[object] = []
 
     monkeypatch.setattr(registry_factory, "_shared_workflow_registry", None)
     monkeypatch.setattr(
@@ -61,6 +62,11 @@ def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
         lambda defer_parity_work=True, start_deferred_registry_work=False: (
             sentinel_registry
         ),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_start_core_workflow_definition_prewarm",
+        lambda registry: core_prewarm.append(registry) or True,
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.prewarm_workflow_capability_index",
@@ -75,7 +81,40 @@ def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
     )
 
     assert result is sentinel_registry
+    assert core_prewarm == [sentinel_registry]
     assert observed == [(False, sentinel_registry)]
+
+
+def test_core_workflow_definition_prewarm_resolves_conversation_turn_family(
+    monkeypatch,
+):
+    warmed: list[str] = []
+
+    class _FakeRegistry:
+        def get(self, workflow_id: str):
+            warmed.append(workflow_id)
+            return object()
+
+    class _SynchronousThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_core_workflow_definition_prewarm_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(registry_factory.threading, "Thread", _SynchronousThread)
+
+    started = registry_factory._start_core_workflow_definition_prewarm(_FakeRegistry())
+
+    assert started is True
+    assert warmed == list(registry_factory.CONVERSATION_TURN_WORKFLOW_IDS)
 
 
 def test_invalidate_shared_workflow_registry_read_only_resets_capability_index(

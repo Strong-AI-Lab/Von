@@ -6,6 +6,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => 
 }));
 
 const {
+    __testOnly_applyCapabilityIndexStatusCard,
     __testOnly_refreshRuntimeModelStatus,
     __testOnly_resetRuntimeModelStatusCache
 } = require('../../src/frontend/web/von_interface/static/js/settingsPage.js');
@@ -101,5 +102,28 @@ describe('settings runtime model status polling', () => {
             '/admin/rag_runtime?namespace=workflow_capabilities&nocache=1',
             '/api/workflows/capability-index/status?nocache=1'
         ]);
+    });
+
+    test('renders unavailable workflow capability index as user-visible error', () => {
+        __testOnly_applyCapabilityIndexStatusCard({
+            ready: false,
+            status: 'building',
+            warning_level: 'warning',
+            user_visible_severity: 'error',
+            summary: 'Workflow capability index still building.',
+            detail: 'Workflow discovery is waiting on the authoritative capability index.',
+            namespace_state: {
+                detail: 'No persisted index exists for this namespace yet.'
+            }
+        });
+
+        const card = document.getElementById('workflowCapabilityIndexStatusCard');
+        expect(card.dataset.status).toBe('building');
+        expect(card.dataset.warningLevel).toBe('error');
+        expect(card.dataset.userVisibleSeverity).toBe('error');
+        expect(document.getElementById('workflowCapabilityIndexStatusSummary').textContent)
+            .toContain('still building');
+        expect(document.getElementById('workflowCapabilityIndexStatusDetail').textContent)
+            .toContain('No persisted index exists');
     });
 });

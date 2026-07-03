@@ -409,8 +409,14 @@ def browser_test_login():
     window_session_id = request.headers.get("X-Von-Window-Session") or data.get(
         "window_session_id"
     )
+    refresh_fixture = data.get("refresh_fixture")
+    if not isinstance(refresh_fixture, bool):
+        refresh_fixture = None
     try:
-        result = login_browser_test_user(window_session_id=window_session_id)
+        result = login_browser_test_user(
+            window_session_id=window_session_id,
+            refresh_fixture=refresh_fixture,
+        )
     except MultipleUsersForEmailError as exc:
         return (
             jsonify(

@@ -144,6 +144,65 @@ def test_upsert_singleton_text_relation_replaces_others_for_language():
     assert len(remaining) == 1
 
 
+def test_workflow_routing_text_context_update_does_not_invalidate_projection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#workflow_context_update_test"
+    predicate = "#V#hasWorkflowDiscoveryExemplarsJson"
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+    invalidations: list[str | None] = []
+    discovery_cache_clears: list[bool] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
+        lambda **kwargs: (
+            invalidations.append(kwargs.get("reason")) or {"success": True}
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
+        lambda: discovery_cache_clears.append(True),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.is_authoritative_workflow_concept_id",
+        lambda subject_concept_id: subject_concept_id == concept_id,
+    )
+
+    text = '{"schema_version":"workflow_discovery_exemplars.v1","keywords":["demo"]}'
+    with bypass_access_control():
+        created = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang="en-NZ",
+            context={"source": "first"},
+        )
+        context_only_update = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang="en-NZ",
+            context={"source": "second"},
+        )
+
+    assert created["relation_created"] is True
+    assert created["context_updated"] is False
+    assert context_only_update["relation_created"] is False
+    assert context_only_update["context_updated"] is True
+    assert context_only_update["text_value_id"] == created["text_value_id"]
+    assert invalidations == [
+        f"workflow_routing_text_relation_changed:{concept_id}:{predicate}"
+    ]
+    assert discovery_cache_clears == [True]
+
+
 def test_get_texts_for_concept_can_return_recent_rows_first():
     if TextValuesRepository.db() is None:
         pytest.skip("MongoDB not configured for this test run")

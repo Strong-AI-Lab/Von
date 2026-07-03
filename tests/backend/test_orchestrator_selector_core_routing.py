@@ -548,6 +548,263 @@ def test_workflow_execute_contract_keeps_launchable_discovered_workflow(monkeypa
     assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
 
 
+def test_workflow_execute_with_readback_tools_keeps_discovered_workflow_candidate(
+    monkeypatch,
+):
+    """Read-back obligations should not hide launchable represented workflows."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#source_neutral_paper_reference_ingestion_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Ingest a paper reference and produce represented artefacts.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Source Neutral Paper Reference Ingestion Workflow",
+                        "description": (
+                            "Canonical entry workflow for ingesting scholarly paper "
+                            "references and producing represented paper artefacts."
+                        ),
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "match_source": "capability_index",
+                        "routing_profile": {"role": "execution"},
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": [
+                        "workflow_execute",
+                        "workflow_get_execution_trace",
+                        "workflow_get_instance",
+                        "rag_list_indexed",
+                        "rag_get_item",
+                    ],
+                },
+            },
+            prompt=(
+                "Please ingest https://arxiv.org/abs/2406.15341 into Von, then "
+                "read back the represented paper concept, file-copy, and blob evidence."
+            ),
+        )
+    )
+
+    assert [candidate["concept_id"] for candidate in discovered] == [workflow_id]
+    assert [candidate["concept_id"] for candidate in selector_candidates][:1] == [
+        workflow_id
+    ]
+    represented_candidate = selector_candidates[0]
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "workflow_execute_primary_obligation",
+        "covered_required_tools": ["workflow_execute"],
+        "remaining_turn_level_required_tools": [
+            "workflow_get_execution_trace",
+            "workflow_get_instance",
+            "rag_list_indexed",
+            "rag_get_item",
+        ],
+    }
+    assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
+
+
+def test_contract_named_launchable_workflow_survives_internal_tool_contract_shape(
+    monkeypatch,
+):
+    """Expected-outcome internal-tool wording must not veto workflow initiation."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#contract_named_paper_ingestion_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Ingest a paper reference through a represented workflow.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Contract Named Paper Ingestion Workflow",
+                        "description": (
+                            "Ingest a paper reference through a represented workflow."
+                        ),
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "match_source": "contract_direct_workflow_resolution",
+                        "routing_profile": {"role": "execution"},
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": [
+                        "paper:download_source",
+                        "paper:finalise_cached_source",
+                        "vontology:read_file_copy",
+                    ],
+                    "conditional_required_tools": ["workflow_execute"],
+                    "workflow_concept_ids": [workflow_id],
+                },
+            },
+            prompt=(
+                "Please ingest this paper into Von, then read back the represented "
+                "paper concept, file-copy, and blob evidence."
+            ),
+        )
+    )
+
+    assert [candidate["concept_id"] for candidate in discovered] == [workflow_id]
+    assert [candidate["concept_id"] for candidate in selector_candidates][:1] == [
+        workflow_id
+    ]
+    represented_candidate = selector_candidates[0]
+    assert represented_candidate["candidate_reason"] == (
+        "contract_named_launchable_workflow_preserved"
+    )
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "contract_named_launchable_workflow",
+        "covered_workflow_concept_ids": [workflow_id],
+        "remaining_turn_level_required_tools": [
+            "paper:download_source",
+            "paper:finalise_cached_source",
+            "vontology:read_file_copy",
+        ],
+    }
+    assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
+
+
+def test_contract_named_nonlaunchable_workflow_still_fails_required_tool_gate(
+    monkeypatch,
+):
+    """Contract naming is not enough when the workflow cannot launch this turn."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#contract_named_unlaunchable_ingestion_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Ingest a paper reference through a represented workflow.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Contract Named Unlaunchable Ingestion Workflow",
+                        "description": (
+                            "Ingest a paper reference through a represented workflow."
+                        ),
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": False,
+                        "candidate_source": "workflow_discovery",
+                        "match_source": "contract_direct_workflow_resolution",
+                        "routing_profile": {"role": "execution"},
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": [
+                        "paper:download_source",
+                        "paper:finalise_cached_source",
+                    ],
+                    "conditional_required_tools": ["workflow_execute"],
+                    "workflow_concept_ids": [workflow_id],
+                },
+            },
+            prompt="Please ingest the relevant paper if you can resolve it.",
+        )
+    )
+
+    assert not any(candidate.get("concept_id") == workflow_id for candidate in discovered)
+    assert not any(
+        candidate.get("concept_id") == workflow_id for candidate in selector_candidates
+    )
+    assert any(
+        candidate.get("concept_id") == workflow_id
+        and candidate.get("routing_exclusion_reason")
+        == "required_tool_contract_not_satisfied"
+        for candidate in excluded
+    )
+
+
+def test_zero_candidate_capability_index_blocker_forces_discovery_refresh(
+    monkeypatch,
+):
+    """A transiently unavailable discovery surface must not become selector truth."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    stale_discovery = {
+        "query": "Represent this arXiv paper.",
+        "requested_query": "Represent this arXiv paper.",
+        "matches": [],
+        "candidates": [],
+        "candidate_count": 0,
+        "match_count": 0,
+        "errors": [
+            "capability_index_wait_timed_out",
+            "capability_index_build_in_progress",
+        ],
+        "match_absence_reason": "capability_index_wait_timed_out_build_in_progress",
+        "stage_timings": [
+            {
+                "stage": "capability_index_unavailable",
+                "errors": [
+                    "capability_index_wait_timed_out",
+                    "capability_index_build_in_progress",
+                ],
+            }
+        ],
+    }
+
+    assert orchestrator._should_refresh_turn_workflow_discovery_result(
+        workflow_discovery_result=stale_discovery,
+        requested_query="Represent this arXiv paper.",
+        discovery_query_input="Represent this arXiv paper.",
+    )
+
+
+def test_clean_zero_candidate_discovery_can_be_reused(monkeypatch):
+    """A real no-match result is different from operational unavailability."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    clean_no_match = {
+        "query": "hello",
+        "requested_query": "hello",
+        "matches": [],
+        "candidates": [],
+        "candidate_count": 0,
+        "match_count": 0,
+        "match_absence_reason": "no_relevant_workflow",
+    }
+
+    assert not orchestrator._should_refresh_turn_workflow_discovery_result(
+        workflow_discovery_result=clean_no_match,
+        requested_query="hello",
+        discovery_query_input="hello",
+    )
+
+
 def test_top_level_selector_applies_represented_fast_path_before_llm(monkeypatch):
     """Represented candidate policy should route the top-level path without selector LLM drift."""
 

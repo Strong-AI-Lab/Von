@@ -827,7 +827,121 @@ class TestIndexFromRegistry:
         assert readiness["last_manifest_status"] == "loaded"
         assert readiness["ready"] is True
 
-    def test_blocking_build_rebuilds_when_authoritative_manifest_digest_changes(
+    def test_manifest_reuse_allows_intentionally_unindexed_registry_workflows(
+        self,
+        tmp_path: Any,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.backend.services.workflow_capability_service as capability_service
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        _enable_fake_backend_persistence(_fake_retrieval_backend, tmp_path)
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#indexable_workflow",
+                purpose="This workflow has authoritative routing text.",
+                source="vontology",
+            )
+        )
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#textless_workflow",
+                purpose="",
+                source="vontology",
+            )
+        )
+
+        first_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+        assert first_index.size == 1
+
+        reset_workflow_capability_index()
+        monkeypatch.setattr(
+            capability_service.WorkflowCapabilityIndex,
+            "_entries_from_registry",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "matching current registry fingerprint should load the "
+                    "manifest even when some registry workflows are not indexable"
+                )
+            ),
+        )
+
+        second_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+
+        assert second_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
+        assert len(_fake_retrieval_backend.upsert_calls) == 1
+        readiness = get_workflow_capability_index_readiness_report()
+        assert readiness["last_manifest_status"] == "loaded"
+        assert readiness["ready"] is True
+
+    def test_manifest_reuse_ignores_lazy_loaded_purpose_metadata_change(
+        self,
+        tmp_path: Any,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.backend.services.workflow_capability_service as capability_service
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        _enable_fake_backend_persistence(_fake_retrieval_backend, tmp_path)
+
+        first_registry = WorkflowRegistry()
+        first_registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair workflows from requests.",
+                source="vontology",
+            )
+        )
+        capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=first_registry,
+        )
+
+        reset_workflow_capability_index()
+        second_registry = WorkflowRegistry()
+        second_registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Runtime-populated purpose after lazy definition load.",
+                source="vontology",
+            )
+        )
+        monkeypatch.setattr(
+            capability_service.WorkflowCapabilityIndex,
+            "_entries_from_registry",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "lazy-loaded purpose metadata must not make a current "
+                    "manifest look stale"
+                )
+            ),
+        )
+
+        second_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=second_registry,
+        )
+
+        assert second_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
+        assert len(_fake_retrieval_backend.upsert_calls) == 1
+        readiness = get_workflow_capability_index_readiness_report()
+        assert readiness["last_manifest_status"] == "loaded"
+        assert readiness["ready"] is True
+
+    def test_blocking_build_rebuilds_when_authoritative_workflow_set_changes(
         self,
         tmp_path: Any,
         _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
@@ -855,7 +969,7 @@ class TestIndexFromRegistry:
         second_registry = WorkflowRegistry()
         second_registry.register_lazy(
             LazyWorkflowRegistration(
-                workflow_id="#V#workflow_repair_or_create_workflow",
+                workflow_id="#V#different_authoritative_workflow",
                 purpose="Repair or create workflows from current user requests.",
                 source="vontology",
             )
@@ -1182,6 +1296,10 @@ def test_startup_check_records_not_ready_report(
     readiness = get_workflow_capability_index_readiness_report()
     assert readiness["status"] == "not_ready"
     assert readiness["startup_check"]["status"] == "not_ready"
+    assert readiness["workflow_discovery_available"] is False
+    assert readiness["user_visible_blocker"] is True
+    assert readiness["user_visible_severity"] == "error"
+    assert readiness["footer_red_flag"] is True
 
 
 def test_readiness_report_requires_query_surface_warmth() -> None:
@@ -1194,6 +1312,8 @@ def test_readiness_report_requires_query_surface_warmth() -> None:
     assert readiness["ready"] is False
     assert readiness["status"] == "warming"
     assert readiness["summary"] == "Workflow capability index query surface warming."
+    assert readiness["workflow_discovery_available"] is False
+    assert readiness["user_visible_severity"] == "error"
 
 
 def test_startup_check_warms_query_surface_for_ready_namespace(

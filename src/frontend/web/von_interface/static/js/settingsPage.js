@@ -651,6 +651,24 @@ function _focusModelSettingsSection() {
   } catch { }
 }
 
+function _focusWorkflowCapabilityIndexStatusSection() {
+  try {
+    focusSettingsSection('rag-model-settings');
+    void refreshRuntimeModelStatus({ force: true });
+
+    setTimeout(() => {
+      const card = document.getElementById('workflowCapabilityIndexStatusCard');
+      if (!card) return;
+      card.setAttribute('tabindex', '-1');
+      try {
+        card.focus({ preventScroll: true });
+      } catch (_) {
+        try { card.focus(); } catch { }
+      }
+    }, 250);
+  } catch { }
+}
+
 // Allow parent (main app) to request focus on the login area from elsewhere (e.g. chat tabs placeholder).
 try {
   window.addEventListener('message', (event) => {
@@ -661,6 +679,8 @@ try {
         _focusCurrentUserSettingsSection();
       } else if (type === 'von:focus-model-settings') {
         _focusModelSettingsSection();
+      } else if (type === 'von:focus-workflow-capability-index-status') {
+        _focusWorkflowCapabilityIndexStatusSection();
       }
     } catch { }
   });
@@ -1521,6 +1541,10 @@ function applyCapabilityIndexStatusCard(report) {
 
   const status = String(report?.status || 'unknown').trim().toLowerCase();
   const warningLevel = String(report?.warning_level || '').trim().toLowerCase();
+  const userVisibleSeverity = String(report?.user_visible_severity || '').trim().toLowerCase();
+  const displayWarningLevel = report?.ready === true
+    ? 'ok'
+    : (userVisibleSeverity === 'error' ? 'error' : (warningLevel || 'warning'));
   const summary = String(report?.summary || 'Workflow capability index status unavailable.').trim();
   let detail = String(report?.detail || '').trim();
   const namespaceDetail = String(report?.namespace_state?.detail || '').trim();
@@ -1532,7 +1556,8 @@ function applyCapabilityIndexStatusCard(report) {
   }
 
   cardEl.dataset.status = status || 'unknown';
-  cardEl.dataset.warningLevel = warningLevel || 'warning';
+  cardEl.dataset.warningLevel = displayWarningLevel;
+  cardEl.dataset.userVisibleSeverity = userVisibleSeverity || displayWarningLevel;
   summaryEl.textContent = summary;
   detailEl.textContent = detail;
 }
@@ -2876,6 +2901,10 @@ export function __testOnly_updateOllamaModelStatusMessage() {
 
 export async function __testOnly_refreshRuntimeModelStatus(options = {}) {
   return refreshRuntimeModelStatus(options);
+}
+
+export function __testOnly_applyCapabilityIndexStatusCard(report) {
+  return applyCapabilityIndexStatusCard(report);
 }
 
 export function __testOnly_resetRuntimeModelStatusCache() {

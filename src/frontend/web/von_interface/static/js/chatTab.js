@@ -2341,6 +2341,47 @@ function buildWorkflowRoutingDiagnosticsLocatorSnapshot(progressLike) {
     };
 }
 
+function resolveLlmDebugPromptPreview({ debugData, turnExecutionDiagnostics }) {
+    const candidates = [
+        turnExecutionDiagnostics?.prompt_preview,
+        debugData?.prompt_preview,
+        debugData?.llm_prompt_preview,
+        debugData?.prompt_text
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+            return candidate;
+        }
+        if (candidate && typeof candidate === 'object') {
+            const text = typeof candidate.text === 'string' ? candidate.text : '';
+            if (text.trim()) {
+                return text;
+            }
+            const preview = typeof candidate.preview === 'string' ? candidate.preview : '';
+            if (preview.trim()) {
+                return preview;
+            }
+        }
+    }
+    return null;
+}
+
+function resolveLlmDebugWorkflowRoutingDiagnostics({ debugData, turnExecutionDiagnostics }) {
+    const sources = [
+        turnExecutionDiagnostics,
+        debugData,
+        turnExecutionDiagnostics?.workflow_routing_diagnostics,
+        debugData?.workflow_routing_diagnostics
+    ];
+    for (const source of sources) {
+        const routingDiagnostics = getWorkflowRoutingDiagnostics(source);
+        if (routingDiagnostics) {
+            return routingDiagnostics;
+        }
+    }
+    return null;
+}
+
 function deriveSelectedWorkflowIdFromRoutingDiagnostics(workflowRoutingDiagnostics) {
     if (!workflowRoutingDiagnostics || typeof workflowRoutingDiagnostics !== 'object') {
         return null;
@@ -32448,14 +32489,16 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
         chat_session_id: sessionId,
         namespace_context: namespaceContext,
         metadata: metadata || null,
-        prompt_preview: typeof turnExecutionDiagnostics?.prompt_preview === 'string'
-            ? turnExecutionDiagnostics.prompt_preview
-            : (typeof debugData?.prompt_text === 'string' ? debugData.prompt_text : null),
+        prompt_preview: resolveLlmDebugPromptPreview({
+            debugData,
+            turnExecutionDiagnostics
+        }),
         diagnostic_summary: diagnosticSummary,
         workflow_routing_diagnostics: buildWorkflowRoutingDiagnosticsLocatorSnapshot(
-            (turnExecutionDiagnostics && typeof turnExecutionDiagnostics === 'object')
-                ? turnExecutionDiagnostics
-                : debugData
+            resolveLlmDebugWorkflowRoutingDiagnostics({
+                debugData,
+                turnExecutionDiagnostics
+            })
         ),
         mcp_access: {}
     };
