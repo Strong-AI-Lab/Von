@@ -1109,9 +1109,21 @@ def _render_structured_observation_lines(observations: Any) -> list[str]:
     return lines
 
 
-def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[str]:
+def _render_selected_workflow_artefact_lines(
+    data: Mapping[str, Any],
+    *,
+    concept_evidence_source: Mapping[str, Any] | None = None,
+) -> list[str]:
     lines: list[str] = []
-    surfaceable_evidence = project_surfaceable_concept_evidence(data)
+    # Surface concept evidence from this turn's authoritative source when one is
+    # supplied. Projecting from the full aggregate payload would recursively pull
+    # in concept handles nested inside session-influenced payloads (e.g. a
+    # completion_report that carries a concept salient earlier in the
+    # conversation), which is exactly how a prior target's concept leaked into an
+    # answer about a different target. (JVNAUTOSCI-2564)
+    surfaceable_evidence = project_surfaceable_concept_evidence(
+        concept_evidence_source if concept_evidence_source is not None else data
+    )
     paper_concept_id = _coerce_non_empty_text(data.get("paper_concept_id"))
     file_copy_concept_id = _coerce_non_empty_text(data.get("file_copy_concept_id"))
     if paper_concept_id:
@@ -1931,7 +1943,34 @@ def render_selected_workflow_user_response(
                 if isinstance(key, str) and key not in combined_data:
                     combined_data[key] = value
 
-    artefact_lines = _render_selected_workflow_artefact_lines(combined_data)
+    # The child-result snapshot is the authoritative record of what THIS turn's
+    # selected-workflow delegation actually produced and read back. Its verified
+    # concept handles must win over the aggregate/session-influenced payloads
+    # above, so the answer is grounded in this turn's own evidence rather than a
+    # concept that is merely salient elsewhere in the conversation. This is
+    # generic evidence attribution, not a per-domain override: it applies to any
+    # `*_concept_id`/`*_concept_ids` handle the child snapshot resolved.
+    # (JVNAUTOSCI-2564)
+    child_snapshot_concept_handles: dict[str, Any] = {}
+    for key, value in child_snapshot.items():
+        if (
+            isinstance(key, str)
+            and (key.endswith("_concept_id") or key.endswith("_concept_ids"))
+            and value
+        ):
+            child_snapshot_concept_handles[key] = value
+            combined_data[key] = value
+
+    # When this turn's child snapshot resolved its own verified concept handles,
+    # project the surfaceable concept evidence from the snapshot rather than the
+    # aggregate payload, so a concept salient elsewhere in the conversation cannot
+    # be surfaced as this turn's verified result.
+    artefact_lines = _render_selected_workflow_artefact_lines(
+        combined_data,
+        concept_evidence_source=(
+            child_snapshot if child_snapshot_concept_handles else None
+        ),
+    )
     fail_closed_response = _build_fail_closed_completion_gate_response(
         combined_data=combined_data,
         fallback_payloads=(
