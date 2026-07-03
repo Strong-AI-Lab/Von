@@ -1,7 +1,11 @@
 /** @jest-environment jsdom */
 
+const fs = require('fs');
+const path = require('path');
+
 const domUtilsPath = '../../src/frontend/web/von_interface/static/js/domUtils.js';
 const suppressTooltipsPath = '../../src/frontend/web/von_interface/static/js/suppressTooltips.js';
+const stylesPath = path.resolve(__dirname, '../../src/frontend/web/von_interface/static/styles.css');
 
 function installFetchMock(options = {}) {
     const {
@@ -355,5 +359,24 @@ describe('footer latest LLM execution status', () => {
         expect(button?.title).toContain('Namespace status: missing_index');
         expect(footerContainer.classList.contains('footer-not-ready')).toBe(true);
         expect(footerContainer.title).toContain('workflow capability index');
+    });
+
+    test('keeps workflow index badge label readable on fatal status backgrounds', () => {
+        const css = fs.readFileSync(stylesPath, 'utf8');
+        const style = document.createElement('style');
+        style.textContent = css;
+        document.head.appendChild(style);
+        document.body.innerHTML = `
+            <span class="footer-segment workflow-index-status-badge fatal">
+                <span class="footer-label-inline">Workflow Index: </span>
+                <button class="concept-footer-button" type="button">error</button>
+            </span>
+        `;
+
+        const badge = document.querySelector('.workflow-index-status-badge');
+        const label = document.querySelector('.workflow-index-status-badge .footer-label-inline');
+
+        expect(getComputedStyle(badge).color).toBe('rgb(255, 255, 255)');
+        expect(getComputedStyle(label).color).toBe('rgb(255, 255, 255)');
     });
 });
