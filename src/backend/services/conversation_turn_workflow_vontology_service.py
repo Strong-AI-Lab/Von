@@ -371,6 +371,8 @@ def _ensure_conversation_turn_prompt_support(
                 "Do not return only Gmail list tools",
                 "#V#arxiv_paper_representation_workflow",
                 "#V#scholarly_article_metadata_representation_workflow",
+                "Distinguish prior *referents* from prior *obligations*",
+                "prior_obligation_carry_forward",
             ),
         )
     ):
@@ -393,6 +395,8 @@ def _ensure_conversation_turn_prompt_support(
                 "`no_prior_context`",
                 "`raw_recent_turns_required`",
                 "Do not answer the user",
+                "prior_obligation_carry_forward",
+                "suppressed_prior_obligations",
             ),
         )
     ):

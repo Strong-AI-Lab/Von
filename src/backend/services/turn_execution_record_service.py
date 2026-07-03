@@ -55,6 +55,10 @@ from .turn_execution_diagnostic_event_service import (
 from .turn_context_adjudication_projection_service import (
     build_turn_context_adjudication_projection,
 )
+from .turn_expected_outcome_obligation_carry_forward import (
+    adjudicate_conditional_required_tool_activation,
+    obligation_carry_forward_permission,
+)
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -3580,21 +3584,23 @@ def _activated_turn_expected_conditional_required_tools(
     *,
     contract: TurnExpectedOutcomeContract,
     tool_invocations: Sequence[Mapping[str, Any]] | None,
-) -> list[str]:
-    conditional_tools = _dedupe_string_sequence(contract.conditional_required_tools)
-    if not conditional_tools:
-        return []
-    target_resolved_symbolically = bool(
-        contract.target_concept_ids
-        or contract.target_type_ids
-        or any(
-            target_contract.is_symbolically_resolved()
-            for target_contract in (contract.target_contracts or ())
-        )
+    obligation_carry_forward_permitted: bool | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Return activated conditional tools plus the carry-forward projection.
+
+    Conditional required tools only activate once a symbolic target is resolved.
+    A prior-turn referent carried into this turn must not, by itself, activate the
+    prior turn's obligations: that is how a bare "do you have a concept for X"
+    follow-up inherited a full ingestion/read-back obligation family. The
+    represented context-adjudication decision owns the carry-forward policy; this
+    support surface enforces it and records what was suppressed.
+    """
+
+    return adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=tool_invocations,
+        obligation_carry_forward_permitted=obligation_carry_forward_permitted,
     )
-    if not target_resolved_symbolically:
-        return []
-    return conditional_tools
 
 
 def _normalise_discovery_stage_timings(
@@ -8578,11 +8584,39 @@ def build_turn_execution_record(
             completion_report,
         )
     )
-    activated_conditional_required_tools = (
-        _activated_turn_expected_conditional_required_tools(
-            contract=resolved_turn_expected_outcome_contract,
-            tool_invocations=tool_invocations,
+    obligation_carry_forward_adjudication = build_turn_context_adjudication_projection(
+        (
+            ("aux_llm_calls", {"aux_llm_calls": list(aux_llm_calls or ())}),
+            (
+                "turn_execution_diagnostics",
+                turn_execution_diagnostics
+                if isinstance(turn_execution_diagnostics, Mapping)
+                else None,
+            ),
+            (
+                "selected_workflow_trace",
+                selected_workflow_trace
+                if isinstance(selected_workflow_trace, Mapping)
+                else None,
+            ),
+            (
+                "completion_report",
+                completion_report
+                if isinstance(completion_report, Mapping)
+                else None,
+            ),
         )
+    )
+    obligation_carry_forward_permitted = obligation_carry_forward_permission(
+        obligation_carry_forward_adjudication
+    )
+    (
+        activated_conditional_required_tools,
+        obligation_carry_forward_projection,
+    ) = _activated_turn_expected_conditional_required_tools(
+        contract=resolved_turn_expected_outcome_contract,
+        tool_invocations=tool_invocations,
+        obligation_carry_forward_permitted=obligation_carry_forward_permitted,
     )
     turn_expected_outcome_contract_payload = (
         resolved_turn_expected_outcome_contract.to_dict()
@@ -8798,6 +8832,15 @@ def build_turn_execution_record(
         execution_summary = dict(execution_summary)
         execution_summary["activated_conditional_required_tools"] = list(
             activated_conditional_required_tools
+        )
+    if isinstance(obligation_carry_forward_projection, Mapping) and (
+        obligation_carry_forward_projection.get("suppressed_prior_obligations")
+        or obligation_carry_forward_projection.get("carried_forward_obligations")
+        or obligation_carry_forward_projection.get("suppression_reason")
+    ):
+        execution_summary = dict(execution_summary)
+        execution_summary["expected_outcome_obligation_carry_forward"] = dict(
+            obligation_carry_forward_projection
         )
     required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
@@ -9328,6 +9371,23 @@ def build_turn_execution_record(
         if context_adjudication_source:
             execution_summary_with_contract["context_adjudication_source"] = (
                 context_adjudication_source
+            )
+    if isinstance(obligation_carry_forward_projection, Mapping):
+        execution_summary_with_contract[
+            "expected_outcome_obligation_carry_forward"
+        ] = dict(obligation_carry_forward_projection)
+        suppressed_prior_obligations = list(
+            obligation_carry_forward_projection.get("suppressed_prior_obligations")
+            or ()
+        )
+        if suppressed_prior_obligations:
+            execution_summary_with_contract[
+                "suppressed_prior_obligation_tools"
+            ] = suppressed_prior_obligations
+            execution_summary_with_contract[
+                "suppressed_prior_obligation_reason"
+            ] = _safe_str(
+                obligation_carry_forward_projection.get("suppression_reason")
             )
     execution_summary_with_contract["final_answer_synthesis_observed"] = bool(
         final_answer_synthesis
