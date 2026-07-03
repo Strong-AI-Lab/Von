@@ -20,6 +20,9 @@ from src.backend.services.turn_expected_outcome_obligation_carry_forward import 
     obligation_carry_forward_permission,
     target_resolved_by_current_turn,
 )
+from src.backend.services.turn_execution_record_service import (
+    build_turn_execution_record,
+)
 
 
 def _contract(conditional_tools, *, target_concept_ids=(), target_type_ids=()):
@@ -235,3 +238,69 @@ def test_represented_suppress_directive_is_authoritative() -> None:
         projection["suppression_reason"]
         == "represented_context_adjudication_suppressed_prior_obligation_carry_forward"
     )
+
+
+# --- integration through the real turn-record build path -------------------
+
+_PRIOR_INGESTION_TOOLS = [
+    "scholarly_paper.verify_representation",
+    "vontology:fetch_concept",
+    "vontology:read_file_copy",
+    "vontology:rag_get_item",
+]
+
+
+def _build_bare_lookup_followup_record():
+    # Reproduces the JVNAUTOSCI-2563 motivating follow-up: a bare concept-existence
+    # lookup whose expected-outcome contract carried the prior turn's ingestion/
+    # read-back conditional tools plus the prior resolved concept IDs as referents,
+    # with zero tools invoked and no continuation directive.
+    return build_turn_execution_record(
+        request_id="req-2563-bare-lookup",
+        session_id="session-2563",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Do you have a concept for https://arxiv.org/abs/2406.15341",
+        response_text="I could not verify whether that concept exists yet.",
+        interaction_timestamp_utc="2026-07-03T16:41:16Z",
+        workflow_routing={
+            "workflow_id": "#V#chat_narration_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[],
+        turn_expected_outcome_contract={
+            "expected_outcome_summary": "Answer whether a concept exists for the source.",
+            "conditional_required_tools": list(_PRIOR_INGESTION_TOOLS),
+            "target_concept_ids": [
+                "#V#genotex_an_llm_agent_benchmark",
+                "#V#arxiv_pdf_file_46934c89",
+            ],
+        },
+    )
+
+
+def test_record_build_suppresses_carried_prior_obligations() -> None:
+    record = _build_bare_lookup_followup_record()
+    summary = record["execution"]["summary"]
+
+    projection = summary["expected_outcome_obligation_carry_forward"]
+    assert projection["suppressed_prior_obligations"] == _PRIOR_INGESTION_TOOLS
+    assert projection["suppression_reason"]
+    assert summary["suppressed_prior_obligation_tools"] == _PRIOR_INGESTION_TOOLS
+    # Prior referents are preserved for downstream resolution.
+    assert projection["carried_forward_referents"]["target_concept_ids"] == [
+        "#V#genotex_an_llm_agent_benchmark",
+        "#V#arxiv_pdf_file_46934c89",
+    ]
+
+
+def test_record_build_keeps_stale_tools_out_of_required_obligations() -> None:
+    record = _build_bare_lookup_followup_record()
+    summary = record["execution"]["summary"]
+
+    obligations = summary.get("required_tool_obligations") or {}
+    required_tools = set(obligations.get("unsatisfied_required_tools") or [])
+    # None of the prior ingestion/read-back tools should have become an obligation.
+    assert required_tools.isdisjoint(set(_PRIOR_INGESTION_TOOLS))
