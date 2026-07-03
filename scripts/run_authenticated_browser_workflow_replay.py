@@ -1090,24 +1090,124 @@ def _contract_ids(facts: Sequence[Mapping[str, Any]]) -> set[str]:
     }
 
 
-def _contains_gmail_oauth_blocker_text(value: Any) -> bool:
-    text = json.dumps(value, ensure_ascii=True, sort_keys=True).lower()
-    gmailish = any(marker in text for marker in ("gmail", "google mail"))
-    authish = any(
-        marker in text
-        for marker in (
-            "oauth",
-            "token",
-            "credential",
-            "authoris",
-            "authoriz",
-            "profile",
-            "not configured",
-            "not authenticated",
-            "not connected",
+_GMAIL_OAUTH_AUTH_MARKERS = (
+    "oauth",
+    "token",
+    "credential",
+    "authoris",
+    "authoriz",
+    "profile",
+)
+_GMAIL_OAUTH_FAILURE_MARKERS = (
+    "denied",
+    "disabled",
+    "disconnected",
+    "expired",
+    "failed",
+    "failure",
+    "invalid",
+    "missing",
+    "not authenticated",
+    "not configured",
+    "not connected",
+    "not ready",
+    "reauth",
+    "re-auth",
+    "revoked",
+    "unavailable",
+)
+_GMAIL_CONTEXT_KEYS = (
+    "gmail",
+    "gmail_preflight",
+    "gmail_profile",
+    "requested_gmail_profile",
+)
+_GMAIL_IDENTIFIER_KEYS = {
+    "action_id",
+    "concept_id",
+    "contract_id",
+    "fact_id",
+    "id",
+    "selected_workflow_id",
+    "state_id",
+    "workflow_id",
+}
+_GMAIL_OAUTH_NON_EVIDENCE_KEYS = {
+    "available_tools",
+    "context_message",
+    "context_messages",
+    "llm_prompt",
+    "llm_request",
+    "messages",
+    "prompt",
+    "prompt_preview",
+    "request",
+    "selector_prompt",
+    "system_prompt",
+    "tool_specs",
+}
+
+
+def _text_mentions_gmail(value: str) -> bool:
+    text = value.lower()
+    return "gmail" in text or "google mail" in text
+
+
+def _text_mentions_gmail_oauth_failure(value: str, *, gmail_context: bool) -> bool:
+    text = value.lower()
+    gmailish = gmail_context or _text_mentions_gmail(text)
+    if not gmailish:
+        return False
+    authish = any(marker in text for marker in _GMAIL_OAUTH_AUTH_MARKERS)
+    failureish = any(marker in text for marker in _GMAIL_OAUTH_FAILURE_MARKERS)
+    return authish and failureish
+
+
+def _mapping_has_gmail_context(value: Mapping[str, Any]) -> bool:
+    for raw_key, raw_item in value.items():
+        key = _safe_text(raw_key).lower()
+        if key in _GMAIL_IDENTIFIER_KEYS:
+            continue
+        if any(marker in key for marker in _GMAIL_CONTEXT_KEYS):
+            return True
+        if isinstance(raw_item, str) and _text_mentions_gmail(raw_item):
+            return True
+    return False
+
+
+def _contains_gmail_oauth_blocker_text(
+    value: Any,
+    *,
+    gmail_context: bool = False,
+) -> bool:
+    if isinstance(value, str):
+        return _text_mentions_gmail_oauth_failure(value, gmail_context=gmail_context)
+    if isinstance(value, Mapping):
+        local_gmail_context = gmail_context or _mapping_has_gmail_context(value)
+        for raw_key, item in value.items():
+            key = _safe_text(raw_key).lower()
+            if key in _GMAIL_OAUTH_NON_EVIDENCE_KEYS:
+                continue
+            child_gmail_context = local_gmail_context
+            if key in _GMAIL_IDENTIFIER_KEYS:
+                child_gmail_context = gmail_context
+            elif any(marker in key for marker in _GMAIL_CONTEXT_KEYS):
+                child_gmail_context = True
+            if _contains_gmail_oauth_blocker_text(
+                item,
+                gmail_context=child_gmail_context,
+            ):
+                return True
+        return False
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(
+            _contains_gmail_oauth_blocker_text(
+                item,
+                gmail_context=gmail_context,
+            )
+            for item in value
         )
-    )
-    return gmailish and authish
+    return False
 
 
 def _selector_route_evidence_present(
