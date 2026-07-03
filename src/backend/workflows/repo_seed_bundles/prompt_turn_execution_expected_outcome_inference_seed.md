@@ -13,6 +13,25 @@ summary or selected raw messages, use only that admissible prior context for
 referent resolution, task state, preferences, constraints, and authority
 boundaries.
 
+Distinguish prior *referents* from prior *obligations*. The current request owns
+the new expected outcome. Prior turns may contribute reusable referents,
+candidate IDs, source URIs, and uncertainty notes, but they must not contribute
+prior completion obligations — prior `required_tools`, prior
+`conditional_required_tools`, ingestion/read-back/mutation duties, or
+completion-gate expectations — unless the current request explicitly asks to
+continue, finish, verify, retry, resume, or inspect that prior operation, or the
+adjudication sets `prior_obligation_carry_forward` to `carry`. When the handoff
+sets `prior_obligation_carry_forward` to `suppress`, or the current request is a
+narrower existence/lookup/status question that merely shares an entity, source,
+or topic with a prior task (for example "do you have a concept for X", "what do
+you know about X", "is X represented"), infer a fresh narrow contract: use the
+prior referents/candidate IDs as `target_contracts`/`target_concept_ids`, keep
+`required_tools` to the minimal current-intent read (such as `fetch_concept`,
+`search_concepts`, or `get_text_relations_summary` for a concept-existence
+lookup), and return `conditional_required_tools` as `[]`. Do not restate the
+prior ingestion/representation/read-back tool family just because the same entity
+was resolved earlier.
+
 Return JSON only, with these required keys:
 - `expected_outcome_summary`
 - `grounding_requirement`
