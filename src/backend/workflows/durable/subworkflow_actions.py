@@ -68,6 +68,11 @@ from ..plan_state_runtime import (
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
+from ..workflow_launch_input_contracts import (
+    WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS,
+    normalise_workflow_launch_input_contract,
+    resolve_workflow_launch_inputs,
+)
 from ..definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
@@ -79,12 +84,14 @@ _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
     "__parent_workflow_id",
     "__parent_state_id",
     "__workflow_invocation_chain",
+    "__workflow_ambient_input_keys",
     "failure_mode",
     "__failure_mode",
     "inherit_parent_context",
     "max_transitions",
 }
 _INVOCATION_CHAIN_KEY = "__workflow_invocation_chain"
+_AMBIENT_INPUT_KEYS_KEY = "__workflow_ambient_input_keys"
 _INVOCATION_LEDGER_KEY = "__workflow_subworkflow_invocation_ledger"
 _MAX_SUBWORKFLOW_DEPTH_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH"
 _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT = 8
@@ -657,6 +664,19 @@ def _resolve_failure_mode(inputs: Mapping[str, Any]) -> str:
     return WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE
 
 
+def _normalise_input_key_list(value: Any) -> set[str]:
+    if isinstance(value, str):
+        cleaned = _normalise_text(value)
+        return {cleaned} if cleaned else set()
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {
+        cleaned
+        for item in value
+        if (cleaned := _normalise_text(item))
+    }
+
+
 def _extract_child_inputs(
     *,
     inputs: Mapping[str, Any],
@@ -687,6 +707,81 @@ def _extract_child_inputs(
     if parent_state_id:
         child_inputs.setdefault("__parent_state_id", parent_state_id)
     return child_inputs
+
+
+def _apply_child_launch_input_contract(
+    *,
+    child_workflow_id: str,
+    definition: WorkflowDefinition,
+    child_inputs: Dict[str, Any],
+    ambient_input_keys: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a child workflow's represented launch contract before execution."""
+
+    workflow_metadata = getattr(definition, "metadata", None)
+    if not isinstance(workflow_metadata, Mapping):
+        return None
+    launch_input_contract = workflow_metadata.get("launch_input_contract")
+    if not isinstance(launch_input_contract, Mapping):
+        return None
+    launch_input_contract_source = workflow_metadata.get("launch_input_contract_source")
+    normalised_contract, _contract_error = normalise_workflow_launch_input_contract(
+        launch_input_contract
+    )
+    excluded_keys = [
+        _normalise_text(key)
+        for key in (
+            (
+                normalised_contract.get(
+                    WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS
+                )
+                if isinstance(normalised_contract, Mapping)
+                else []
+            )
+            or []
+        )
+        if _normalise_text(key)
+    ]
+    ambient_keys = set(ambient_input_keys or set())
+    pre_resolution_excluded_applied: list[str] = []
+    if ambient_keys and excluded_keys:
+        for key in excluded_keys:
+            if key in ambient_keys and key in child_inputs:
+                child_inputs.pop(key, None)
+                pre_resolution_excluded_applied.append(key)
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=child_workflow_id,
+        contract=launch_input_contract,
+        inputs=child_inputs,
+        contract_source=(
+            str(launch_input_contract_source).strip()
+            if isinstance(launch_input_contract_source, str)
+            and launch_input_contract_source.strip()
+            else None
+        ),
+    )
+    resolved_inputs = {
+        _normalise_text(key): value
+        for key, value in resolution.resolved_inputs.items()
+        if _normalise_text(key)
+    }
+    diagnostics: dict[str, Any] = dict(resolution.diagnostics)
+    excluded_applied: list[str] = list(pre_resolution_excluded_applied)
+    for key in excluded_keys:
+        if key in resolved_inputs:
+            child_inputs[key] = resolved_inputs[key]
+            continue
+        if key in child_inputs:
+            child_inputs.pop(key, None)
+            excluded_applied.append(key)
+    for key, value in resolved_inputs.items():
+        child_inputs.setdefault(key, value)
+    if excluded_applied:
+        diagnostics["excluded_ambient_inputs_applied"] = sorted(
+            dict.fromkeys(excluded_applied)
+        )
+    child_inputs["workflow_launch_input_resolution"] = diagnostics
+    return diagnostics
 
 
 def _append_parent_trace_event(
@@ -901,12 +996,21 @@ def _build_subworkflow_handler(
             )
 
         child_chain = [*invocation_chain, child_workflow_id]
+        ambient_input_keys = _normalise_input_key_list(
+            inputs.get(_AMBIENT_INPUT_KEYS_KEY)
+        )
         child_inputs = _extract_child_inputs(
             inputs=inputs,
             parent_context=request.data,
             invocation_chain=child_chain,
             parent_workflow_id=parent_workflow_id,
             parent_state_id=parent_state_id,
+        )
+        _apply_child_launch_input_contract(
+            child_workflow_id=child_workflow_id,
+            definition=definition,
+            child_inputs=child_inputs,
+            ambient_input_keys=ambient_input_keys,
         )
         child_inputs["__workflow_subworkflow_invocation_count"] = invocation_count + 1
         request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
@@ -1046,6 +1150,7 @@ def register_subworkflow_actions(
             definition_loader=loader,
         ),
         description="Invoke a child workflow using explicit subworkflow contracts.",
+        required_tool_operation_class="workflow_execute",
     )
     if overwrite:
         registry.replace(spec)

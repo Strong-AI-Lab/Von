@@ -90,6 +90,9 @@ EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous
 EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = "workflow_step_completely_vacuous"
 ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = "missing_authoritative_purpose"
 ROUTING_EXCLUSION_EXPLICITLY_DISABLED = "routing_explicitly_disabled"
+ROUTING_EXCLUSION_EXPLICIT_WORKFLOW_CONTEXT_REQUIRED = (
+    "explicit_workflow_context_required"
+)
 ROUTING_READINESS_WORKFLOW_ABSENT = "workflow_absent"
 ROUTING_READINESS_WORKFLOW_PRESENT_NOT_INDEXED = "workflow_present_not_indexed"
 ROUTING_READINESS_WORKFLOW_PRESENT_LAZY_DEFINITION = "workflow_present_lazy_definition"
@@ -823,6 +826,7 @@ def _build_expected_outcome_contract_projection(
             "schema_version": CONTRACT_PROJECTION_SCHEMA_VERSION,
             "fields_used": [],
             "text": "",
+            "query_text": "",
             "workflow_concept_ids": [],
             "required_tools": [],
             "required_actions": [],
@@ -832,6 +836,7 @@ def _build_expected_outcome_contract_projection(
 
     field_payload = _contract_state_field_payload(expected_outcome_contract)
     lines: list[str] = []
+    query_lines: list[str] = []
     fields_used: list[str] = []
 
     labelled_text_fields: tuple[tuple[str, str], ...] = (
@@ -868,7 +873,9 @@ def _build_expected_outcome_contract_projection(
         field_names=("required_tools", "turn_expected_required_tools"),
     )
     if required_tools:
-        lines.append("- Required tools: " + ", ".join(required_tools))
+        line = "- Required tools: " + ", ".join(required_tools)
+        lines.append(line)
+        query_lines.append(line)
         fields_used.append("required_tools")
 
     required_actions = _contract_sequence_values(
@@ -884,7 +891,9 @@ def _build_expected_outcome_contract_projection(
         ),
     )
     if required_actions:
-        lines.append("- Required workflow actions: " + ", ".join(required_actions))
+        line = "- Required workflow actions: " + ", ".join(required_actions)
+        lines.append(line)
+        query_lines.append(line)
         fields_used.append("required_actions")
 
     target_concept_ids = _contract_sequence_values(
@@ -898,7 +907,9 @@ def _build_expected_outcome_contract_projection(
         ),
     )
     if target_concept_ids:
-        lines.append("- Target concept IDs: " + ", ".join(target_concept_ids))
+        line = "- Target concept IDs: " + ", ".join(target_concept_ids)
+        lines.append(line)
+        query_lines.append(line)
         fields_used.append("target_concept_ids")
 
     target_type_ids = _contract_sequence_values(
@@ -913,24 +924,32 @@ def _build_expected_outcome_contract_projection(
         ),
     )
     if target_type_ids:
-        lines.append("- Target type IDs: " + ", ".join(target_type_ids))
+        line = "- Target type IDs: " + ", ".join(target_type_ids)
+        lines.append(line)
+        query_lines.append(line)
         fields_used.append("target_type_ids")
 
     workflow_concept_ids = _extract_contract_workflow_concept_ids(
         expected_outcome_contract
     )
     if workflow_concept_ids:
-        lines.append("- Workflow concept IDs: " + ", ".join(workflow_concept_ids))
+        line = "- Workflow concept IDs: " + ", ".join(workflow_concept_ids)
+        lines.append(line)
+        query_lines.append(line)
         fields_used.append("workflow_concept_ids")
 
     text = ""
     if lines:
         text = "\n".join(["Turn-intent routing guidance:", *lines])
+    query_text = ""
+    if query_lines:
+        query_text = "\n".join(["Turn-intent routing guidance:", *query_lines])
 
     return {
         "schema_version": CONTRACT_PROJECTION_SCHEMA_VERSION,
         "fields_used": _dedupe_text_values(fields_used),
         "text": text,
+        "query_text": query_text,
         "workflow_concept_ids": workflow_concept_ids,
         "required_tools": required_tools,
         "required_actions": required_actions,
@@ -945,7 +964,7 @@ def _apply_contract_projection_to_query(
     projection: Mapping[str, Any] | None,
 ) -> str:
     projection_text = (
-        str(projection.get("text") or "").strip()
+        str(projection.get("query_text") or "").strip()
         if isinstance(projection, Mapping)
         else ""
     )
@@ -1165,6 +1184,58 @@ def _derive_candidate_routing_readiness_status(
     if match.routing_eligible:
         return "workflow_present_routing_ready", None
     return ROUTING_READINESS_WORKFLOW_PRESENT_NOT_ROUTING_ELIGIBLE, None
+
+
+def _query_explicitly_names_workflow_candidate(
+    query: str,
+    match: WorkflowMatch,
+) -> bool:
+    """Return whether the turn directly names this workflow artefact.
+
+    This is a support guard for represented routing profiles that declare
+    ``explicit_workflow_context_required``. It only recognises explicit workflow
+    identity, not domain semantics.
+    """
+
+    direct_ids = {
+        item.lower()
+        for item in _extract_direct_workflow_concept_ids(query)
+        if isinstance(item, str) and item.strip()
+    }
+    concept_id = str(match.concept_id or "").strip()
+    if concept_id and concept_id.lower() in direct_ids:
+        return True
+
+    query_phrase = f" {_normalise_workflow_phrase(query)} "
+    if not _query_may_name_workflow_directly(query_phrase):
+        return False
+
+    candidate_phrases = {
+        _normalise_workflow_phrase(concept_id),
+        _normalise_workflow_phrase(match.name),
+    }
+    return any(
+        bool(phrase) and f" {phrase} " in query_phrase
+        for phrase in candidate_phrases
+    )
+
+
+def _routing_profile_exclusion_reason(
+    match: WorkflowMatch,
+    *,
+    query: str,
+) -> str | None:
+    profile = match.routing_profile
+    if not isinstance(profile, Mapping):
+        return None
+    if profile.get("routing_eligible") is False:
+        return ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    if (
+        profile.get("explicit_workflow_context_required") is True
+        and not _query_explicitly_names_workflow_candidate(query, match)
+    ):
+        return ROUTING_EXCLUSION_EXPLICIT_WORKFLOW_CONTEXT_REQUIRED
+    return None
 
 
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
@@ -1582,6 +1653,7 @@ def _annotate_and_rank_candidates(
     *,
     max_results: int,
     workflow_registry: Any | None = None,
+    query: str = "",
 ) -> List[WorkflowMatch]:
     """Attach executability/confidence metadata and rank candidates for routing."""
     annotated: list[WorkflowMatch] = []
@@ -1645,6 +1717,14 @@ def _annotate_and_rank_candidates(
             match.routing_exclusion_reason = None
         if isinstance(routing_profile, dict):
             match.routing_profile = routing_profile
+        profile_exclusion_reason = _routing_profile_exclusion_reason(
+            match,
+            query=query,
+        )
+        if profile_exclusion_reason:
+            match.routing_eligible = False
+            match.is_policy_safe = False
+            match.routing_exclusion_reason = profile_exclusion_reason
         readiness_status, readiness_detail = _derive_candidate_routing_readiness_status(
             match
         )
@@ -1660,6 +1740,7 @@ def _annotate_and_rank_candidates(
     annotated.sort(
         key=lambda m: (
             -_EXECUTABILITY_REASON_PRIORITY.get(m.executability_reason, -1),
+            -int(bool(m.routing_eligible)),
             -m.confidence_score,
             -m.relevance_score,
             m.concept_id,
@@ -2376,6 +2457,7 @@ def discover_workflows(
         ranked_matches,
         max_results=max_results,
         workflow_registry=workflow_registry,
+        query=requested_query_text,
     )
     _record_discovery_stage_timing(
         stage_timings,

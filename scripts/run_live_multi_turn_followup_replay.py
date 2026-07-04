@@ -143,21 +143,108 @@ def _find_turn_execution_record(payload: Any, *, depth: int = 0) -> dict[str, An
     return {}
 
 
+def _turn_record_request_id(turn_record: Mapping[str, Any]) -> str | None:
+    for path in (
+        ("request_id",),
+        ("turn_id",),
+        ("execution", "request_id"),
+        ("execution", "turn_id"),
+        ("execution", "summary", "request_id"),
+        ("execution", "summary", "turn_id"),
+    ):
+        cursor: Any = turn_record
+        for key in path:
+            if not isinstance(cursor, Mapping):
+                cursor = None
+                break
+            cursor = cursor.get(key)
+        text = _safe_text(cursor)
+        if text:
+            return text
+    return None
+
+
+def _turn_record_matches_request(
+    turn_record: Mapping[str, Any],
+    request_id: str | None,
+    *,
+    require_record_request_id: bool,
+) -> bool:
+    clean_request_id = _safe_text(request_id)
+    if not clean_request_id:
+        return True
+    record_request_id = _turn_record_request_id(turn_record)
+    if not record_request_id:
+        return not require_record_request_id
+    return record_request_id == clean_request_id
+
+
+def _lookup_projected_turn_record(
+    *,
+    request_id: str,
+    namespace: str | None,
+    attempts: int = 3,
+    sleep_seconds: float = 0.5,
+) -> dict[str, Any]:
+    clean_request_id = _safe_text(request_id)
+    if not clean_request_id:
+        return {}
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+    except Exception:
+        pass
+    try:
+        from src.backend.services.turn_execution_record_service import (
+            get_turn_execution_record_projection,
+        )
+    except Exception:
+        return {}
+
+    namespace_candidates = [_safe_text(namespace) or None]
+    if namespace_candidates[0] is not None:
+        namespace_candidates.append(None)
+    bounded_attempts = max(1, int(attempts or 1))
+    for attempt_index in range(bounded_attempts):
+        for namespace_candidate in namespace_candidates:
+            try:
+                record = get_turn_execution_record_projection(
+                    request_id=clean_request_id,
+                    namespace=namespace_candidate,
+                )
+            except Exception:
+                record = {}
+            if isinstance(record, Mapping) and record:
+                return dict(record)
+        if attempt_index + 1 < bounded_attempts and sleep_seconds > 0:
+            time.sleep(max(0.0, float(sleep_seconds)))
+    return {}
+
+
 def fetch_turn_record(
     *,
     session: requests.Session,
     base_url: str,
     chat_session_id: str,
+    request_id: str,
+    namespace: str | None = None,
     task_result: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Locate the persisted turn execution record for the just-finished turn.
 
     Prefer the copy embedded in the task result; fall back to the newest
-    assistant history debug entry for the session.
+    assistant history debug entry for the session, then the canonical projected
+    turn-execution record keyed by request id.
     """
 
+    clean_request_id = _safe_text(request_id)
     record = _find_turn_execution_record(task_result)
-    if record:
+    if record and _turn_record_matches_request(
+        record,
+        clean_request_id,
+        require_record_request_id=False,
+    ):
         return record
     try:
         history = _request_json(
@@ -167,7 +254,7 @@ def fetch_turn_record(
             params={"session_id": chat_session_id, "tail_limit": 4},
         )
     except Exception:
-        return {}
+        history = {}
     entries = history.get("history") or history.get("messages") or []
     for entry in reversed(list(entries) if isinstance(entries, list) else []):
         location = _as_mapping(entry.get("history_location"))
@@ -189,9 +276,100 @@ def fetch_turn_record(
         record = _find_turn_execution_record(
             _as_mapping(debug_payload.get("llm_debug_data"))
         )
-        if record:
+        if record and _turn_record_matches_request(
+            record,
+            clean_request_id,
+            require_record_request_id=True,
+        ):
             return record
-    return {}
+    return _lookup_projected_turn_record(
+        request_id=clean_request_id,
+        namespace=namespace,
+    )
+
+
+_TURN_RECORD_VISIBLE_ANSWER_PATHS: tuple[tuple[str, ...], ...] = (
+    ("response_surfaces", "user_visible_response", "text"),
+    ("requested_evidence_lineage", "final_response", "text_checked"),
+    ("requested_evidence_lineage", "final_response", "text"),
+    ("requested_evidence_lineage", "final_response", "response_text"),
+    ("requested_evidence_lineage", "final_response", "preview"),
+    ("requested_evidence_lineage", "final_response", "text_checked_preview"),
+    ("final_response", "text"),
+    ("final_response", "response_text"),
+    ("final_response", "preview"),
+    ("final_response", "content"),
+    ("final_answer_synthesis", "final_answer"),
+    ("final_answer_synthesis", "response_text"),
+    ("final_answer_synthesis", "text"),
+    ("execution", "summary", "response_surfaces", "user_visible_response", "text"),
+    (
+        "execution",
+        "summary",
+        "requested_evidence_lineage",
+        "final_response",
+        "text_checked",
+    ),
+    (
+        "execution",
+        "summary",
+        "requested_evidence_lineage",
+        "final_response",
+        "text_checked_preview",
+    ),
+)
+
+
+def _turn_record_text_at_path(
+    payload: Mapping[str, Any],
+    path: Sequence[str],
+) -> str | None:
+    cursor: Any = payload
+    for key in path:
+        if not isinstance(cursor, Mapping):
+            return None
+        cursor = cursor.get(key)
+    text = _safe_text(cursor)
+    return text or None
+
+
+def extract_visible_answer_from_turn_record(
+    turn_record: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """Extract final user-visible text from persisted turn-record surfaces.
+
+    The background task result can expose a selected-workflow snapshot that is
+    older than the final answer synthesis. The turn record's response surfaces
+    and requested-evidence lineage are closer to what the answer gate actually
+    checked, so the replay oracle should prefer them when available.
+    """
+
+    for path in _TURN_RECORD_VISIBLE_ANSWER_PATHS:
+        text = _turn_record_text_at_path(turn_record, path)
+        if text:
+            return text, ".".join(path)
+    return None, None
+
+
+def _derive_target_namespace(
+    *,
+    target_session_context: Mapping[str, Any],
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+) -> str | None:
+    session_context = _as_mapping(target_session_context.get("session_context"))
+    user_id = _safe_text(session_context.get("user_id")) or _safe_text(user_concept_id)
+    org_id = _safe_text(session_context.get("organisation_id")) or _safe_text(
+        organisation_concept_id
+    )
+    if not user_id:
+        return None
+    try:
+        from src.backend.services.namespace_service import derive_namespace_for_actor
+
+        return derive_namespace_for_actor(user_id, org_id)
+    except Exception:
+        return None
 
 
 def _unsatisfied_obligations(turn_record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -423,6 +601,11 @@ def run_case(
         user_concept_id=user_concept_id,
         organisation_concept_id=organisation_concept_id,
     )
+    target_namespace = _derive_target_namespace(
+        target_session_context=target_session_context,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+    )
     chat_session = create_replay_chat_session(
         session=session,
         base_url=base_url,
@@ -468,12 +651,23 @@ def run_case(
         task_result = _as_mapping(evidence.get("task_result"))
         last_task_status = _as_mapping(evidence.get("last_task_status"))
         terminal_status = _safe_text(last_task_status.get("status"))
-        visible_answer = extract_visible_answer(task_result)
         turn_record = fetch_turn_record(
             session=session,
             base_url=base_url,
             chat_session_id=chat_session_id,
+            request_id=client_request_id,
+            namespace=target_namespace,
             task_result=task_result,
+        )
+        turn_record_visible_answer, turn_record_visible_answer_source = (
+            extract_visible_answer_from_turn_record(turn_record)
+        )
+        task_result_visible_answer = extract_visible_answer(task_result)
+        visible_answer = turn_record_visible_answer or task_result_visible_answer
+        visible_answer_source = (
+            f"turn_record.{turn_record_visible_answer_source}"
+            if turn_record_visible_answer_source
+            else ("task_result" if task_result_visible_answer else None)
         )
         selected_workflow_ids = extract_selected_workflow_ids(
             task_result,
@@ -496,6 +690,7 @@ def run_case(
                 "task_id": task_id,
                 "terminal_status": terminal_status,
                 "visible_answer": visible_answer,
+                "visible_answer_source": visible_answer_source,
                 "selected_workflow_ids": selected_workflow_ids,
                 "turn_record_decision": _safe_text(turn_record.get("decision")) or None,
                 "turn_record_available": bool(turn_record),

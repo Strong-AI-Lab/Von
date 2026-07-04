@@ -855,6 +855,22 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "workflow_launch_input_contract.v1"
     )
     assert arxiv_launch_contract.get("required_inputs") == ["prompt"]
+    assert arxiv_launch_contract.get("excluded_ambient_input_keys") == [
+        "arxiv_id",
+        "arxiv_ids",
+        "source_uri",
+        "source_uris",
+        "paper_url",
+        "paper_urls",
+        "url",
+        "urls",
+        "paper_concept_id",
+        "paper_concept_ids",
+        "file_copy_concept_id",
+        "file_copy_concept_ids",
+        "concept_id",
+        "concept_ids",
+    ]
     resolved_launch_contract, resolved_launch_source = (
         resolve_workflow_launch_input_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
     )
@@ -878,6 +894,14 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         isinstance(item, dict)
         and item.get("target_context_key") == "arxiv_id"
         and item.get("source_expression") == "inputs.arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression") == "inputs.prompt"
+        and item.get("extractor") == "arxiv_id"
         and item.get("required") is False
         for item in input_mappings
     )

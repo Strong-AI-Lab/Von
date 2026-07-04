@@ -718,7 +718,9 @@ def test_custom_workflow_dispatch_resolves_deictic_arxiv_target_from_discovery_c
     captured_data: dict[str, Any] = {}
 
     def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
-        captured_data.update(dict(data))
+        if getattr(_workflow_def, "workflow_id", None) == selected_workflow_id:
+            captured_data.clear()
+            captured_data.update(dict(data))
         return SimpleNamespace(
             completed=True,
             final_state="normalise_arxiv_source",
@@ -812,7 +814,9 @@ def test_authoritative_arxiv_workflow_dispatch_resolves_deictic_grounded_target(
     captured_data: dict[str, Any] = {}
 
     def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
-        captured_data.update(dict(data))
+        if getattr(_workflow_def, "workflow_id", None) == selected_workflow_id:
+            captured_data.clear()
+            captured_data.update(dict(data))
         return SimpleNamespace(
             completed=True,
             final_state="normalise_arxiv_source",
@@ -891,3 +895,141 @@ def test_authoritative_arxiv_workflow_dispatch_resolves_deictic_grounded_target(
     )
 
 
+def test_authoritative_arxiv_workflow_dispatch_ignores_stale_ambient_target_when_prompt_names_new_target(
+    _reset_mock_db: Any,
+    monkeypatch,
+):
+    bootstrap_canonical_paper_representation_workflows()
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+
+    authoritative_definition = load_workflow_definition_from_vontology(
+        selected_workflow_id
+    )
+    assert authoritative_definition is not None
+    launch_contract = authoritative_definition.metadata.get("launch_input_contract")
+    assert isinstance(launch_contract, dict)
+    assert "arxiv_id" in launch_contract.get("excluded_ambient_input_keys", [])
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=authoritative_definition,
+            purpose="Authoritative arXiv stale-context handoff regression test.",
+            source="authoritative_vontology_test",
+        )
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-stale-arxiv-context",
+            "selected_workflow_id": selected_workflow_id,
+            "completion_gate_decision": "follow_up_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "arxiv_paper_representation",
+                    "effect_type": "scholarly_representation",
+                    "status": "not_satisfied",
+                    "targets": ["2406.15341"],
+                }
+            ],
+            "required_effects_contract": {
+                "schema_version": "workflow_required_effects_contract.v1",
+                "required_effects": [
+                    {
+                        "effect_id": "arxiv_paper_representation",
+                        "targets": ["2406.15341"],
+                    }
+                ],
+            },
+        },
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
+        if getattr(_workflow_def, "workflow_id", None) == selected_workflow_id:
+            captured_data.clear()
+            captured_data.update(dict(data))
+        return SimpleNamespace(
+            completed=True,
+            final_state="normalise_arxiv_source",
+            error=None,
+            data={"response_text": "Prepared from current prompt target."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="Is this paper represented? https://arxiv.org/pdf/2603.22519v2",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-stale-arxiv-context",
+        workflow_discovery_result={
+            "discovery_query_input": (
+                "Is this paper represented? https://arxiv.org/pdf/2603.22519v2"
+            ),
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a current prompt URL.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a current prompt URL.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.response_text == "Prepared from current prompt target."
+    assert captured_data["selected_workflow_id"] == selected_workflow_id
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert captured_data["arxiv_id"] == "2603.22519", {
+        "excluded_ambient_inputs_applied": (
+            launch_resolution.get("excluded_ambient_inputs_applied")
+            if isinstance(launch_resolution, dict)
+            else None
+        ),
+        "arxiv_mappings": [
+            mapping
+            for mapping in (
+                launch_resolution.get("mappings", [])
+                if isinstance(launch_resolution, dict)
+                else []
+            )
+            if isinstance(mapping, dict)
+            and mapping.get("target_context_key") in {"arxiv_id", "arxiv_ids"}
+        ],
+    }
+    assert captured_data["arxiv_ids"] == ["2603.22519"]
+    assert captured_data.get("source_uri") != "https://arxiv.org/abs/2406.15341"
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("status") == "resolved"
+    assert "arxiv_id" in launch_resolution.get("excluded_ambient_inputs_applied", [])
+    assert any(
+        mapping.get("target_context_key") == "arxiv_id"
+        and mapping.get("source_expression")
+        == "inputs.workflow_discovery_result.discovery_query_input"
+        and mapping.get("resolved") is True
+        for mapping in launch_resolution.get("mappings") or []
+    )

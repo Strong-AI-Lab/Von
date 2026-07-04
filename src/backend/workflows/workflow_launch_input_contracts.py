@@ -30,6 +30,7 @@ WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT = "first_quoted_text"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST = "workflow_id_list"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID = "arxiv_id"
 WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST = "arxiv_id_list"
+WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS = "excluded_ambient_input_keys"
 _ALLOWED_EXTRACTORS: Tuple[str, ...] = (
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_IDENTITY,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_FIRST_QUOTED_TEXT,
@@ -287,11 +288,21 @@ def normalise_workflow_launch_input_contract(
         if item not in required_inputs:
             required_inputs.append(item)
 
+    excluded_ambient_input_keys = _normalise_string_list(
+        value.get(WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS)
+        or value.get("exclude_ambient_input_keys")
+        or value.get("ambient_input_exclusions")
+        or value.get("excluded_input_keys")
+    )
+
     return (
         {
             "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
             "input_mappings": mappings,
             "required_inputs": required_inputs,
+            WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS: (
+                excluded_ambient_input_keys
+            ),
         },
         None,
     )
@@ -320,6 +331,7 @@ def resolve_workflow_launch_inputs(
             "resolved_inputs": [],
             "unresolved_required_inputs": [],
             "unresolved_optional_inputs": [],
+            WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS: [],
             "mappings": [],
         }
         if contract_error:
@@ -417,6 +429,13 @@ def resolve_workflow_launch_inputs(
         "resolved_inputs": sorted(resolved_inputs.keys()),
         "unresolved_required_inputs": sorted(dict.fromkeys(unresolved_required_inputs)),
         "unresolved_optional_inputs": sorted(dict.fromkeys(unresolved_optional_inputs)),
+        WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS: list(
+            normalised_contract.get(
+                WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS,
+                [],
+            )
+            or []
+        ),
         "mappings": mapping_diagnostics,
     }
     required_actor_context_fields = [
@@ -466,6 +485,7 @@ __all__ = [
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_WORKFLOW_ID_LIST",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID",
     "WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST",
+    "WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS",
     "WorkflowLaunchInputResolution",
     "normalise_workflow_launch_input_contract",
     "resolve_workflow_launch_inputs",

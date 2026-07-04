@@ -1804,6 +1804,16 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
             handler=_build_verify_representation_handler(),
             description="Verify scholarly-paper representation postconditions.",
             required_tool_operation_class="verification_read",
+            required_tool_target_argument_names=(
+                "arxiv_id",
+                "paper_concept_id",
+                "file_copy_concept_id",
+            ),
+            required_tool_target_payload_field_names=(
+                "arxiv_id",
+                "paper_concept_id",
+                "file_copy_concept_id",
+            ),
         )
     )
     registry.register_if_absent(
@@ -1842,6 +1852,7 @@ def register_paper_representation_actions(registry: ActionRegistry) -> None:
                 "Normalise caller-supplied scholarly paper references into a "
                 "source-neutral reference-set schema for represented workflow fan-out."
             ),
+            required_tool_operation_class="search_or_resolution_read",
         )
     )
     registry.register_if_absent(

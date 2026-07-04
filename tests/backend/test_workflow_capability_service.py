@@ -226,6 +226,113 @@ class TestWorkflowCapabilityIndex:
         assert len(results) >= 1
         assert results[0].workflow_id == "#V#test_workflow"
 
+    def test_memory_only_entries_match_when_rag_namespace_is_empty(self):
+        import src.backend.services.workflow_capability_service as capability_service
+
+        index = WorkflowCapabilityIndex()
+        with index._lock:
+            index._entries = {
+                "#V#arxiv_paper_representation_workflow": capability_service._CapabilityEntry(
+                    workflow_id="#V#arxiv_paper_representation_workflow",
+                    doc_id="workflow_capability:#V#arxiv_paper_representation_workflow",
+                    text=(
+                        "Arxiv Paper Representation Workflow\n\n"
+                        "Represent an arXiv paper from a URL or identifier."
+                    ),
+                    metadata={
+                        "name": "Arxiv Paper Representation Workflow",
+                        "description": "Represent an arXiv paper from a URL.",
+                        "source": "repo_seed_agent_test",
+                    },
+                )
+            }
+
+        results = index.search("represent arxiv paper", max_results=3)
+
+        assert len(results) == 1
+        assert results[0].workflow_id == "#V#arxiv_paper_representation_workflow"
+        assert results[0].source == "capability_index_memory"
+
+    def test_memory_only_search_prefers_specific_represented_routing_fields(self):
+        import src.backend.services.workflow_capability_service as capability_service
+
+        prompt = (
+            "Please ingest https://arxiv.org/abs/2406.15341 into Von, "
+            "including the normal download/file-copy path if available, then "
+            "read back the represented paper concept so I can see what was stored."
+        )
+        index = WorkflowCapabilityIndex()
+        with index._lock:
+            index._entries = {
+                "#V#represented_artefact_creation_workflow": capability_service._CapabilityEntry(
+                    workflow_id="#V#represented_artefact_creation_workflow",
+                    doc_id=(
+                        "workflow_capability:"
+                        "#V#represented_artefact_creation_workflow"
+                    ),
+                    text=(
+                        "Decompose represented-artefact requests into a single "
+                        "artefact or a bounded set. Read represented state back."
+                    ),
+                    metadata={
+                        "name": "Represented Artefact Creation Workflow",
+                        "summary_text": (
+                            "Create or reuse small durable Vontology artefacts, "
+                            "then read represented state back."
+                        ),
+                        "discovery_exemplars": {
+                            "keywords": [
+                                "represented artefact creation",
+                                "create durable labels",
+                                "read represented state back",
+                            ],
+                            "examples": [
+                                "Create represented labels in Von and read them back."
+                            ],
+                        },
+                    },
+                ),
+                "#V#arxiv_paper_representation_workflow": capability_service._CapabilityEntry(
+                    workflow_id="#V#arxiv_paper_representation_workflow",
+                    doc_id="workflow_capability:#V#arxiv_paper_representation_workflow",
+                    text=(
+                        "Represent an arXiv paper by extracting the canonical "
+                        "identifier, fetching metadata, and downloading a PDF "
+                        "file copy when available."
+                    ),
+                    metadata={
+                        "name": "Arxiv Paper Representation Workflow",
+                        "summary_text": (
+                            "Represent an arXiv paper from a URL or identifier "
+                            "and optionally download a PDF file copy."
+                        ),
+                        "discovery_exemplars": {
+                            "keywords": [
+                                "represent arxiv paper",
+                                "represent arxiv url",
+                                "arxiv org abs",
+                                "download and represent arxiv paper",
+                            ],
+                            "examples": [
+                                "Please represent https://arxiv.org/abs/2401.00001."
+                            ],
+                        },
+                        "workflow_action_ids": [
+                            "arxiv.normalise_source",
+                            "download_paper",
+                            "import_url_file_copy",
+                        ],
+                    },
+                ),
+            }
+
+        results = index.search(prompt, max_results=2)
+
+        assert [result.workflow_id for result in results] == [
+            "#V#arxiv_paper_representation_workflow",
+            "#V#represented_artefact_creation_workflow",
+        ]
+
     def test_multiple_entries_rank_by_relevance(self):
         index = WorkflowCapabilityIndex()
         index.index_workflow(
@@ -683,6 +790,73 @@ class TestIndexFromRegistry:
         results = index.search("Look for recent email messages about arxiv papers")
         assert results
         assert results[0].workflow_id == workflow_id
+
+    def test_required_query_cues_gate_capability_search(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#email_arxiv_source_workflow",
+                purpose="Represent arXiv papers discovered in email messages.",
+                source="vontology",
+            )
+        )
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#supplied_arxiv_paper_workflow",
+                purpose="Represent supplied arXiv paper identifiers.",
+                source="vontology",
+            )
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_routing_metadata",
+            lambda workflow_ids: {
+                "#V#email_arxiv_source_workflow": {
+                    "description_text": (
+                        "Represent arXiv papers discovered in email messages."
+                    ),
+                    "description_source": "text_relation:#V#hasDescription",
+                    "discovery_exemplars": {
+                        "schema_version": "workflow_discovery_exemplars.v1",
+                        "keywords": ["arxiv paper representation from email"],
+                        "examples": [
+                            "Process recent email messages about arXiv papers."
+                        ],
+                        "required_query_cues": ["email", "gmail", "message"],
+                    },
+                    "discovery_exemplars_source": (
+                        "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+                    ),
+                },
+                "#V#supplied_arxiv_paper_workflow": {
+                    "description_text": "Represent supplied arXiv paper identifiers.",
+                    "description_source": "text_relation:#V#hasDescription",
+                },
+            },
+        )
+
+        index = WorkflowCapabilityIndex()
+        assert index.index_from_registry(registry) == 2
+        email_entry = index._entries["#V#email_arxiv_source_workflow"]
+        assert "Required query cues: email, gmail, message" in email_entry.text
+
+        direct_results = index.search("Is arXiv 2603.22519 represented?")
+        assert "#V#email_arxiv_source_workflow" not in {
+            result.workflow_id for result in direct_results
+        }
+        assert "#V#supplied_arxiv_paper_workflow" in {
+            result.workflow_id for result in direct_results
+        }
+
+        email_results = index.search("Process email messages about arxiv papers")
+        assert "#V#email_arxiv_source_workflow" in {
+            result.workflow_id for result in email_results
+        }
 
     def test_rebuild_replaces_stale_retrieval_docs(
         self,
@@ -1215,7 +1389,7 @@ def test_blocking_build_runs_all_warm_queries(
     )
 
 
-def test_agent_test_build_loads_registry_entries_without_rag_warmup(
+def test_agent_test_build_loads_registry_entries_without_rag_sync_but_warms_query_surface(
     monkeypatch: pytest.MonkeyPatch,
     _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
 ) -> None:
@@ -1224,13 +1398,21 @@ def test_agent_test_build_loads_registry_entries_without_rag_warmup(
     reset_workflow_capability_index()
     registry = build_test_conversation_turn_registry()
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
-    monkeypatch.setattr(
-        capability_service,
-        "_warm_workflow_capability_query_surface",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("AgentTest startup must not warm the RAG query surface")
+    namespace = capability_service.WORKFLOW_CAPABILITY_NAMESPACE
+    _fake_retrieval_backend.docs_by_namespace.setdefault(namespace, {})[
+        "workflow_capability:#V#tool_calling_workflow"
+    ] = {
+        "id": "workflow_capability:#V#tool_calling_workflow",
+        "text": (
+            "workflow discovery capability relationship retrieval entity predicate "
+            "tools grounding"
         ),
-    )
+        "metadata": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "type": "workflow_capability",
+        },
+    }
 
     index = capability_service._perform_workflow_capability_index_build(
         mode="startup",
@@ -1240,10 +1422,52 @@ def test_agent_test_build_loads_registry_entries_without_rag_warmup(
     assert index.size > 0
     assert _fake_retrieval_backend.reset_calls == []
     assert _fake_retrieval_backend.upsert_calls == []
-    assert _fake_retrieval_backend.queries == []
+    assert [query["query_text"] for query in _fake_retrieval_backend.queries] == list(
+        _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES
+    )
     runtime_state = capability_service.get_workflow_capability_index_runtime_state()
-    assert runtime_state["query_surface_ready"] is False
+    assert runtime_state["query_surface_ready"] is True
+    assert runtime_state["ready"] is True
     assert runtime_state["last_manifest_status"] == "agent_test_memory_only"
+
+
+def test_warm_query_surface_requires_retrieval_match() -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+
+    class _EmptyWarmIndex:
+        def search(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return []
+
+    with pytest.raises(RuntimeError, match="no warm-up match"):
+        capability_service._warm_workflow_capability_query_surface(_EmptyWarmIndex())
+
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["query_surface_ready"] is False
+    assert "no warm-up match" in runtime_state["query_surface_last_error"]
+
+
+def test_warm_query_surface_accepts_at_least_one_represented_match() -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+
+    class _PartiallyWarmIndex:
+        def search(self, query: str, *_args: Any, **_kwargs: Any) -> list[Any]:
+            if "arxiv" in query.lower():
+                return [{"workflow_id": "#V#arxiv_paper_representation_workflow"}]
+            return []
+
+    capability_service._warm_workflow_capability_query_surface(_PartiallyWarmIndex())
+
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["query_surface_ready"] is True
+    assert runtime_state["query_surface_last_error"] is None
 
 
 def test_index_sync_trims_backend_document_metadata(

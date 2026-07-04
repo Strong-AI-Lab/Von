@@ -28,12 +28,14 @@ from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE,
     ROUTING_EXCLUSION_EXPLICITLY_DISABLED,
+    ROUTING_EXCLUSION_EXPLICIT_WORKFLOW_CONTEXT_REQUIRED,
     ROUTING_READINESS_WORKFLOW_PRESENT_MISSING_AUTHORITATIVE_ROUTING_TEXT,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
     _agent_test_registry_capability_search_should_block,
     _annotate_and_rank_candidates,
+    _apply_contract_projection_to_query,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
     _enrich_workflow_matches,
@@ -628,6 +630,49 @@ class TestDiscoverWorkflows:
             "#V#generic_metadata_representation_workflow"
         ]
         assert "metadata.verify_representation" in projection["text"]
+        assert "metadata.verify_representation" in projection["query_text"]
+
+    def test_generic_contract_prose_does_not_pollute_retrieval_query(self) -> None:
+        projection = _build_expected_outcome_contract_projection(
+            {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Answer the user's request accurately.",
+                    "grounding_requirement": (
+                        "Use available context and authoritative tool evidence."
+                    ),
+                    "selector_guidance": (
+                        "Choose the route most likely to answer with grounded evidence."
+                    ),
+                },
+            }
+        )
+
+        query = "Please ingest https://arxiv.org/abs/2406.15341 into Von."
+
+        assert "Choose the route" in projection["text"]
+        assert projection["query_text"] == ""
+        assert _apply_contract_projection_to_query(query, projection=projection) == query
+
+    def test_structural_contract_hints_still_reach_retrieval_query(self) -> None:
+        projection = _build_expected_outcome_contract_projection(
+            {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Answer the user's request accurately.",
+                },
+                "required_tools": ["workflow_execute"],
+                "target_workflow_id": "#V#arxiv_paper_representation_workflow",
+            }
+        )
+
+        query = "Please ingest https://arxiv.org/abs/2406.15341 into Von."
+        enriched = _apply_contract_projection_to_query(query, projection=projection)
+
+        assert "Answer the user's request accurately" in projection["text"]
+        assert "Answer the user's request accurately" not in projection["query_text"]
+        assert "workflow_execute" in enriched
+        assert "#V#arxiv_paper_representation_workflow" in enriched
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
@@ -1605,6 +1650,101 @@ class TestDiscoverWorkflowsForTurn:
             "prefer_existing_capability": True,
         }
         assert annotated[0].to_dict()["routing_profile"]["role"] == "authoring"
+
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data"
+    )
+    def test_annotation_excludes_explicit_context_workflow_when_not_named(
+        self,
+        mock_lifecycle: MagicMock,
+        mock_routing_profile: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_classify: MagicMock,
+    ) -> None:
+        match = WorkflowMatch(
+            "#V#arxiv_paper_ingestion_testing_workflow",
+            "Arxiv Paper Ingestion Testing Workflow",
+            relevance_score=0.99,
+        )
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = True
+        mock_lifecycle.return_value = (None, None)
+        mock_routing_profile.return_value = (
+            {
+                "role": "testing",
+                "explicit_workflow_context_required": True,
+            },
+            "text_relation:#V#hasWorkflowRoutingProfileJson",
+        )
+
+        annotated = _annotate_and_rank_candidates(
+            [match],
+            max_results=1,
+            query="What about https://arxiv.org/abs/2603.22519?",
+        )
+
+        assert annotated[0].routing_eligible is False
+        assert annotated[0].is_policy_safe is False
+        assert (
+            annotated[0].routing_exclusion_reason
+            == ROUTING_EXCLUSION_EXPLICIT_WORKFLOW_CONTEXT_REQUIRED
+        )
+
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data"
+    )
+    def test_annotation_allows_explicit_context_workflow_when_named(
+        self,
+        mock_lifecycle: MagicMock,
+        mock_routing_profile: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_classify: MagicMock,
+    ) -> None:
+        match = WorkflowMatch(
+            "#V#arxiv_paper_ingestion_testing_workflow",
+            "Arxiv Paper Ingestion Testing Workflow",
+            relevance_score=0.99,
+        )
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = True
+        mock_lifecycle.return_value = (None, None)
+        mock_routing_profile.return_value = (
+            {
+                "role": "testing",
+                "explicit_workflow_context_required": True,
+            },
+            "text_relation:#V#hasWorkflowRoutingProfileJson",
+        )
+
+        annotated = _annotate_and_rank_candidates(
+            [match],
+            max_results=1,
+            query=(
+                "Run the Arxiv Paper Ingestion Testing Workflow on "
+                "https://arxiv.org/abs/2603.22519."
+            ),
+        )
+
+        assert annotated[0].routing_eligible is True
+        assert annotated[0].routing_exclusion_reason is None
 
     def test_annotation_uses_routing_index_metadata_without_live_hydration(
         self,

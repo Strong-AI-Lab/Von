@@ -293,6 +293,15 @@ def _invocation_status(invocation: Mapping[str, Any]) -> str:
     return raw_status or "unknown"
 
 
+def _invocation_reports_false_result(invocation: Mapping[str, Any]) -> bool:
+    payload = _payload_from_invocation(invocation)
+    return (
+        invocation.get("result") is False
+        or invocation.get("result_preview") is False
+        or payload.get("result") is False
+    )
+
+
 def _normalise_target_tokens(values: Sequence[Any]) -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
@@ -350,7 +359,7 @@ def _target_tokens_from_mapping(
         if not field_name:
             continue
         value = _value_at_path(source, field_name)
-        if isinstance(value, str) and value.strip().startswith("#V#"):
+        if isinstance(value, str) and value.strip():
             target_values.append(value)
         elif isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
@@ -359,7 +368,7 @@ def _target_tokens_from_mapping(
                 [
                     item
                     for item in value
-                    if isinstance(item, str) and item.startswith("#V#")
+                    if isinstance(item, str) and item.strip()
                 ]
             )
     return _normalise_target_tokens(target_values)
@@ -788,6 +797,13 @@ def build_required_tool_obligation_ledger(
             planned_counts.get(lowered, 0), attempted_counts[lowered]
         )
         status = _invocation_status(invocation)
+        operation_class = classify_required_tool_operation(tool_name)
+        if (
+            status == "ok"
+            and operation_class == OPERATION_VERIFICATION_READ
+            and _invocation_reports_false_result(invocation)
+        ):
+            status = "failed"
         validation_payload = _arguments_from_invocation(invocation)
         if not validation_payload:
             validation_payload = _payload_from_invocation(invocation)
@@ -805,7 +821,6 @@ def build_required_tool_obligation_ledger(
             status = target_validation.first_error_code() or "target_contract_failed"
         last_status_by_tool[lowered] = status
         last_invocation_by_tool[lowered] = invocation
-        operation_class = classify_required_tool_operation(tool_name)
         attempted_operation_classes.append(operation_class)
         if status == "ok":
             successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
@@ -985,10 +1000,12 @@ def build_required_tool_obligation_ledger(
             if isinstance(target_closure, Mapping)
             else 0
         )
+        availability_blocks_obligation = (
+            available_on_gateway is False and attempted_count <= 0
+        )
         satisfied = (
             successful_count > 0
             and bool(allowed_by_policy)
-            and available_on_gateway is not False
             and operation_metadata_present
             and unresolved_failed_target_count <= 0
         )
@@ -1000,7 +1017,7 @@ def build_required_tool_obligation_ledger(
                 BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY
             )
             failure_class = BLOCKER_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY
-        elif available_on_gateway is False:
+        elif availability_blocks_obligation:
             blocking_reason = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
             failure_class = BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
         elif not operation_metadata_present:

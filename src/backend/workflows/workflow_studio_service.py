@@ -929,13 +929,41 @@ def _normalise_discovery_exemplars(value: Any) -> dict[str, Any] | None:
         return None
     keywords = _clean_string_list(raw.get("keywords"))
     examples = _clean_string_list(raw.get("examples") or raw.get("exemplars"))
-    if not keywords and not examples:
+    routing_notes = _clean_string_list(raw.get("routing_notes"))
+    required_query_cues = _clean_string_list(
+        raw.get("required_query_cues")
+        or raw.get("required_cues")
+        or raw.get("source_required_cues")
+    )
+    negative_query_cues = _clean_string_list(
+        raw.get("negative_query_cues") or raw.get("negative_keywords")
+    )
+    excluded_query_cues = _clean_string_list(
+        raw.get("excluded_query_cues") or raw.get("exclude_query_cues")
+    )
+    if (
+        not keywords
+        and not examples
+        and not routing_notes
+        and not required_query_cues
+        and not negative_query_cues
+        and not excluded_query_cues
+    ):
         return None
-    return {
+    payload = {
         "schema_version": "workflow_discovery_exemplars.v1",
         "keywords": keywords,
         "examples": examples,
     }
+    if routing_notes:
+        payload["routing_notes"] = routing_notes
+    if required_query_cues:
+        payload["required_query_cues"] = required_query_cues
+    if negative_query_cues:
+        payload["negative_query_cues"] = negative_query_cues
+    if excluded_query_cues:
+        payload["excluded_query_cues"] = excluded_query_cues
+    return payload
 
 
 def _normalise_background_launch_policy(value: Any) -> dict[str, Any] | None:

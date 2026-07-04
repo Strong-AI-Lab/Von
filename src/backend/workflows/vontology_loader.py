@@ -2045,7 +2045,28 @@ def _normalise_workflow_discovery_exemplars(
         raw_payload.get("routing_notes"),
         max_items=24,
     )
-    if not keywords and not examples and not routing_notes:
+    required_query_cues = _normalise_non_empty_text_tuple(
+        raw_payload.get("required_query_cues")
+        or raw_payload.get("required_cues")
+        or raw_payload.get("source_required_cues"),
+        max_items=24,
+    )
+    negative_query_cues = _normalise_non_empty_text_tuple(
+        raw_payload.get("negative_query_cues") or raw_payload.get("negative_keywords"),
+        max_items=24,
+    )
+    excluded_query_cues = _normalise_non_empty_text_tuple(
+        raw_payload.get("excluded_query_cues") or raw_payload.get("exclude_query_cues"),
+        max_items=24,
+    )
+    if (
+        not keywords
+        and not examples
+        and not routing_notes
+        and not required_query_cues
+        and not negative_query_cues
+        and not excluded_query_cues
+    ):
         return None
 
     payload = {
@@ -2055,6 +2076,12 @@ def _normalise_workflow_discovery_exemplars(
     }
     if routing_notes:
         payload["routing_notes"] = list(routing_notes)
+    if required_query_cues:
+        payload["required_query_cues"] = list(required_query_cues)
+    if negative_query_cues:
+        payload["negative_query_cues"] = list(negative_query_cues)
+    if excluded_query_cues:
+        payload["excluded_query_cues"] = list(excluded_query_cues)
     return payload
 
 

@@ -158,7 +158,11 @@ from ...workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
 )
-from ...workflows.workflow_launch_input_contracts import resolve_workflow_launch_inputs
+from ...workflows.workflow_launch_input_contracts import (
+    WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS,
+    normalise_workflow_launch_input_contract,
+    resolve_workflow_launch_inputs,
+)
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
 from ...workflows.workflow_selector import (
@@ -1814,6 +1818,88 @@ def _normalise_tool_name_sequence(value: Any) -> list[str]:
         seen.add(lowered)
         tools.append(tool)
     return tools
+
+
+_WORKFLOW_AMBIENT_INPUT_KEYS_KEY = "__workflow_ambient_input_keys"
+
+
+def _normalise_workflow_input_key_set(value: Any) -> set[str]:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return {cleaned} if cleaned else set()
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {
+        cleaned
+        for item in value
+        if isinstance(item, str) and (cleaned := item.strip())
+    }
+
+
+def _mark_workflow_launch_inputs_as_ambient(inputs: dict[str, Any]) -> None:
+    ambient_keys = _normalise_workflow_input_key_set(
+        inputs.get(_WORKFLOW_AMBIENT_INPUT_KEYS_KEY)
+    )
+    ambient_keys.update(
+        key
+        for key in inputs.keys()
+        if isinstance(key, str) and key != _WORKFLOW_AMBIENT_INPUT_KEYS_KEY
+    )
+    if ambient_keys:
+        inputs[_WORKFLOW_AMBIENT_INPUT_KEYS_KEY] = sorted(ambient_keys)
+
+
+def _strip_excluded_ambient_workflow_launch_inputs(
+    data: dict[str, Any],
+    *,
+    launch_input_contract: Mapping[str, Any] | None,
+) -> list[str]:
+    ambient_keys = _normalise_workflow_input_key_set(
+        data.pop(_WORKFLOW_AMBIENT_INPUT_KEYS_KEY, None)
+    )
+    if not ambient_keys or not isinstance(launch_input_contract, Mapping):
+        return []
+
+    normalised_contract, _contract_error = normalise_workflow_launch_input_contract(
+        launch_input_contract
+    )
+    if not isinstance(normalised_contract, Mapping):
+        return []
+    excluded_keys = [
+        key.strip()
+        for key in (
+            normalised_contract.get(WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS)
+            or []
+        )
+        if isinstance(key, str) and key.strip()
+    ]
+    removed: list[str] = []
+    for key in excluded_keys:
+        if key in ambient_keys and key in data:
+            data.pop(key, None)
+            removed.append(key)
+    return sorted(dict.fromkeys(removed))
+
+
+def _merge_excluded_ambient_launch_diagnostics(
+    diagnostics: dict[str, Any],
+    removed_keys: Sequence[str],
+) -> dict[str, Any]:
+    clean_removed = [
+        key.strip() for key in removed_keys if isinstance(key, str) and key.strip()
+    ]
+    if not clean_removed:
+        return diagnostics
+    existing = diagnostics.get("excluded_ambient_inputs_applied")
+    existing_keys = [
+        key.strip()
+        for key in (existing if isinstance(existing, list) else [])
+        if isinstance(key, str) and key.strip()
+    ]
+    diagnostics["excluded_ambient_inputs_applied"] = sorted(
+        dict.fromkeys([*existing_keys, *clean_removed])
+    )
+    return diagnostics
 
 
 def _evaluate_workflow_required_effects_tool_policy(
@@ -32177,6 +32263,16 @@ class InternalMCPChatOrchestrator:
                 if isinstance(workflow_metadata, Mapping)
                 else None
             )
+            excluded_ambient_inputs_applied = (
+                _strip_excluded_ambient_workflow_launch_inputs(
+                    data,
+                    launch_input_contract=(
+                        launch_contract
+                        if isinstance(launch_contract, Mapping)
+                        else None
+                    ),
+                )
+            )
             launch_resolution = resolve_workflow_launch_inputs(
                 workflow_id=workflow_id,
                 contract=(
@@ -32193,8 +32289,11 @@ class InternalMCPChatOrchestrator:
             for key, value in launch_resolution.resolved_inputs.items():
                 if key not in data:
                     data[key] = value
-            data["workflow_launch_input_resolution"] = dict(
-                launch_resolution.diagnostics
+            data["workflow_launch_input_resolution"] = (
+                _merge_excluded_ambient_launch_diagnostics(
+                    dict(launch_resolution.diagnostics),
+                    excluded_ambient_inputs_applied,
+                )
             )
 
             unresolved_required_inputs = tuple(
@@ -32218,7 +32317,10 @@ class InternalMCPChatOrchestrator:
                             getattr(first_action, "action_id", None)
                             or getattr(first_action, "target_id", None)
                         )
-                diagnostics_payload = dict(launch_resolution.diagnostics)
+                diagnostics_payload = _merge_excluded_ambient_launch_diagnostics(
+                    dict(launch_resolution.diagnostics),
+                    excluded_ambient_inputs_applied,
+                )
                 diagnostics_payload["failing_state_id"] = initial_state
                 diagnostics_payload["failing_action_id"] = failing_action_id
                 data["workflow_launch_input_resolution"] = diagnostics_payload
@@ -33113,6 +33215,7 @@ class InternalMCPChatOrchestrator:
             inputs.setdefault("org_concept_id", org_concept_id.strip())
         if isinstance(gmail_profile, str) and gmail_profile.strip():
             inputs.setdefault("gmail_profile", gmail_profile.strip())
+        _mark_workflow_launch_inputs_as_ambient(inputs)
         return inputs
 
     @staticmethod
@@ -34400,22 +34503,8 @@ class InternalMCPChatOrchestrator:
             if isinstance(expected_outcome_contract, TurnExpectedOutcomeContract)
             else TurnExpectedOutcomeContract.from_mapping(expected_outcome_contract)
         )
-        contract = contract_object.to_dict()
         guidance_lines: list[str] = []
 
-        selector_guidance = contract.get("selector_guidance")
-        if isinstance(selector_guidance, str) and selector_guidance.strip():
-            guidance_lines.append(f"- Routing guidance: {selector_guidance.strip()}")
-
-        grounding_requirement = contract.get("grounding_requirement")
-        if isinstance(grounding_requirement, str) and grounding_requirement.strip():
-            guidance_lines.append(
-                f"- Grounding requirement: {grounding_requirement.strip()}"
-            )
-
-        summary = contract.get("summary")
-        if isinstance(summary, str) and summary.strip():
-            guidance_lines.append(f"- Success target: {summary.strip()}")
         if contract_object.required_tools:
             guidance_lines.append(
                 "- Required tools: " + ", ".join(contract_object.required_tools)
@@ -34423,6 +34512,10 @@ class InternalMCPChatOrchestrator:
         if contract_object.target_concept_ids:
             guidance_lines.append(
                 "- Target concept IDs: " + ", ".join(contract_object.target_concept_ids)
+            )
+        if contract_object.target_type_ids:
+            guidance_lines.append(
+                "- Target type IDs: " + ", ".join(contract_object.target_type_ids)
             )
         if contract_object.workflow_concept_ids:
             guidance_lines.append(
@@ -37078,6 +37171,7 @@ class InternalMCPChatOrchestrator:
                 )
                 for key, value in projected_continuation_launch_inputs.items():
                     child_workflow_data.setdefault(key, value)
+        _mark_workflow_launch_inputs_as_ambient(child_workflow_data)
 
         if selected_workflow_id and selected_execution_mode == "direct_response":
             _emit_selected_workflow_execution_event(
@@ -45713,6 +45807,7 @@ class InternalMCPChatOrchestrator:
                     )
                     for key, value in projected_launch_inputs.items():
                         workflow_dispatch_data.setdefault(key, value)
+            _mark_workflow_launch_inputs_as_ambient(workflow_dispatch_data)
 
             workflow_dispatch_data.update(
                 self._build_turn_expected_outcome_context_payload(
@@ -47805,6 +47900,14 @@ class InternalMCPChatOrchestrator:
             if isinstance(workflow_metadata, Mapping)
             else None
         )
+        excluded_ambient_inputs_applied = _strip_excluded_ambient_workflow_launch_inputs(
+            probe_data,
+            launch_input_contract=(
+                launch_input_contract
+                if isinstance(launch_input_contract, Mapping)
+                else None
+            ),
+        )
         launch_resolution = resolve_workflow_launch_inputs(
             workflow_id=clean_workflow_id,
             contract=(
@@ -47890,7 +47993,10 @@ class InternalMCPChatOrchestrator:
             }
 
         resolution_diagnostics = (
-            dict(launch_resolution.diagnostics)
+            _merge_excluded_ambient_launch_diagnostics(
+                dict(launch_resolution.diagnostics),
+                excluded_ambient_inputs_applied,
+            )
             if isinstance(launch_resolution.diagnostics, Mapping)
             else {}
         )

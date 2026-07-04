@@ -445,6 +445,106 @@ def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> Non
     )
 
 
+def test_completion_gate_does_not_rebuild_failed_required_verification_as_success() -> None:
+    data: dict[str, Any] = {
+        "turn_execution_record": {
+            "required_effects": [
+                {
+                    "effect_id": "effect_required_tool_obligations_1",
+                    "intent_origin": "required_tool_obligation_ledger",
+                    "effect_type": "tool_execution",
+                    "required_tools": ["scholarly_paper.verify_representation"],
+                    "status": "not_executed",
+                    "status_reason": (
+                        "Required tool obligations were not satisfied: "
+                        "scholarly_paper.verify_representation"
+                    ),
+                    "failure_code": "required_tool_not_available_on_gateway",
+                    "failure_codes": ["required_tool_not_available_on_gateway"],
+                }
+            ],
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required tool execution was not observed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_required_tool_obligations_1"],
+                "blocking_failure_codes": ["required_tool_not_available_on_gateway"],
+                "evidence_payload": {
+                    "required_effect_count": 1,
+                    "unresolved_preconditions": [
+                        {
+                            "effect_id": "effect_required_tool_obligations_1",
+                            "effect_type": "tool_execution",
+                            "status": "not_executed",
+                            "status_reason": (
+                                "Required tool obligations were not satisfied: "
+                                "scholarly_paper.verify_representation"
+                            ),
+                            "failure_codes": ["required_tool_not_available_on_gateway"],
+                        }
+                    ],
+                },
+            },
+        },
+        "required_prompt_tools": ["scholarly_paper.verify_representation"],
+        "prompt": "Is this paper represented? https://arxiv.org/abs/2603.22519v2",
+        "final_response": "I attempted to verify the paper but read-back failed.",
+        "current_response": "I attempted to verify the paper but read-back failed.",
+        "invocations": [
+            {
+                "tool": "scholarly_paper.verify_representation",
+                "status": "ok",
+                "payload": {
+                    "arxiv_id": "2603.22519",
+                    "paper_concept_id": (
+                        "#V#genotex_an_llm_agent_benchmark_for_automated_gene_"
+                        "expression_data_analysis"
+                    ),
+                },
+                "result_preview": False,
+            }
+        ],
+        "aux_llm_calls": [],
+        "workflow_routing": {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        "turn_expected_outcome_contract_state": {
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {"summary": "Verify arXiv:2603.22519 representation."},
+            "required_tools": ["scholarly_paper.verify_representation"],
+        },
+        "turn_id": "req-failed-required-tool-effect",
+        "conversation_session_id": "session-failed-required-tool-effect",
+        "user_concept_id": "#V#user",
+        "org_concept_id": "#V#org",
+        "turn_execution_record_generated_at": "2026-05-02T00:00:00Z",
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert not any(
+        entry.get("type") == "completion_gate_record_rebuilt"
+        and entry.get("reason")
+        == "stale_required_tool_obligation_effect_satisfied_by_current_invocations"
+        for entry in data["aux_llm_calls"]
+    )
+
+
 def test_completion_gate_rebuild_uses_workflow_method_catalogue_snapshot() -> None:
     data: dict[str, Any] = {
         "turn_execution_record": {
@@ -810,6 +910,77 @@ def test_completion_gate_does_not_publish_partial_answer_as_ready_response() -> 
         for event in progress_events
         if event.get("status") == "orchestrator_result_ready"
     ] == []
+
+
+def test_completion_gate_blocks_failed_selected_workflow_with_zero_required_effects() -> None:
+    data = {
+        "turn_execution_record": {
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "evidence_payload": {"required_effect_count": 0},
+            },
+            "required_effects": [],
+            "critic": {"summary": {}},
+        },
+        "completion_report": {
+            "schema_version": "workflow_execution_summary.v1",
+            "workflow_id": "#V#source_specific_workflow",
+            "completed": False,
+            "effective_completed": False,
+            "reported_completed": True,
+            "terminal_status": "completed",
+            "final_state": "failed",
+            "action_failure_count": 1,
+            "failed_action_ids": ["workflow_mcp.invoke_tool"],
+            "first_failing_state_id": "list_messages",
+            "first_failing_action_id": "workflow_mcp.invoke_tool",
+            "response_text": "A stale selected-workflow response.",
+        },
+        "selected_workflow_user_response": "A stale selected-workflow response.",
+        "final_response": "A stale selected-workflow response.",
+        "response_text": "A stale selected-workflow response.",
+        "current_response": "A stale selected-workflow response.",
+        "invocations": [],
+        "aux_llm_calls": [],
+    }
+    request = SimpleNamespace(
+        data=data,
+        inputs={},
+        environment=SimpleNamespace(user_namespace="#V#user@org"),
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_completion_gate_blocks_failed_selected_workflow",
+        introspection_auto_apply_env="VON_TEST_UNUSED",
+    )
+
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert (
+        "selected_workflow_execution_failed"
+        in result.outputs["completion_gate_blocking_failure_codes"]
+    )
+    assert result.outputs["completion_gate_unresolved_preconditions"] == [
+        {
+            "effect_id": "effect_selected_workflow_execution_1",
+            "effect_type": "workflow_execution",
+            "status": "not_satisfied",
+            "status_reason": (
+                "Selected workflow #V#source_specific_workflow did not complete "
+                "safely; first failing state: list_messages; first failing "
+                "action: workflow_mcp.invoke_tool."
+            ),
+            "failure_codes": ["selected_workflow_execution_failed"],
+        }
+    ]
+    assert "selected workflow execution did not complete successfully" in (
+        result.outputs["response_text"]
+    )
 
 
 def test_selected_workflow_outputs_render_structured_response_text() -> None:

@@ -428,23 +428,69 @@ def _normalise_turn_prompt(data: Mapping[str, Any]) -> str:
     return prompt.strip() if isinstance(prompt, str) else ""
 
 
+def _turn_discovery_sequence_values(
+    data: Mapping[str, Any],
+    *keys: str,
+) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        raw_value = data.get(key)
+        raw_items: Sequence[Any]
+        if isinstance(raw_value, Sequence) and not isinstance(
+            raw_value, (str, bytes, bytearray)
+        ):
+            raw_items = raw_value
+        else:
+            raw_items = (raw_value,)
+        for item in raw_items:
+            clean_item = str(item or "").strip() if item is not None else ""
+            if not clean_item or clean_item in seen:
+                continue
+            seen.add(clean_item)
+            values.append(clean_item)
+    return values
+
+
 def _build_turn_discovery_query_text(data: Mapping[str, Any]) -> str:
-    parts = [_normalise_turn_prompt(data)]
-    for key in (
-        "turn_expected_outcome_summary",
-        "turn_expected_grounding_requirement",
-        "turn_selector_guidance",
-        "turn_answering_guidance",
-    ):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            parts.append(value.strip())
-    required_tools = data.get("turn_expected_required_tools")
-    if isinstance(required_tools, Sequence) and not isinstance(
-        required_tools, (str, bytes, bytearray)
-    ):
-        parts.extend(str(item) for item in required_tools if item)
-    return "\n".join(part for part in parts if part)
+    prompt = _normalise_turn_prompt(data)
+    structural_lines: list[str] = []
+    required_tools = _turn_discovery_sequence_values(
+        data,
+        "turn_expected_required_tools",
+        "required_tools",
+    )
+    if required_tools:
+        structural_lines.append("- Required tools: " + ", ".join(required_tools))
+    target_concept_ids = _turn_discovery_sequence_values(
+        data,
+        "turn_expected_target_concept_ids",
+        "target_concept_ids",
+        "target_concept_id",
+    )
+    if target_concept_ids:
+        structural_lines.append("- Target concept IDs: " + ", ".join(target_concept_ids))
+    target_type_ids = _turn_discovery_sequence_values(
+        data,
+        "turn_expected_target_type_ids",
+        "target_type_ids",
+        "target_type_id",
+    )
+    if target_type_ids:
+        structural_lines.append("- Target type IDs: " + ", ".join(target_type_ids))
+    workflow_concept_ids = _turn_discovery_sequence_values(
+        data,
+        "turn_expected_workflow_concept_ids",
+        "workflow_concept_ids",
+        "workflow_concept_id",
+    )
+    if workflow_concept_ids:
+        structural_lines.append(
+            "- Workflow concept IDs: " + ", ".join(workflow_concept_ids)
+        )
+    if not structural_lines:
+        return prompt
+    return "\n".join([prompt, "", "Turn-intent routing guidance:", *structural_lines])
 
 
 def _build_turn_primary_discovery_query_text(data: Mapping[str, Any]) -> str:
@@ -964,6 +1010,9 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
             **request_data,
         }
+        subworkflow_inputs["__workflow_ambient_input_keys"] = sorted(
+            key for key in request_data.keys() if isinstance(key, str)
+        )
         subworkflow_result = get_shared_durable_action_registry().execute(
             "workflow_invoke_subworkflow",
             inputs=subworkflow_inputs,

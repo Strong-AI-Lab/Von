@@ -30,6 +30,7 @@ from src.backend.workflows.durable.subworkflow_actions import (
     register_subworkflow_actions,
 )
 from src.backend.workflows.durable.turn_execution_actions import (
+    _build_turn_discovery_query_text as _build_durable_turn_discovery_query_text,
     register_turn_execution_actions,
 )
 from src.backend.workflows.engine import WORKFLOW_STEP_EXECUTION_MODE_LLM
@@ -45,6 +46,36 @@ from workflow_test_support import (
     build_authoritative_test_workflow_definition,
     build_test_conversation_turn_registry,
 )
+
+
+def test_durable_turn_discovery_query_uses_only_structural_contract_hints() -> None:
+    prompt = "Please ingest https://arxiv.org/abs/2406.15341 into Von."
+    query = _build_durable_turn_discovery_query_text(
+        {
+            "user_prompt": prompt,
+            "turn_selector_guidance": (
+                "Choose the route most likely to answer the request with grounded evidence."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Use available conversation context and authoritative tool evidence."
+            ),
+            "turn_expected_outcome_summary": (
+                "Answer the user's request accurately using available context."
+            ),
+        }
+    )
+    assert query == prompt
+
+    structural_query = _build_durable_turn_discovery_query_text(
+        {
+            "user_prompt": prompt,
+            "turn_expected_required_tools": ["download_paper", "workflow_execute"],
+            "turn_expected_target_type_ids": ["#V#scholarly_paper"],
+        }
+    )
+    assert "Required tools: download_paper, workflow_execute" in structural_query
+    assert "Target type IDs: #V#scholarly_paper" in structural_query
+    assert "Choose the route" not in structural_query
 
 
 def _build_stub_kb_postcondition_critic_definition() -> WorkflowDefinition:

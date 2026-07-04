@@ -1608,6 +1608,13 @@
             "target_context_key": "arxiv_ids"
           },
           {
+            "description": "Resolve the primary arXiv identifier from direct request text before consulting prior-turn context.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.prompt",
+            "target_context_key": "arxiv_id"
+          },
+          {
             "description": "Resolve all arXiv identifiers from the request text so turn-level recovery can verify each supplied paper target.",
             "extractor": "arxiv_id_list",
             "required": false,
@@ -1687,6 +1694,22 @@
         ],
         "required_inputs": [
           "prompt"
+        ],
+        "excluded_ambient_input_keys": [
+          "arxiv_id",
+          "arxiv_ids",
+          "source_uri",
+          "source_uris",
+          "paper_url",
+          "paper_urls",
+          "url",
+          "urls",
+          "paper_concept_id",
+          "paper_concept_ids",
+          "file_copy_concept_id",
+          "file_copy_concept_ids",
+          "concept_id",
+          "concept_ids"
         ],
         "schema_version": "workflow_launch_input_contract.v1"
       },

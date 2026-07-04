@@ -420,6 +420,99 @@ def _workflow_llm_timeout_blocker_from_turn_data(
     }
 
 
+def _bool_field(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _selected_workflow_failure_blocker_from_turn_data(
+    *,
+    data: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Detect a failed selected-workflow run when no required effects exist."""
+
+    completion_report_raw = data.get("completion_report")
+    if not isinstance(completion_report_raw, Mapping) and isinstance(record, Mapping):
+        completion_report_raw = record.get("completion_report")
+    if not isinstance(completion_report_raw, Mapping):
+        return None
+    completion_report = completion_report_raw
+    workflow_routing = (
+        data.get("workflow_routing")
+        if isinstance(data.get("workflow_routing"), Mapping)
+        else {}
+    )
+
+    workflow_id = (
+        _safe_str(completion_report.get("workflow_id"))
+        or _safe_str(data.get("selected_workflow_id"))
+        or _safe_str(workflow_routing.get("workflow_id"))
+        or _safe_str(workflow_routing.get("selected_workflow_id"))
+    )
+    effective_completed = _bool_field(completion_report.get("effective_completed"))
+    completed = _bool_field(completion_report.get("completed"))
+    terminal_status = (_safe_str(completion_report.get("terminal_status")) or "").lower()
+    final_state = (_safe_str(completion_report.get("final_state")) or "").lower()
+    failure_count = _coerce_non_negative_int(
+        completion_report.get("action_failure_count"),
+        default=0,
+        max_value=100_000,
+    )
+    failed_action_ids = _normalise_string_list(
+        completion_report.get("failed_action_ids")
+    )
+    first_failing_state_id = _safe_str(completion_report.get("first_failing_state_id"))
+    first_failing_action_id = _safe_str(completion_report.get("first_failing_action_id"))
+
+    failed = bool(
+        effective_completed is False
+        or (completed is False and terminal_status in {"failed", "failure", "error"})
+        or final_state.endswith("failed")
+        or final_state in {"failed", "failure", "error"}
+        or failure_count > 0
+        or failed_action_ids
+    )
+    if not failed:
+        return None
+
+    detail_parts: list[str] = []
+    if workflow_id:
+        detail_parts.append(f"Selected workflow {workflow_id} did not complete safely")
+    else:
+        detail_parts.append("Selected workflow did not complete safely")
+    if first_failing_state_id:
+        detail_parts.append(f"first failing state: {first_failing_state_id}")
+    if first_failing_action_id:
+        detail_parts.append(f"first failing action: {first_failing_action_id}")
+    elif failed_action_ids:
+        detail_parts.append(f"failed actions: {', '.join(failed_action_ids[:3])}")
+    decision_reason = "; ".join(detail_parts) + "."
+
+    return {
+        "effect_id": "effect_selected_workflow_execution_1",
+        "effect_type": "workflow_execution",
+        "status": "not_satisfied",
+        "status_reason": decision_reason,
+        "failure_code": "selected_workflow_execution_failed",
+        "failure_codes": ["selected_workflow_execution_failed"],
+        "decision": "failed",
+        "decision_reason": decision_reason,
+        "repeat_eligible": False,
+        "source": "selected_workflow_completion_report",
+        "workflow_id": workflow_id,
+        "first_failing_state_id": first_failing_state_id,
+        "first_failing_action_id": first_failing_action_id,
+    }
+
+
 def _dedupe_string_sequence(raw_values: Any) -> list[str]:
     if not isinstance(raw_values, Sequence) or isinstance(
         raw_values, (str, bytes, bytearray)
@@ -3199,16 +3292,25 @@ def run_turn_execution_completion_gate(
         data=data,
         record=record,
     )
-    if workflow_llm_timeout_blocker:
-        execution_signal_blocker = dict(workflow_llm_timeout_blocker)
-        effect_id = _safe_str(workflow_llm_timeout_blocker.get("effect_id"))
+    selected_workflow_failure_blocker = (
+        None
+        if workflow_llm_timeout_blocker
+        else _selected_workflow_failure_blocker_from_turn_data(
+            data=data,
+            record=record,
+        )
+    )
+    execution_blocker = workflow_llm_timeout_blocker or selected_workflow_failure_blocker
+    if execution_blocker:
+        execution_signal_blocker = dict(execution_blocker)
+        effect_id = _safe_str(execution_blocker.get("effect_id"))
         if effect_id and effect_id not in blocking_effect_ids:
             blocking_effect_ids.append(effect_id)
         blocker_failure_codes = _normalise_string_list(
-            workflow_llm_timeout_blocker.get("failure_codes")
+            execution_blocker.get("failure_codes")
         )
         blocker_failure_code = _safe_str(
-            workflow_llm_timeout_blocker.get("failure_code")
+            execution_blocker.get("failure_code")
         )
         if blocker_failure_code and blocker_failure_code not in blocker_failure_codes:
             blocker_failure_codes.append(blocker_failure_code)
@@ -3223,24 +3325,20 @@ def run_turn_execution_completion_gate(
             unresolved_preconditions.append(
                 {
                     "effect_id": effect_id,
-                    "effect_type": _safe_str(
-                        workflow_llm_timeout_blocker.get("effect_type")
-                    ),
-                    "status": _safe_str(workflow_llm_timeout_blocker.get("status")),
-                    "status_reason": _safe_str(
-                        workflow_llm_timeout_blocker.get("status_reason")
-                    ),
+                    "effect_type": _safe_str(execution_blocker.get("effect_type")),
+                    "status": _safe_str(execution_blocker.get("status")),
+                    "status_reason": _safe_str(execution_blocker.get("status_reason")),
                     "failure_codes": blocker_failure_codes,
                 }
             )
         if decision == "completed" or not decision:
             decision = (
-                _safe_str(workflow_llm_timeout_blocker.get("decision"))
+                _safe_str(execution_blocker.get("decision"))
                 or "escalation_required"
             )
         if not decision_reason:
             decision_reason = (
-                _safe_str(workflow_llm_timeout_blocker.get("decision_reason")) or ""
+                _safe_str(execution_blocker.get("decision_reason")) or ""
             )
 
     if not blocking_failure_codes:
@@ -3278,10 +3376,10 @@ def run_turn_execution_completion_gate(
     repeat_eligible = bool(
         completion_gate_payload.get("repeat_eligible", repeat_eligible_default)
     )
-    if workflow_llm_timeout_blocker:
+    if execution_blocker:
         safe_to_claim_completion = False
         requires_follow_up = True
-        repeat_eligible = False
+        repeat_eligible = bool(execution_blocker.get("repeat_eligible", False))
     loop_attempts = _coerce_non_negative_int(
         data.get("completion_gate_loop_attempts"),
         default=0,

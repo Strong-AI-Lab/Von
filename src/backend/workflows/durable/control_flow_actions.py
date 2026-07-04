@@ -1378,6 +1378,7 @@ def register_control_flow_actions(
                 "Execute one child workflow per item in a deterministic input "
                 "sequence and collect structured per-item outcomes."
             ),
+            required_tool_operation_class="workflow_execute",
         )
     )
     registry.register_if_absent(

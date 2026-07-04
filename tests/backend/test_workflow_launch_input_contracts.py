@@ -4,6 +4,7 @@ from src.backend.workflows.workflow_launch_input_contracts import (
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID,
     WORKFLOW_LAUNCH_INPUT_EXTRACTOR_ARXIV_ID_LIST,
     WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+    WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS,
     WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING,
     normalise_workflow_launch_input_contract,
     resolve_workflow_launch_inputs,
@@ -54,6 +55,32 @@ def test_resolve_workflow_launch_inputs_extracts_declared_values() -> None:
     }
     assert resolution.unresolved_required_inputs == ()
     assert resolution.diagnostics.get("status") == "resolved"
+
+
+def test_resolve_workflow_launch_inputs_preserves_ambient_exclusions() -> None:
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id="#V#paper_workflow",
+        contract={
+            "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+            WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS: [
+                "paper_concept_id",
+                "file_copy_concept_id",
+            ],
+            "required_inputs": ["prompt"],
+            "input_mappings": [
+                {
+                    "target_context_key": "prompt",
+                    "source_expression": "inputs.prompt",
+                    "required": True,
+                }
+            ],
+        },
+        inputs={"prompt": "Represent https://arxiv.org/abs/2603.22519"},
+    )
+
+    assert resolution.diagnostics.get(
+        WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS
+    ) == ["paper_concept_id", "file_copy_concept_id"]
 
 
 def test_resolve_workflow_launch_inputs_can_read_selector_workflow_inputs() -> None:

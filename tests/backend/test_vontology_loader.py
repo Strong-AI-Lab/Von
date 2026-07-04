@@ -444,6 +444,8 @@ class TestWorkflowDescriptionResolution:
                             "routing_notes": [
                                 "Do not choose this for read-only lookup turns."
                             ],
+                            "required_query_cues": ["email", "gmail"],
+                            "negative_keywords": ["read-only lookup"],
                         }
                     ),
                 }
@@ -461,6 +463,8 @@ class TestWorkflowDescriptionResolution:
         assert exemplars["routing_notes"] == [
             "Do not choose this for read-only lookup turns."
         ]
+        assert exemplars["required_query_cues"] == ["email", "gmail"]
+        assert exemplars["negative_query_cues"] == ["read-only lookup"]
         assert source == "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
 
     def test_resolve_narrative_prefers_has_definition_precedence(self):

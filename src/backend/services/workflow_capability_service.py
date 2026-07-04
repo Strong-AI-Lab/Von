@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -84,7 +85,7 @@ _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
 )
 _WORKFLOW_CAPABILITY_RETRIEVAL_CANDIDATE_MULTIPLIER = 2
 _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES: tuple[str, ...] = (
-    "workflow discovery capability",
+    "represent arxiv paper",
     (
         "workflow capability warmup\n\n"
         "Turn-intent routing guidance:\n"
@@ -173,6 +174,108 @@ def _build_workflow_capability_result_description(entry: "_CapabilityEntry") -> 
     if first_block:
         return first_block[:300]
     return text[:300]
+
+
+_MEMORY_SEARCH_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _memory_search_tokens(value: Any) -> set[str]:
+    return set(_MEMORY_SEARCH_TOKEN_RE.findall(str(value or "").lower()))
+
+
+def _memory_capability_field_score(
+    *,
+    query_tokens: set[str],
+    field_text: Any,
+    weight: float,
+) -> float:
+    field_tokens = _memory_search_tokens(field_text)
+    if not query_tokens or not field_tokens:
+        return 0.0
+    overlap_count = len(query_tokens.intersection(field_tokens))
+    if overlap_count <= 0:
+        return 0.0
+    query_coverage = overlap_count / max(len(query_tokens), 1)
+    field_coverage = overlap_count / max(len(field_tokens), 1)
+    return float(weight) * ((0.4 * query_coverage) + (0.6 * field_coverage))
+
+
+def _memory_capability_match_score(query_text: str, entry: "_CapabilityEntry") -> float:
+    query_tokens = _memory_search_tokens(query_text)
+    if not query_tokens:
+        return 0.0
+    metadata = entry.metadata
+    identity_text = "\n".join(
+        str(value or "")
+        for value in (
+            entry.workflow_id,
+            metadata.get("name"),
+        )
+    )
+    exemplars_text = json.dumps(
+        metadata.get("discovery_exemplars") or {},
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    action_text = json.dumps(
+        {
+            "workflow_action_ids": metadata.get("workflow_action_ids") or [],
+            "required_tools": metadata.get("required_tools") or [],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    score = 0.0
+    score += _memory_capability_field_score(
+        query_tokens=query_tokens,
+        field_text=identity_text,
+        weight=1.8,
+    )
+    score += _memory_capability_field_score(
+        query_tokens=query_tokens,
+        field_text=exemplars_text,
+        weight=2.0,
+    )
+    score += _memory_capability_field_score(
+        query_tokens=query_tokens,
+        field_text=action_text,
+        weight=1.2,
+    )
+    score += _memory_capability_field_score(
+        query_tokens=query_tokens,
+        field_text=metadata.get("summary_text"),
+        weight=0.8,
+    )
+    score += _memory_capability_field_score(
+        query_tokens=query_tokens,
+        field_text=entry.text,
+        weight=0.25,
+    )
+    return score
+
+
+def _search_memory_capability_entries(
+    query_text: str,
+    entries: Sequence["_CapabilityEntry"],
+    *,
+    exclude_ids: Optional[set[str]] = None,
+) -> list[tuple[float, "_CapabilityEntry", str]]:
+    scored_rows: list[tuple[float, _CapabilityEntry, str]] = []
+    for entry in entries:
+        cue_status = _entry_query_cue_status(query_text, entry)
+        if cue_status.get("required_query_cue_absent"):
+            continue
+        if cue_status.get("excluded_query_cue_present"):
+            continue
+        if exclude_ids and entry.workflow_id in exclude_ids:
+            continue
+        score = _memory_capability_match_score(query_text, entry)
+        if score <= 0.0:
+            continue
+        scored_rows.append((score, entry, "capability_index_memory"))
+    return scored_rows
 
 
 def _utc_now_iso() -> str:
@@ -753,12 +856,17 @@ class WorkflowCapabilityIndex:
 
             routing_profile = None
             routing_profile_source = ""
+            discovery_exemplars = None
             publication_lifecycle = None
             publication_lifecycle_source = ""
             compact_executability = None
             workflow_action_ids: list[str] | None = None
             required_tools: list[str] | None = None
             if isinstance(routing_metadata, Mapping):
+                raw_discovery_exemplars = routing_metadata.get("discovery_exemplars")
+                if isinstance(raw_discovery_exemplars, Mapping):
+                    discovery_exemplars = dict(raw_discovery_exemplars)
+
                 raw_routing_profile = routing_metadata.get("routing_profile")
                 if isinstance(raw_routing_profile, Mapping):
                     routing_profile = dict(raw_routing_profile)
@@ -817,6 +925,7 @@ class WorkflowCapabilityIndex:
                     ),
                     "routing_profile": routing_profile,
                     "routing_profile_source": routing_profile_source,
+                    "discovery_exemplars": discovery_exemplars,
                     "publication_lifecycle": publication_lifecycle,
                     "publication_lifecycle_source": publication_lifecycle_source,
                     "compact_executability": compact_executability,
@@ -1184,7 +1293,7 @@ class WorkflowCapabilityIndex:
             },
         )
 
-        scored_rows: List[Tuple[float, _CapabilityEntry]] = []
+        scored_rows: List[Tuple[float, _CapabilityEntry, str]] = []
         seen_ids: set[str] = set()
         for result in rag_results:
             metadata = result.get("metadata")
@@ -1196,22 +1305,36 @@ class WorkflowCapabilityIndex:
             entry = entry_lookup.get(workflow_id)
             if entry is None:
                 continue
+            cue_status = _entry_query_cue_status(clean_query, entry)
+            if cue_status.get("required_query_cue_absent"):
+                continue
+            if cue_status.get("excluded_query_cue_present"):
+                continue
             if exclude_ids and entry.workflow_id in exclude_ids:
                 continue
             seen_ids.add(workflow_id)
-            scored_rows.append((_coerce_retrieval_score(result.get("score")), entry))
+            scored_rows.append(
+                (_coerce_retrieval_score(result.get("score")), entry, "capability_index")
+            )
+
+        if not scored_rows:
+            scored_rows = _search_memory_capability_entries(
+                clean_query,
+                entries,
+                exclude_ids=exclude_ids,
+            )
 
         if not scored_rows:
             return []
 
         scored_rows.sort(key=lambda item: (-item[0], item[1].workflow_id))
         max_score = max(
-            (score for score, _entry in scored_rows if score > 0.0),
+            (score for score, _entry, _source in scored_rows if score > 0.0),
             default=1.0,
         )
 
         results: List[WorkflowCapabilityMatch] = []
-        for score, entry in scored_rows:
+        for score, entry, source in scored_rows:
             normalised = _normalise_retrieval_score(
                 raw_score=score,
                 max_score=max_score,
@@ -1227,7 +1350,7 @@ class WorkflowCapabilityIndex:
                     name=name,
                     description=_build_workflow_capability_result_description(entry),
                     relevance_score=round(normalised, 4),
-                    source="capability_index",
+                    source=source,
                     metadata=result_metadata,
                 )
             )
@@ -1299,7 +1422,120 @@ def _capability_discovery_exemplar_text(
         ]
         if routing_note_lines:
             capability_parts.append("Routing notes: " + " | ".join(routing_note_lines))
+    required_query_cues = discovery_exemplars.get("required_query_cues") or []
+    if isinstance(required_query_cues, Sequence) and not isinstance(
+        required_query_cues, str
+    ):
+        required_query_cue_text = ", ".join(
+            str(item).strip()
+            for item in required_query_cues
+            if isinstance(item, str) and str(item).strip()
+        )
+        if required_query_cue_text:
+            capability_parts.append(f"Required query cues: {required_query_cue_text}")
+    excluded_query_cues = discovery_exemplars.get("excluded_query_cues") or []
+    if isinstance(excluded_query_cues, Sequence) and not isinstance(
+        excluded_query_cues, str
+    ):
+        excluded_query_cue_text = ", ".join(
+            str(item).strip()
+            for item in excluded_query_cues
+            if isinstance(item, str) and str(item).strip()
+        )
+        if excluded_query_cue_text:
+            capability_parts.append(f"Excluded query cues: {excluded_query_cue_text}")
+    negative_query_cues = discovery_exemplars.get("negative_query_cues") or []
+    if isinstance(negative_query_cues, Sequence) and not isinstance(
+        negative_query_cues, str
+    ):
+        negative_query_cue_text = ", ".join(
+            str(item).strip()
+            for item in negative_query_cues
+            if isinstance(item, str) and str(item).strip()
+        )
+        if negative_query_cue_text:
+            capability_parts.append(f"Negative query cues: {negative_query_cue_text}")
     return capability_parts
+
+
+_QUERY_CUE_TOKEN_RE = re.compile(r"[a-z0-9_#.:/-]+")
+
+
+def _normalise_query_cue_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.lower().split())
+
+
+def _capability_query_cues(
+    discovery_exemplars: Mapping[str, Any] | None,
+    *field_names: str,
+) -> list[str]:
+    if not isinstance(discovery_exemplars, Mapping):
+        return []
+    values: list[str] = []
+    for field_name in field_names:
+        raw_values = discovery_exemplars.get(field_name)
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, Sequence):
+            continue
+        for item in raw_values:
+            text = _normalise_query_cue_text(item)
+            if text:
+                values.append(text)
+    return _dedupe_capability_strings(values)
+
+
+def _query_contains_represented_cue(query_text: str, cue: str) -> bool:
+    query = _normalise_query_cue_text(query_text)
+    clean_cue = _normalise_query_cue_text(cue)
+    if not query or not clean_cue:
+        return False
+    if len(clean_cue) <= 3:
+        return clean_cue in set(_QUERY_CUE_TOKEN_RE.findall(query))
+    return clean_cue in query
+
+
+def _entry_query_cue_status(
+    query_text: str,
+    entry: "_CapabilityEntry",
+) -> dict[str, Any]:
+    discovery_exemplars = entry.metadata.get("discovery_exemplars")
+    if not isinstance(discovery_exemplars, Mapping):
+        return {
+            "required_query_cues": [],
+            "matched_required_query_cues": [],
+            "required_query_cue_absent": False,
+            "excluded_query_cues": [],
+            "matched_excluded_query_cues": [],
+            "excluded_query_cue_present": False,
+        }
+    required_cues = _capability_query_cues(
+        discovery_exemplars,
+        "required_query_cues",
+        "required_cues",
+        "source_required_cues",
+    )
+    excluded_cues = _capability_query_cues(
+        discovery_exemplars,
+        "excluded_query_cues",
+        "exclude_query_cues",
+    )
+    matched_required = [
+        cue for cue in required_cues if _query_contains_represented_cue(query_text, cue)
+    ]
+    matched_excluded = [
+        cue for cue in excluded_cues if _query_contains_represented_cue(query_text, cue)
+    ]
+    return {
+        "required_query_cues": required_cues,
+        "matched_required_query_cues": matched_required,
+        "required_query_cue_absent": bool(required_cues and not matched_required),
+        "excluded_query_cues": excluded_cues,
+        "matched_excluded_query_cues": matched_excluded,
+        "excluded_query_cue_present": bool(matched_excluded),
+    }
 
 
 def _capability_string_values(value: Any) -> list[str]:
@@ -2045,6 +2281,7 @@ def _warm_workflow_capability_query_surface(
 ) -> None:
     warm_started_at = time.perf_counter()
     warm_failures: list[str] = []
+    warm_match_count = 0
     for warm_query in _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES:
         if (
             timeout_seconds is not None
@@ -2056,14 +2293,31 @@ def _warm_workflow_capability_query_surface(
                 f"{timeout_seconds:.3f}s"
             )
         try:
-            index.search(warm_query, max_results=1)
+            warm_matches = index.search(warm_query, max_results=1)
         except Exception as warm_exc:
             warm_failures.append(str(warm_exc))
-    if warm_failures:
+            continue
+        if warm_matches:
+            warm_match_count += 1
+        else:
+            warm_failures.append(
+                "workflow capability query surface returned no warm-up match "
+                f"for query {warm_query!r}"
+            )
+    if warm_match_count <= 0:
         joined = "; ".join(warm_failures)
         _set_workflow_capability_query_surface_state(ready=False, error=joined)
         logger.warning("workflow_capability_index_warm_query_failed: %s", joined)
         raise RuntimeError(joined)
+    if warm_failures:
+        logger.info(
+            "[workflow_capability_index] %s query surface warmed with %d "
+            "matched warm quer%s; non-blocking warm misses: %s",
+            mode,
+            warm_match_count,
+            "y" if warm_match_count == 1 else "ies",
+            "; ".join(warm_failures),
+        )
 
     _set_workflow_capability_query_surface_state(
         ready=True,
@@ -2507,10 +2761,8 @@ def _perform_workflow_capability_index_build(
                     count = index.index_from_registry(registry, mode=mode)
                 except TypeError:
                     count = index.index_from_registry(registry)
-        if count > 0 and not agent_test_memory_only:
+        if count > 0:
             _warm_workflow_capability_query_surface(index, mode=mode)
-        elif count > 0:
-            _set_workflow_capability_query_surface_state(ready=False, error=None)
         success_monotonic = time.monotonic()
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,

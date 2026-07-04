@@ -81,6 +81,59 @@ def _stub_represented_dispatch_policy(monkeypatch) -> None:
     )
 
 
+def test_turn_discovery_query_uses_only_structural_contract_hints(monkeypatch) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+    )
+    prompt = "Please ingest https://arxiv.org/abs/2406.15341 into Von."
+    generic_contract = orchestrator._build_turn_expected_outcome_contract_object(
+        {
+            "turn_expected_outcome_summary": (
+                "Answer the user's request accurately using available context."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Use available conversation context and authoritative tool evidence."
+            ),
+            "turn_selector_guidance": (
+                "Choose the route most likely to answer the request with grounded evidence."
+            ),
+        }
+    )
+
+    assert (
+        orchestrator._build_turn_discovery_query_text(
+            turn_text=prompt,
+            expected_outcome_contract=generic_contract,
+        )
+        == prompt
+    )
+
+    structural_contract = orchestrator._build_turn_expected_outcome_contract_object(
+        {
+            "turn_expected_required_tools": ["download_paper", "workflow_execute"],
+            "turn_expected_target_type_ids": ["#V#scholarly_paper"],
+            "turn_expected_workflow_concept_ids": [
+                "#V#arxiv_paper_representation_workflow"
+            ],
+            "turn_selector_guidance": (
+                "Choose the route most likely to answer the request with grounded evidence."
+            ),
+        }
+    )
+    structural_query = orchestrator._build_turn_discovery_query_text(
+        turn_text=prompt,
+        expected_outcome_contract=structural_contract,
+    )
+
+    assert "Required tools: download_paper, workflow_execute" in structural_query
+    assert "Target type IDs: #V#scholarly_paper" in structural_query
+    assert "Workflow concept IDs: #V#arxiv_paper_representation_workflow" in (
+        structural_query
+    )
+    assert "Choose the route" not in structural_query
+
+
 def test_generic_selected_workflow_modes_use_builtin_defaults_without_metadata(
     monkeypatch,
 ) -> None:
@@ -1069,16 +1122,7 @@ def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query
         discovered_queries.append(user_input)
         assert namespace == "#V#user"
         assert workflow_registry is orchestrator._workflow_registry
-        assert user_input == (
-            "What papers of mine do you know about?\n\n"
-            "Turn-intent routing guidance:\n"
-            "- Routing guidance: Treat this as concept/relation retrieval for the "
-            "referenced entity rather than artefact creation or representation.\n"
-            "- Grounding requirement: Ground authorship or ownership claims in "
-            "represented concept relations.\n"
-            "- Success target: Answer only with represented facts grounded to the "
-            "referenced user concept."
-        )
+        assert user_input == "What papers of mine do you know about?"
         return {
             "query": user_input,
             "requested_query": "stale query",
@@ -1242,17 +1286,10 @@ def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query
         "What papers of mine do you know about?"
     )
     assert refreshed_discovery["discovery_query_input"] == (
-        "What papers of mine do you know about?\n\n"
-        "Turn-intent routing guidance:\n"
-        "- Routing guidance: Treat this as concept/relation retrieval for the "
-        "referenced entity rather than artefact creation or representation.\n"
-        "- Grounding requirement: Ground authorship or ownership claims in "
-        "represented concept relations.\n"
-        "- Success target: Answer only with represented facts grounded to the "
-        "referenced user concept."
+        "What papers of mine do you know about?"
     )
     assert refreshed_discovery["query"] == discovered_queries[0]
-    assert refreshed_discovery.get("query_enrichment_applied") is True
+    assert refreshed_discovery.get("query_enrichment_applied") is None
     assert refreshed_discovery["discovery_refreshed"] is True
     assert refreshed_discovery["discovery_refresh_reason"] == (
         "effective_query_changed"

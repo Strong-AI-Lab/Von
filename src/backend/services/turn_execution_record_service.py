@@ -10006,6 +10006,42 @@ def get_latest_turn_execution_record_projection(
     return None
 
 
+def get_turn_execution_record_projection(
+    *,
+    request_id: str | None,
+    namespace: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one projected turn-execution record by request id."""
+
+    clean_request_id = _safe_str(request_id)
+    if not clean_request_id:
+        return None
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return None
+
+    query: dict[str, Any] = {"request_id": clean_request_id}
+    clean_namespace = _safe_str(namespace)
+    if clean_namespace:
+        query["namespace"] = clean_namespace
+
+    doc = _turn_execution_find_one(
+        coll,
+        query,
+        projection={"_id": 0},
+        operation="get_turn_execution_record_projection.find_by_request",
+    )
+    if isinstance(doc, Mapping):
+        hydrated = hydrate_debug_payload_blob_refs(doc, fail_soft=True)
+        return (
+            dict(hydrated.payload)
+            if isinstance(hydrated.payload, Mapping)
+            else dict(doc)
+        )
+    return None
+
+
 def _normalise_positive_int(
     value: Any,
     *,

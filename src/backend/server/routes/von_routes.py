@@ -180,6 +180,73 @@ _TEMPLATE_DIR = os.path.abspath(
 von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 
 
+def _json_safe_response_payload(value: Any, *, _seen: set[int] | None = None) -> Any:
+    """Clone arbitrary route payloads into structures Flask can JSON-encode."""
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.hex()
+    if isinstance(value, bytearray):
+        return _json_safe_response_payload(bytes(value), _seen=_seen)
+    if isinstance(value, memoryview):
+        return _json_safe_response_payload(value.tobytes(), _seen=_seen)
+
+    seen = _seen if _seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return "<circular_ref>"
+
+    if is_dataclass(value) and not isinstance(value, type):
+        seen.add(value_id)
+        try:
+            return _json_safe_response_payload(asdict(value), _seen=seen)
+        finally:
+            seen.discard(value_id)
+
+    if isinstance(value, Mapping):
+        seen.add(value_id)
+        try:
+            return {
+                str(key): _json_safe_response_payload(item, _seen=seen)
+                for key, item in value.items()
+            }
+        finally:
+            seen.discard(value_id)
+
+    if isinstance(value, (list, tuple)):
+        seen.add(value_id)
+        try:
+            return [_json_safe_response_payload(item, _seen=seen) for item in value]
+        finally:
+            seen.discard(value_id)
+
+    if isinstance(value, (set, frozenset)):
+        seen.add(value_id)
+        try:
+            return [
+                _json_safe_response_payload(item, _seen=seen)
+                for item in sorted(value, key=repr)
+            ]
+        finally:
+            seen.discard(value_id)
+
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
 # --- Live request-load signal (JVNAUTOSCI-2383) ---------------------------
 #
 # Track in-flight *foreground* /von/generate turns so the in-process durable
@@ -5972,7 +6039,7 @@ def get_generation_progress(request_id: str):
     ):
         serialised_state["resolved_scope_key"] = resolved_scope_key
         serialised_state["progress_source"] = "alternate_scope_fallback"
-    return jsonify(serialised_state), 200
+    return jsonify(_json_safe_response_payload(serialised_state)), 200
 
 
 # ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
@@ -6215,7 +6282,7 @@ def get_task_status(task_id: str):
     if status is None:
         return jsonify({"error": "Task not found", "task_id": task_id}), 404
 
-    return jsonify(status.to_dict()), 200
+    return jsonify(_json_safe_response_payload(status.to_dict())), 200
 
 
 def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
@@ -6301,7 +6368,7 @@ def _normalise_background_generate_result(result: Any) -> dict[str, Any]:
             f"/von/generate background execution failed with status {status_code}: "
             f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
         )
-    return payload
+    return _json_safe_response_payload(payload)
 
 
 def _mark_background_generate_completed_if_ready(
@@ -6345,8 +6412,8 @@ def _mark_background_generate_completed_if_ready(
         marker(
             background_task_id.strip(),
             status="completed",
-            result=dict(result_body),
-            progress=progress,
+            result=_json_safe_response_payload(result_body),
+            progress=_json_safe_response_payload(progress),
             session_id=session_id,
             user_id=user_id,
         )
@@ -6591,16 +6658,21 @@ def get_task_result(task_id: str):
     if hasattr(result, "response_text"):
         return (
             jsonify(
-                {
-                    "task_id": task_id,
-                    "result": _serialise_background_orchestrator_result(result),
-                }
+                _json_safe_response_payload(
+                    {
+                        "task_id": task_id,
+                        "result": _serialise_background_orchestrator_result(result),
+                    }
+                )
             ),
             200,
         )
 
     # Generic result
-    return jsonify({"task_id": task_id, "result": result}), 200
+    return (
+        jsonify(_json_safe_response_payload({"task_id": task_id, "result": result})),
+        200,
+    )
 
 
 @von_bp.route("/api/task/cancel/<task_id>", methods=["POST"])
@@ -14647,18 +14719,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 _emit_generate_progress(final_progress_payload)
         _refresh_llm_debug_timing_payload(llm_debug_info)
         return jsonify(
-            _build_generate_success_body(
-                request_id=request_id,
-                session_id=session_id,
-                created_conversation_session_name=created_conversation_session_name,
-                created_conversation_session=created_conversation_session,
-                response_text=response_text,
-                presenter_channels=(
-                    presenter_channels if isinstance(presenter_channels, dict) else None
-                ),
-                llm_debug_info=llm_debug_info,
-                display_elements_contract=display_elements_contract,
-                rag_trace=rag_trace,
+            _json_safe_response_payload(
+                _build_generate_success_body(
+                    request_id=request_id,
+                    session_id=session_id,
+                    created_conversation_session_name=created_conversation_session_name,
+                    created_conversation_session=created_conversation_session,
+                    response_text=response_text,
+                    presenter_channels=(
+                        presenter_channels
+                        if isinstance(presenter_channels, dict)
+                        else None
+                    ),
+                    llm_debug_info=llm_debug_info,
+                    display_elements_contract=display_elements_contract,
+                    rag_trace=rag_trace,
+                )
             )
         )
     except CancellationRequested:
@@ -14826,13 +14902,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         return (
             jsonify(
-                _build_generate_error_body(
-                    request_id=request_id if "request_id" in locals() else None,
-                    error_text=str(e),
-                    error_debug_info=error_debug_info,
-                    rag_trace=rag_trace if "rag_trace" in locals() else None,
-                    namespace_report=(
-                        namespace_report if "namespace_report" in locals() else None
+                _json_safe_response_payload(
+                    _build_generate_error_body(
+                        request_id=request_id if "request_id" in locals() else None,
+                        error_text=str(e),
+                        error_debug_info=error_debug_info,
+                        rag_trace=rag_trace if "rag_trace" in locals() else None,
+                        namespace_report=(
+                            namespace_report if "namespace_report" in locals() else None
+                        ),
                     ),
                 )
             ),

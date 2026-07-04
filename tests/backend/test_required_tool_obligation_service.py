@@ -2,6 +2,7 @@ from src.backend.services.required_tool_obligation_service import (
     BLOCKER_CONTRACT_REQUIRED_TOOL_NOT_ALLOWED_BY_WORKFLOW_POLICY,
     BLOCKER_MUTATION_SUCCEEDED_READBACK_MISSING,
     BLOCKER_READBACK_ATTEMPTED_BUT_NOT_VERIFIED,
+    BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY,
     BLOCKER_REQUIRED_TOOL_METADATA_MISSING,
     BLOCKER_REQUIRED_TOOL_NOT_PLANNED,
     BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED,
@@ -190,6 +191,105 @@ def test_required_tool_ledger_closes_from_workflow_action_spec_metadata(
     assert obligation["blocking_reason"] == ""
     assert (
         BLOCKER_REQUIRED_TOOL_METADATA_MISSING not in ledger["blocking_failure_codes"]
+    )
+
+
+def test_successful_observed_required_tool_is_not_blocked_by_missing_gateway_catalogue(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.workflows.action_registry import ActionSpec, WorkflowActionResult
+
+    def handler(_request):
+        return WorkflowActionResult(status="success", outputs={"success": True})
+
+    monkeypatch.setattr(metadata_service, "_load_from_vontology", lambda: {})
+    monkeypatch.setattr(
+        metadata_service,
+        "_resolve_workflow_action_spec",
+        lambda tool_name: ActionSpec(
+            action_id=tool_name,
+            handler=handler,
+            required_tool_operation_class="verification_read",
+        ),
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "selected_workflow_trace_required_prompt_tools": [
+                    "scholarly_paper.verify_representation"
+                ]
+            },
+            invocations=[
+                {
+                    "tool": "scholarly_paper.verify_representation",
+                    "status": "ok",
+                    "payload": {"success": True, "result": True},
+                }
+            ],
+            allowed_tools=["scholarly_paper.verify_representation"],
+            method_catalogue={},
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(
+        ledger, "scholarly_paper.verify_representation"
+    )
+    assert obligation["available_on_gateway"] is False
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 1
+    assert obligation["satisfied"] is True
+    assert obligation["blocking_reason"] == ""
+    assert BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY not in (
+        ledger["blocking_failure_codes"]
+    )
+
+
+def test_absent_required_tool_still_reports_missing_gateway_catalogue(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.workflows.action_registry import ActionSpec, WorkflowActionResult
+
+    def handler(_request):
+        return WorkflowActionResult(status="success", outputs={"success": True})
+
+    monkeypatch.setattr(metadata_service, "_load_from_vontology", lambda: {})
+    monkeypatch.setattr(
+        metadata_service,
+        "_resolve_workflow_action_spec",
+        lambda tool_name: ActionSpec(
+            action_id=tool_name,
+            handler=handler,
+            required_tool_operation_class="verification_read",
+        ),
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "selected_workflow_trace_required_prompt_tools": [
+                    "scholarly_paper.verify_representation"
+                ]
+            },
+            invocations=[],
+            allowed_tools=["scholarly_paper.verify_representation"],
+            method_catalogue={},
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(
+        ledger, "scholarly_paper.verify_representation"
+    )
+    assert obligation["available_on_gateway"] is False
+    assert obligation["attempted_count"] == 0
+    assert obligation["satisfied"] is False
+    assert obligation["blocking_reason"] == BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY
+    assert BLOCKER_REQUIRED_TOOL_NOT_AVAILABLE_ON_GATEWAY in (
+        ledger["blocking_failure_codes"]
     )
 
 
@@ -607,3 +707,117 @@ def test_url_target_alias_closes_when_canonical_identifier_later_succeeds() -> N
         "unresolved_failed_target_count": 0,
         "unresolved_failed_targets": [],
     }
+
+
+def test_false_verification_result_keeps_non_symbolic_target_obligation_open(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import ToolMetadata
+
+    monkeypatch.setattr(
+        metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "generic.verify_representation": ToolMetadata(
+                tool_name="generic.verify_representation",
+                operation_category="read",
+                evidence_role="verification",
+                required_tool_target_payload_field_names=("external_id",),
+            )
+        },
+    )
+    metadata_service.invalidate_cache()
+    try:
+        ledger = build_required_tool_obligation_ledger(
+            required_tools_by_source={
+                "turn_expected_outcome_contract": [
+                    "generic.verify_representation"
+                ]
+            },
+            invocations=[
+                {
+                    "tool": "generic.verify_representation",
+                    "status": "ok",
+                    "payload": {"external_id": "2603.22519"},
+                    "result_preview": False,
+                }
+            ],
+            allowed_tools=["generic.verify_representation"],
+            method_catalogue=_catalogue(["generic.verify_representation"]),
+        )
+    finally:
+        metadata_service.invalidate_cache()
+
+    obligation = _obligation_for_tool(ledger, "generic.verify_representation")
+    assert obligation["operation_class"] == "verification_read"
+    assert obligation["attempted_count"] == 1
+    assert obligation["successful_count"] == 0
+    assert obligation["satisfied"] is False
+    assert obligation["last_attempt_status"] == "failed"
+    assert (
+        obligation["blocking_reason"]
+        == BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+    )
+    assert obligation["target_closure"] == {
+        "attempted_target_count": 1,
+        "successful_target_count": 0,
+        "failed_target_count": 1,
+        "unresolved_failed_target_count": 1,
+        "unresolved_failed_targets": ["2603.22519"],
+    }
+
+
+def test_scholarly_verifier_action_metadata_exposes_readback_target_fields() -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import (
+        get_tool_required_obligation_metadata,
+    )
+    from src.backend.workflows.durable.registry_factory import (
+        invalidate_shared_durable_action_registry,
+    )
+
+    metadata_service.invalidate_cache()
+    invalidate_shared_durable_action_registry()
+    try:
+        metadata = get_tool_required_obligation_metadata(
+            "scholarly_paper.verify_representation",
+        )
+    finally:
+        metadata_service.invalidate_cache()
+        invalidate_shared_durable_action_registry()
+
+    assert metadata.operation_class == "verification_read"
+    assert "arxiv_id" in metadata.target_argument_names
+    assert "paper_concept_id" in metadata.target_argument_names
+    assert "file_copy_concept_id" in metadata.target_argument_names
+
+
+def test_internal_workflow_primitives_expose_required_tool_operation_metadata() -> None:
+    from src.backend.services import tool_metadata_service as metadata_service
+    from src.backend.services.tool_metadata_service import (
+        get_tool_required_obligation_metadata,
+    )
+    from src.backend.workflows.durable.registry_factory import (
+        invalidate_shared_durable_action_registry,
+    )
+
+    metadata_service.invalidate_cache()
+    invalidate_shared_durable_action_registry()
+    try:
+        subworkflow_metadata = get_tool_required_obligation_metadata(
+            "workflow_invoke_subworkflow",
+        )
+        for_each_metadata = get_tool_required_obligation_metadata(
+            "workflow_control.for_each",
+        )
+        reference_metadata = get_tool_required_obligation_metadata(
+            "paper_reference.normalise_reference_set",
+        )
+    finally:
+        metadata_service.invalidate_cache()
+        invalidate_shared_durable_action_registry()
+
+    assert subworkflow_metadata.operation_class == "workflow_execute"
+    assert for_each_metadata.operation_class == "workflow_execute"
+    assert reference_metadata.operation_class == "search_or_resolution_read"

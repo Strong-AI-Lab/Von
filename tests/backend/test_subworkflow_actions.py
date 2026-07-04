@@ -132,6 +132,127 @@ def test_subworkflow_action_executes_child_and_emits_trace_chain() -> None:
     assert event["invocation_chain"] == ["#V#parent_workflow", "#V#child_success"]
 
 
+def test_subworkflow_action_applies_launch_contract_ambient_exclusions() -> None:
+    registry = ActionRegistry()
+    captured_child_data: dict[str, object] = {}
+    registry.register(
+        ActionSpec(
+            action_id="child.capture",
+            handler=lambda request: (
+                captured_child_data.update(dict(request.data))
+                or WorkflowActionResult(status="success", outputs={"ok": True})
+            ),
+        )
+    )
+    child_definition = WorkflowDefinition(
+        workflow_id="#V#child_launch_contract",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id="child.capture"),),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "required_inputs": ["prompt"],
+                "excluded_ambient_input_keys": [
+                    "arxiv_id",
+                    "source_uri",
+                    "paper_concept_id",
+                    "file_copy_concept_id",
+                ],
+                "input_mappings": [
+                    {
+                        "target_context_key": "prompt",
+                        "source_expression": "inputs.prompt",
+                        "required": True,
+                    },
+                    {
+                        "target_context_key": "arxiv_id",
+                        "source_expression": "inputs.arxiv_id",
+                    },
+                    {
+                        "target_context_key": "arxiv_id",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "arxiv_id",
+                    },
+                    {
+                        "target_context_key": "arxiv_ids",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "arxiv_id_list",
+                    },
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            child_definition if workflow_id == "#V#child_launch_contract" else None
+        ),
+    )
+
+    parent = WorkflowDefinition(
+        workflow_id="#V#parent_launch_contract",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                        inputs={
+                            "workflow_id": "#V#child_launch_contract",
+                            "prompt": (
+                                "Is this paper represented? "
+                                "https://arxiv.org/pdf/2603.22519v2"
+                            ),
+                            "paper_concept_id": "#V#prior_paper",
+                            "file_copy_concept_id": "#V#prior_file_copy",
+                            "arxiv_id": "2406.15341",
+                            "source_uri": "https://arxiv.org/abs/2406.15341",
+                            "__workflow_ambient_input_keys": [
+                                "arxiv_id",
+                                "source_uri",
+                            ],
+                            "__parent_workflow_id": "#V#parent_launch_contract",
+                            "__parent_state_id": "start",
+                        },
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        parent,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert "paper_concept_id" not in captured_child_data
+    assert "file_copy_concept_id" not in captured_child_data
+    assert "source_uri" not in captured_child_data
+    assert captured_child_data["arxiv_id"] == "2603.22519"
+    assert captured_child_data["arxiv_ids"] == ["2603.22519"]
+    launch_resolution = captured_child_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("excluded_ambient_inputs_applied") == [
+        "arxiv_id",
+        "file_copy_concept_id",
+        "paper_concept_id",
+        "source_uri",
+    ]
+
+
 def test_subworkflow_action_propagates_child_failure_by_default() -> None:
     registry = ActionRegistry()
     registry.register(

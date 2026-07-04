@@ -240,3 +240,110 @@ def test_expected_workflow_check() -> None:
         turn_record={"decision": "completed"},
     )
     assert _verdict(result) == "fail"
+
+
+def test_fetch_turn_record_falls_back_to_projected_request_record(monkeypatch) -> None:
+    calls: list[tuple[str | None, str | None]] = []
+
+    def _raise_history_unavailable(*_args, **_kwargs):
+        raise RuntimeError("history unavailable")
+
+    def _fake_projection_lookup(*, request_id, namespace=None):
+        calls.append((request_id, namespace))
+        return {
+            "request_id": request_id,
+            "namespace": namespace,
+            "decision": "completed",
+        }
+
+    monkeypatch.setattr(runner, "_request_json", _raise_history_unavailable)
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service."
+        "get_turn_execution_record_projection",
+        _fake_projection_lookup,
+    )
+
+    record = runner.fetch_turn_record(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5010",
+        chat_session_id="session-1",
+        request_id="request-1",
+        namespace="#V#user@org",
+        task_result={},
+    )
+
+    assert record["decision"] == "completed"
+    assert calls == [("request-1", "#V#user@org")]
+
+
+def test_fetch_turn_record_skips_history_record_for_different_request(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str | None, str | None]] = []
+
+    def _fake_request_json(_session, _method, url, *, params=None):
+        if url.endswith("/von/history"):
+            return {
+                "history": [
+                    {
+                        "role": "assistant",
+                        "history_location": {"history_index": 7},
+                    }
+                ]
+            }
+        if url.endswith("/von/history/debug"):
+            return {
+                "llm_debug_data": {
+                    "turn_execution_record": {
+                        "request_id": "other-request",
+                        "decision": "completed",
+                    }
+                }
+            }
+        raise AssertionError(f"unexpected URL {url}")
+
+    def _fake_projection_lookup(*, request_id, namespace=None):
+        calls.append((request_id, namespace))
+        return {
+            "request_id": request_id,
+            "namespace": namespace,
+            "decision": "failed",
+        }
+
+    monkeypatch.setattr(runner, "_request_json", _fake_request_json)
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service."
+        "get_turn_execution_record_projection",
+        _fake_projection_lookup,
+    )
+
+    record = runner.fetch_turn_record(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5010",
+        chat_session_id="session-1",
+        request_id="request-1",
+        namespace="#V#user@org",
+        task_result={},
+    )
+
+    assert record["request_id"] == "request-1"
+    assert record["decision"] == "failed"
+    assert calls == [("request-1", "#V#user@org")]
+
+
+def test_extract_visible_answer_prefers_turn_record_checked_final_response() -> None:
+    record = {
+        "requested_evidence_lineage": {
+            "final_response": {
+                "text_checked_preview": "Current target could not be verified yet."
+            }
+        },
+        "completion_report": {
+            "response_text": "Stale selected-workflow answer from a prior target."
+        },
+    }
+
+    answer, source = runner.extract_visible_answer_from_turn_record(record)
+
+    assert answer == "Current target could not be verified yet."
+    assert source == "requested_evidence_lineage.final_response.text_checked_preview"
