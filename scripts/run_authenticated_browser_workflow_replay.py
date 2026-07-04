@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -90,6 +91,48 @@ GMAIL_ARXIV_REPLAY_CASE = ReplayCase(
     expected_progress_fact_ids=GMAIL_ARXIV_FACT_IDS,
     expected_contract_ids=GMAIL_ARXIV_CONTRACT_IDS,
     requires_gmail=True,
+)
+
+
+@dataclass(frozen=True)
+class ReplayTurnCase:
+    turn_id: str
+    case: ReplayCase
+
+
+GMAIL_ARXIV_IDEMPOTENCE_CASE_ID = "gmail-arxiv-idempotence-2571"
+GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID = (
+    "gmail_arxiv_idempotence_2571_sequence"
+)
+GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY = "arxiv.org newer_than:365d"
+GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL = "vontology/ingested"
+GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID = "Label_7"
+GMAIL_ARXIV_IDEMPOTENCE_TURN_PROMPTS: tuple[tuple[str, str], ...] = (
+    (
+        "initial",
+        "Use the represented Gmail-to-arXiv ingestion workflow for at most one "
+        "recent Gmail message matching `{gmail_query}` that has not already "
+        "been marked `{completion_label}`. Represent the arXiv paper from that "
+        "message in Vontology, then answer with the arXiv ID, paper concept, "
+        "file-copy or import evidence if available, and the Gmail message or "
+        "thread identifier you used. Do not archive, delete, reply, or send.",
+    ),
+    (
+        "repeat",
+        "Represent that same arXiv paper from the email again. If the paper is "
+        "already represented or the source Gmail message is already marked "
+        "processed, read back the existing concept, file-copy/import, and "
+        "message-processing evidence instead of creating a duplicate or "
+        "selecting a different paper. Do not archive, delete, reply, send, or "
+        "change Gmail labels.",
+    ),
+    (
+        "verify",
+        "Show me the represented paper concept and whether that Gmail message "
+        "or thread was already processed for this paper. Read back existing "
+        "evidence; do not recreate the paper, archive, delete, reply, send, or "
+        "change Gmail labels.",
+    ),
 )
 
 
@@ -485,6 +528,32 @@ def _query_gmail_oauth_status(
         }
 
 
+def _query_gmail_access_test(
+    *,
+    session: requests.Session,
+    base_url: str,
+    gmail_profile: str | None,
+) -> dict[str, Any] | None:
+    profile = _safe_text(gmail_profile)
+    if not profile:
+        return None
+    try:
+        return _request_json(
+            session,
+            "POST",
+            f"{base_url}/von/api/agent/gmail/oauth/test_access",
+            timeout_seconds=30.0,
+            params={"profile_id": profile},
+        )
+    except JsonRequestError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "status_code": exc.status_code,
+            "payload": exc.payload,
+        }
+
+
 def build_gmail_preflight(
     *,
     session: requests.Session,
@@ -507,21 +576,36 @@ def build_gmail_preflight(
         base_url=base_url,
         gmail_profile=requested_profile,
     )
+    requested_profile_configured = (
+        bool(requested_profile) and requested_profile in profiles
+    )
+    token_status_ready = bool(
+        requested_profile_configured
+        and isinstance(oauth_status, Mapping)
+        and oauth_status.get("has_tokens") is True
+    )
+    access_test = (
+        _query_gmail_access_test(
+            session=session,
+            base_url=base_url,
+            gmail_profile=requested_profile,
+        )
+        if token_status_ready
+        else None
+    )
     return {
         "requested_gmail_profile": requested_profile,
         "required": True,
         "configured_gmail_profiles": profiles,
         "default_gmail_profile": default_profile,
         "gmail_profiles_configured": bool(profiles),
-        "requested_profile_configured": (
-            bool(requested_profile) and requested_profile in profiles
-        ),
+        "requested_profile_configured": requested_profile_configured,
         "oauth_status": oauth_status,
+        "access_test": access_test,
         "gmail_capability_ready": bool(
-            requested_profile
-            and requested_profile in profiles
-            and isinstance(oauth_status, Mapping)
-            and oauth_status.get("has_tokens") is True
+            token_status_ready
+            and isinstance(access_test, Mapping)
+            and access_test.get("success") is True
         ),
     }
 
@@ -1074,6 +1158,445 @@ def extract_visible_answer(task_result: Mapping[str, Any]) -> str | None:
     return debug_response or None
 
 
+_ARXIV_IDENTIFIER_PATTERN = re.compile(
+    r"(?i)(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)?"
+    r"(?P<id>\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?"
+)
+
+
+def _append_unique(items: list[str], value: Any) -> None:
+    text = _safe_text(value)
+    if text and text not in items:
+        items.append(text)
+
+
+def _iter_scalar_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [_safe_text(value)] if _safe_text(value) else []
+    if isinstance(value, (int, float, bool)):
+        return [_safe_text(value)]
+    if isinstance(value, Mapping):
+        texts: list[str] = []
+        for item in value.values():
+            texts.extend(_iter_scalar_texts(item))
+        return texts
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        texts = []
+        for item in value:
+            texts.extend(_iter_scalar_texts(item))
+        return texts
+    return []
+
+
+def _collect_keyed_scalar_values(
+    value: Any,
+    *,
+    exact_keys: set[str] | None = None,
+    key_markers: tuple[str, ...] = (),
+) -> list[str]:
+    exact = {item.lower() for item in (exact_keys or set())}
+    results: list[str] = []
+    for candidate in _walk_json(value):
+        if not isinstance(candidate, Mapping):
+            continue
+        for raw_key, raw_value in candidate.items():
+            key = _safe_text(raw_key).lower()
+            if not key:
+                continue
+            if key not in exact and not any(marker in key for marker in key_markers):
+                continue
+            for text in _iter_scalar_texts(raw_value):
+                _append_unique(results, text)
+    return results
+
+
+def _normalise_arxiv_identifier(value: Any) -> str | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    match = _ARXIV_IDENTIFIER_PATTERN.search(text)
+    if not match:
+        return None
+    return match.group("id")
+
+
+def _extract_arxiv_identifiers(value: Any) -> list[str]:
+    identifiers: list[str] = []
+    for raw in _collect_keyed_scalar_values(value, key_markers=("arxiv",)):
+        identifier = _normalise_arxiv_identifier(raw)
+        if identifier:
+            _append_unique(identifiers, identifier)
+    for fact in extract_progress_facts(value):
+        fact_id = _safe_text(fact.get("fact_id")) or _safe_text(fact.get("id"))
+        if "arxiv" not in fact_id.lower():
+            continue
+        for key in ("value", "raw_value", "display_value", "text", "label"):
+            identifier = _normalise_arxiv_identifier(fact.get(key))
+            if identifier:
+                _append_unique(identifiers, identifier)
+    return identifiers
+
+
+def _extract_progress_fact_values(
+    value: Any,
+    *,
+    fact_ids: set[str],
+) -> list[str]:
+    results: list[str] = []
+    wanted = {item.lower() for item in fact_ids}
+    for fact in extract_progress_facts(value):
+        fact_id = (
+            _safe_text(fact.get("fact_id")) or _safe_text(fact.get("id"))
+        ).lower()
+        if fact_id not in wanted:
+            continue
+        for key in ("value", "raw_value", "display_value", "text", "concept_id"):
+            for text in _iter_scalar_texts(fact.get(key)):
+                _append_unique(results, text)
+    return results
+
+
+def extract_observed_tool_names(*payloads: Any) -> list[str]:
+    tools: list[str] = []
+    for payload in payloads:
+        for raw in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={
+                "tool",
+                "tool_name",
+                "mcp_tool",
+                "mcp_requested_tool",
+                "mcp_resolved_tool",
+            },
+        ):
+            _append_unique(tools, raw)
+    return tools
+
+
+def _mapping_mentions_tool(value: Mapping[str, Any], tool_name: str) -> bool:
+    wanted = _safe_text(tool_name)
+    if not wanted:
+        return False
+    return wanted in extract_observed_tool_names(value)
+
+
+def _extract_gmail_modify_label_message_ids(value: Any) -> list[str]:
+    message_ids: list[str] = []
+    for candidate in _walk_json(value):
+        if not isinstance(candidate, Mapping):
+            continue
+        if not _mapping_mentions_tool(candidate, "gmail_modify_labels"):
+            continue
+        for message_id in _collect_keyed_scalar_values(
+            candidate,
+            exact_keys={"message_id", "gmail_message_id"},
+        ):
+            _append_unique(message_ids, message_id)
+    return message_ids
+
+
+def _extract_completion_marker_values(value: Any) -> list[str]:
+    labels: list[str] = []
+    for raw in _collect_keyed_scalar_values(
+        value,
+        exact_keys={
+            "add_labels",
+            "add_label_ids",
+            "label_ids",
+            "labelids",
+            "labels",
+            "query_fragment",
+            "effective_gmail_query",
+            "effective_query",
+        },
+    ):
+        if (
+            raw == GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID
+            or GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL in raw
+            or f"-label:{GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL}" in raw
+        ):
+            _append_unique(labels, raw)
+    return labels
+
+
+def extract_gmail_arxiv_idempotence_evidence(*payloads: Any) -> dict[str, Any]:
+    """Extract privacy-bounded idempotence evidence from replay telemetry."""
+
+    evidence: dict[str, Any] = {
+        "message_ids": [],
+        "thread_ids": [],
+        "arxiv_ids": [],
+        "paper_concept_ids": [],
+        "file_copy_concept_ids": [],
+        "observed_tools": [],
+        "gmail_modify_label_message_ids": [],
+        "completion_marker_values": [],
+        "effective_gmail_queries": [],
+    }
+    for payload in payloads:
+        for value in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={"message_id", "gmail_message_id"},
+        ):
+            _append_unique(evidence["message_ids"], value)
+        for value in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={"thread_id", "gmail_thread_id"},
+        ):
+            _append_unique(evidence["thread_ids"], value)
+        for value in _extract_arxiv_identifiers(payload):
+            _append_unique(evidence["arxiv_ids"], value)
+        for value in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={"paper_concept_id"},
+        ):
+            _append_unique(evidence["paper_concept_ids"], value)
+        for value in _extract_progress_fact_values(
+            payload,
+            fact_ids={"paper_concept", "arxiv_paper_concept"},
+        ):
+            if value.startswith("#V#"):
+                _append_unique(evidence["paper_concept_ids"], value)
+        for value in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={"file_copy_concept_id"},
+        ):
+            _append_unique(evidence["file_copy_concept_ids"], value)
+        for value in extract_observed_tool_names(payload):
+            _append_unique(evidence["observed_tools"], value)
+        for value in _extract_gmail_modify_label_message_ids(payload):
+            _append_unique(evidence["gmail_modify_label_message_ids"], value)
+        for value in _extract_completion_marker_values(payload):
+            _append_unique(evidence["completion_marker_values"], value)
+        for value in _collect_keyed_scalar_values(
+            payload,
+            exact_keys={"effective_gmail_query", "effective_query"},
+        ):
+            _append_unique(evidence["effective_gmail_queries"], value)
+    evidence["completion_marker_seen"] = bool(evidence["completion_marker_values"])
+    return evidence
+
+
+def _turn_report_status(report: Mapping[str, Any]) -> str:
+    analysis = _as_mapping(report.get("analysis"))
+    status = _safe_text(analysis.get("terminal_task_status"))
+    if status:
+        return status
+    return _safe_text(_as_mapping(report.get("last_task_status")).get("status"))
+
+
+def _blocked_sequence_analysis(
+    blocker_type: str,
+    reason: str,
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    turn_reports: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    return {
+        "verdict": "blocked",
+        "blocker": {
+            "type": blocker_type,
+            "reason": reason,
+        },
+        "evidence": dict(evidence or {}),
+        "turn_count": len(turn_reports),
+    }
+
+
+def analyse_gmail_arxiv_idempotence_sequence(
+    turn_reports: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Classify the 2571 first/repeat/verify replay without adding policy."""
+
+    reports = [dict(report) for report in turn_reports if isinstance(report, Mapping)]
+    if len(reports) < 3:
+        return _blocked_sequence_analysis(
+            "sequence_incomplete",
+            "The replay did not submit all three required turns.",
+            turn_reports=reports,
+        )
+
+    per_turn: dict[str, dict[str, Any]] = {
+        _safe_text(report.get("turn_id")) or f"turn_{index + 1}": report
+        for index, report in enumerate(reports)
+    }
+    for turn_id, report in per_turn.items():
+        analysis = _as_mapping(report.get("analysis"))
+        if _safe_text(analysis.get("verdict")) == "blocked":
+            blocker = _as_mapping(analysis.get("blocker"))
+            blocker_type = _safe_text(blocker.get("type")) or "turn_blocked"
+            return _blocked_sequence_analysis(
+                blocker_type,
+                f"Turn {turn_id!r} was blocked: "
+                f"{_safe_text(blocker.get('reason')) or blocker_type}.",
+                evidence={"blocked_turn_id": turn_id, "turn_analysis": analysis},
+                turn_reports=reports,
+            )
+        terminal_status = _turn_report_status(report)
+        if terminal_status and terminal_status != "completed":
+            return _blocked_sequence_analysis(
+                "turn_not_completed",
+                f"Turn {turn_id!r} ended with status {terminal_status!r}.",
+                evidence={"blocked_turn_id": turn_id, "terminal_status": terminal_status},
+                turn_reports=reports,
+            )
+
+    initial_report = per_turn.get("initial") or reports[0]
+    repeat_report = per_turn.get("repeat") or reports[1]
+    verify_report = per_turn.get("verify") or reports[2]
+    initial = extract_gmail_arxiv_idempotence_evidence(initial_report)
+    repeat = extract_gmail_arxiv_idempotence_evidence(repeat_report)
+    verify = extract_gmail_arxiv_idempotence_evidence(verify_report)
+    all_evidence = {
+        "initial": initial,
+        "repeat": repeat,
+        "verify": verify,
+    }
+
+    initial_selected = set(_as_list(_as_mapping(initial_report.get("analysis")).get("selected_workflow_ids")))
+    if GMAIL_ARXIV_WORKFLOW_ID not in initial_selected:
+        return _blocked_sequence_analysis(
+            "initial_workflow_not_selected",
+            f"The initial turn did not select {GMAIL_ARXIV_WORKFLOW_ID}.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    if len(initial["message_ids"]) != 1:
+        return _blocked_sequence_analysis(
+            "gmail_message_target_ambiguous",
+            "The initial turn did not expose exactly one Gmail message id for the target.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+    if len(initial["arxiv_ids"]) != 1:
+        return _blocked_sequence_analysis(
+            "arxiv_target_ambiguous",
+            "The initial turn did not expose exactly one arXiv id for the target.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+    if len(initial["paper_concept_ids"]) != 1:
+        return _blocked_sequence_analysis(
+            "paper_concept_readback_missing",
+            "The initial turn did not expose exactly one represented paper concept id.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    target_message_id = initial["message_ids"][0]
+    target_arxiv_id = initial["arxiv_ids"][0]
+    target_paper_concept_id = initial["paper_concept_ids"][0]
+    post_paper_ids = set(repeat["paper_concept_ids"]) | set(verify["paper_concept_ids"])
+    if target_paper_concept_id not in post_paper_ids:
+        return _blocked_sequence_analysis(
+            "repeat_readback_missing",
+            "The repeat/verification turns did not read back the initial paper concept id.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    all_paper_ids = (
+        set(initial["paper_concept_ids"])
+        | set(repeat["paper_concept_ids"])
+        | set(verify["paper_concept_ids"])
+    )
+    if len(all_paper_ids) > 1:
+        return _blocked_sequence_analysis(
+            "duplicate_paper_concepts_observed",
+            "The replay observed more than one paper concept id for the same target.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    all_file_copy_ids = (
+        set(initial["file_copy_concept_ids"])
+        | set(repeat["file_copy_concept_ids"])
+        | set(verify["file_copy_concept_ids"])
+    )
+    if len(all_file_copy_ids) > 1:
+        return _blocked_sequence_analysis(
+            "duplicate_file_copies_observed",
+            "The replay observed more than one file-copy/import id for the same target.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    if (
+        target_message_id not in initial["gmail_modify_label_message_ids"]
+        or not initial["completion_marker_seen"]
+    ):
+        return _blocked_sequence_analysis(
+            "message_processing_marker_missing",
+            "The initial turn did not prove the source Gmail message was marked processed.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    repeated_mutations = [
+        message_id
+        for message_id in (
+            repeat["gmail_modify_label_message_ids"]
+            + verify["gmail_modify_label_message_ids"]
+        )
+        if message_id == target_message_id
+    ]
+    if repeated_mutations:
+        return _blocked_sequence_analysis(
+            "message_reprocessed_on_repeat",
+            "A repeat/verification turn attempted to mark the same Gmail message again.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    different_repeat_mutations = [
+        message_id
+        for message_id in repeat["gmail_modify_label_message_ids"]
+        if message_id != target_message_id
+    ]
+    if different_repeat_mutations:
+        return _blocked_sequence_analysis(
+            "different_message_processed_on_repeat",
+            "The repeat turn processed a different Gmail message instead of the same target.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    post_marker_readback = bool(
+        repeat["completion_marker_seen"]
+        or verify["completion_marker_seen"]
+        or any(
+            f"-label:{GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL}" in query
+            for query in repeat["effective_gmail_queries"] + verify["effective_gmail_queries"]
+        )
+    )
+    if not post_marker_readback:
+        return _blocked_sequence_analysis(
+            "message_processing_readback_missing",
+            "The repeat/verification turns did not read back the message-processing marker.",
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
+
+    warnings: list[str] = []
+    if not all_file_copy_ids:
+        warnings.append("file_copy_or_import_id_not_observed")
+    return {
+        "verdict": "pass",
+        "blocker": None,
+        "turn_count": len(reports),
+        "target": {
+            "gmail_message_id": target_message_id,
+            "gmail_thread_ids": initial["thread_ids"],
+            "arxiv_id": target_arxiv_id,
+            "paper_concept_id": target_paper_concept_id,
+            "file_copy_concept_ids": sorted(all_file_copy_ids),
+        },
+        "evidence": all_evidence,
+        "warnings": warnings,
+    }
+
+
 def _fact_ids(facts: Sequence[Mapping[str, Any]]) -> set[str]:
     return {
         _safe_text(fact.get("fact_id")) or _safe_text(fact.get("id"))
@@ -1146,6 +1669,26 @@ _GMAIL_OAUTH_NON_EVIDENCE_KEYS = {
     "system_prompt",
     "tool_specs",
 }
+_TOOL_REGISTRATION_NON_EVIDENCE_KEYS = {
+    "available_tools",
+    "context_message",
+    "context_messages",
+    "llm_prompt",
+    "llm_request",
+    "messages",
+    "prompt",
+    "prompt_preview",
+    "request",
+    "selector_prompt",
+    "system_prompt",
+    "tool_specs",
+}
+_TOOL_REGISTRATION_CONTEXT_MARKERS = (
+    "mcp",
+    "method",
+    "tool",
+    "workflow",
+)
 
 
 def _text_mentions_gmail(value: str) -> bool:
@@ -1161,6 +1704,31 @@ def _text_mentions_gmail_oauth_failure(value: str, *, gmail_context: bool) -> bo
     authish = any(marker in text for marker in _GMAIL_OAUTH_AUTH_MARKERS)
     failureish = any(marker in text for marker in _GMAIL_OAUTH_FAILURE_MARKERS)
     return authish and failureish
+
+
+def _text_mentions_tool_registration_failure(value: str) -> bool:
+    text = value.lower()
+    if "mcp_invoke_failed" in text or "method '" in text and "not registered" in text:
+        return True
+    if "not registered" not in text:
+        return False
+    return any(marker in text for marker in _TOOL_REGISTRATION_CONTEXT_MARKERS)
+
+
+def _contains_tool_registration_blocker_text(value: Any) -> bool:
+    if isinstance(value, str):
+        return _text_mentions_tool_registration_failure(value)
+    if isinstance(value, Mapping):
+        for raw_key, item in value.items():
+            key = _safe_text(raw_key).lower()
+            if key in _TOOL_REGISTRATION_NON_EVIDENCE_KEYS:
+                continue
+            if _contains_tool_registration_blocker_text(item):
+                return True
+        return False
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_contains_tool_registration_blocker_text(item) for item in value)
+    return False
 
 
 def _mapping_has_gmail_context(value: Mapping[str, Any]) -> bool:
@@ -1425,10 +1993,17 @@ def build_precondition_blockers(
 
     gmail_payload = dict(gmail_preflight if isinstance(gmail_preflight, Mapping) else {})
     if not gmail_payload.get("gmail_capability_ready") and not gmail_forced:
+        access_test = _as_mapping(gmail_payload.get("access_test"))
+        gmail_reason = (
+            _safe_text(access_test.get("detail"))
+            or _safe_text(access_test.get("error"))
+            or _safe_text(access_test.get("status"))
+        )
         blockers.append(
             {
                 "type": "gmail_oauth_or_profile_blocker",
-                "reason": (
+                "reason": gmail_reason
+                or (
                     "Gmail profile/tokens are not ready for an authenticated "
                     "Gmail-backed replay."
                 ),
@@ -1548,6 +2123,12 @@ def classify_replay(
             "reason": "Replay reached the expected workflow, but progress projection evidence is incomplete.",
             "missing_fact_ids": missing_fact_ids,
             "missing_contract_ids": missing_contract_ids,
+        }
+    elif _contains_tool_registration_blocker_text(task_evidence):
+        blocker = {
+            "type": "tool_registration_blocker",
+            "reason": "Task evidence contains an unregistered tool or MCP method failure.",
+            "observed_tools": extract_observed_tool_names(task_evidence),
         }
     elif _contains_gmail_oauth_blocker_text(task_evidence):
         blocker = {
@@ -1854,6 +2435,230 @@ def run_replay(
     )
 
 
+def build_gmail_arxiv_idempotence_turn_cases(
+    *,
+    gmail_query: str | None = None,
+) -> tuple[ReplayTurnCase, ...]:
+    query = _safe_text(gmail_query) or GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY
+    turns: list[ReplayTurnCase] = []
+    for turn_id, prompt_template in GMAIL_ARXIV_IDEMPOTENCE_TURN_PROMPTS:
+        prompt = prompt_template.format(
+            gmail_query=query,
+            completion_label=GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL,
+        )
+        turns.append(
+            ReplayTurnCase(
+                turn_id=turn_id,
+                case=ReplayCase(
+                    case_id=f"{GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID}_{turn_id}",
+                    prompt=prompt,
+                    expected_workflow_id=(
+                        GMAIL_ARXIV_WORKFLOW_ID if turn_id == "initial" else None
+                    ),
+                    expected_progress_fact_ids=(),
+                    expected_contract_ids=(),
+                    requires_gmail=True,
+                ),
+            )
+        )
+    return tuple(turns)
+
+
+def run_gmail_arxiv_idempotence_replay(
+    *,
+    base_url: str,
+    gmail_profile: str | None,
+    gmail_query: str | None,
+    model: str | None,
+    target_user_concept_id: str | None,
+    target_organisation_concept_id: str | None,
+    presenter_mode: bool,
+    thinking_card_mode: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    auth_login_timeout_seconds: float,
+    database_preflight_attempts: int,
+    database_preflight_poll_interval_seconds: float,
+    workflow_capability_preflight_timeout_seconds: float,
+    workflow_capability_preflight_poll_interval_seconds: float,
+    allow_non_agent_test_server: bool,
+    run_despite_database_preflight_blocker: bool,
+    run_despite_llm_preflight_blocker: bool,
+    run_despite_workflow_capability_preflight_blocker: bool,
+    run_despite_gmail_preflight_blocker: bool,
+    cancel_on_timeout: bool,
+) -> dict[str, Any]:
+    """Run the 2571 first/repeat/verify sequence in one chat session."""
+
+    turn_cases = build_gmail_arxiv_idempotence_turn_cases(gmail_query=gmail_query)
+    session = requests.Session()
+    environment = collect_run_environment(session=session, base_url=base_url)
+    require_agent_test_server(
+        environment=environment,
+        base_url=base_url,
+        allow_non_agent_test_server=allow_non_agent_test_server,
+    )
+
+    window_session_id = f"browser-replay-{uuid.uuid4()}"
+    auth_login = establish_browser_test_session(
+        session=session,
+        base_url=base_url,
+        window_session_id=window_session_id,
+        timeout_seconds=auth_login_timeout_seconds,
+    )
+    user_concept_id = _safe_text(auth_login.get("user_concept_id"))
+    if user_concept_id:
+        session.headers.update({"X-User-Concept-ID": user_concept_id})
+    effective_target_user = _safe_text(target_user_concept_id) or user_concept_id
+    target_session_context = apply_target_session_context(
+        session=session,
+        base_url=base_url,
+        user_concept_id=effective_target_user,
+        organisation_concept_id=target_organisation_concept_id,
+    )
+    auth_status = get_auth_status(session=session, base_url=base_url)
+    database_preflight = build_database_preflight(
+        session=session,
+        base_url=base_url,
+        attempt_count=database_preflight_attempts,
+        poll_interval_seconds=database_preflight_poll_interval_seconds,
+    )
+    llm_preflight = build_llm_preflight(
+        session=session,
+        base_url=base_url,
+        user_concept_id=effective_target_user,
+        organisation_concept_id=target_organisation_concept_id,
+        explicit_model=model,
+    )
+    workflow_capability_preflight = build_workflow_capability_preflight(
+        session=session,
+        base_url=base_url,
+        timeout_seconds=workflow_capability_preflight_timeout_seconds,
+        poll_interval_seconds=workflow_capability_preflight_poll_interval_seconds,
+    )
+    gmail_preflight = build_gmail_preflight(
+        session=session,
+        base_url=base_url,
+        gmail_profile=gmail_profile,
+        required=True,
+    )
+
+    active_precondition_blockers = build_precondition_blockers(
+        auth_login=auth_login,
+        auth_status=auth_status,
+        target_session_context=target_session_context,
+        database_preflight=database_preflight,
+        llm_preflight=llm_preflight,
+        workflow_capability_preflight=workflow_capability_preflight,
+        gmail_preflight=gmail_preflight,
+        database_forced=run_despite_database_preflight_blocker,
+        llm_forced=run_despite_llm_preflight_blocker,
+        workflow_capability_forced=run_despite_workflow_capability_preflight_blocker,
+        gmail_forced=run_despite_gmail_preflight_blocker,
+    )
+
+    chat_session: dict[str, Any] = {}
+    turn_reports: list[dict[str, Any]] = []
+    if active_precondition_blockers:
+        sequence_analysis = _blocked_sequence_analysis(
+            _safe_text(active_precondition_blockers[0].get("type"))
+            or "preflight_blocker",
+            _safe_text(active_precondition_blockers[0].get("reason"))
+            or "Replay preflight blocked submission.",
+            evidence={"precondition_blockers": active_precondition_blockers},
+            turn_reports=turn_reports,
+        )
+    else:
+        chat_session = create_replay_chat_session(
+            session=session,
+            base_url=base_url,
+            case_id=GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID,
+        )
+        conversation_session_id = _safe_text(chat_session.get("session_id"))
+        for turn in turn_cases:
+            client_request_id = f"jvnautosci-2571-{turn.turn_id}-{uuid.uuid4()}"
+            submission = submit_background_generate(
+                session=session,
+                base_url=base_url,
+                case=turn.case,
+                client_request_id=client_request_id,
+                conversation_session_id=conversation_session_id,
+                gmail_profile=_safe_text(gmail_preflight.get("requested_gmail_profile")),
+                model=model,
+                presenter_mode=presenter_mode,
+                thinking_card_mode=thinking_card_mode,
+            )
+            task_evidence = {
+                "task_statuses": [],
+                "progress_snapshots": [],
+                "last_task_status": {},
+                "last_progress": {},
+                "task_result": {},
+            }
+            task_id = _safe_text(submission.get("task_id"))
+            request_id = _safe_text(submission.get("request_id")) or task_id
+            if task_id and request_id:
+                task_evidence = poll_replay_task(
+                    session=session,
+                    base_url=base_url,
+                    task_id=task_id,
+                    request_id=request_id,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                    cancel_on_timeout=cancel_on_timeout,
+                )
+            report = build_replay_report(
+                case=turn.case,
+                environment=environment,
+                window_session_id=window_session_id,
+                auth_login=auth_login,
+                auth_status=auth_status,
+                target_session_context=target_session_context,
+                database_preflight=database_preflight,
+                llm_preflight=llm_preflight,
+                workflow_capability_preflight=workflow_capability_preflight,
+                gmail_preflight=gmail_preflight,
+                chat_session=chat_session,
+                submission=submission,
+                task_evidence=task_evidence,
+            )
+            report["turn_id"] = turn.turn_id
+            turn_reports.append(report)
+
+            if _safe_text(_as_mapping(report.get("analysis")).get("verdict")) == (
+                "blocked"
+            ):
+                break
+
+        sequence_analysis = analyse_gmail_arxiv_idempotence_sequence(turn_reports)
+
+    return {
+        "schema_version": "authenticated_browser_workflow_replay_sequence.v1",
+        "case_id": GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID,
+        "case": {
+            "case_id": GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID,
+            "gmail_query": (
+                _safe_text(gmail_query) or GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY
+            ),
+            "completion_label": GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL,
+            "turn_ids": [turn.turn_id for turn in turn_cases],
+        },
+        "environment": dict(environment),
+        "window_session_id": window_session_id,
+        "auth_login": dict(auth_login),
+        "auth_status": dict(auth_status),
+        "target_session_context": dict(target_session_context),
+        "database_preflight": dict(database_preflight),
+        "llm_preflight": dict(llm_preflight),
+        "workflow_capability_preflight": dict(workflow_capability_preflight),
+        "gmail_preflight": dict(gmail_preflight),
+        "precondition_blockers": active_precondition_blockers,
+        "chat_session": dict(chat_session),
+        "turn_reports": turn_reports,
+        "analysis": sequence_analysis,
+    }
+
+
 def _write_output(path: str | None, report: Mapping[str, Any]) -> None:
     output = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if not path:
@@ -1906,6 +2711,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     parser.add_argument("--case", default="gmail-arxiv-2421")
+    parser.add_argument(
+        "--idempotence-gmail-query",
+        default=GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY,
+        help=(
+            "Gmail query described to the 2571 idempotence replay prompt when "
+            "--case gmail-arxiv-idempotence-2571 is selected."
+        ),
+    )
     parser.add_argument(
         "--prompt",
         default=None,
@@ -2032,6 +2845,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if _safe_text(args.case) in {
+        GMAIL_ARXIV_IDEMPOTENCE_CASE_ID,
+        GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID,
+    } and not _safe_text(args.prompt):
+        report = run_gmail_arxiv_idempotence_replay(
+            base_url=str(args.base_url).rstrip("/"),
+            gmail_profile=args.gmail_profile,
+            gmail_query=args.idempotence_gmail_query,
+            model=args.model,
+            target_user_concept_id=args.target_user_concept_id,
+            target_organisation_concept_id=args.target_organisation_concept_id,
+            presenter_mode=bool(args.presenter_mode),
+            thinking_card_mode=args.thinking_card_mode,
+            timeout_seconds=float(args.timeout_seconds),
+            poll_interval_seconds=float(args.poll_interval_seconds),
+            auth_login_timeout_seconds=float(args.auth_login_timeout_seconds),
+            database_preflight_attempts=int(args.database_preflight_attempts),
+            database_preflight_poll_interval_seconds=float(
+                args.database_preflight_poll_interval_seconds
+            ),
+            workflow_capability_preflight_timeout_seconds=float(
+                args.workflow_capability_preflight_timeout_seconds
+            ),
+            workflow_capability_preflight_poll_interval_seconds=float(
+                args.workflow_capability_preflight_poll_interval_seconds
+            ),
+            allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
+            run_despite_database_preflight_blocker=bool(
+                args.run_despite_database_preflight_blocker
+            ),
+            run_despite_llm_preflight_blocker=bool(
+                args.run_despite_llm_preflight_blocker
+            ),
+            run_despite_workflow_capability_preflight_blocker=bool(
+                args.run_despite_workflow_capability_preflight_blocker
+            ),
+            run_despite_gmail_preflight_blocker=bool(
+                args.run_despite_gmail_preflight_blocker
+            ),
+            cancel_on_timeout=not bool(args.skip_cancel_on_timeout),
+        )
+        _write_output(args.output_json, report)
+        verdict = _safe_text(_as_mapping(report.get("analysis")).get("verdict"))
+        return 0 if verdict in {"pass", "blocked"} else 1
 
     case = _resolve_case(
         args.case,

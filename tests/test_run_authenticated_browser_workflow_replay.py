@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import scripts.run_authenticated_browser_workflow_replay as replay
 
 
 def test_establish_browser_test_session_skips_fixture_refresh(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class _FakeSession:
         def __init__(self) -> None:
@@ -322,6 +324,70 @@ def test_apply_target_session_context_reports_mismatch(monkeypatch) -> None:
     assert [call[0] for call in calls] == ["POST", "POST", "GET"]
 
 
+def test_build_gmail_preflight_requires_live_access_test(monkeypatch) -> None:
+    monkeypatch.setattr(
+        replay,
+        "_query_settings",
+        lambda **_kwargs: {
+            "gmail_profiles": ["vonwitbrock-gmail"],
+            "gmail_default_profile": None,
+        },
+    )
+    monkeypatch.setattr(
+        replay,
+        "_query_gmail_oauth_status",
+        lambda **_kwargs: {"has_tokens": True},
+    )
+    monkeypatch.setattr(
+        replay,
+        "_query_gmail_access_test",
+        lambda **_kwargs: {
+            "success": False,
+            "status": "reauthorisation_required",
+            "error": "invalid_grant",
+        },
+    )
+
+    preflight = replay.build_gmail_preflight(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        gmail_profile="vonwitbrock-gmail",
+    )
+
+    assert preflight["gmail_capability_ready"] is False
+    assert preflight["access_test"]["error"] == "invalid_grant"
+
+
+def test_build_gmail_preflight_passes_with_live_access_test(monkeypatch) -> None:
+    monkeypatch.setattr(
+        replay,
+        "_query_settings",
+        lambda **_kwargs: {
+            "gmail_profiles": ["vonwitbrock-gmail"],
+            "gmail_default_profile": None,
+        },
+    )
+    monkeypatch.setattr(
+        replay,
+        "_query_gmail_oauth_status",
+        lambda **_kwargs: {"has_tokens": True},
+    )
+    monkeypatch.setattr(
+        replay,
+        "_query_gmail_access_test",
+        lambda **_kwargs: {"success": True, "status": "access_ok"},
+    )
+
+    preflight = replay.build_gmail_preflight(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        gmail_profile="vonwitbrock-gmail",
+    )
+
+    assert preflight["gmail_capability_ready"] is True
+    assert preflight["access_test"]["status"] == "access_ok"
+
+
 def test_classify_replay_reports_gmail_profile_blocker_when_auth_ready() -> None:
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
@@ -547,6 +613,53 @@ def test_classify_replay_reports_explicit_gmail_oauth_failure_text() -> None:
     assert analysis["blocker"]["type"] == "gmail_oauth_or_profile_blocker"
 
 
+def test_classify_replay_reports_tool_registration_before_gmail_profile_text() -> None:
+    case = replay.ReplayCase(
+        case_id="gmail-workflow-recovery-dispatch-failure",
+        prompt="Represent a Gmail-linked arXiv paper",
+        expected_workflow_id=replay.GMAIL_ARXIV_WORKFLOW_ID,
+        expected_progress_fact_ids=(),
+        expected_contract_ids=(),
+        requires_gmail=True,
+    )
+
+    analysis = replay.classify_replay(
+        case=case,
+        auth_login={"success": True},
+        auth_status={"authenticated": True},
+        gmail_preflight={"gmail_capability_ready": True},
+        task_evidence={
+            "last_task_status": {
+                "status": "completed",
+                "progress": {
+                    "result_summary": (
+                        "The 'general_mail_review_workflow' tool is not "
+                        "registered, preventing retrieval of Gmail messages. "
+                        "Please confirm the Gmail profile."
+                    ),
+                },
+            },
+            "tool_history": [
+                {
+                    "tool": "general_mail_review_workflow",
+                    "error": (
+                        "mcp_invoke_failed:general_mail_review_workflow:"
+                        "\"Method 'general_mail_review_workflow' not registered.\""
+                    ),
+                }
+            ],
+        },
+        selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        observed_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        selector_diagnostics=[],
+        progress_facts=[],
+    )
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "tool_registration_blocker"
+    assert "general_mail_review_workflow" in analysis["blocker"]["observed_tools"]
+
+
 def test_classify_replay_reports_selector_blocker_before_running_timeout() -> None:
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
@@ -651,3 +764,113 @@ def test_classify_replay_reports_expected_workflow_action_blocker() -> None:
         "#V#gmail_arxiv_email_message_subject_progress_fact"
         in analysis["blocker"]["missing_contract_ids"]
     )
+
+
+def _idempotence_turn_report(
+    turn_id: str,
+    payload: dict,
+    *,
+    selected_workflow_ids: list[str] | None = None,
+) -> dict:
+    return {
+        "turn_id": turn_id,
+        "analysis": {
+            "verdict": "pass",
+            "blocker": None,
+            "terminal_task_status": "completed",
+            "selected_workflow_ids": selected_workflow_ids or [],
+        },
+        "last_task_status": {"status": "completed"},
+        "task_result": {"result": payload},
+        "progress_snapshots": [
+            {
+                "progress_facts": payload.get("progress_facts", []),
+            }
+        ],
+    }
+
+
+def _passing_idempotence_reports() -> list[dict]:
+    target_payload = {
+        "workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
+        "mcp_tool": "gmail_modify_labels",
+        "tool_arguments": {
+            "message_id": "msg-1",
+            "add_labels": [replay.GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID],
+        },
+        "thread_id": "thread-1",
+        "arxiv_id": "https://arxiv.org/abs/2406.15341v1",
+        "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
+        "file_copy_concept_id": "#V#file_copy_2406_15341",
+        "effective_gmail_query": "arxiv.org -label:vontology/ingested",
+    }
+    repeat_payload = {
+        "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
+        "arxiv_id": "2406.15341",
+        "effective_gmail_query": "arxiv.org -label:vontology/ingested",
+    }
+    verify_payload = {
+        "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
+        "label_ids": [replay.GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID],
+    }
+    return [
+        _idempotence_turn_report(
+            "initial",
+            target_payload,
+            selected_workflow_ids=[replay.GMAIL_ARXIV_WORKFLOW_ID],
+        ),
+        _idempotence_turn_report("repeat", repeat_payload),
+        _idempotence_turn_report("verify", verify_payload),
+    ]
+
+
+def test_extract_gmail_arxiv_idempotence_evidence_from_nested_payload() -> None:
+    report = _passing_idempotence_reports()[0]
+
+    evidence = replay.extract_gmail_arxiv_idempotence_evidence(report)
+
+    assert evidence["message_ids"] == ["msg-1"]
+    assert evidence["thread_ids"] == ["thread-1"]
+    assert evidence["arxiv_ids"] == ["2406.15341"]
+    assert evidence["paper_concept_ids"] == ["#V#paper_on_arxiv_2406_15341"]
+    assert evidence["file_copy_concept_ids"] == ["#V#file_copy_2406_15341"]
+    assert "gmail_modify_labels" in evidence["observed_tools"]
+    assert evidence["gmail_modify_label_message_ids"] == ["msg-1"]
+    assert evidence["completion_marker_seen"] is True
+
+
+def test_analyse_gmail_arxiv_idempotence_sequence_passes_on_stable_ids() -> None:
+    analysis = replay.analyse_gmail_arxiv_idempotence_sequence(
+        _passing_idempotence_reports()
+    )
+
+    assert analysis["verdict"] == "pass"
+    assert analysis["blocker"] is None
+    assert analysis["target"]["gmail_message_id"] == "msg-1"
+    assert analysis["target"]["arxiv_id"] == "2406.15341"
+    assert analysis["target"]["paper_concept_id"] == "#V#paper_on_arxiv_2406_15341"
+    assert analysis["target"]["file_copy_concept_ids"] == ["#V#file_copy_2406_15341"]
+
+
+def test_analyse_gmail_arxiv_idempotence_sequence_blocks_missing_message_marker() -> None:
+    reports = _passing_idempotence_reports()
+    reports[0]["task_result"]["result"]["message_id"] = "msg-1"
+    reports[0]["task_result"]["result"].pop("mcp_tool")
+    reports[0]["task_result"]["result"].pop("tool_arguments")
+
+    analysis = replay.analyse_gmail_arxiv_idempotence_sequence(reports)
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "message_processing_marker_missing"
+
+
+def test_analyse_gmail_arxiv_idempotence_sequence_blocks_duplicate_paper_ids() -> None:
+    reports = _passing_idempotence_reports()
+    reports[1]["task_result"]["result"]["paper_concept_id"] = (
+        "#V#paper_on_arxiv_2406_15341_duplicate"
+    )
+
+    analysis = replay.analyse_gmail_arxiv_idempotence_sequence(reports)
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "duplicate_paper_concepts_observed"
