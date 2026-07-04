@@ -1,0 +1,225 @@
+{
+  "schema_version": "live_multi_turn_followup_prompt_bank.v1",
+  "description": "Multi-turn follow-up replay family for conversation-context behaviour on the real /von/generate path. Each case runs several turns in ONE chat session and checks, per turn, that prior-turn referents remain usable while prior-turn obligations and concepts do not leak into new intents. Motivated by JVNAUTOSCI-2563 (prior-turn expected-outcome obligations leaking into follow-up intents), JVNAUTOSCI-2564 (answer grounded to a prior-session concept instead of the target verified this turn), and the JVNAUTOSCI-2553 degraded-success ingestion class. Run with scripts/run_live_multi_turn_followup_replay.py under the JVNAUTOSCI-1894 replay-and-telemetry method (expectation-first bar, real path, telemetry capture, honest per-turn verdicts).",
+  "turn_roles": {
+    "task": "An initial task turn that establishes referents and (implicitly) an operation-shaped expected-outcome contract.",
+    "bare_followup": "A narrow lookup/existence question about the SAME entity as the task turn. Prior referents may be reused; prior operation obligations must NOT be inherited (JVNAUTOSCI-2563).",
+    "different_target_followup": "A question about a DIFFERENT target than the task turn. The answer's concrete concepts must ground to the newly asked-about target, never silently substitute the earlier one (JVNAUTOSCI-2564).",
+    "explicit_continuation": "An explicit continue/verify/finish request for the earlier operation. Prior obligations MAY legitimately carry forward; the answer must address the earlier operation's target.",
+    "multi_target": "A question about the current target AND earlier ones together. The answer must address each target distinctly and must not collapse to a single concept (JVNAUTOSCI-2564 anti-over-constraint guardrail)."
+  },
+  "expectation_keys": {
+    "expected_workflow_id": "Optional workflow concept ID expected to be selected for this turn.",
+    "require_completed": "Background task must reach terminal status completed.",
+    "forbid_decisions": "Turn execution record decision must not be one of these (e.g. escalation_required on a bare follow-up).",
+    "require_prior_obligation_suppression": "The turn record must show prior-contract conditional obligations suppressed (execution.summary.expected_outcome_obligation_carry_forward.suppressed_prior_obligations non-empty) OR carry no unsatisfied obligation sourced from the prior turn's contract.",
+    "forbid_unsatisfied_obligation_sources": "No UNSATISFIED required-tool obligation may cite one of these sources (default probe: turn_expected_outcome_conditional_required_tools).",
+    "allow_obligation_carry_forward": "Explicit continuation: obligation inheritance is legitimate; no suppression requirement.",
+    "response_must_mention_any": "Visible answer must contain at least one of these strings (target grounding).",
+    "response_must_not_mention": "Visible answer must contain none of these strings (stale-referent grounding guard).",
+    "response_must_mention_all_groups": "For multi-target turns: for EACH group (list of alternative strings), the answer must mention at least one entry; proves per-target coverage without forcing a single binding.",
+    "notes": "Free-text reviewer guidance; not machine-checked."
+  },
+  "cases": [
+    {
+      "case_id": "arxiv_ingest_followup_family",
+      "domain": "arxiv",
+      "motivating_issues": ["JVNAUTOSCI-2563", "JVNAUTOSCI-2564", "JVNAUTOSCI-2553"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "Please ingest https://arxiv.org/abs/2406.15341 into Von, including the normal download/file-copy path if available, then read back the represented paper concept so I can see what was stored.",
+          "expectations": {
+            "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "require_completed": true,
+            "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
+            "notes": "Establishes referents: the GenoTEX paper concept and its file copy. PDF acquisition failure is acceptable if the workflow reaches degraded success and the answer says so."
+          }
+        },
+        {
+          "role": "bare_followup",
+          "prompt": "Do you have a concept for https://arxiv.org/abs/2406.15341",
+          "expectations": {
+            "require_completed": true,
+            "forbid_decisions": ["escalation_required"],
+            "require_prior_obligation_suppression": true,
+            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
+            "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
+            "notes": "Exact JVNAUTOSCI-2563 motivating shape. Prior paper/file-copy referents may be reused for a direct existence answer; the prior ingestion/read-back tool family must not become this turn's obligations."
+          }
+        },
+        {
+          "role": "different_target_followup",
+          "prompt": "Is this paper represented? https://arxiv.org/pdf/2603.22519v2",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_any": ["2603.22519", "LLMon", "llmon"],
+            "response_must_not_mention": ["genotex_an_llm_agent_benchmark", "arxiv_pdf_file_46934c89"],
+            "notes": "Exact JVNAUTOSCI-2564 motivating shape. The answer's concrete concept handles must correspond to 2603.22519; the earlier GenoTEX concept/file-copy must not be presented as this turn's verified result. Mentioning GenoTEX as clearly-labelled prior context by name is acceptable; surfacing its concept IDs as the verified answer is not."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Please verify the representation of the paper you ingested at the start of this conversation and confirm its stored concept is still retrievable.",
+          "expectations": {
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "response_must_mention_any": ["2406.15341", "GenoTEX", "genotex"],
+            "notes": "Legitimate continuation: verification obligations for the earlier operation may carry; the answer must address the T1 paper, resolved through prior referents."
+          }
+        },
+        {
+          "role": "multi_target",
+          "prompt": "Is 2603.22519 represented, and what about the paper we ingested earlier? Answer for each separately.",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_all_groups": [
+              ["2603.22519", "LLMon", "llmon"],
+              ["2406.15341", "GenoTEX", "genotex"]
+            ],
+            "notes": "Anti-over-constraint guardrail: the answer must cover BOTH targets distinctly, proving the grounding fix does not force single-target binding."
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "gmail_review_followup_family",
+      "domain": "gmail",
+      "motivating_issues": ["JVNAUTOSCI-2563"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "List my three most recent Gmail messages with sender, subject, and received time. Read-only: do not modify, label, or send anything.",
+          "expectations": {
+            "require_completed": true,
+            "notes": "Establishes mailbox referents (message IDs/subjects) with a read-only contract shape."
+          }
+        },
+        {
+          "role": "bare_followup",
+          "prompt": "Which Gmail profile did you just use for that listing?",
+          "expectations": {
+            "require_completed": true,
+            "forbid_decisions": ["escalation_required"],
+            "require_prior_obligation_suppression": true,
+            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
+            "notes": "A narrow status question sharing the mail topic. It must not inherit the prior turn's mail retrieval/detail tool family as fresh obligations; the profile referent from T1 may be reused directly."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Show me the full details of the most recent message from that list, including its body.",
+          "expectations": {
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "notes": "Legitimate continuation: reuses the message referent from T1 and may carry per-message detail obligations (gmail_get_message grounded in a listed message ID)."
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "jira_lookup_followup_family",
+      "domain": "jira",
+      "motivating_issues": ["JVNAUTOSCI-2563", "JVNAUTOSCI-2564"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "What is the most recently created Task in the JVNAUTOSCI Jira project? Give me its key, summary, and status.",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_any": ["JVNAUTOSCI-"],
+            "notes": "Establishes a concrete Jira issue-key referent via read-only jira_search."
+          }
+        },
+        {
+          "role": "bare_followup",
+          "prompt": "Do you have a represented Vontology concept for that Jira issue?",
+          "expectations": {
+            "require_completed": true,
+            "forbid_decisions": ["escalation_required"],
+            "require_prior_obligation_suppression": true,
+            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
+            "notes": "Narrow concept-existence question. The issue-key referent from T1 must be reusable; the prior Jira search/read tool family must not be inherited as obligations, and no Jira import/reconciliation path may activate."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Fetch the full details of that issue directly from Jira, including description and assignee.",
+          "expectations": {
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "response_must_mention_any": ["JVNAUTOSCI-"],
+            "notes": "Legitimate continuation: jira_get_issue on the carried issue-key referent."
+          }
+        },
+        {
+          "role": "multi_target",
+          "prompt": "Summarise both that issue and the one created immediately before it, separately.",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_all_groups": [
+              ["JVNAUTOSCI-"]
+            ],
+            "notes": "Two-target coverage; the runner cannot know the keys in advance so machine checks are weak here — the reviewer must confirm two distinct issue keys appear and are summarised separately."
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "generic_concept_followup_family",
+      "domain": "vontology_generic",
+      "motivating_issues": ["JVNAUTOSCI-2563"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "Create a represented note concept containing exactly this text: 'Multi-turn replay checkpoint for the follow-up family.' Then read it back so I can see the stored concept.",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_any": ["Multi-turn replay checkpoint"],
+            "notes": "Establishes a freshly created concept referent through the generic representation path (create + text relation + read-back)."
+          }
+        },
+        {
+          "role": "bare_followup",
+          "prompt": "Do you have a concept for that note?",
+          "expectations": {
+            "require_completed": true,
+            "forbid_decisions": ["escalation_required"],
+            "require_prior_obligation_suppression": true,
+            "forbid_unsatisfied_obligation_sources": ["turn_expected_outcome_conditional_required_tools"],
+            "response_must_mention_any": ["Multi-turn replay checkpoint", "note"],
+            "notes": "Deictic narrow lookup: the note referent must resolve from prior context; the prior mutation/read-back tool family must not be inherited as fresh obligations."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Verify the note concept you created is still retrievable and show me its stored content.",
+          "expectations": {
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "response_must_mention_any": ["Multi-turn replay checkpoint"],
+            "notes": "Legitimate verification continuation: read-back obligations for the earlier mutation may carry."
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "arxiv_degraded_success_ingestion",
+      "domain": "arxiv",
+      "motivating_issues": ["JVNAUTOSCI-2553", "JVNAUTOSCI-2557"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "Please ingest https://arxiv.org/abs/2408.12065 into Von. Include the PDF download/file-copy path if it works, but if the PDF cannot be fetched, still represent the paper from its metadata and tell me explicitly what was skipped.",
+          "expectations": {
+            "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "require_completed": true,
+            "response_must_mention_any": ["2408.12065"],
+            "response_must_not_mention": ["remote_file_copy_timeout"],
+            "notes": "The JVNAUTOSCI-2553 motivating paper. Success is metadata representation + read-back; PDF acquisition is optional enrichment. If acquisition failed, the answer must say so honestly (degraded success), never convert it into a terminal failure or surface raw support-error codes as the answer."
+          }
+        }
+      ]
+    }
+  ]
+}
