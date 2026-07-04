@@ -90,6 +90,15 @@ _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
     "inherit_parent_context",
     "max_transitions",
 }
+_NAMESPACED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS: frozenset[str] = frozenset(
+    {
+        "workflow_id",
+        "failure_mode",
+        "selected_workflow_id",
+        "prompt",
+        "user_prompt",
+    }
+)
 _INVOCATION_CHAIN_KEY = "__workflow_invocation_chain"
 _AMBIENT_INPUT_KEYS_KEY = "__workflow_ambient_input_keys"
 _INVOCATION_LEDGER_KEY = "__workflow_subworkflow_invocation_ledger"
@@ -143,6 +152,23 @@ _INTERNAL_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
         LAST_WORKFLOW_COMPLETION_GATE_KEY,
     }
 )
+
+
+def _normalise_namespaced_workflow_launch_inputs(raw_value: Any) -> dict[str, Any]:
+    if not isinstance(raw_value, Mapping):
+        return {}
+
+    normalised: dict[str, Any] = {}
+    for key, value in raw_value.items():
+        key_text = _normalise_text(key)
+        if (
+            not key_text
+            or key_text.startswith("__")
+            or key_text in _NAMESPACED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS
+        ):
+            continue
+        normalised[key_text] = value
+    return normalised
 _TELEMETRY_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
     {
         "aux_llm_calls",
@@ -749,10 +775,17 @@ def _apply_child_launch_input_contract(
             if key in ambient_keys and key in child_inputs:
                 child_inputs.pop(key, None)
                 pre_resolution_excluded_applied.append(key)
+    namespaced_launch_inputs = _normalise_namespaced_workflow_launch_inputs(
+        child_inputs.get("workflow_launch_inputs")
+    )
+    resolution_inputs: Dict[str, Any] = dict(child_inputs)
+    if namespaced_launch_inputs:
+        resolution_inputs.update(namespaced_launch_inputs)
+
     resolution = resolve_workflow_launch_inputs(
         workflow_id=child_workflow_id,
         contract=launch_input_contract,
-        inputs=child_inputs,
+        inputs=resolution_inputs,
         contract_source=(
             str(launch_input_contract_source).strip()
             if isinstance(launch_input_contract_source, str)
@@ -766,6 +799,10 @@ def _apply_child_launch_input_contract(
         if _normalise_text(key)
     }
     diagnostics: dict[str, Any] = dict(resolution.diagnostics)
+    if namespaced_launch_inputs:
+        diagnostics["namespaced_workflow_launch_inputs_applied"] = sorted(
+            namespaced_launch_inputs.keys()
+        )
     excluded_applied: list[str] = list(pre_resolution_excluded_applied)
     for key in excluded_keys:
         if key in resolved_inputs:
@@ -775,7 +812,10 @@ def _apply_child_launch_input_contract(
             child_inputs.pop(key, None)
             excluded_applied.append(key)
     for key, value in resolved_inputs.items():
-        child_inputs.setdefault(key, value)
+        if namespaced_launch_inputs:
+            child_inputs[key] = value
+        else:
+            child_inputs.setdefault(key, value)
     if excluded_applied:
         diagnostics["excluded_ambient_inputs_applied"] = sorted(
             dict.fromkeys(excluded_applied)

@@ -82,6 +82,7 @@ class ReplayCase:
     expected_progress_fact_ids: tuple[str, ...]
     expected_contract_ids: tuple[str, ...]
     requires_gmail: bool = False
+    workflow_inputs: Mapping[str, Any] | None = None
 
 
 GMAIL_ARXIV_REPLAY_CASE = ReplayCase(
@@ -105,33 +106,44 @@ GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID = (
     "gmail_arxiv_idempotence_2571_sequence"
 )
 GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY = "arxiv.org newer_than:365d"
-GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL = "vontology/ingested"
-GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID = "Label_7"
+GMAIL_ARXIV_IDEMPOTENCE_PROCESSING_MARKER = (
+    "represented message-processing evidence"
+)
+GMAIL_MUTATION_TOOL_NAMES = frozenset(
+    {
+        "gmail_create_label",
+        "gmail_modify_labels",
+        "gmail_send_message",
+        "gmail_set_profile_scope",
+    }
+)
 GMAIL_ARXIV_IDEMPOTENCE_TURN_PROMPTS: tuple[tuple[str, str], ...] = (
     (
         "initial",
         "Use the represented Gmail-to-arXiv ingestion workflow for at most one "
-        "recent Gmail message matching `{gmail_query}` that has not already "
-        "been marked `{completion_label}`. Represent the arXiv paper from that "
-        "message in Vontology, then answer with the arXiv ID, paper concept, "
-        "file-copy or import evidence if available, and the Gmail message or "
-        "thread identifier you used. Do not archive, delete, reply, or send.",
+        "recent Gmail message matching `{gmail_query}` whose represented Von "
+        "message-processing evidence does not already show completed handling. "
+        "Represent the arXiv paper from that message in Vontology, then answer "
+        "with the arXiv ID, paper concept, file-copy or import evidence if "
+        "available, the Gmail message or thread identifier you used, and the "
+        "represented message-processing evidence. Do not archive, delete, "
+        "label, reply, send, create labels, or change Gmail settings.",
     ),
     (
         "repeat",
         "Represent that same arXiv paper from the email again. If the paper is "
-        "already represented or the source Gmail message is already marked "
-        "processed, read back the existing concept, file-copy/import, and "
-        "message-processing evidence instead of creating a duplicate or "
-        "selecting a different paper. Do not archive, delete, reply, send, or "
-        "change Gmail labels.",
+        "already represented or the source Gmail message already has "
+        "represented processing evidence, read back the existing concept, "
+        "file-copy/import, and message-processing evidence instead of creating "
+        "a duplicate or selecting a different paper. Do not archive, delete, "
+        "label, reply, send, create labels, or change Gmail settings.",
     ),
     (
         "verify",
         "Show me the represented paper concept and whether that Gmail message "
         "or thread was already processed for this paper. Read back existing "
-        "evidence; do not recreate the paper, archive, delete, reply, send, or "
-        "change Gmail labels.",
+        "evidence; do not recreate the paper, archive, delete, label, reply, "
+        "send, create labels, or change Gmail settings.",
     ),
 )
 
@@ -910,6 +922,12 @@ def submit_background_generate(
         payload["model"] = model
     if presenter_mode:
         payload["presenter_mode"] = True
+    if isinstance(case.workflow_inputs, Mapping) and case.workflow_inputs:
+        payload["workflow_inputs"] = {
+            str(key): value
+            for key, value in case.workflow_inputs.items()
+            if isinstance(key, str) and key.strip()
+        }
 
     return _request_json(
         session,
@@ -1280,12 +1298,40 @@ def _mapping_mentions_tool(value: Mapping[str, Any], tool_name: str) -> bool:
     return wanted in extract_observed_tool_names(value)
 
 
-def _extract_gmail_modify_label_message_ids(value: Any) -> list[str]:
+MESSAGE_PROCESSING_MARKER_KEYS = {
+    "gmail_message_processing_marker",
+    "gmail_processing_status",
+    "message_processed",
+    "message_processed_for_paper",
+    "message_processing_marker",
+    "message_processing_status",
+    "processed_gmail_message_id",
+    "processed_message_id",
+    "source_message_processed",
+}
+MESSAGE_PROCESSING_MARKER_MESSAGE_ID_KEYS = {
+    "processed_gmail_message_id",
+    "processed_message_id",
+}
+
+
+def _extract_gmail_mutation_tools(value: Any) -> list[str]:
+    tools: list[str] = []
+    for tool_name in extract_observed_tool_names(value):
+        if tool_name in GMAIL_MUTATION_TOOL_NAMES:
+            _append_unique(tools, tool_name)
+    return tools
+
+
+def _extract_gmail_mutation_message_ids(value: Any) -> list[str]:
     message_ids: list[str] = []
     for candidate in _walk_json(value):
         if not isinstance(candidate, Mapping):
             continue
-        if not _mapping_mentions_tool(candidate, "gmail_modify_labels"):
+        if not any(
+            _mapping_mentions_tool(candidate, tool_name)
+            for tool_name in GMAIL_MUTATION_TOOL_NAMES
+        ):
             continue
         for message_id in _collect_keyed_scalar_values(
             candidate,
@@ -1295,28 +1341,57 @@ def _extract_gmail_modify_label_message_ids(value: Any) -> list[str]:
     return message_ids
 
 
-def _extract_completion_marker_values(value: Any) -> list[str]:
-    labels: list[str] = []
+def _is_truthy_marker_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _safe_text(value).lower()
+    return bool(text) and text not in {
+        "0",
+        "false",
+        "none",
+        "not_processed",
+        "null",
+        "unprocessed",
+    }
+
+
+def _mapping_has_message_processing_marker(value: Mapping[str, Any]) -> bool:
+    for raw_key, raw_value in value.items():
+        if _safe_text(raw_key).lower() in MESSAGE_PROCESSING_MARKER_KEYS:
+            if _is_truthy_marker_value(raw_value):
+                return True
+    return False
+
+
+def _extract_message_processing_marker_values(value: Any) -> list[str]:
+    markers: list[str] = []
     for raw in _collect_keyed_scalar_values(
         value,
-        exact_keys={
-            "add_labels",
-            "add_label_ids",
-            "label_ids",
-            "labelids",
-            "labels",
-            "query_fragment",
-            "effective_gmail_query",
-            "effective_query",
-        },
+        exact_keys=MESSAGE_PROCESSING_MARKER_KEYS,
     ):
-        if (
-            raw == GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID
-            or GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL in raw
-            or f"-label:{GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL}" in raw
+        if _is_truthy_marker_value(raw):
+            _append_unique(markers, raw)
+    return markers
+
+
+def _extract_message_processing_marker_message_ids(value: Any) -> list[str]:
+    message_ids: list[str] = []
+    for marker_value in _collect_keyed_scalar_values(
+        value,
+        exact_keys=MESSAGE_PROCESSING_MARKER_MESSAGE_ID_KEYS,
+    ):
+        _append_unique(message_ids, marker_value)
+    for candidate in _walk_json(value):
+        if not isinstance(candidate, Mapping):
+            continue
+        if not _mapping_has_message_processing_marker(candidate):
+            continue
+        for message_id in _collect_keyed_scalar_values(
+            candidate,
+            exact_keys={"message_id", "gmail_message_id"},
         ):
-            _append_unique(labels, raw)
-    return labels
+            _append_unique(message_ids, message_id)
+    return message_ids
 
 
 def extract_gmail_arxiv_idempotence_evidence(*payloads: Any) -> dict[str, Any]:
@@ -1329,8 +1404,10 @@ def extract_gmail_arxiv_idempotence_evidence(*payloads: Any) -> dict[str, Any]:
         "paper_concept_ids": [],
         "file_copy_concept_ids": [],
         "observed_tools": [],
-        "gmail_modify_label_message_ids": [],
-        "completion_marker_values": [],
+        "gmail_mutation_tools": [],
+        "gmail_mutation_message_ids": [],
+        "message_processing_marker_values": [],
+        "message_processing_marker_message_ids": [],
         "effective_gmail_queries": [],
     }
     for payload in payloads:
@@ -1364,16 +1441,23 @@ def extract_gmail_arxiv_idempotence_evidence(*payloads: Any) -> dict[str, Any]:
             _append_unique(evidence["file_copy_concept_ids"], value)
         for value in extract_observed_tool_names(payload):
             _append_unique(evidence["observed_tools"], value)
-        for value in _extract_gmail_modify_label_message_ids(payload):
-            _append_unique(evidence["gmail_modify_label_message_ids"], value)
-        for value in _extract_completion_marker_values(payload):
-            _append_unique(evidence["completion_marker_values"], value)
+        for value in _extract_gmail_mutation_tools(payload):
+            _append_unique(evidence["gmail_mutation_tools"], value)
+        for value in _extract_gmail_mutation_message_ids(payload):
+            _append_unique(evidence["gmail_mutation_message_ids"], value)
+        for value in _extract_message_processing_marker_values(payload):
+            _append_unique(evidence["message_processing_marker_values"], value)
+        for value in _extract_message_processing_marker_message_ids(payload):
+            _append_unique(evidence["message_processing_marker_message_ids"], value)
         for value in _collect_keyed_scalar_values(
             payload,
             exact_keys={"effective_gmail_query", "effective_query"},
         ):
             _append_unique(evidence["effective_gmail_queries"], value)
-    evidence["completion_marker_seen"] = bool(evidence["completion_marker_values"])
+    evidence["message_processing_marker_seen"] = bool(
+        evidence["message_processing_marker_values"]
+        or evidence["message_processing_marker_message_ids"]
+    )
     return evidence
 
 
@@ -1452,6 +1536,19 @@ def analyse_gmail_arxiv_idempotence_sequence(
         "repeat": repeat,
         "verify": verify,
     }
+    gmail_mutation_tools = sorted(
+        set(initial["gmail_mutation_tools"])
+        | set(repeat["gmail_mutation_tools"])
+        | set(verify["gmail_mutation_tools"])
+    )
+    if gmail_mutation_tools:
+        return _blocked_sequence_analysis(
+            "gmail_write_tool_used",
+            "The read-only Gmail replay observed Gmail write-capable tools: "
+            + ", ".join(gmail_mutation_tools),
+            evidence=all_evidence,
+            turn_reports=reports,
+        )
 
     initial_selected = set(_as_list(_as_mapping(initial_report.get("analysis")).get("selected_workflow_ids")))
     if GMAIL_ARXIV_WORKFLOW_ID not in initial_selected:
@@ -1523,51 +1620,25 @@ def analyse_gmail_arxiv_idempotence_sequence(
         )
 
     if (
-        target_message_id not in initial["gmail_modify_label_message_ids"]
-        or not initial["completion_marker_seen"]
+        target_message_id not in initial["message_processing_marker_message_ids"]
+        or not initial["message_processing_marker_seen"]
     ):
         return _blocked_sequence_analysis(
             "message_processing_marker_missing",
-            "The initial turn did not prove the source Gmail message was marked processed.",
-            evidence=all_evidence,
-            turn_reports=reports,
-        )
-
-    repeated_mutations = [
-        message_id
-        for message_id in (
-            repeat["gmail_modify_label_message_ids"]
-            + verify["gmail_modify_label_message_ids"]
-        )
-        if message_id == target_message_id
-    ]
-    if repeated_mutations:
-        return _blocked_sequence_analysis(
-            "message_reprocessed_on_repeat",
-            "A repeat/verification turn attempted to mark the same Gmail message again.",
-            evidence=all_evidence,
-            turn_reports=reports,
-        )
-
-    different_repeat_mutations = [
-        message_id
-        for message_id in repeat["gmail_modify_label_message_ids"]
-        if message_id != target_message_id
-    ]
-    if different_repeat_mutations:
-        return _blocked_sequence_analysis(
-            "different_message_processed_on_repeat",
-            "The repeat turn processed a different Gmail message instead of the same target.",
+            "The initial turn did not prove the source Gmail message had represented processing evidence.",
             evidence=all_evidence,
             turn_reports=reports,
         )
 
     post_marker_readback = bool(
-        repeat["completion_marker_seen"]
-        or verify["completion_marker_seen"]
+        repeat["message_processing_marker_seen"]
+        or verify["message_processing_marker_seen"]
         or any(
-            f"-label:{GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL}" in query
-            for query in repeat["effective_gmail_queries"] + verify["effective_gmail_queries"]
+            message_id == target_message_id
+            for message_id in (
+                repeat["message_processing_marker_message_ids"]
+                + verify["message_processing_marker_message_ids"]
+            )
         )
     )
     if not post_marker_readback:
@@ -2444,7 +2515,7 @@ def build_gmail_arxiv_idempotence_turn_cases(
     for turn_id, prompt_template in GMAIL_ARXIV_IDEMPOTENCE_TURN_PROMPTS:
         prompt = prompt_template.format(
             gmail_query=query,
-            completion_label=GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL,
+            processing_marker=GMAIL_ARXIV_IDEMPOTENCE_PROCESSING_MARKER,
         )
         turns.append(
             ReplayTurnCase(
@@ -2458,6 +2529,15 @@ def build_gmail_arxiv_idempotence_turn_cases(
                     expected_progress_fact_ids=(),
                     expected_contract_ids=(),
                     requires_gmail=True,
+                    workflow_inputs=(
+                        {
+                            "base_gmail_query": query,
+                            "gmail_max_results": 1,
+                            "max_results": 1,
+                        }
+                        if turn_id == "initial"
+                        else None
+                    ),
                 ),
             )
         )
@@ -2640,7 +2720,7 @@ def run_gmail_arxiv_idempotence_replay(
             "gmail_query": (
                 _safe_text(gmail_query) or GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY
             ),
-            "completion_label": GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL,
+            "processing_marker": GMAIL_ARXIV_IDEMPOTENCE_PROCESSING_MARKER,
             "turn_ids": [turn.turn_id for turn in turn_cases],
         },
         "environment": dict(environment),

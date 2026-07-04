@@ -466,6 +466,7 @@ def _build_generate_conversation_turn_instance_inputs(
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
+    workflow_launch_inputs: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     payload = {
         "conversation_session_id": session_id,
@@ -503,6 +504,11 @@ def _build_generate_conversation_turn_instance_inputs(
             dict(workflow_continuation_context)
             if isinstance(workflow_continuation_context, Mapping)
             else None
+        ),
+        "workflow_launch_inputs": (
+            dict(workflow_launch_inputs)
+            if isinstance(workflow_launch_inputs, Mapping)
+            else {}
         ),
     }
     if isinstance(agent_test_selector_replay_mode, str):
@@ -601,6 +607,7 @@ def _submit_generate_conversation_turn_instance(
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
+    workflow_launch_inputs: Mapping[str, Any] | None,
     get_instance_manager_fn: Callable[[], Any],
     submit_verified_workflow_instance_fn: Callable[..., Any],
     background_task_id: str | None = None,
@@ -701,6 +708,7 @@ def _submit_generate_conversation_turn_instance(
                 prompt_text=prompt_text,
                 workflow_discovery_result=workflow_discovery_result,
                 workflow_continuation_context=workflow_continuation_context,
+                workflow_launch_inputs=workflow_launch_inputs,
             ),
             max_retries=0,
             source_event_type="conversation_turn",

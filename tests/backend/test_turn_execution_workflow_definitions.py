@@ -1,4 +1,5 @@
 import re
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from representation_intent_regression_helpers import patch_representation_profile_loader
@@ -27,9 +28,11 @@ from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
 from src.backend.workflows.durable.subworkflow_actions import (
+    _apply_child_launch_input_contract,
     register_subworkflow_actions,
 )
 from src.backend.workflows.durable.turn_execution_actions import (
+    TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID,
     _build_turn_discovery_query_text as _build_durable_turn_discovery_query_text,
     register_turn_execution_actions,
 )
@@ -42,6 +45,9 @@ from src.backend.workflows.engine import (
     WorkflowTransitionSpec,
 )
 from src.backend.workflows.llm_step_executor import execute_llm_step
+from src.backend.workflows.subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+)
 from workflow_test_support import (
     build_authoritative_test_workflow_definition,
     build_test_conversation_turn_registry,
@@ -193,6 +199,131 @@ def test_durable_turn_selector_prepare_discovers_and_projects_selector_context(
     ]
 
 
+def test_execute_selected_projects_safe_workflow_launch_inputs(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _CapturingRegistry:
+        def execute(self, action_id: str, **kwargs: Any) -> WorkflowActionResult:
+            captured["action_id"] = action_id
+            captured["kwargs"] = kwargs
+            return WorkflowActionResult(
+                outputs={
+                    "result": {"ok": True},
+                    "subworkflow_invocation": {"child_final_state": "done"},
+                    "child_workflow_failed": False,
+                }
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        lambda: _CapturingRegistry(),
+    )
+
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    spec = registry.get(TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID,
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={
+                "selected_workflow_id": "#V#child_workflow",
+                "prompt": "original prompt",
+                "workflow_launch_inputs": {
+                    "gmail_max_results": 1,
+                    "base_gmail_query": "arxiv.org newer_than:365d",
+                    "prompt": "override prompt",
+                    "workflow_id": "#V#wrong_workflow",
+                    "failure_mode": "wrong_failure_mode",
+                    "__private": "drop",
+                },
+            },
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="execute_selected",
+        )
+    )
+
+    assert result.ok is True
+    assert captured["action_id"] == "workflow_invoke_subworkflow"
+    subworkflow_inputs = captured["kwargs"]["inputs"]
+    assert subworkflow_inputs["workflow_id"] == "#V#child_workflow"
+    assert subworkflow_inputs["failure_mode"] == (
+        WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
+    )
+    assert subworkflow_inputs["gmail_max_results"] == 1
+    assert subworkflow_inputs["base_gmail_query"] == "arxiv.org newer_than:365d"
+    assert subworkflow_inputs["prompt"] == "original prompt"
+    assert "__private" not in subworkflow_inputs
+    assert subworkflow_inputs["selected_workflow_launch_inputs"] == {
+        "gmail_max_results": 1,
+        "base_gmail_query": "arxiv.org newer_than:365d",
+        "prompt": "override prompt",
+    }
+
+
+def test_subworkflow_launch_contract_resolves_namespaced_workflow_inputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#child_workflow",
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "input_mappings": [
+                    {
+                        "target_context_key": "gmail_max_results",
+                        "source_expression": "inputs.gmail_max_results",
+                    },
+                    {
+                        "target_context_key": "gmail_max_results",
+                        "source_expression": "inputs.max_results",
+                    },
+                    {
+                        "target_context_key": "prompt",
+                        "source_expression": "inputs.prompt",
+                    },
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+    child_inputs: dict[str, Any] = {
+        "prompt": "original prompt",
+        "gmail_max_results": 5,
+        "workflow_launch_inputs": {
+            "gmail_max_results": 1,
+            "max_results": 1,
+            "prompt": "override prompt",
+            "workflow_id": "#V#wrong_workflow",
+            "__private": "drop",
+        },
+    }
+
+    diagnostics = _apply_child_launch_input_contract(
+        child_workflow_id="#V#child_workflow",
+        definition=definition,
+        child_inputs=child_inputs,
+        ambient_input_keys={"prompt", "gmail_max_results"},
+    )
+
+    assert diagnostics is not None
+    assert diagnostics["status"] == "resolved"
+    assert diagnostics["namespaced_workflow_launch_inputs_applied"] == [
+        "gmail_max_results",
+        "max_results",
+    ]
+    assert child_inputs["gmail_max_results"] == 1
+    assert child_inputs["prompt"] == "original prompt"
+    assert "workflow_id" not in child_inputs
+    assert "__private" not in child_inputs
+
+
 def test_durable_turn_selector_prepare_routes_on_user_prompt_before_contract(
     monkeypatch,
 ) -> None:
@@ -314,7 +445,7 @@ def test_agent_test_turn_route_preserves_gmail_arxiv_selector_choice(
         termination_states=("completed",),
         metadata=source.metadata,
     )
-    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     monkeypatch.setattr(
         orchestrator,
         "_build_turn_current_request_stage_message",

@@ -10600,6 +10600,31 @@ def _persist_terminal_failure_turn_record_best_effort(
             pass
 
 
+def _normalise_generate_workflow_launch_inputs(raw_value: Any) -> dict[str, Any]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, Mapping):
+        raise ValueError("workflow_inputs must be an object.")
+
+    normalised: dict[str, Any] = {}
+    invalid_keys: list[str] = []
+    for key, value in raw_value.items():
+        if not isinstance(key, str) or not key.strip():
+            invalid_keys.append(str(key))
+            continue
+        clean_key = key.strip()
+        if clean_key.startswith("__"):
+            invalid_keys.append(clean_key)
+            continue
+        normalised[clean_key] = value
+
+    if invalid_keys:
+        raise ValueError(
+            "workflow_inputs contains invalid keys: " + ", ".join(invalid_keys[:8])
+        )
+    return normalised
+
+
 @von_bp.route("/generate", methods=["POST"])
 def generate():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""
@@ -10667,6 +10692,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             thinking_card_mode = "default"
     else:
         thinking_card_mode = "default"
+
+    raw_workflow_launch_inputs = data.get("workflow_inputs")
+    if raw_workflow_launch_inputs is None:
+        raw_workflow_launch_inputs = data.get("workflow_launch_inputs")
+    try:
+        request_workflow_launch_inputs = _normalise_generate_workflow_launch_inputs(
+            raw_workflow_launch_inputs
+        )
+    except ValueError as exc:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_workflow_inputs",
+                    "detail": str(exc),
+                }
+            ),
+            400,
+        )
 
     if background_mode:
         return _submit_generate_background_request(
@@ -12519,6 +12562,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     prompt_text=prompt_text,
                     workflow_discovery_result=workflow_discovery_result,
                     workflow_continuation_context=workflow_continuation_context,
+                    workflow_launch_inputs=request_workflow_launch_inputs,
                     get_instance_manager_fn=get_instance_manager,
                     submit_verified_workflow_instance_fn=submit_verified_workflow_instance,
                     background_task_id=background_task_id,
@@ -12556,6 +12600,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     conversation_session_id=session_id,
                     turn_id=request_id,
                     workflow_continuation_context=workflow_continuation_context,
+                    workflow_launch_inputs=request_workflow_launch_inputs,
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
                     turn_memory_context=request_turn_memory_context,

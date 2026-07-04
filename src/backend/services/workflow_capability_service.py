@@ -2418,13 +2418,23 @@ def get_workflow_capability_index_runtime_state(
         query_surface_ready = bool(
             _INDEX_REBUILD_STATE.get("query_surface_ready", False)
         )
+        last_manifest_status = _INDEX_REBUILD_STATE.get("last_manifest_status")
+        agent_test_memory_only_ready = bool(
+            _is_agent_test_instance()
+            and last_manifest_status == "agent_test_memory_only"
+            and index.size > 0
+            and query_surface_ready
+        )
+        namespace_allows_readiness = bool(
+            namespace_compatible or agent_test_memory_only_ready
+        )
         return {
             "surface": "workflow_retrieval",
             "backend": "llamaindex",
             "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
             "size": int(index.size),
             "ready": bool(
-                index.size > 0 and namespace_compatible and query_surface_ready
+                index.size > 0 and namespace_allows_readiness and query_surface_ready
             ),
             "build_in_progress": bool(
                 _INDEX_REBUILD_STATE.get("build_in_progress", False)
@@ -2451,7 +2461,7 @@ def get_workflow_capability_index_runtime_state(
             "query_surface_last_warm_monotonic": float(
                 _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
             ),
-            "last_manifest_status": _INDEX_REBUILD_STATE.get("last_manifest_status"),
+            "last_manifest_status": last_manifest_status,
             "last_manifest_detail": _INDEX_REBUILD_STATE.get("last_manifest_detail"),
             "last_manifest_path": _INDEX_REBUILD_STATE.get("last_manifest_path"),
             "last_manifest_digest": _INDEX_REBUILD_STATE.get("last_manifest_digest"),
@@ -2460,6 +2470,10 @@ def get_workflow_capability_index_runtime_state(
             ),
             "auto_rebuild": _snapshot_workflow_capability_auto_rebuild_state_locked(),
             "namespace_state": namespace_state,
+            "agent_test_memory_only_ready": agent_test_memory_only_ready,
+            "namespace_state_ignored_for_readiness": bool(
+                agent_test_memory_only_ready and not namespace_compatible
+            ),
         }
 
 

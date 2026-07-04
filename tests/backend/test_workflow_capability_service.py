@@ -10,7 +10,7 @@ Tests cover:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1431,6 +1431,42 @@ def test_agent_test_build_loads_registry_entries_without_rag_sync_but_warms_quer
     assert runtime_state["last_manifest_status"] == "agent_test_memory_only"
 
 
+def test_agent_test_memory_only_readiness_ignores_stale_persisted_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": False,
+        "status": "embedding_signature_mismatch",
+        "detail": (
+            "Persisted index embeddings were built with a different embedding "
+            "signature."
+        ),
+    }
+
+    index = capability_service._perform_workflow_capability_index_build(
+        mode="startup",
+        workflow_registry=build_test_conversation_turn_registry(),
+    )
+
+    assert index.size > 0
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state()
+    assert runtime_state["ready"] is True
+    assert runtime_state["agent_test_memory_only_ready"] is True
+    assert runtime_state["namespace_state_ignored_for_readiness"] is True
+    readiness = capability_service.get_workflow_capability_index_readiness_report()
+    assert readiness["ready"] is True
+    assert readiness["workflow_discovery_available"] is True
+    assert readiness["status"] == "ready"
+    assert readiness["footer_red_flag"] is False
+    assert readiness["namespace_state"]["status"] == "embedding_signature_mismatch"
+
+
 def test_warm_query_surface_requires_retrieval_match() -> None:
     import src.backend.services.workflow_capability_service as capability_service
 
@@ -1441,7 +1477,9 @@ def test_warm_query_surface_requires_retrieval_match() -> None:
             return []
 
     with pytest.raises(RuntimeError, match="no warm-up match"):
-        capability_service._warm_workflow_capability_query_surface(_EmptyWarmIndex())
+        capability_service._warm_workflow_capability_query_surface(
+            cast(Any, _EmptyWarmIndex())
+        )
 
     runtime_state = capability_service.get_workflow_capability_index_runtime_state(
         latency_sensitive=True
@@ -1461,7 +1499,9 @@ def test_warm_query_surface_accepts_at_least_one_represented_match() -> None:
                 return [{"workflow_id": "#V#some_represented_workflow"}]
             return []
 
-    capability_service._warm_workflow_capability_query_surface(_PartiallyWarmIndex())
+    capability_service._warm_workflow_capability_query_surface(
+        cast(Any, _PartiallyWarmIndex())
+    )
 
     runtime_state = capability_service.get_workflow_capability_index_runtime_state(
         latency_sensitive=True

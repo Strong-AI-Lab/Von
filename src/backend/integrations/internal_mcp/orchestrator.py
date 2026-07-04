@@ -1821,6 +1821,15 @@ def _normalise_tool_name_sequence(value: Any) -> list[str]:
 
 
 _WORKFLOW_AMBIENT_INPUT_KEYS_KEY = "__workflow_ambient_input_keys"
+_NAMESPACED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS: frozenset[str] = frozenset(
+    {
+        "workflow_id",
+        "failure_mode",
+        "selected_workflow_id",
+        "prompt",
+        "user_prompt",
+    }
+)
 
 
 def _normalise_workflow_input_key_set(value: Any) -> set[str]:
@@ -1847,6 +1856,30 @@ def _mark_workflow_launch_inputs_as_ambient(inputs: dict[str, Any]) -> None:
     )
     if ambient_keys:
         inputs[_WORKFLOW_AMBIENT_INPUT_KEYS_KEY] = sorted(ambient_keys)
+
+
+def _project_namespaced_workflow_launch_inputs(inputs: dict[str, Any]) -> None:
+    raw_launch_inputs = inputs.get("workflow_launch_inputs")
+    if not isinstance(raw_launch_inputs, Mapping):
+        return
+
+    applied_keys: list[str] = []
+    for key, value in raw_launch_inputs.items():
+        if not isinstance(key, str):
+            continue
+        key_text = key.strip()
+        if (
+            not key_text
+            or key_text.startswith("__")
+            or key_text in _NAMESPACED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS
+        ):
+            continue
+        inputs[key_text] = value
+        applied_keys.append(key_text)
+    if applied_keys:
+        inputs["namespaced_workflow_launch_inputs_applied"] = sorted(
+            dict.fromkeys(applied_keys)
+        )
 
 
 def _strip_excluded_ambient_workflow_launch_inputs(
@@ -32263,6 +32296,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(workflow_metadata, Mapping)
                 else None
             )
+            _project_namespaced_workflow_launch_inputs(data)
             excluded_ambient_inputs_applied = (
                 _strip_excluded_ambient_workflow_launch_inputs(
                     data,
@@ -33215,6 +33249,7 @@ class InternalMCPChatOrchestrator:
             inputs.setdefault("org_concept_id", org_concept_id.strip())
         if isinstance(gmail_profile, str) and gmail_profile.strip():
             inputs.setdefault("gmail_profile", gmail_profile.strip())
+        _project_namespaced_workflow_launch_inputs(inputs)
         _mark_workflow_launch_inputs_as_ambient(inputs)
         return inputs
 
@@ -37211,6 +37246,7 @@ class InternalMCPChatOrchestrator:
                 )
                 for key, value in projected_continuation_launch_inputs.items():
                     child_workflow_data.setdefault(key, value)
+        _project_namespaced_workflow_launch_inputs(child_workflow_data)
         _mark_workflow_launch_inputs_as_ambient(child_workflow_data)
 
         if selected_workflow_id and selected_execution_mode == "direct_response":
@@ -37706,6 +37742,7 @@ class InternalMCPChatOrchestrator:
         turn_id: Optional[str] = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
         workflow_continuation_context: Mapping[str, Any] | None = None,
+        workflow_launch_inputs: Mapping[str, Any] | None = None,
         workflow_gap_recovery_enabled: bool = True,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
@@ -38451,6 +38488,11 @@ class InternalMCPChatOrchestrator:
             ),
             "workflow_routing": None,
             "continuation_context": dict(workflow_continuation_context or {}),
+            "workflow_launch_inputs": (
+                dict(workflow_launch_inputs)
+                if isinstance(workflow_launch_inputs, Mapping)
+                else {}
+            ),
             "auxiliary_system_prompt": auxiliary_system_prompt,
             "policy_state": policy_state,
             "registry_snapshot": registry_snapshot,
@@ -45847,6 +45889,7 @@ class InternalMCPChatOrchestrator:
                     )
                     for key, value in projected_launch_inputs.items():
                         workflow_dispatch_data.setdefault(key, value)
+            _project_namespaced_workflow_launch_inputs(workflow_dispatch_data)
             _mark_workflow_launch_inputs_as_ambient(workflow_dispatch_data)
 
             workflow_dispatch_data.update(
@@ -47940,6 +47983,7 @@ class InternalMCPChatOrchestrator:
             if isinstance(workflow_metadata, Mapping)
             else None
         )
+        _project_namespaced_workflow_launch_inputs(probe_data)
         excluded_ambient_inputs_applied = _strip_excluded_ambient_workflow_launch_inputs(
             probe_data,
             launch_input_contract=(

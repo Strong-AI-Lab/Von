@@ -186,6 +186,64 @@ def test_build_report_uses_task_status_snapshots_for_route_and_progress_evidence
     ]
 
 
+def test_submit_background_generate_sends_workflow_inputs(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_request_json(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-1"}
+
+    monkeypatch.setattr(replay, "_request_json", _fake_request_json)
+
+    case = replay.ReplayCase(
+        case_id="launch-inputs",
+        prompt="Run the selected workflow.",
+        expected_workflow_id="#V#workflow",
+        expected_progress_fact_ids=(),
+        expected_contract_ids=(),
+        workflow_inputs={
+            "gmail_max_results": 1,
+            "base_gmail_query": "arxiv.org newer_than:365d",
+            "": "ignored",
+        },
+    )
+
+    result = replay.submit_background_generate(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5001",
+        case=case,
+        client_request_id="request-1",
+        conversation_session_id="session-1",
+        gmail_profile="vonwitbrock-gmail",
+        model="qwen3:8b",
+        presenter_mode=False,
+        thinking_card_mode="debug",
+    )
+
+    assert result == {"task_id": "task-1"}
+    assert captured["args"][1:3] == ("POST", "http://127.0.0.1:5001/von/generate")
+    assert captured["kwargs"]["json"]["workflow_inputs"] == {
+        "gmail_max_results": 1,
+        "base_gmail_query": "arxiv.org newer_than:365d",
+    }
+
+
+def test_gmail_arxiv_idempotence_initial_turn_sets_bounded_workflow_inputs() -> None:
+    turns = replay.build_gmail_arxiv_idempotence_turn_cases(
+        gmail_query="arxiv.org newer_than:365d"
+    )
+
+    assert [turn.turn_id for turn in turns] == ["initial", "repeat", "verify"]
+    assert turns[0].case.workflow_inputs == {
+        "base_gmail_query": "arxiv.org newer_than:365d",
+        "gmail_max_results": 1,
+        "max_results": 1,
+    }
+    assert turns[1].case.workflow_inputs is None
+    assert turns[2].case.workflow_inputs is None
+
+
 def test_classify_replay_reports_auth_blocker_before_workflow_assertions() -> None:
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
@@ -793,25 +851,27 @@ def _idempotence_turn_report(
 def _passing_idempotence_reports() -> list[dict]:
     target_payload = {
         "workflow_id": replay.GMAIL_ARXIV_WORKFLOW_ID,
-        "mcp_tool": "gmail_modify_labels",
-        "tool_arguments": {
-            "message_id": "msg-1",
-            "add_labels": [replay.GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID],
-        },
+        "mcp_tool": "gmail_get_message",
+        "message_id": "msg-1",
+        "message_processing_marker": "#V#gmail_message_processed_msg_1",
+        "processed_message_id": "msg-1",
         "thread_id": "thread-1",
         "arxiv_id": "https://arxiv.org/abs/2406.15341v1",
         "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
         "file_copy_concept_id": "#V#file_copy_2406_15341",
-        "effective_gmail_query": "arxiv.org -label:vontology/ingested",
+        "effective_gmail_query": "arxiv.org",
     }
     repeat_payload = {
         "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
         "arxiv_id": "2406.15341",
-        "effective_gmail_query": "arxiv.org -label:vontology/ingested",
+        "processed_message_id": "msg-1",
+        "message_processing_status": "processed",
+        "effective_gmail_query": "arxiv.org",
     }
     verify_payload = {
         "paper_concept_id": "#V#paper_on_arxiv_2406_15341",
-        "label_ids": [replay.GMAIL_ARXIV_IDEMPOTENCE_COMPLETION_LABEL_ID],
+        "processed_message_id": "msg-1",
+        "message_processing_marker": "#V#gmail_message_processed_msg_1",
     }
     return [
         _idempotence_turn_report(
@@ -834,9 +894,10 @@ def test_extract_gmail_arxiv_idempotence_evidence_from_nested_payload() -> None:
     assert evidence["arxiv_ids"] == ["2406.15341"]
     assert evidence["paper_concept_ids"] == ["#V#paper_on_arxiv_2406_15341"]
     assert evidence["file_copy_concept_ids"] == ["#V#file_copy_2406_15341"]
-    assert "gmail_modify_labels" in evidence["observed_tools"]
-    assert evidence["gmail_modify_label_message_ids"] == ["msg-1"]
-    assert evidence["completion_marker_seen"] is True
+    assert "gmail_get_message" in evidence["observed_tools"]
+    assert evidence["gmail_mutation_tools"] == []
+    assert evidence["message_processing_marker_message_ids"] == ["msg-1"]
+    assert evidence["message_processing_marker_seen"] is True
 
 
 def test_analyse_gmail_arxiv_idempotence_sequence_passes_on_stable_ids() -> None:
@@ -855,13 +916,27 @@ def test_analyse_gmail_arxiv_idempotence_sequence_passes_on_stable_ids() -> None
 def test_analyse_gmail_arxiv_idempotence_sequence_blocks_missing_message_marker() -> None:
     reports = _passing_idempotence_reports()
     reports[0]["task_result"]["result"]["message_id"] = "msg-1"
-    reports[0]["task_result"]["result"].pop("mcp_tool")
-    reports[0]["task_result"]["result"].pop("tool_arguments")
+    reports[0]["task_result"]["result"].pop("message_processing_marker")
+    reports[0]["task_result"]["result"].pop("processed_message_id")
 
     analysis = replay.analyse_gmail_arxiv_idempotence_sequence(reports)
 
     assert analysis["verdict"] == "blocked"
     assert analysis["blocker"]["type"] == "message_processing_marker_missing"
+
+
+def test_analyse_gmail_arxiv_idempotence_sequence_blocks_gmail_write_tools() -> None:
+    reports = _passing_idempotence_reports()
+    reports[0]["task_result"]["result"]["mcp_tool"] = "gmail_modify_labels"
+    reports[0]["task_result"]["result"]["tool_arguments"] = {
+        "message_id": "msg-1",
+        "add_labels": ["vontology/ingested"],
+    }
+
+    analysis = replay.analyse_gmail_arxiv_idempotence_sequence(reports)
+
+    assert analysis["verdict"] == "blocked"
+    assert analysis["blocker"]["type"] == "gmail_write_tool_used"
 
 
 def test_analyse_gmail_arxiv_idempotence_sequence_blocks_duplicate_paper_ids() -> None:

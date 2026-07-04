@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from flask import Flask, jsonify, request, session
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 from src.backend.services.tool_progress_store_service import (
     reset_tool_progress_persistence_queue_for_tests,
@@ -179,6 +179,49 @@ def test_background_generate_submits_immediately(monkeypatch):
     assert body["task_id"] == submitted["task_id"]
 
 
+def test_background_generate_reentry_passes_workflow_inputs_to_orchestrator(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    task_registry = _CapturingTaskRegistry()
+    orchestrator = _StubOrchestrator(orchestrator_result)
+    app = _make_app(monkeypatch, orchestrator, task_registry)
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Run this in the background",
+            "background": True,
+            "model": "gpt-5.4-nano",
+            "workflow_inputs": {
+                "base_gmail_query": "arxiv.org newer_than:365d",
+                "gmail_max_results": 1,
+            },
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 202
+    submitted = cast(dict[str, Any], task_registry.calls[0])
+    task_callable = submitted["callable"]
+    assert callable(task_callable)
+    task_callable()
+
+    assert orchestrator.calls
+    assert orchestrator.calls[0]["workflow_launch_inputs"] == {
+        "base_gmail_query": "arxiv.org newer_than:365d",
+        "gmail_max_results": 1,
+    }
+
+
 def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
     import src.backend.server.routes.von_routes as von_routes
 
@@ -205,8 +248,12 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
         session["session_id"] = "session-123"
         response, status_code = von_routes._submit_generate_background_request(
             app=app,
-            request_data={"prompt": "Run this in the background", "background": True},
-            request_headers=request.headers,
+            request_data={
+                "prompt": "Run this in the background",
+                "background": True,
+                "workflow_inputs": {"gmail_max_results": 1},
+            },
+            request_headers=cast(Mapping[str, Any], request.headers),
             session_snapshot=dict(session),
             request_id="task-123",
         )
@@ -224,6 +271,7 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
     assert captured_payload["client_request_id"] == "task-123"
     assert captured_payload["background_task_id"] == "task-123"
     assert captured_payload["background_progress"] is True
+    assert captured_payload["workflow_inputs"] == {"gmail_max_results": 1}
 
 
 def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
@@ -282,6 +330,68 @@ def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
     assert live_progress["progress_source"] == "tool_progress_state"
     assert live_progress["status"] == "thinking"
     assert live_progress["stage"] == "context_build"
+
+
+def test_generate_passes_workflow_inputs_to_supervised_orchestrator(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    task_registry = _CapturingTaskRegistry()
+    orchestrator = _StubOrchestrator(orchestrator_result)
+    app = _make_app(monkeypatch, orchestrator, task_registry)
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Run selected workflow",
+            "background": False,
+            "model": "gpt-5.4-nano",
+            "workflow_inputs": {
+                "base_gmail_query": "arxiv.org newer_than:365d",
+                "gmail_max_results": 1,
+            },
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 200
+    assert orchestrator.calls
+    assert orchestrator.calls[0]["workflow_launch_inputs"] == {
+        "base_gmail_query": "arxiv.org newer_than:365d",
+        "gmail_max_results": 1,
+    }
+
+
+def test_orchestrator_projects_namespaced_workflow_launch_inputs_safely() -> None:
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        _project_namespaced_workflow_launch_inputs,
+    )
+
+    payload: dict[str, Any] = {
+        "prompt": "original prompt",
+        "workflow_launch_inputs": {
+            "gmail_max_results": 1,
+            "prompt": "override prompt",
+            "workflow_id": "#V#wrong_workflow",
+            "__private": "drop",
+        },
+    }
+
+    _project_namespaced_workflow_launch_inputs(payload)
+
+    assert payload["gmail_max_results"] == 1
+    assert payload["prompt"] == "original prompt"
+    assert "workflow_id" not in payload
+    assert "__private" not in payload
+    assert payload["namespaced_workflow_launch_inputs_applied"] == [
+        "gmail_max_results"
+    ]
 
 
 def test_normalise_background_generate_result_preserves_json_payload() -> None:
@@ -448,6 +558,7 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
         prompt_text="What do you know about my current research interests?",
         workflow_discovery_result={"selected_workflow_id": "#V#concept_search"},
         workflow_continuation_context={"applied": False},
+        workflow_launch_inputs={"gmail_max_results": 1},
     )
 
     assert payload["requested_model"] == "gemma4:26b"
@@ -462,6 +573,26 @@ def test_build_generate_conversation_turn_instance_inputs_preserves_requested_mo
         "selected_workflow_id": "#V#concept_search"
     }
     assert payload["continuation_context"] == {"applied": False}
+    assert payload["workflow_launch_inputs"] == {"gmail_max_results": 1}
+
+
+def test_normalise_generate_workflow_launch_inputs_validates_shape() -> None:
+    from src.backend.server.routes.von_routes import (
+        _normalise_generate_workflow_launch_inputs,
+    )
+
+    assert _normalise_generate_workflow_launch_inputs(
+        {" gmail_max_results ": 1, "base_gmail_query": "arxiv.org"}
+    ) == {
+        "gmail_max_results": 1,
+        "base_gmail_query": "arxiv.org",
+    }
+
+    with pytest.raises(ValueError, match="must be an object"):
+        _normalise_generate_workflow_launch_inputs(["not", "an", "object"])
+
+    with pytest.raises(ValueError, match="invalid keys"):
+        _normalise_generate_workflow_launch_inputs({"__private": True})
 
 
 def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
@@ -500,6 +631,7 @@ def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
         prompt_text="Prompt",
         workflow_discovery_result=None,
         workflow_continuation_context=None,
+        workflow_launch_inputs=None,
         get_instance_manager_fn=fail_get_instance_manager,
         submit_verified_workflow_instance_fn=fail_submit_verified_workflow_instance,
     )
@@ -547,6 +679,7 @@ def test_submit_generate_conversation_turn_instance_skips_background_reentry() -
         prompt_text="Prompt",
         workflow_discovery_result=None,
         workflow_continuation_context=None,
+        workflow_launch_inputs=None,
         get_instance_manager_fn=fail_get_instance_manager,
         submit_verified_workflow_instance_fn=fail_submit_verified_workflow_instance,
         background_task_id="task-123",

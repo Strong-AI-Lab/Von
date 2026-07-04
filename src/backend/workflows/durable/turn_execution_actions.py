@@ -60,6 +60,28 @@ _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_PREFIXES: tuple[str, ...] = (
 _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_IDS: frozenset[str] = frozenset(
     {"workflow_invoke_subworkflow", "llm.action"}
 )
+_SELECTED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS: frozenset[str] = frozenset(
+    {"workflow_id", "failure_mode"}
+)
+
+
+def _normalise_selected_workflow_launch_inputs(raw_value: Any) -> dict[str, Any]:
+    if not isinstance(raw_value, Mapping):
+        return {}
+
+    normalised: dict[str, Any] = {}
+    for key, value in raw_value.items():
+        if not isinstance(key, str):
+            continue
+        clean_key = key.strip()
+        if (
+            not clean_key
+            or clean_key.startswith("__")
+            or clean_key in _SELECTED_WORKFLOW_LAUNCH_INPUT_RESERVED_KEYS
+        ):
+            continue
+        normalised[clean_key] = value
+    return normalised
 
 
 def _normalise_tool_batch_cap(
@@ -973,6 +995,15 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             for key, value in request.data.items()
             if isinstance(key, str)
         }
+        selected_workflow_launch_inputs = _normalise_selected_workflow_launch_inputs(
+            request_data.get("workflow_launch_inputs")
+        )
+        if selected_workflow_launch_inputs:
+            request_data["selected_workflow_launch_inputs"] = dict(
+                selected_workflow_launch_inputs
+            )
+            for key, value in selected_workflow_launch_inputs.items():
+                request_data.setdefault(key, value)
         continuation_context = request_data.get("continuation_context")
         projected_continuation_launch_inputs: dict[str, Any] = {}
         if isinstance(continuation_context, Mapping) and bool(
