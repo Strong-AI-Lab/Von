@@ -295,17 +295,16 @@ def normalise_workflow_launch_input_contract(
         or value.get("excluded_input_keys")
     )
 
-    return (
-        {
-            "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
-            "input_mappings": mappings,
-            "required_inputs": required_inputs,
-            WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS: (
-                excluded_ambient_input_keys
-            ),
-        },
-        None,
-    )
+    normalised: Dict[str, Any] = {
+        "schema_version": WORKFLOW_LAUNCH_INPUT_CONTRACT_SCHEMA_VERSION,
+        "input_mappings": mappings,
+        "required_inputs": required_inputs,
+    }
+    if excluded_ambient_input_keys:
+        normalised[WORKFLOW_LAUNCH_INPUT_EXCLUDED_AMBIENT_INPUT_KEYS] = (
+            excluded_ambient_input_keys
+        )
+    return normalised, None
 
 
 def resolve_workflow_launch_inputs(
