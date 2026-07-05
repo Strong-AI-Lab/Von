@@ -35526,6 +35526,46 @@ class InternalMCPChatOrchestrator:
                     "discovery_payload_origin",
                     "prepare_turn_selector_context_refresh",
                 )
+                # Evidence preservation: a refresh replaces the prefilled
+                # payload wholesale. If the prefilled attempt already ran out
+                # of discovery budget and the refresh still surfaced zero
+                # candidates, the turn's discovery remains budget-starved;
+                # dropping that signal would disable downstream budget-timeout
+                # recovery paths on evidence this same turn already produced.
+                if (
+                    isinstance(raw_discovery, Mapping)
+                    and bool(raw_discovery.get("budget_exhausted"))
+                    and not workflow_discovery_result.get("budget_exhausted")
+                    and not any(
+                        isinstance(
+                            workflow_discovery_result.get(candidate_key), list
+                        )
+                        and workflow_discovery_result.get(candidate_key)
+                        for candidate_key in (
+                            "candidates",
+                            "matches",
+                            "routing_matches",
+                        )
+                    )
+                ):
+                    workflow_discovery_result["budget_exhausted"] = True
+                    workflow_discovery_result["prior_discovery_budget_exhausted"] = (
+                        True
+                    )
+                    prior_detail = str(
+                        raw_discovery.get("budget_exhaustion_detail") or ""
+                    ).strip()
+                    if prior_detail:
+                        workflow_discovery_result.setdefault(
+                            "budget_exhaustion_detail", prior_detail
+                        )
+                    prior_stage = str(
+                        raw_discovery.get("budget_exhaustion_stage") or ""
+                    ).strip()
+                    if prior_stage:
+                        workflow_discovery_result.setdefault(
+                            "budget_exhaustion_stage", prior_stage
+                        )
         else:
             workflow_discovery_result = {
                 "discovery_payload_origin": "prepare_turn_selector_context_skipped_no_query",

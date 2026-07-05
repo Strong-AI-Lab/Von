@@ -209,6 +209,55 @@ def test_multi_target_requires_every_group() -> None:
     assert _verdict(only_one) == "fail"
 
 
+# --- visible-answer shape invariant -----------------------------------------
+
+
+def test_visible_answer_raw_json_payload_fails_even_when_bank_checks_pass() -> None:
+    truncated_envelope = (
+        '{\n  "turn_next_action": {\n    "action_type": "respond_with_follow_up",\n'
+        '    "response_text": "I ingested 2406.15341 and read back the concept'
+    )
+    result = runner.evaluate_turn_expectations(
+        expectations={"response_must_mention_any": ["2406.15341"]},
+        visible_answer=truncated_envelope,
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={"decision": "completed"},
+    )
+    assert _verdict(result) == "fail"
+    assert _check(result, "visible_answer_not_raw_payload")["outcome"] == "fail"
+
+
+def test_visible_answer_complete_tool_call_json_fails() -> None:
+    result = runner.evaluate_turn_expectations(
+        expectations={},
+        visible_answer=(
+            '{"action": "call_tool", "tool": "arxiv.download_paper",'
+            ' "payload": {"paper_id": "2406.15341v3"}}'
+        ),
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={"decision": "completed"},
+    )
+    assert _verdict(result) == "fail"
+    assert _check(result, "visible_answer_not_raw_payload")["outcome"] == "fail"
+
+
+def test_visible_answer_prose_does_not_trigger_raw_payload_check() -> None:
+    result = runner.evaluate_turn_expectations(
+        expectations={"response_must_mention_any": ["2406.15341"]},
+        visible_answer="Paper 2406.15341 is represented; the stored concept reads back.",
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={"decision": "completed"},
+    )
+    assert _verdict(result) == "pass"
+    assert all(
+        check["check"] != "visible_answer_not_raw_payload"
+        for check in result["checks"]
+    )
+
+
 # --- continuation + workflow expectations -----------------------------------
 
 

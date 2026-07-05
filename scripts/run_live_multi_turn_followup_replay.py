@@ -40,6 +40,7 @@ import requests
 from scripts.run_authenticated_browser_workflow_replay import (
     ReplayCase,
     apply_target_session_context,
+    build_workflow_capability_preflight,
     collect_run_environment,
     create_replay_chat_session,
     establish_browser_test_session,
@@ -434,6 +435,31 @@ def evaluate_turn_expectations(
             }
         )
 
+    # Built-in invariant, independent of bank expectations: the visible answer
+    # must be user-facing prose, never a raw payload envelope. Truncated
+    # payloads (e.g. a preview cut mid-JSON) still start like JSON, so the
+    # structural prefix counts even when json.loads fails.
+    raw_answer_text = (visible_answer or "").strip()
+    if raw_answer_text:
+        looks_like_raw_payload = False
+        if raw_answer_text.startswith(("{", "[")):
+            try:
+                parsed_answer = json.loads(raw_answer_text)
+            except ValueError:
+                parsed_answer = None
+            looks_like_raw_payload = isinstance(parsed_answer, (dict, list)) or (
+                raw_answer_text[:80].replace(" ", "").replace("\n", "").startswith(
+                    ('{"', "[{", "['", '["')
+                )
+            )
+        if looks_like_raw_payload:
+            add(
+                "visible_answer_not_raw_payload",
+                False,
+                raw_answer_text[:160],
+                "user-facing prose, not a JSON/tool payload",
+            )
+
     if expectations.get("require_completed"):
         status = (_safe_text(terminal_status) or "").lower()
         add("require_completed", status == "completed", status, "completed")
@@ -752,6 +778,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Permit a base URL whose /health does not report agent_test_instance.",
     )
+    parser.add_argument(
+        "--run-despite-workflow-capability-preflight-blocker",
+        action="store_true",
+        help=(
+            "Diagnostic override: submit turns even though the workflow "
+            "capability index preflight reports discovery unavailable."
+        ),
+    )
     args = parser.parse_args(argv)
 
     preflight_session = requests.Session()
@@ -764,6 +798,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_url=args.base_url,
         allow_non_agent_test_server=args.allow_non_agent_test_server,
     )
+    workflow_capability_preflight = build_workflow_capability_preflight(
+        session=preflight_session,
+        base_url=args.base_url,
+    )
+    if workflow_capability_preflight.get("workflow_discovery_available") is not True:
+        blocker_payload = {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "verdict": "blocked",
+            "blocker_type": "workflow_capability_index_blocker",
+            "workflow_capability_preflight": workflow_capability_preflight,
+        }
+        print(
+            "Workflow capability index preflight reports discovery unavailable; "
+            "a replay submitted now would test operational collapse, not "
+            "conversation behaviour."
+        )
+        if not args.run_despite_workflow_capability_preflight_blocker:
+            if args.output_json:
+                blocker_path = Path(args.output_json)
+                blocker_path.parent.mkdir(parents=True, exist_ok=True)
+                blocker_path.write_text(
+                    json.dumps(blocker_payload, indent=2, default=str),
+                    encoding="utf-8",
+                )
+                print(f"Blocker report written to {blocker_path}")
+            raise SystemExit(2)
+        print(
+            "Continuing anyway because "
+            "--run-despite-workflow-capability-preflight-blocker was passed."
+        )
 
     bank = load_bank()
     cases = list(bank.get("cases") or [])
@@ -799,6 +863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "bank_schema_version": bank.get("schema_version"),
+        "workflow_capability_preflight": workflow_capability_preflight,
         "case_reports": reports,
     }
     if args.output_json:

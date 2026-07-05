@@ -85,7 +85,7 @@ _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
 )
 _WORKFLOW_CAPABILITY_RETRIEVAL_CANDIDATE_MULTIPLIER = 2
 _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES: tuple[str, ...] = (
-    "represent arxiv paper",
+    "workflow discovery capability",
     (
         "workflow capability warmup\n\n"
         "Turn-intent routing guidance:\n"

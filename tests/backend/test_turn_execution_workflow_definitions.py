@@ -1402,14 +1402,15 @@ def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context
     assert result.data["completion_gate_requires_follow_up"] is True
     assert result.data["completion_gate_safe_to_claim_completion"] is False
     assert result.data["completion_gate_blocking_failure_codes"] == [
-        "contracted_workflow_completed_flag_false"
+        "contracted_workflow_completed_flag_false",
+        "selected_workflow_execution_failed",
     ]
     gate_evidence = result.data["completion_gate_evidence_payload"]
     assert gate_evidence["evaluation_basis"] == (
         "required_effects_postcondition_checks_and_execution_signals"
     )
     assert gate_evidence["execution_signal_blocker"]["source"] == (
-        "workflow_terminal_success_contract"
+        "selected_workflow_completion_report"
     )
     custom_execution = result.data["turn_execution_record"]["execution"]["summary"][
         "custom_workflow_execution"

@@ -2332,6 +2332,14 @@ def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_ge
 def test_turn_execution_route_recovers_launchable_requested_workflow_after_discovery_timeout(
     monkeypatch,
 ) -> None:
+    # This test exercises recovery from a discovery that found nothing before
+    # its budget ran out. A capability index left warm by an earlier test would
+    # let the refresh path surface candidates and bypass the recovery entirely.
+    from src.backend.services.workflow_capability_service import (
+        reset_workflow_capability_index,
+    )
+
+    reset_workflow_capability_index()
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, _DummyGateway()),

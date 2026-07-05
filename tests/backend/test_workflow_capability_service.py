@@ -1364,7 +1364,7 @@ def test_blocking_build_runs_all_warm_queries(
         def search(self, query: str, max_results: int = 1) -> list[object]:
             assert max_results == 1
             self.search_queries.append(query)
-            return []
+            return [object()]
 
     sentinel_registry = object()
     fake_index = _FakeIndex()
@@ -1457,8 +1457,8 @@ def test_warm_query_surface_accepts_at_least_one_represented_match() -> None:
 
     class _PartiallyWarmIndex:
         def search(self, query: str, *_args: Any, **_kwargs: Any) -> list[Any]:
-            if "arxiv" in query.lower():
-                return [{"workflow_id": "#V#arxiv_paper_representation_workflow"}]
+            if "discovery" in query.lower():
+                return [{"workflow_id": "#V#some_represented_workflow"}]
             return []
 
     capability_service._warm_workflow_capability_query_surface(_PartiallyWarmIndex())
