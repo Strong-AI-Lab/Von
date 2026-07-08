@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .paper_recommendation_constants import (
+    GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
@@ -17,6 +18,7 @@ from .paper_recommendation_constants import (
 )
 from .paper_recommendation_policy_authority_service import (
     ensure_paper_recommendation_policy_authority,
+    resolve_paper_recommendation_policy,
 )
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_event_integration_service import (
@@ -24,6 +26,7 @@ from .workflow_event_integration_service import (
     EVENT_TYPE_RELATIONSHIP_REMOVED,
     EVENT_TYPE_TEXT_RELATION_UPDATED,
     EVENT_TYPE_TEXT_RELATION_UPSERTED,
+    _normalise_event_binding_condition,
     launch_event_workflow,
 )
 from .workflow_prompt_authority_service import (
@@ -41,6 +44,7 @@ from ..workflows.durable.startup import get_instance_manager
 
 _MANAGED_BY = "paper_recommendation_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-1679"
+_LEGACY_PROFILE_JSON_PREDICATE_ID = "#V#has_paper_recommendation_profile_json"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -192,20 +196,48 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
 
 def _ensure_paper_recommendation_event_bindings() -> dict[str, Any]:
     manager = get_instance_manager()
+    policy = resolve_paper_recommendation_policy()
+    profile_predicates = sorted(
+        {
+            GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
+            _LEGACY_PROFILE_JSON_PREDICATE_ID,
+        }
+    )
+    subject_relationship_predicates = sorted(
+        set(policy.matching_string_tuple("affecting_subject_relationship_predicates"))
+    )
+    condition_by_event_type: dict[str, dict[str, Any] | None] = {
+        PAPER_RECOMMENDATION_REQUESTED_EVENT_TYPE: None,
+        EVENT_TYPE_TEXT_RELATION_UPSERTED: {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": profile_predicates,
+        },
+        EVENT_TYPE_TEXT_RELATION_UPDATED: {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": profile_predicates,
+        },
+        EVENT_TYPE_RELATIONSHIP_ADDED: {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": subject_relationship_predicates,
+        },
+        EVENT_TYPE_RELATIONSHIP_REMOVED: {
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": subject_relationship_predicates,
+        },
+    }
     created_count = 0
     updated_count = 0
     bindings: list[dict[str, Any]] = []
-    for event_type in (
-        PAPER_RECOMMENDATION_REQUESTED_EVENT_TYPE,
-        EVENT_TYPE_RELATIONSHIP_ADDED,
-        EVENT_TYPE_RELATIONSHIP_REMOVED,
-        EVENT_TYPE_TEXT_RELATION_UPSERTED,
-        EVENT_TYPE_TEXT_RELATION_UPDATED,
-    ):
+    for event_type, condition in condition_by_event_type.items():
         binding, created, updated = manager.upsert_event_binding(
             event_type=event_type,
             workflow_id=PAPER_RECOMMENDATION_WORKFLOW_ID,
             input_mapping={},
+            condition=_normalise_event_binding_condition(condition),
             enabled=True,
             actor=_MANAGED_BY,
             replace_existing=True,

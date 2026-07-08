@@ -27,6 +27,35 @@ def test_build_transition_condition_rejects_invalid_context_flag() -> None:
     assert "workflow_condition_invalid:context_flag_key_missing" in str(exc_info.value)
 
 
+def test_context_value_in_condition_is_generic_membership_check() -> None:
+    normalised_spec, condition_fn = build_transition_condition(
+        {
+            "kind": "context_value_in",
+            "path": "event.predicate",
+            "values": ["#V#profile_predicate", "#V#interest_predicate"],
+        }
+    )
+
+    assert normalised_spec == {
+        "kind": "context_value_in",
+        "key": "event.predicate",
+        "values": ["#V#profile_predicate", "#V#interest_predicate"],
+    }
+    assert condition_fn({"event": {"predicate": "#V#interest_predicate"}}) is True
+    assert condition_fn({"event": {"predicate": "#V#other_predicate"}}) is False
+    assert condition_fn({"event": {}}) is False
+
+
+def test_context_value_in_condition_rejects_missing_values() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        build_transition_condition(
+            {"kind": "context_value_in", "key": "event.predicate", "values": []}
+        )
+    assert "workflow_condition_invalid:context_value_in_values_missing" in str(
+        exc_info.value
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "reason", "context_key"),
     [

@@ -328,6 +328,67 @@ def test_launch_event_workflow_applies_represented_binding_condition(
     assert mock_submit.call_args.kwargs["inputs"]["status"] == "completed"
 
 
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_applies_membership_binding_condition(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+
+    binding = EventWorkflowBinding.create(
+        event_type="relationship.added",
+        workflow_id="#V#profile_refresh_workflow",
+        condition={
+            "kind": "context_value_in",
+            "key": "event.predicate",
+            "values": ["#V#has_research_interest", "#V#working_on_project"],
+        },
+        enabled=True,
+        actor="test",
+    )
+    mock_manager = MagicMock()
+    mock_manager.list_event_bindings.return_value = [binding]
+    mock_get_instance_manager.return_value = mock_manager
+
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#profile_refresh_workflow",
+            instance_id="instance-456",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        skipped = launch_event_workflow(
+            event_type="relationship.added",
+            event_id="rel-ignored",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            event_payload={
+                "source_id": "#V#paper_1",
+                "predicate": "#V#authored_by",
+                "target_id": "#V#person_1",
+            },
+        )
+        triggered = launch_event_workflow(
+            event_type="relationship.added",
+            event_id="rel-profile",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            event_payload={
+                "source_id": "#V#person_1",
+                "predicate": "#V#has_research_interest",
+                "target_id": "#V#topic_1",
+            },
+        )
+
+    assert skipped["triggered"] is False
+    assert skipped["reason"] == "binding_condition_not_matched"
+    assert triggered["triggered"] is True
+    assert triggered["binding_condition_result"] is True
+    assert mock_submit.call_count == 1
+
+
 def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> None:
     multiple_enabled_a = EventWorkflowBinding.create(
         event_type="file_copy.uploaded",

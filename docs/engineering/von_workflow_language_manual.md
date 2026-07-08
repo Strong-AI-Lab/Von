@@ -474,6 +474,7 @@ Supported kinds:
 - `always`
 - `context_flag`
 - `context_value_equals`
+- `context_value_in`
 - `context_exists`
 - `context_is_null`
 - `context_compare`
@@ -490,6 +491,7 @@ Canonical forms:
 {"kind":"always"}
 {"kind":"context_flag","key":"last_action_failed","expected":true}
 {"kind":"context_value_equals","key":"mode","value":"strict"}
+{"kind":"context_value_in","path":"event.predicate","values":["#V#has_research_interest","#V#working_on_project"]}
 {"kind":"context_exists","path":"current_item.pull_request_url","expected":false}
 {"kind":"context_is_null","path":"current_item.pull_request_url","expected":true}
 {"kind":"context_compare","path":"candidate_issue_count","operator":"gt","value":0}

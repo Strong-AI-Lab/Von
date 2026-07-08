@@ -624,6 +624,15 @@ def _coerce_numeric(value: Any) -> float | None:
     return None
 
 
+def _normalise_condition_values(value: Any) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ValueError("workflow_condition_invalid:context_value_in_values_missing")
+    values = list(value)
+    if not values:
+        raise ValueError("workflow_condition_invalid:context_value_in_values_missing")
+    return values
+
+
 def _evaluate_compare(
     *,
     left: Any,
@@ -715,6 +724,20 @@ def _normalise_transition_condition_spec(
             "kind": "context_value_equals",
             "key": key,
             "value": condition_spec.get("value"),
+        }
+
+    if kind == "context_value_in":
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_value_in_key_missing",
+        )
+        values = condition_spec.get("values")
+        if values is None:
+            values = condition_spec.get("value")
+        return {
+            "kind": "context_value_in",
+            "key": key,
+            "values": _normalise_condition_values(values),
         }
 
     if kind == "context_exists":
@@ -870,6 +893,13 @@ def evaluate_transition_condition_spec(
         if not found:
             return False
         return value == condition_spec.get("value")
+    if kind == "context_value_in":
+        key = str(condition_spec.get("key") or "")
+        found, value = resolve_context_path(context=context, path=key)
+        values = condition_spec.get("values")
+        if not found or not isinstance(values, list):
+            return False
+        return value in values
     if kind == "context_exists":
         key = str(condition_spec.get("key") or "")
         expected = bool(condition_spec.get("expected", True))
