@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 
 from src.backend.workflows.durable.models import WorkflowSchedule
+from src.backend.workflows.workflow_launch_input_contracts import (
+    resolve_workflow_launch_inputs,
+)
 
 
 class _FakeManager:
@@ -65,8 +68,13 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     payload = json.loads(str(captured_hint["text"]))
     entry = payload["entries"][0]
     assert entry["action_kind"] == "terminal_completion"
-    assert entry["tool_arguments"]["add_labels"] == ["Label_7"]
-    assert entry["upstream_filter"]["query_fragment"] == "-label:vontology/ingested"
+    assert entry["action"]["tool_name"] == "record_source_processing_marker"
+    assert entry["tool_arguments"]["source_system"] == "gmail"
+    assert entry["tool_arguments"]["source_item_id_context_key"] == "message_id"
+    assert entry["upstream_filter"]["query_fragment"] == ""
+    assert entry["represented_effects"][0]["effect_kind"] == (
+        "record_source_processing_marker"
+    )
 
 
 def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> None:
@@ -93,6 +101,66 @@ def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> 
         "failed",
     }
     assert all("claim" not in json.dumps(step).lower() for step in steps)
+
+
+def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    seed_text = json.dumps(payload)
+    assert "gmail_modify_labels" not in seed_text
+    assert "vontology/ingested" not in seed_text
+
+    workflows = {
+        item["workflow_id"]: item
+        for item in payload.get("workflows") or []
+        if isinstance(item, dict)
+    }
+    child = workflows[mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID]
+    steps = {
+        step["state_id"]: step
+        for step in child["publication_spec"]["steps"]
+        if isinstance(step, dict)
+    }
+
+    assert steps["check_processed_marker"]["static_input_bindings"][1] == [
+        "tool_name",
+        "get_source_processing_marker",
+    ]
+    mark_done = steps["mark_done"]
+    assert mark_done["mutation_authority"]["maximum_level"] == "additive_vontology"
+    assert mark_done["static_input_bindings"][1] == [
+        "tool_name",
+        "record_source_processing_marker",
+    ]
+    assert "message_processing_marker" in mark_done["writes_context_keys"]
+
+
+def test_zhan_seed_launch_contract_can_narrow_from_prior_arxiv_evidence() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflows = {
+        item["workflow_id"]: item
+        for item in payload.get("workflows") or []
+        if isinstance(item, dict)
+    }
+    workflow = workflows[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID,
+        contract=workflow["launch_input_contract"],
+        inputs={"arxiv_id": "2606.30544"},
+        contract_source="repo_seed_test",
+    )
+
+    assert resolution.resolved_inputs["base_gmail_query"] == "2606.30544"
+    assert resolution.resolved_inputs["arxiv_id"] == "2606.30544"
+    assert resolution.diagnostics["status"] == "resolved"
 
 
 def test_email_arxiv_schedule_bootstrap_creates_managed_interval_schedule(

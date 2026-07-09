@@ -603,6 +603,30 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "before writing; missing #V# predicates are rejected."
         ),
     },
+    "record_source_processing_marker": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Recorded source-processing marker",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "write",
+        "planner_hint": (
+            "Use only after a represented workflow has verified that a source "
+            "item was processed into durable Vontology artefacts. This records "
+            "additive Vontology evidence and must not mutate the source system."
+        ),
+    },
+    "get_source_processing_marker": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Read source-processing marker",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "read",
+        "evidence_role": "verification",
+    },
     "delete_text_relation": {
         "salience": "medium",
         "category": "vontology",
@@ -997,6 +1021,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "download_paper",
     "build_paper_recommendations",
     "record_paper_recommendation_feedback",
+    "record_source_processing_marker",
     "extract_annotations",
     "extract_url",
     "fetch_concept",
@@ -1006,6 +1031,7 @@ _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
     "find_relations_with_argument",
     "get_concept_usage_profile",
     "get_predicate_incidence",
+    "get_source_processing_marker",
     "find_concepts_by_name",
     "find_subconcepts",
     "get_concept_index_status",
@@ -1197,6 +1223,7 @@ _DEFAULT_WRITE_TOOL_NAMES = {
     "mcp__github__update_pull_request",
     "pull_request_review_write",
     "push_files",
+    "record_source_processing_marker",
     "remove_relationship",
     "remove_relationships_bulk",
     "undo_relationship_removal",

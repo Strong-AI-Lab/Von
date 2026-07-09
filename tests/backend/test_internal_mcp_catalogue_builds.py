@@ -504,6 +504,27 @@ def test_gmail_modify_labels_resolves_represented_profile_resource_alias(monkeyp
     assert captured_kwargs["add_labels"] == ["Label_7"]
 
 
+def test_source_processing_marker_tools_registered_as_vontology_surfaces():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    snapshot = build_default_catalogue().snapshot()
+
+    assert snapshot["get_source_processing_marker"]["category"] == "read"
+    assert snapshot["record_source_processing_marker"]["category"] == "write"
+    assert snapshot["get_source_processing_marker"]["input_schema"]["required"] == [
+        "source_item_id",
+        "source_system",
+    ]
+    assert (
+        "represented_outputs"
+        in snapshot["record_source_processing_marker"]["input_schema"]["optional"]
+    )
+    assert (
+        "message_processing_marker"
+        in snapshot["record_source_processing_marker"]["output_schema"]["optional"]
+    )
+
+
 def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,

@@ -2,7 +2,7 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
+  "seed_version": "2",
   "source_tag": "JVNAUTOSCI-2335",
   "supported_action_ids": [
     "extract_signals_from_tool_result",
@@ -17,11 +17,11 @@
     {
       "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
       "display_name": "Zhan Gmail Arxiv Ingestion Workflow",
-      "description": "Top-level workflow for recurring Gmail-to-arXiv paper representation convergence. It uses a represented Gmail profile, a Vontology-authored completion hint, and child workflows to list unprocessed arXiv-related email, represent each discovered paper, and mark only successfully represented source messages as vontology/ingested so later runs retry the remaining work.",
+      "description": "Top-level workflow for recurring Gmail-to-arXiv paper representation convergence. It uses a represented Gmail profile, read-only Gmail listing and message fetches, and child workflows to represent discovered papers while recording durable source-message processing markers inside Vontology rather than mutating Gmail labels.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Look for recent email messages about arxiv papers and represent them if they are not already represented.\", \"Keep scanning Gmail for arXiv paper links, represent any unrepresented papers, and mark successfully processed source emails.\", \"Run the recurring email-to-representation convergence workflow for arXiv paper notifications.\", \"Process arXiv links found in recent email and retry only messages that have not been marked vontology/ingested.\"], \"keywords\": [\"recent email messages about arxiv papers\", \"represent arxiv papers from email\", \"gmail arxiv paper representation\", \"source email to paper representation convergence\", \"mark arxiv email as vontology ingested\", \"recurring arxiv gmail ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"routing_notes\": [\"Choose this workflow only when the turn asks to scan, process, or retry email/Gmail source messages for arXiv paper links.\", \"Do not choose this workflow for supplied arXiv identifiers, source-neutral paper references, or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\": [\"Look for recent email messages about arxiv papers and represent them if they are not already represented.\", \"Keep scanning Gmail for arXiv paper links, represent any unrepresented papers, and record represented processing evidence for source emails.\", \"Run the recurring email-to-representation convergence workflow for arXiv paper notifications.\", \"Process arXiv links found in recent email and retry only messages without represented source-processing evidence.\"], \"keywords\": [\"recent email messages about arxiv papers\", \"represent arxiv papers from email\", \"gmail arxiv paper representation\", \"source email to paper representation convergence\", \"represented source processing marker\", \"recurring arxiv gmail ingestion workflow\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\", \"messages\", \"mailbox\", \"inbox\", \"sender\", \"label\"], \"routing_notes\": [\"Choose this workflow only when the turn asks to scan, process, or retry email/Gmail source messages for arXiv paper links.\", \"Do not choose this workflow for supplied arXiv identifiers, source-neutral paper references, or conversation-context paper lookups unless an email/Gmail/mail source cue is present.\", \"Do not mutate Gmail labels; use represented source-processing markers for completion and idempotence state.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -55,6 +55,20 @@
             "required": false,
             "source_expression": "inputs.base_gmail_query",
             "target_context_key": "base_gmail_query"
+          },
+          {
+            "description": "Optional prior-evidence arXiv identifier used as a narrow Gmail query when no explicit base Gmail query is supplied.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.arxiv_id",
+            "target_context_key": "base_gmail_query"
+          },
+          {
+            "description": "Optional prior-evidence arXiv identifier preserved for downstream workflow context.",
+            "extractor": "arxiv_id",
+            "required": false,
+            "source_expression": "inputs.arxiv_id",
+            "target_context_key": "arxiv_id"
           },
           {
             "description": "Optional caller override for maximum Gmail messages.",
@@ -104,19 +118,13 @@
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_resolve_done_hint_selected_tool_arguments_add_labels_to_completion_labels",
-                "context_key": "completion_labels",
-                "tool_output_field": "selected_tool_arguments.add_labels"
-              },
-              {
                 "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_resolve_done_hint_selected_upstream_filter_query_fragment_to_completion_filter_query_fragment",
                 "context_key": "completion_filter_query_fragment",
                 "tool_output_field": "selected_upstream_filter.query_fragment"
               }
             ],
             "writes_context_keys": [
-              "completion_filter_query_fragment",
-              "completion_labels"
+              "completion_filter_query_fragment"
             ]
           },
           {
@@ -383,7 +391,7 @@
     {
       "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow",
       "display_name": "Email Arxiv Ingestion From Message Workflow",
-      "description": "Processes one Gmail message: extract resource links, ingest each arXiv reference through represented subworkflows, then resolve and execute the Vontology-authored terminal follow-up hint that marks the source Gmail message as ingested only after successful arXiv ingestion.",
+      "description": "Processes one Gmail message: check for durable represented source-processing evidence, extract resource links when needed, ingest each arXiv reference through represented subworkflows, then record a Vontology source-processing marker only after successful arXiv ingestion.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
@@ -441,7 +449,7 @@
           {
             "action_id": "workflow_control.context_set",
             "execution_mode": "deterministic",
-            "next_state": "extract_email_resources",
+            "next_state": "check_processed_marker",
             "on_failure_state": "failed",
             "state_id": "normalise_message",
             "static_input_bindings": [
@@ -473,6 +481,82 @@
                   }
                 ]
               ]
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "source_processing_marker_exists",
+                  "kind": "context_flag"
+                },
+                "reason": "source_message_already_processed",
+                "to_state": "done_already_processed"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "extract_email_resources",
+            "on_failure_state": "failed",
+            "state_id": "check_processed_marker",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "source_system": "gmail"
+                }
+              ],
+              [
+                "tool_name",
+                "get_source_processing_marker"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_source_processing_marker_exists_to_source_processing_marker_exists",
+                "context_key": "source_processing_marker_exists",
+                "tool_output_field": "result.source_processing_marker_exists"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_message_processing_marker_to_message_processing_marker",
+                "context_key": "message_processing_marker",
+                "tool_output_field": "result.message_processing_marker"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_processed_message_id_to_processed_message_id",
+                "context_key": "processed_message_id",
+                "tool_output_field": "result.processed_message_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.file_copy_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_check_processed_marker_result_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "result.arxiv_id"
+              }
+            ],
+            "writes_context_keys": [
+              "source_processing_marker_exists",
+              "message_processing_marker",
+              "processed_message_id",
+              "paper_concept_id",
+              "file_copy_concept_id",
+              "arxiv_id"
             ]
           },
           {
@@ -577,7 +661,7 @@
                   "kind": "all"
                 },
                 "reason": "all_arxiv_ingestions_succeeded",
-                "to_state": "resolve_done_hint"
+                "to_state": "mark_done"
               },
               {
                 "condition_spec": {
@@ -661,43 +745,11 @@
             ]
           },
           {
-            "action_id": "resolve_tool_output_followup_hint",
-            "execution_mode": "deterministic",
-            "next_state": "mark_done",
-            "state_id": "resolve_done_hint",
-            "static_input_bindings": [
-              [
-                "required_action_kind",
-                "terminal_completion"
-              ],
-              [
-                "source_tool_concept",
-                "#V#gmail_get_message_tool"
-              ]
-            ],
-            "tool_output_mapping_specs": [
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_resolve_done_hint_selected_action_tool_name_to_completion_tool_name",
-                "context_key": "completion_tool_name",
-                "tool_output_field": "selected_action.tool_name"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_resolve_done_hint_selected_tool_arguments_add_labels_to_completion_labels",
-                "context_key": "completion_labels",
-                "tool_output_field": "selected_tool_arguments.add_labels"
-              }
-            ],
-            "writes_context_keys": [
-              "completion_labels",
-              "completion_tool_name"
-            ]
-          },
-          {
             "action_id": "workflow_mcp.invoke_tool",
             "execution_mode": "deterministic",
             "mutation_authority": {
-              "maximum_level": "external_system_guarded",
-              "reason_code": "jvnautosci_2119_terminal_external_write_authorised_by_vontology_workflow",
+              "maximum_level": "additive_vontology",
+              "reason_code": "source_processing_marker_additive_vontology_write",
               "schema_version": "workflow_step_mutation_authority.v1"
             },
             "next_state": "done",
@@ -706,24 +758,51 @@
               [
                 "tool_arguments",
                 {
-                  "add_labels": {
-                    "$context_key": "completion_labels"
+                  "processing_status": "processed",
+                  "represented_outputs": {
+                    "$context_key": "arxiv_iteration_results"
                   },
-                  "allow_mutation": true,
-                  "message_id": {
+                  "source_item_id": {
                     "$context_key": "message_id"
                   },
-                  "profile": {
+                  "source_profile": {
                     "$context_key": "gmail_profile"
-                  }
+                  },
+                  "source_system": "gmail",
+                  "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow"
                 }
               ],
               [
                 "tool_name",
-                "gmail_modify_labels"
+                "record_source_processing_marker"
               ]
             ],
             "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_message_processing_marker_to_message_processing_marker",
+                "context_key": "message_processing_marker",
+                "tool_output_field": "result.message_processing_marker"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_processed_message_id_to_processed_message_id",
+                "context_key": "processed_message_id",
+                "tool_output_field": "result.processed_message_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.file_copy_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "result.arxiv_id"
+              },
               {
                 "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_done_result_to_mark_done_result",
                 "context_key": "mark_done_result",
@@ -731,11 +810,19 @@
               }
             ],
             "writes_context_keys": [
+              "message_processing_marker",
+              "processed_message_id",
+              "paper_concept_id",
+              "file_copy_concept_id",
+              "arxiv_id",
               "mark_done_result"
             ]
           },
           {
             "state_id": "done"
+          },
+          {
+            "state_id": "done_already_processed"
           },
           {
             "state_id": "done_no_resources"

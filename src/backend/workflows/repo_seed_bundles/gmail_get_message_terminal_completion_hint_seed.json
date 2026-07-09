@@ -3,40 +3,29 @@
   "entries": [
     {
       "action_kind": "terminal_completion",
-      "description": "After a message's arXiv resources have been successfully ingested, mark the source Gmail message as processed by adding the represented completion label.",
+      "description": "After a message's arXiv resources have been successfully ingested, record durable represented source-processing evidence for the source Gmail message.",
       "action": {
         "type": "workflow_mcp.invoke_tool",
-        "tool_name": "gmail_modify_labels",
-        "tool_concept_id": "#V#gmail_modify_labels_tool"
+        "tool_name": "record_source_processing_marker",
+        "tool_concept_id": "#V#record_source_processing_marker_tool"
       },
       "tool_arguments": {
-        "profile_context_key": "gmail_profile",
-        "message_id_context_key": "message_id",
-        "add_labels": [
-          "Label_7"
-        ],
-        "add_label_concept_ids": [
-          "#V#zhan_gmail_label_vontology_ingested"
-        ],
-        "allow_mutation": true
+        "source_system": "gmail",
+        "source_profile_context_key": "gmail_profile",
+        "source_item_id_context_key": "message_id",
+        "represented_outputs_context_key": "arxiv_iteration_results",
+        "processing_status": "processed"
       },
       "represented_effects": [
         {
-          "effect_kind": "add_gmail_label",
-          "label_concept_id": "#V#zhan_gmail_label_vontology_ingested",
-          "label_role_concept_id": "#V#paper_email_workflow_ingested_completion_gmail_label_role",
-          "gmail_label_id": "Label_7",
-          "gmail_label_name": "vontology/ingested",
-          "query_atom": "label:vontology/ingested",
-          "exclusion_query_fragment": "-label:vontology/ingested"
+          "effect_kind": "record_source_processing_marker",
+          "marker_type_concept_id": "#V#source_processing_marker",
+          "evidence_predicate_concept_id": "#V#hasSourceProcessingEvidenceJson"
         }
       ],
       "upstream_filter": {
-        "label_concept_id": "#V#zhan_gmail_label_vontology_ingested",
-        "label_role_concept_id": "#V#paper_email_workflow_ingested_completion_gmail_label_role",
-        "gmail_label_id": "Label_7",
-        "query_fragment": "-label:vontology/ingested",
-        "rationale": "Avoid reprocessing messages that this represented workflow has already completed."
+        "query_fragment": "",
+        "rationale": "Gmail listing remains read-only; child workflows check represented source-processing markers before repeating source-message work."
       }
     }
   ]

@@ -1694,8 +1694,21 @@ _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_KEYS: tuple[str, ...] = (
     "verification_passed",
     "workflow_execution",
     "target_workflow_execution",
+    "arxiv_id",
+    "arxiv_ids",
     "paper_concept_id",
+    "paper_concept_ids",
     "file_copy_concept_id",
+    "file_copy_concept_ids",
+    "message_id",
+    "message_ids",
+    "message_processing_marker",
+    "processed_message_id",
+    "source_item_id",
+    "source_item_ids",
+    "source_processing_marker",
+    "source_processing_marker_concept_id",
+    "source_processing_markers",
     "learning_signal",
 )
 _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_FALLBACK_KEYS: dict[str, tuple[str, ...]] = {
@@ -1839,9 +1852,7 @@ def _normalise_workflow_input_key_set(value: Any) -> set[str]:
     if not isinstance(value, (list, tuple, set)):
         return set()
     return {
-        cleaned
-        for item in value
-        if isinstance(item, str) and (cleaned := item.strip())
+        cleaned for item in value if isinstance(item, str) and (cleaned := item.strip())
     }
 
 
@@ -4445,9 +4456,7 @@ class InternalMCPChatOrchestrator:
         selected_workflow_id: str | None,
     ) -> SelectedWorkflowExecutionModeResolution:
         return resolve_declared_workflow_execution_mode_from_metadata(
-            self._selected_workflow_metadata(
-                selected_workflow_id=selected_workflow_id
-            )
+            self._selected_workflow_metadata(selected_workflow_id=selected_workflow_id)
         )
 
     def _selected_workflow_declared_execution_mode(
@@ -4479,9 +4488,7 @@ class InternalMCPChatOrchestrator:
         return resolve_selected_workflow_execution_mode(
             selected_workflow_id=selected_workflow_id,
             workflow_metadata_resolver=lambda workflow_id: (
-                self._selected_workflow_metadata(
-                    selected_workflow_id=workflow_id
-                )
+                self._selected_workflow_metadata(selected_workflow_id=workflow_id)
             ),
             action_contract_matches=lambda workflow_id, required_action_ids: (
                 self._selected_workflow_uses_action_contract(
@@ -4896,7 +4903,9 @@ class InternalMCPChatOrchestrator:
         recovery_outcome = (
             "retry_needed"
             if retry_needed
-            else "retry_suppressed" if retry_suppressed else "no_retry_required"
+            else "retry_suppressed"
+            if retry_suppressed
+            else "no_retry_required"
         )
         if retry_suppressed:
             try:
@@ -5052,7 +5061,9 @@ class InternalMCPChatOrchestrator:
                     )
                     else (
                         data.get("turn_expected_outcome_contract")
-                        if isinstance(data.get("turn_expected_outcome_contract"), Mapping)
+                        if isinstance(
+                            data.get("turn_expected_outcome_contract"), Mapping
+                        )
                         else None
                     )
                 ),
@@ -6088,9 +6099,9 @@ class InternalMCPChatOrchestrator:
             retry_suppressed = True
             retry_attempts = max(retry_attempts, retry_budget)
             retries_remaining_after = 0
-            cast(MutableMapping[str, Any], data)[
-                "missing_tool_call_retry_attempts"
-            ] = retry_attempts
+            cast(MutableMapping[str, Any], data)["missing_tool_call_retry_attempts"] = (
+                retry_attempts
+            )
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -6360,7 +6371,9 @@ class InternalMCPChatOrchestrator:
             classifier_verdict_text = (
                 "yes"
                 if classifier_verdict is True
-                else "no" if classifier_verdict is False else "unavailable"
+                else "no"
+                if classifier_verdict is False
+                else "unavailable"
             )
             if "missing_tool_call_detection" not in existing_types:
                 aux_log.append(
@@ -6421,7 +6434,9 @@ class InternalMCPChatOrchestrator:
         retry_stage = (
             "completed"
             if retry_success
-            else "skipped" if retry_suppressed else "failed"
+            else "skipped"
+            if retry_suppressed
+            else "failed"
         )
         aux_log.append(
             {
@@ -8896,7 +8911,9 @@ class InternalMCPChatOrchestrator:
         relation_authority = self._agent_test_local_relation_authority(request, data)
         if relation_authority is None:
             return None
-        relation_tool_name, relation_authority_source, required_tools = relation_authority
+        relation_tool_name, relation_authority_source, required_tools = (
+            relation_authority
+        )
         retry_fields = self._agent_test_local_relation_retry_fields(
             missing_tool_call_retry_attempts=missing_tool_call_retry_attempts,
             missing_tool_call_retry_budget=missing_tool_call_retry_budget,
@@ -10133,8 +10150,8 @@ class InternalMCPChatOrchestrator:
                     data=data,
                     tool_invocations=tuple(invocations),
                 )
-                progress_argument_summary = (
-                    self._build_tool_progress_argument_summary(payload)
+                progress_argument_summary = self._build_tool_progress_argument_summary(
+                    payload
                 )
                 placeholder_block = placeholder_tool_argument_block(
                     tool_name=tool_name,
@@ -10146,9 +10163,7 @@ class InternalMCPChatOrchestrator:
                     batch_size=current_batch_size,
                     tool_calls_done=iteration_count,
                     tool_calls_cap=int(max_tool_invocations),
-                    tool_calls_remaining=max(
-                        0, max_tool_invocations - iteration_count
-                    ),
+                    tool_calls_remaining=max(0, max_tool_invocations - iteration_count),
                     tool_argument_summary=progress_argument_summary,
                 )
                 if placeholder_block is not None:
@@ -10783,11 +10798,11 @@ class InternalMCPChatOrchestrator:
                 follow_up_context,
                 user_prompt=(
                     requirement_state.get("prompt_for_requirements")
-                    if isinstance(
-                        requirement_state.get("prompt_for_requirements"), str
-                    )
+                    if isinstance(requirement_state.get("prompt_for_requirements"), str)
                     else (
-                        data.get("prompt") if isinstance(data.get("prompt"), str) else ""
+                        data.get("prompt")
+                        if isinstance(data.get("prompt"), str)
+                        else ""
                     )
                 ),
                 turn_expected_outcome_contract=(
@@ -10795,7 +10810,9 @@ class InternalMCPChatOrchestrator:
                 ),
                 workflow_required_effects_contract=(
                     data.get("workflow_required_effects_contract")
-                    if isinstance(data.get("workflow_required_effects_contract"), Mapping)
+                    if isinstance(
+                        data.get("workflow_required_effects_contract"), Mapping
+                    )
                     else None
                 ),
                 workflow_required_effects_contract_source=(
@@ -10803,7 +10820,9 @@ class InternalMCPChatOrchestrator:
                     if isinstance(
                         data.get("workflow_required_effects_contract_source"), str
                     )
-                    and str(data.get("workflow_required_effects_contract_source")).strip()
+                    and str(
+                        data.get("workflow_required_effects_contract_source")
+                    ).strip()
                     else None
                 ),
                 missing_required_tools=cast(
@@ -10897,7 +10916,9 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
                 selected_gmail_profile=(
-                    str(requirement_state.get("selected_gmail_profile_for_retry")).strip()
+                    str(
+                        requirement_state.get("selected_gmail_profile_for_retry")
+                    ).strip()
                     if isinstance(
                         requirement_state.get("selected_gmail_profile_for_retry"), str
                     )
@@ -10926,9 +10947,7 @@ class InternalMCPChatOrchestrator:
             import json
 
             public_parent_forced_tool_calls = (
-                self._strip_retry_tool_call_internal_metadata(
-                    parent_forced_tool_calls
-                )
+                self._strip_retry_tool_call_internal_metadata(parent_forced_tool_calls)
             )
             retry_binding_sources = self._summarise_retry_tool_call_binding_sources(
                 parent_forced_tool_calls
@@ -11294,9 +11313,7 @@ class InternalMCPChatOrchestrator:
                                 "type": "prompt_tool_requirements",
                                 "stage": "tool_execute",
                                 "required_tools": list(required_prompt_tools),
-                                "missing_tools": list(
-                                    missing_required_tools_for_retry
-                                ),
+                                "missing_tools": list(missing_required_tools_for_retry),
                                 "required_fetch_concept_ids": list(
                                     required_prompt_fetch_concept_ids
                                 ),
@@ -16239,9 +16256,11 @@ class InternalMCPChatOrchestrator:
                 or candidate.get("request_model")
                 or candidate.get("requested_model")
             )
-            resolved_model = InternalMCPChatOrchestrator._resolve_registry_model_candidate(
-                model_value,
-                registry_snapshot,
+            resolved_model = (
+                InternalMCPChatOrchestrator._resolve_registry_model_candidate(
+                    model_value,
+                    registry_snapshot,
+                )
             )
             if isinstance(resolved_model, str) and resolved_model.strip():
                 candidate["model"] = resolved_model.strip()
@@ -16331,7 +16350,11 @@ class InternalMCPChatOrchestrator:
     ) -> bool:
         left_identity = cls._normalise_model_candidate_identity(left)
         right_identity = cls._normalise_model_candidate_identity(right)
-        if left_identity[0] and right_identity[0] and left_identity[0] == right_identity[0]:
+        if (
+            left_identity[0]
+            and right_identity[0]
+            and left_identity[0] == right_identity[0]
+        ):
             return left_identity[-1] == right_identity[-1]
         return left_identity[1:] == right_identity[1:]
 
@@ -17428,7 +17451,10 @@ class InternalMCPChatOrchestrator:
             "host": candidate.host,
             "source": candidate.source,
         }
-        if isinstance(candidate.model_parameters, Mapping) and candidate.model_parameters:
+        if (
+            isinstance(candidate.model_parameters, Mapping)
+            and candidate.model_parameters
+        ):
             telemetry["model_parameters"] = dict(candidate.model_parameters)
 
         if candidate.source == "active_llm":
@@ -19673,17 +19699,13 @@ class InternalMCPChatOrchestrator:
                         "error_class": "RequiredToolCallOmittedError",
                         "failure_kind": "response_validation_failed",
                         "required_prompt_tools": list(required_prompt_tools),
-                        "required_available_tools": list(
-                            required_available_tool_names
-                        ),
+                        "required_available_tools": list(required_available_tool_names),
                     }
                 if (
                     required_tool_omitted_failure is not None
                     and attempt_no < total_candidates
                 ):
-                    validation_reason = str(
-                        required_tool_omitted_failure["reason"]
-                    )
+                    validation_reason = str(required_tool_omitted_failure["reason"])
                     validation_error_class = str(
                         required_tool_omitted_failure["error_class"]
                     )
@@ -19722,9 +19744,7 @@ class InternalMCPChatOrchestrator:
                         error_class=validation_error_class,
                         failure_kind=validation_failure_kind,
                     )
-                    failure_extra["validation"] = dict(
-                        required_tool_omitted_failure
-                    )
+                    failure_extra["validation"] = dict(required_tool_omitted_failure)
                     resolved_model_name = (
                         llm_response.model
                         if isinstance(getattr(llm_response, "model", None), str)
@@ -28653,9 +28673,7 @@ class InternalMCPChatOrchestrator:
                 "turn_expected_outcome.target_type_ids",
             ),
             "target_type_ids": ("turn_expected_outcome.target_type_ids",),
-            "contract_target_type_ids": (
-                "turn_expected_outcome.target_type_ids",
-            ),
+            "contract_target_type_ids": ("turn_expected_outcome.target_type_ids",),
             "missing_required_fetch_concept_ids": (
                 "missing_required_fetch_concept_ids",
             ),
@@ -28697,12 +28715,9 @@ class InternalMCPChatOrchestrator:
             target_concept_source="turn_expected_outcome.target_type_ids",
             target_concept_sources=target_concept_sources,
         )
-        if (
-            type_target_ids
-            and any(
-                argument_name.lower() == "instance_of"
-                for argument_name in obligation_metadata.target_argument_names
-            )
+        if type_target_ids and any(
+            argument_name.lower() == "instance_of"
+            for argument_name in obligation_metadata.target_argument_names
         ):
             tool_metadata = get_tool_metadata(tool_name)
             default_payload = tool_metadata.default_payload or {}
@@ -32358,9 +32373,10 @@ class InternalMCPChatOrchestrator:
                 diagnostics_payload["failing_state_id"] = initial_state
                 diagnostics_payload["failing_action_id"] = failing_action_id
                 data["workflow_launch_input_resolution"] = diagnostics_payload
-                failure_code = _safe_scalar_text(
-                    diagnostics_payload.get("failure_code")
-                ) or "workflow_launch_input_resolution_failed"
+                failure_code = (
+                    _safe_scalar_text(diagnostics_payload.get("failure_code"))
+                    or "workflow_launch_input_resolution_failed"
+                )
                 unresolved_list_text = ", ".join(unresolved_required_inputs)
                 message = (
                     f"Workflow {workflow_id} could not start because required "
@@ -32376,11 +32392,7 @@ class InternalMCPChatOrchestrator:
                     },
                     completed=False,
                     final_state=initial_state or "workflow_launch_input_resolution",
-                    error=(
-                        failure_code
-                        + ":"
-                        + ",".join(unresolved_required_inputs)
-                    ),
+                    error=(failure_code + ":" + ",".join(unresolved_required_inputs)),
                 )
                 _attach_terminal_success_contract(launch_failure_result)
                 _attach_required_effects_contract(launch_failure_result)
@@ -33005,6 +33017,12 @@ class InternalMCPChatOrchestrator:
             )
             error_value = result.error if isinstance(result.error, str) else None
             explicit_failure_detail = _extract_explicit_workflow_failure_detail(result)
+            result_snapshot = _build_workflow_execution_aux_result_snapshot(result)
+            workflow_execution_summary = (
+                result.data.get("workflow_execution_summary")
+                if isinstance(getattr(result, "data", None), Mapping)
+                else None
+            )
             if completed:
                 termination_code = "completed"
                 termination_detail = None
@@ -33020,6 +33038,20 @@ class InternalMCPChatOrchestrator:
             terminal_stage = final_state or ("completed" if completed else "terminated")
             if callable(finalise_episode_fn):
                 try:
+                    episode_metadata: dict[str, Any] = {
+                        "path": "orchestrator.execute_workflow",
+                        "workflow_definition_identity": workflow_definition_identity,
+                    }
+                    if isinstance(result_snapshot, Mapping):
+                        episode_metadata["result_snapshot"] = dict(result_snapshot)
+                    if isinstance(workflow_execution_summary, Mapping):
+                        episode_metadata["workflow_execution_summary"] = (
+                            _safe_mapping_snapshot(
+                                workflow_execution_summary,
+                                max_depth=3,
+                                max_items=40,
+                            )
+                        )
                     finalise_episode_fn(
                         workflow_id=workflow_id,
                         episode_id=episode_id,
@@ -33029,10 +33061,7 @@ class InternalMCPChatOrchestrator:
                         final_state=final_state,
                         termination_code=termination_code,
                         termination_detail=termination_detail,
-                        metadata={
-                            "path": "orchestrator.execute_workflow",
-                            "workflow_definition_identity": workflow_definition_identity,
-                        },
+                        metadata=episode_metadata,
                     )
                 except Exception:
                     pass
@@ -34974,9 +35003,7 @@ class InternalMCPChatOrchestrator:
             getattr(definition, "metadata", None) if definition is not None else None
         )
         routing_profile = (
-            metadata.get("routing_profile")
-            if isinstance(metadata, Mapping)
-            else None
+            metadata.get("routing_profile") if isinstance(metadata, Mapping) else None
         )
         return {
             "purpose": str(
@@ -35483,9 +35510,12 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             if discovery_timeout_seconds is None:
-                if _is_agent_test_instance() and _explicit_model_request_uses_local_provider(
-                    llm_client=env.llm_client,
-                    model=getattr(env, "model", None),
+                if (
+                    _is_agent_test_instance()
+                    and _explicit_model_request_uses_local_provider(
+                        llm_client=env.llm_client,
+                        model=getattr(env, "model", None),
+                    )
                 ):
                     discovery_timeout_seconds = os.getenv(
                         "VON_AGENT_TEST_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS",
@@ -35572,9 +35602,7 @@ class InternalMCPChatOrchestrator:
                     and bool(raw_discovery.get("budget_exhausted"))
                     and not workflow_discovery_result.get("budget_exhausted")
                     and not any(
-                        isinstance(
-                            workflow_discovery_result.get(candidate_key), list
-                        )
+                        isinstance(workflow_discovery_result.get(candidate_key), list)
                         and workflow_discovery_result.get(candidate_key)
                         for candidate_key in (
                             "candidates",
@@ -35584,9 +35612,7 @@ class InternalMCPChatOrchestrator:
                     )
                 ):
                     workflow_discovery_result["budget_exhausted"] = True
-                    workflow_discovery_result["prior_discovery_budget_exhausted"] = (
-                        True
-                    )
+                    workflow_discovery_result["prior_discovery_budget_exhausted"] = True
                     prior_detail = str(
                         raw_discovery.get("budget_exhaustion_detail") or ""
                     ).strip()
@@ -36476,9 +36502,9 @@ class InternalMCPChatOrchestrator:
                     except Exception:
                         return
 
-                def _build_action_turn_live_workflow_routing_payload() -> (
-                    Mapping[str, Any]
-                ):
+                def _build_action_turn_live_workflow_routing_payload() -> Mapping[
+                    str, Any
+                ]:
                     payload: dict[str, Any] = {}
                     if isinstance(workflow_discovery_result, Mapping):
                         payload["workflow_discovery"] = dict(workflow_discovery_result)
@@ -37168,8 +37194,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_stage_id": "selected_workflow_execution",
                 "selected_workflow_id": selected_workflow_id,
                 "workflow_id": selected_workflow_id,
-                "selected_execution_mode": selected_execution_mode
-                or "custom_workflow",
+                "selected_execution_mode": selected_execution_mode or "custom_workflow",
                 **selector_trace_progress_payload,
                 "selected_workflow_execution_event": event,
             }
@@ -40025,9 +40050,9 @@ class InternalMCPChatOrchestrator:
             ),
         )
 
-        def _prepare_workflow_continuation_context() -> (
-            tuple[str, Mapping[str, Any] | None]
-        ):
+        def _prepare_workflow_continuation_context() -> tuple[
+            str, Mapping[str, Any] | None
+        ]:
             effective_prompt = prompt
             workflow_continuation_payload_local = (
                 dict(workflow_continuation_context)
@@ -43720,9 +43745,7 @@ class InternalMCPChatOrchestrator:
                             "chunks": f"Chunk {row_index}",
                             "matches": f"Match {row_index}",
                             "references": f"Reference {row_index}",
-                        }.get(
-                            collection_key, f"Section {row_index}"
-                        )
+                        }.get(collection_key, f"Section {row_index}")
                         section = _section_from_mapping(
                             row,
                             section_id=section_id,
@@ -46897,7 +46920,9 @@ class InternalMCPChatOrchestrator:
                         if continue_to_tool_pipeline
                         and continue_to_tool_pipeline_reason
                         == "custom_workflow_missing_required_prompt_tools"
-                        else "completed" if wf_completed else "failed"
+                        else "completed"
+                        if wf_completed
+                        else "failed"
                     )
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
@@ -47415,7 +47440,9 @@ class InternalMCPChatOrchestrator:
             if tc_completed
             and gate_safe_to_claim_completion
             and not gate_requires_follow_up
-            else "follow_up_required" if tc_completed else "failed"
+            else "follow_up_required"
+            if tc_completed
+            else "failed"
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.
@@ -47460,7 +47487,9 @@ class InternalMCPChatOrchestrator:
                 if tc_completed
                 and gate_safe_to_claim_completion
                 and not gate_requires_follow_up
-                else "follow_up_required" if tc_completed else "failed"
+                else "follow_up_required"
+                if tc_completed
+                else "failed"
             ),
             final_state=tc_result.final_state,
             completed=tc_completed,
@@ -47984,13 +48013,15 @@ class InternalMCPChatOrchestrator:
             else None
         )
         _project_namespaced_workflow_launch_inputs(probe_data)
-        excluded_ambient_inputs_applied = _strip_excluded_ambient_workflow_launch_inputs(
-            probe_data,
-            launch_input_contract=(
-                launch_input_contract
-                if isinstance(launch_input_contract, Mapping)
-                else None
-            ),
+        excluded_ambient_inputs_applied = (
+            _strip_excluded_ambient_workflow_launch_inputs(
+                probe_data,
+                launch_input_contract=(
+                    launch_input_contract
+                    if isinstance(launch_input_contract, Mapping)
+                    else None
+                ),
+            )
         )
         launch_resolution = resolve_workflow_launch_inputs(
             workflow_id=clean_workflow_id,

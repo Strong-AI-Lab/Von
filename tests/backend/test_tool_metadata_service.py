@@ -61,6 +61,29 @@ def test_gmail_create_label_metadata_marks_external_write_surface(monkeypatch):
         service.invalidate_cache()
 
 
+def test_source_processing_marker_metadata_is_vontology_internal(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        write_metadata = service.get_tool_metadata("record_source_processing_marker")
+        write_surface = service.get_tool_dispatch_surface_metadata(
+            "record_source_processing_marker"
+        )
+        read_metadata = service.get_tool_metadata("get_source_processing_marker")
+
+        assert write_metadata.category == "vontology"
+        assert write_metadata.operation_category == "write"
+        assert write_surface is not None
+        assert write_surface.surface_family == "knowledge_base"
+        assert write_surface.external_surface is False
+        assert read_metadata.operation_category == "read"
+        assert read_metadata.evidence_role == "verification"
+    finally:
+        service.invalidate_cache()
+
+
 def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
     from src.backend.services import tool_metadata_service as service
 

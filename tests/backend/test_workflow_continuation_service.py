@@ -81,7 +81,9 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
 
     assert context is not None
     assert context["source_request_id"] == "req-1380"
-    assert context["selected_workflow_id"] == "#V#scholarly_paper_representation_workflow"
+    assert (
+        context["selected_workflow_id"] == "#V#scholarly_paper_representation_workflow"
+    )
     assert context["requires_follow_up"] is True
     assert context["safe_to_claim_completion"] is False
     assert context["has_unresolved_required_effects"] is True
@@ -104,6 +106,73 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
         "selected_execution_mode": "tool_pipeline",
         "dispatch_workflow_id": "#V#tool_calling_workflow",
     }
+
+
+def test_get_session_workflow_continuation_context_keeps_completed_turn_evidence(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "classify_workflow_concept_executability",
+        lambda _workflow_id: (True, "executable_now", None),
+    )
+    monkeypatch.setattr(
+        service,
+        "get_latest_turn_execution_record_projection",
+        lambda **_kwargs: {
+            "request_id": "req-2571",
+            "session_id": "session-2571",
+            "workflow_selection": {
+                "selected_workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                "selector_verdict": "rag_selected",
+                "selector_source": "workflow_selector",
+            },
+            "completion_gate": {
+                "decision": "completed",
+                "requires_follow_up": False,
+                "safe_to_claim_completion": True,
+            },
+            "prompt": {
+                "preview": (
+                    "Process the Gmail message matching arXiv 2606.30544 and "
+                    "answer with represented evidence."
+                )
+            },
+            "completion_report": {
+                "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+                "completed": True,
+                "response_text": (
+                    "Paper concept: #V#latent_actions_paper.\n"
+                    "File copy concept: #V#arxiv_pdf_file_copy_abc123."
+                ),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        service, "get_latest_workflow_use_episode", lambda **_kwargs: None
+    )
+
+    context = service.get_session_workflow_continuation_context(
+        session_id="session-2571",
+        namespace="#V#zhan_von_witbrock@university_of_auckland_strong_ai_lab",
+        user_id=None,
+    )
+
+    assert context is not None
+    assert context["requires_follow_up"] is False
+    assert context["has_unresolved_required_effects"] is False
+    assert context["selected_workflow_id"] == "#V#zhan_gmail_arxiv_ingestion_workflow"
+    assert context["latest_turn_execution_record"]["prompt_preview"].startswith(
+        "Process the Gmail message"
+    )
+    projected = service.project_launch_inputs_from_continuation_context(context)
+    assert projected["arxiv_id"] == "2606.30544"
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="try again",
+        continuation_context=context,
+    )
+    assert decision["applies"] is True
+    assert decision["reason"] == "prior_workflow_evidence_available"
 
 
 def test_assess_prompt_for_workflow_continuation_requires_selected_workflow() -> None:
@@ -349,7 +418,56 @@ def test_no_open_work_returns_workflow_state_decision_source() -> None:
     assert decision["decision_source"] == "workflow_state"
 
 
-def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools() -> None:
+def test_completed_prior_workflow_evidence_can_apply_without_open_work() -> None:
+    context = {
+        "requires_follow_up": False,
+        "has_unresolved_required_effects": False,
+        "selected_workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+        "latest_workflow_episode": {
+            "episode_id": "wfep-2571",
+            "completed": True,
+            "metadata": {
+                "result_snapshot": {
+                    "arxiv_id": "2606.30544",
+                    "paper_concept_id": "#V#latent_actions_paper",
+                    "file_copy_concept_id": "#V#arxiv_pdf_file_copy_abc123",
+                    "processed_message_id": "19f3b77986f71a4d",
+                    "source_processing_marker": (
+                        "#V#source_processing_marker_gmail_vonwitbrock_gmail_abc123"
+                    ),
+                }
+            },
+        },
+    }
+
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="try again",
+        continuation_context=context,
+    )
+    projected = service.project_launch_inputs_from_continuation_context(
+        context,
+        selected_workflow_id="#V#zhan_gmail_arxiv_ingestion_workflow",
+    )
+    summary = service.build_workflow_continuation_summary_text(context)
+
+    assert decision["applies"] is True
+    assert decision["reason"] == "prior_workflow_evidence_available"
+    assert decision["decision_source"] == "workflow_state"
+    assert projected["arxiv_id"] == "2606.30544"
+    assert projected["paper_concept_id"] == "#V#latent_actions_paper"
+    assert projected["file_copy_concept_id"] == "#V#arxiv_pdf_file_copy_abc123"
+    assert projected["source_item_id"] == "19f3b77986f71a4d"
+    assert projected["message_id"] == "19f3b77986f71a4d"
+    assert projected["source_processing_marker"].startswith(
+        "#V#source_processing_marker_gmail"
+    )
+    assert "Prior workflow evidence available: yes" in summary
+    assert "- arxiv_id: 2606.30544" in summary
+
+
+def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools() -> (
+    None
+):
     prompt = service.build_workflow_continuation_routing_prompt(
         prompt="Please proceed.",
         continuation_context={
@@ -400,15 +518,15 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
         "required_tools: materialise_scholarly_representation_for_file_copy" in prompt
     )
     assert "Workflow required-evidence contract: conversation_diagnostics" in prompt
-    assert (
-        "required_effects_contract_profile_selected_id: paper" in prompt
-    )
+    assert "required_effects_contract_profile_selected_id: paper" in prompt
     assert "Artefact file_copy_ids: #V#uploaded_file_copy_abc123" in prompt
     assert "Artefact urls: https://arxiv.org/abs/2502.14996" in prompt
     assert prompt.rstrip().endswith("Please proceed.")
 
 
-def test_extract_url_targets_from_continuation_context_reads_contract_and_targets() -> None:
+def test_extract_url_targets_from_continuation_context_reads_contract_and_targets() -> (
+    None
+):
     urls = service.extract_url_targets_from_continuation_context(
         {
             "unresolved_required_effects": [
@@ -436,7 +554,9 @@ def test_extract_url_targets_from_continuation_context_reads_contract_and_target
     ]
 
 
-def test_project_launch_inputs_from_continuation_context_projects_stable_artefacts() -> None:
+def test_project_launch_inputs_from_continuation_context_projects_stable_artefacts() -> (
+    None
+):
     projected = service.project_launch_inputs_from_continuation_context(
         {
             "unresolved_required_effects": [
@@ -467,7 +587,9 @@ def test_project_launch_inputs_from_continuation_context_projects_stable_artefac
     }
 
 
-def test_project_launch_inputs_from_continuation_context_preserves_plural_targets() -> None:
+def test_project_launch_inputs_from_continuation_context_preserves_plural_targets() -> (
+    None
+):
     projected = service.project_launch_inputs_from_continuation_context(
         {
             "unresolved_required_effects": [

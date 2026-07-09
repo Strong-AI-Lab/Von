@@ -31,6 +31,54 @@ WORKFLOW_CONTINUATION_FRAMING_PROMPT_CONCEPT_ID = (
     "#V#workflow_continuation_framing_prompt"
 )
 
+_PROJECTABLE_PRIOR_EVIDENCE_VALUE_KEYS: frozenset[str] = frozenset(
+    {
+        "arxiv_id",
+        "arxiv_ids",
+        "file_copy_concept_id",
+        "file_copy_concept_ids",
+        "message_id",
+        "message_ids",
+        "message_processing_marker",
+        "paper_concept_id",
+        "paper_concept_ids",
+        "prompt_preview",
+        "processed_message_id",
+        "response_text",
+        "source_item_id",
+        "source_item_ids",
+        "source_processing_marker",
+        "source_processing_marker_concept_id",
+        "source_processing_markers",
+        "source_uri",
+        "source_uris",
+    }
+)
+_PROJECTABLE_SOURCE_ITEM_KEYS: frozenset[str] = frozenset(
+    {
+        "message_id",
+        "message_ids",
+        "processed_message_id",
+        "source_item_id",
+        "source_item_ids",
+    }
+)
+_PROJECTABLE_SOURCE_PROCESSING_MARKER_KEYS: frozenset[str] = frozenset(
+    {
+        "message_processing_marker",
+        "source_processing_marker",
+        "source_processing_marker_concept_id",
+        "source_processing_markers",
+    }
+)
+_PROJECTABLE_PAPER_CONCEPT_KEYS: frozenset[str] = frozenset(
+    {"paper_concept_id", "paper_concept_ids"}
+)
+_PROJECTABLE_FILE_COPY_KEYS: frozenset[str] = frozenset(
+    {"file_copy_concept_id", "file_copy_concept_ids"}
+)
+_PROJECTABLE_SOURCE_URI_KEYS: frozenset[str] = frozenset({"source_uri", "source_uris"})
+
 
 def _safe_str(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -54,6 +102,84 @@ def _dedupe_strings(values: Any) -> list[str]:
         seen.add(lowered)
         deduped.append(text)
     return deduped
+
+
+def _as_deduped_strings(values: Any) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return
+            lowered = cleaned.lower()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            deduped.append(cleaned)
+            return
+        if isinstance(value, Mapping):
+            for candidate_key in ("concept_id", "id", "value"):
+                if candidate_key in value:
+                    _add(value.get(candidate_key))
+                    return
+            return
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for item in value:
+                _add(item)
+
+    _add(values)
+    return deduped
+
+
+def _collect_values_for_keys(
+    value: Any,
+    keys: set[str] | frozenset[str],
+    *,
+    max_depth: int = 5,
+    max_items: int = 300,
+) -> list[str]:
+    collected: list[str] = []
+    seen: set[str] = set()
+    visited_items = 0
+    key_lookup = {key.lower() for key in keys if isinstance(key, str) and key}
+
+    def _append(candidate: Any) -> None:
+        for text in _as_deduped_strings(candidate):
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            collected.append(text)
+
+    def _walk(candidate: Any, *, depth: int) -> None:
+        nonlocal visited_items
+        if visited_items >= max_items or depth > max_depth:
+            return
+        if isinstance(candidate, Mapping):
+            for raw_key, nested in candidate.items():
+                if visited_items >= max_items:
+                    return
+                visited_items += 1
+                key = raw_key.lower() if isinstance(raw_key, str) else ""
+                if key in key_lookup:
+                    _append(nested)
+                _walk(nested, depth=depth + 1)
+            return
+        if isinstance(candidate, Sequence) and not isinstance(
+            candidate, (str, bytes, bytearray)
+        ):
+            for nested in candidate:
+                if visited_items >= max_items:
+                    return
+                visited_items += 1
+                _walk(nested, depth=depth + 1)
+
+    _walk(value, depth=0)
+    return collected
 
 
 def _copy_mapping(value: Any) -> dict[str, Any] | None:
@@ -178,7 +304,9 @@ def get_session_workflow_continuation_context(
         session_id=clean_session_id,
     )
 
-    if not isinstance(latest_record, Mapping) and not isinstance(latest_episode, Mapping):
+    if not isinstance(latest_record, Mapping) and not isinstance(
+        latest_episode, Mapping
+    ):
         return None
 
     workflow_selection = (
@@ -186,21 +314,31 @@ def get_session_workflow_continuation_context(
         if isinstance(latest_record, Mapping)
         else None
     )
-    workflow_selection = workflow_selection if isinstance(workflow_selection, Mapping) else {}
+    workflow_selection = (
+        workflow_selection if isinstance(workflow_selection, Mapping) else {}
+    )
     completion_gate = (
-        latest_record.get("completion_gate") if isinstance(latest_record, Mapping) else None
+        latest_record.get("completion_gate")
+        if isinstance(latest_record, Mapping)
+        else None
     )
     completion_gate = completion_gate if isinstance(completion_gate, Mapping) else {}
-    execution = latest_record.get("execution") if isinstance(latest_record, Mapping) else None
+    execution = (
+        latest_record.get("execution") if isinstance(latest_record, Mapping) else None
+    )
     execution = execution if isinstance(execution, Mapping) else {}
     raw_required_effects = (
-        latest_record.get("required_effects") if isinstance(latest_record, Mapping) else None
+        latest_record.get("required_effects")
+        if isinstance(latest_record, Mapping)
+        else None
     )
     unresolved_required_effects = [
         item
         for item in (
             _normalise_required_effect(effect)
-            for effect in (raw_required_effects if isinstance(raw_required_effects, list) else [])
+            for effect in (
+                raw_required_effects if isinstance(raw_required_effects, list) else []
+            )
             if isinstance(effect, Mapping)
         )
         if isinstance(item, dict)
@@ -221,6 +359,7 @@ def get_session_workflow_continuation_context(
         not unresolved_required_effects
         and not requires_follow_up
         and not isinstance(latest_episode, Mapping)
+        and not isinstance(latest_record, Mapping)
     ):
         return None
 
@@ -245,6 +384,40 @@ def get_session_workflow_continuation_context(
     latest_episode_payload = (
         dict(latest_episode) if isinstance(latest_episode, Mapping) else None
     )
+    latest_record_evidence: dict[str, Any] | None = None
+    if isinstance(latest_record, Mapping):
+        latest_record_evidence = {
+            "request_id": _safe_str(latest_record.get("request_id")),
+            "session_id": _safe_str(latest_record.get("session_id")),
+        }
+        prompt_payload = latest_record.get("prompt")
+        if isinstance(prompt_payload, Mapping):
+            prompt_preview = _safe_str(prompt_payload.get("preview"))
+            if prompt_preview:
+                latest_record_evidence["prompt_preview"] = prompt_preview
+        completion_report = latest_record.get("completion_report")
+        if isinstance(completion_report, Mapping):
+            latest_record_evidence["completion_report"] = dict(completion_report)
+        execution_payload = latest_record.get("execution")
+        if isinstance(execution_payload, Mapping):
+            execution_evidence: dict[str, Any] = {}
+            for key in (
+                "tool_invocations",
+                "tool_observation_ledger",
+                "workflow_execution_summary",
+            ):
+                value = execution_payload.get(key)
+                if isinstance(value, (Mapping, list)):
+                    execution_evidence[key] = value
+            if execution_evidence:
+                latest_record_evidence["execution"] = execution_evidence
+        latest_record_evidence = {
+            key: value
+            for key, value in latest_record_evidence.items()
+            if value is not None
+        }
+        if not latest_record_evidence:
+            latest_record_evidence = None
     workflow_definition_identity = (
         _copy_mapping(latest_episode_payload.get("workflow_definition_identity"))
         if isinstance(latest_episode_payload, Mapping)
@@ -272,7 +445,9 @@ def get_session_workflow_continuation_context(
         "selected_execution_mode": _safe_str(
             execution_summary.get("selected_execution_mode")
         ),
-        "dispatch_workflow_id": _safe_str(execution_summary.get("dispatch_workflow_id")),
+        "dispatch_workflow_id": _safe_str(
+            execution_summary.get("dispatch_workflow_id")
+        ),
         "dispatch_terminal_status": _safe_str(
             execution_summary.get("dispatch_terminal_status")
         ),
@@ -315,7 +490,8 @@ def get_session_workflow_continuation_context(
             else None
         ),
         "selector_verdict": _safe_str(workflow_selection.get("selector_verdict")),
-        "selector_source": _safe_str(workflow_selection.get("selector_source")) or "default",
+        "selector_source": _safe_str(workflow_selection.get("selector_source"))
+        or "default",
         "completion_gate_decision": _safe_str(completion_gate.get("decision")),
         "completion_gate_decision_reason": _safe_str(
             completion_gate.get("decision_reason")
@@ -353,6 +529,7 @@ def get_session_workflow_continuation_context(
         "workflow_required_effects_contract": workflow_required_effects_contract,
         "workflow_definition_identity": workflow_definition_identity,
         "resolved_contract_identifiers": resolved_contract_identifiers,
+        "latest_turn_execution_record": latest_record_evidence,
         "latest_workflow_episode": latest_episode_payload,
     }
 
@@ -366,10 +543,13 @@ def assess_prompt_for_workflow_continuation(
 
     Priority cascade:
     1. Gate checks: empty prompt or no context → not continuation.
-    2. No open work in context → not continuation (workflow-state decision).
-    3. Workflow-state-authoritative: open work under a specific executable
+    2. Non-executable selected workflow → not continuation.
+    3. Completed prior workflow with projectable evidence under a specific
+       executable workflow → continuation evidence is deliberately available.
+    4. No open work and no projectable evidence → not continuation.
+    5. Workflow-state-authoritative: open work under a specific executable
        workflow → continuation context applies.
-    4. Open work without a specific workflow → do not continue implicitly.
+    6. Open work without a specific workflow → do not continue implicitly.
 
     This decision is structural, derived only from persisted workflow state.
     Whether the user's current message *rejects or redirects away from* the
@@ -394,25 +574,11 @@ def assess_prompt_for_workflow_continuation(
             "decision_source": "gate",
         }
 
-    has_open_work = bool(
-        continuation_context.get("requires_follow_up")
-        or continuation_context.get("has_unresolved_required_effects")
-    )
-    if not has_open_work:
-        return {
-            "applies": False,
-            "reason": "no_open_work",
-            "decision_source": "workflow_state",
-        }
-
     selected_workflow_id = _safe_str(continuation_context.get("selected_workflow_id"))
     selected_workflow_is_executable = continuation_context.get(
         "selected_workflow_is_executable"
     )
-    if (
-        selected_workflow_id
-        and selected_workflow_is_executable is False
-    ):
+    if selected_workflow_id and selected_workflow_is_executable is False:
         return {
             "applies": False,
             "reason": "selected_workflow_not_executable",
@@ -423,6 +589,28 @@ def assess_prompt_for_workflow_continuation(
             "selected_workflow_executability_detail": _safe_str(
                 continuation_context.get("selected_workflow_executability_detail")
             ),
+        }
+
+    has_open_work = bool(
+        continuation_context.get("requires_follow_up")
+        or continuation_context.get("has_unresolved_required_effects")
+    )
+    if not has_open_work:
+        projected_prior_inputs = project_launch_inputs_from_continuation_context(
+            continuation_context,
+            selected_workflow_id=selected_workflow_id,
+        )
+        if selected_workflow_id and projected_prior_inputs:
+            return {
+                "applies": True,
+                "reason": "prior_workflow_evidence_available",
+                "decision_source": "workflow_state",
+                "projected_prior_input_keys": sorted(projected_prior_inputs.keys()),
+            }
+        return {
+            "applies": False,
+            "reason": "no_open_work",
+            "decision_source": "workflow_state",
         }
 
     # Workflow-state-authoritative path: when open work exists under a
@@ -476,15 +664,21 @@ def build_workflow_continuation_summary_text(
     )
     if completion_gate_reason:
         summary_lines.append(f"Prior completion gate reason: {completion_gate_reason}")
-    active_workflow_status = _safe_str(continuation_context.get("active_workflow_status"))
+    active_workflow_status = _safe_str(
+        continuation_context.get("active_workflow_status")
+    )
     if active_workflow_status:
         summary_lines.append(f"Active workflow status: {active_workflow_status}")
     active_workflow_final_state = _safe_str(
         continuation_context.get("active_workflow_final_state")
     )
     if active_workflow_final_state:
-        summary_lines.append(f"Active workflow final state: {active_workflow_final_state}")
-    workflow_definition_identity = continuation_context.get("workflow_definition_identity")
+        summary_lines.append(
+            f"Active workflow final state: {active_workflow_final_state}"
+        )
+    workflow_definition_identity = continuation_context.get(
+        "workflow_definition_identity"
+    )
     if isinstance(workflow_definition_identity, Mapping):
         workflow_definition_hash = _safe_str(
             workflow_definition_identity.get("definition_hash")
@@ -547,8 +741,28 @@ def build_workflow_continuation_summary_text(
                 "Workflow required-evidence contract: "
                 f"{workflow_required_effects_contract_id}"
             )
-    resolved_contract_identifiers = continuation_context.get("resolved_contract_identifiers")
-    if isinstance(resolved_contract_identifiers, Mapping) and resolved_contract_identifiers:
+    projected_prior_inputs = project_launch_inputs_from_continuation_context(
+        continuation_context
+    )
+    if projected_prior_inputs and not continuation_context.get(
+        "has_unresolved_required_effects"
+    ):
+        summary_lines.append("Prior workflow evidence available: yes")
+        for key in sorted(projected_prior_inputs.keys())[:12]:
+            value = projected_prior_inputs.get(key)
+            if isinstance(value, list):
+                rendered_value = ", ".join(str(item) for item in value[:6])
+            else:
+                rendered_value = str(value)
+            if rendered_value:
+                summary_lines.append(f"- {key}: {rendered_value}")
+    resolved_contract_identifiers = continuation_context.get(
+        "resolved_contract_identifiers"
+    )
+    if (
+        isinstance(resolved_contract_identifiers, Mapping)
+        and resolved_contract_identifiers
+    ):
         summary_lines.append("Resolved workflow contracts and profile identifiers:")
         ordered_keys = (
             "workflow_required_effects_contract_id",
@@ -777,7 +991,90 @@ def project_launch_inputs_from_continuation_context(
         continuation_context.get("required_effects_contract"),
         continuation_context.get("unresolved_required_effects"),
         url_targets,
+        _collect_values_for_keys(
+            continuation_context,
+            _PROJECTABLE_PRIOR_EVIDENCE_VALUE_KEYS,
+        ),
     )
     _project_targets("arxiv_ids", arxiv_ids, singular_key="arxiv_id")
+
+    prior_source_uris = [
+        uri
+        for uri in _collect_values_for_keys(
+            continuation_context,
+            _PROJECTABLE_SOURCE_URI_KEYS,
+        )
+        if _URL_TARGET_PATTERN.fullmatch(uri)
+    ]
+    if prior_source_uris:
+        existing_source_uris = projected.get("source_uris")
+        merged_source_uris = _dedupe_strings(
+            (existing_source_uris if isinstance(existing_source_uris, list) else [])
+            + prior_source_uris
+        )
+        _project_targets(
+            "source_uris",
+            merged_source_uris,
+            singular_key="source_uri",
+        )
+
+    prior_file_copy_ids = [
+        concept_id
+        for concept_id in _collect_values_for_keys(
+            continuation_context,
+            _PROJECTABLE_FILE_COPY_KEYS,
+        )
+        if is_file_copy_concept_id(concept_id)
+    ]
+    if prior_file_copy_ids:
+        existing_file_copy_ids = projected.get("file_copy_concept_ids")
+        merged_file_copy_ids = _dedupe_strings(
+            (existing_file_copy_ids if isinstance(existing_file_copy_ids, list) else [])
+            + prior_file_copy_ids
+        )
+        _project_targets(
+            "file_copy_concept_ids",
+            merged_file_copy_ids,
+            singular_key="file_copy_concept_id",
+        )
+
+    paper_concept_ids = [
+        concept_id
+        for concept_id in _collect_values_for_keys(
+            continuation_context,
+            _PROJECTABLE_PAPER_CONCEPT_KEYS,
+        )
+        if _CONCEPT_ID_PATTERN.fullmatch(concept_id)
+    ]
+    _project_targets(
+        "paper_concept_ids",
+        paper_concept_ids,
+        singular_key="paper_concept_id",
+    )
+
+    source_item_ids = _collect_values_for_keys(
+        continuation_context,
+        _PROJECTABLE_SOURCE_ITEM_KEYS,
+    )
+    _project_targets("source_item_ids", source_item_ids, singular_key="source_item_id")
+    if len(source_item_ids) == 1:
+        projected.setdefault("message_id", source_item_ids[0])
+        projected.setdefault("processed_message_id", source_item_ids[0])
+
+    source_processing_markers = [
+        marker
+        for marker in _collect_values_for_keys(
+            continuation_context,
+            _PROJECTABLE_SOURCE_PROCESSING_MARKER_KEYS,
+        )
+        if _CONCEPT_ID_PATTERN.fullmatch(marker)
+    ]
+    _project_targets(
+        "source_processing_markers",
+        source_processing_markers,
+        singular_key="source_processing_marker",
+    )
+    if len(source_processing_markers) == 1:
+        projected.setdefault("message_processing_marker", source_processing_markers[0])
 
     return projected

@@ -94,6 +94,10 @@ def test_ensure_canonical_minimal_imposition_runtime_profiles_creates_and_links(
         profile_payload["tool_risk_classes"]["gmail_create_label"]
         == "external_non_vontology"
     )
+    assert (
+        profile_payload["tool_risk_classes"]["record_source_processing_marker"]
+        == "additive_low_risk"
+    )
 
 
 def test_load_minimal_imposition_runtime_profile_uses_workflow_link(

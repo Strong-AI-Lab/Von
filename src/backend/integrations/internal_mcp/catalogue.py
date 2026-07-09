@@ -1603,6 +1603,36 @@ def _upsert_singleton_text_relation(**kwargs):
         )
 
 
+def _get_source_processing_marker(**kwargs):
+    from ...services.source_processing_marker_service import (
+        get_source_processing_marker,
+    )
+
+    try:
+        return get_source_processing_marker(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "source_processing_marker_lookup_failed",
+            f"Failed to read source processing marker: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+
+def _record_source_processing_marker(**kwargs):
+    from ...services.source_processing_marker_service import (
+        record_source_processing_marker,
+    )
+
+    try:
+        return record_source_processing_marker(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return make_error_response(
+            "source_processing_marker_record_failed",
+            f"Failed to record source processing marker: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+
 def _concept_exists(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...security.access_control import describe_concept_access
@@ -7209,6 +7239,80 @@ def _upsert_singleton_text_relation_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="upsert_singleton_text_relation output: success, kept_relation_id, replaced_relation_ids/count, relation_created, text_value_id, predicate_concept_id",
+    )
+
+
+def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema:
+    optional: dict[str, Any] = {
+        "source_profile": (str, type(None)),
+        "workflow_id": (str, type(None)),
+        "namespace": (str, type(None)),
+        "created_by_concept_id": (str, type(None)),
+        "organisation_concept_id": (str, type(None)),
+    }
+    if not read_only:
+        optional.update(
+            {
+                "processing_status": (str, type(None)),
+                "represented_artifact_concept_ids": (list, type(None)),
+                "represented_artefact_concept_ids": (list, type(None)),
+                "paper_concept_ids": (list, type(None)),
+                "file_copy_concept_ids": (list, type(None)),
+                "arxiv_ids": (list, type(None)),
+                "represented_outputs": (dict, list, str, type(None)),
+            }
+        )
+    return Schema(
+        required={
+            "source_system": str,
+            "source_item_id": str,
+        },
+        optional=optional,
+        allow_unknown=True,
+        description=(
+            "source processing marker input: source_system and source_item_id identify "
+            "the source item. record_source_processing_marker may include represented "
+            "artefact, paper, file-copy, arXiv ids, or represented_outputs to mine for "
+            "compact IDs."
+        ),
+    )
+
+
+def _source_processing_marker_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "schema_version": str,
+            "source_processing_marker": (str, type(None)),
+            "source_processing_marker_exists": bool,
+            "message_processing_marker_seen": bool,
+            "message_processed": bool,
+            "source_message_processed": bool,
+            "represented_artifact_concept_ids": list,
+            "paper_concept_ids": list,
+            "file_copy_concept_ids": list,
+        },
+        optional={
+            "source_processing_marker_created": (bool, type(None)),
+            "marker_concept_id": (str, type(None)),
+            "message_processing_marker": (str, type(None)),
+            "message_processing_status": (str, type(None)),
+            "processed_source_item_id": (str, type(None)),
+            "processed_message_id": (str, type(None)),
+            "paper_concept_id": (str, type(None)),
+            "file_copy_concept_id": (str, type(None)),
+            "arxiv_ids": (list, type(None)),
+            "arxiv_id": (str, type(None)),
+            "source_processing_evidence": (dict, type(None)),
+            "source_processing_evidence_text_relation": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "source processing marker output: compact represented evidence that a "
+            "source item has or has not been processed."
+        ),
     )
 
 
@@ -28150,6 +28254,31 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
         ),
         MethodDefinition(
+            name="get_source_processing_marker",
+            handler=_get_source_processing_marker,
+            input_schema=_source_processing_marker_input_schema(read_only=True),
+            output_schema=_source_processing_marker_output_schema(),
+            category="read",
+            description=(
+                "Read the durable Vontology marker for a source item, if one "
+                "exists. Use before repeating source-processing work so a workflow "
+                "can reuse represented evidence instead of mutating the source system."
+            ),
+        ),
+        MethodDefinition(
+            name="record_source_processing_marker",
+            handler=_record_source_processing_marker,
+            input_schema=_source_processing_marker_input_schema(),
+            output_schema=_source_processing_marker_output_schema(),
+            category="write",
+            description=(
+                "Create or update a durable Vontology marker that records a source "
+                "item as processed into represented artefacts. This is additive "
+                "Vontology state and should be called only when the represented "
+                "workflow has verified processing success."
+            ),
+        ),
+        MethodDefinition(
             name="extract_annotations",
             handler=_extract_annotations,
             input_schema=_annotation_input_schema(),
@@ -29229,9 +29358,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_external_integration_definitions() -> List[
+    MethodDefinition
+]:
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -29732,9 +29861,9 @@ def _build_default_catalogue_external_integration_definitions() -> (
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
+    MethodDefinition
+]:
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",

@@ -100,6 +100,7 @@ _DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
     "merge_pull_request": "external_non_vontology",
     "pull_request_review_write": "external_non_vontology",
     "push_files": "external_non_vontology",
+    "record_source_processing_marker": "additive_low_risk",
     "remove_relationship": "destructive",
     "remove_relationships_bulk": "destructive",
     "sub_issue_write": "external_non_vontology",
@@ -301,9 +302,9 @@ def canonical_minimal_imposition_runtime_profile_concept_ids() -> tuple[str, ...
     )
 
 
-def canonical_minimal_imposition_runtime_profile_blueprints() -> (
-    tuple[dict[str, Any], ...]
-):
+def canonical_minimal_imposition_runtime_profile_blueprints() -> tuple[
+    dict[str, Any], ...
+]:
     return tuple(
         dict(item) for item in _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS
     )

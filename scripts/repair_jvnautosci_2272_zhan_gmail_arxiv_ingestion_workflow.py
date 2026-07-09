@@ -2,8 +2,9 @@
 
 This is a Vontology-authoring maintenance script. It keeps request-path policy
 out of Python and materialises the repair as VWL/Vontology state: partial batch
-semantics, represented retry metadata, valid launch contracts, and the Gmail
-completion label contract used to avoid repeating completed work.
+semantics, represented retry metadata, valid launch contracts, and represented
+source-processing markers used to avoid repeating completed work without
+mutating Gmail.
 """
 
 from __future__ import annotations
@@ -49,12 +50,8 @@ PARENT_PROCESS_MESSAGES_STEP_ID = (
 PARENT_LIST_MESSAGES_STEP_ID = (
     "#V#workflow_step_zhan_gmail_arxiv_ingestion_workflow_list_messages"
 )
-CHILD_EXTRACT_RESOURCES_STEP_ID = (
-    "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_extract_email_resources"
-)
-CHILD_INGEST_ARXIV_STEP_ID = (
-    "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_ingest_arxiv_resources"
-)
+CHILD_EXTRACT_RESOURCES_STEP_ID = "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_extract_email_resources"
+CHILD_INGEST_ARXIV_STEP_ID = "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_ingest_arxiv_resources"
 CHILD_MARK_DONE_STEP_ID = (
     "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_mark_done"
 )
@@ -87,10 +84,8 @@ def _static_bindings(step: dict[str, Any]) -> list[dict[str, Any]]:
     raw_bindings = step.get("static_input_bindings")
     if not isinstance(raw_bindings, list):
         raw_bindings = []
-        step["static_input_bindings"] = raw_bindings
     bindings = [item for item in raw_bindings if isinstance(item, dict)]
-    if len(bindings) != len(raw_bindings):
-        step["static_input_bindings"] = bindings
+    step["static_input_bindings"] = bindings
     return bindings
 
 
@@ -175,7 +170,10 @@ def _find_step(spec: Mapping[str, Any], state_id: str) -> dict[str, Any]:
     for raw_step in steps:
         if not isinstance(raw_step, dict):
             continue
-        if _clean_text(raw_step.get("state_id") or raw_step.get("state_key")) == state_id:
+        if (
+            _clean_text(raw_step.get("state_id") or raw_step.get("state_key"))
+            == state_id
+        ):
             return raw_step
     raise ValueError(f"workflow_authoring_spec_missing_step:{state_id}")
 
@@ -189,10 +187,10 @@ def rewrite_zhan_parent_workflow_spec(
     spec["workflow_description"] = (
         "Top-level workflow for Zhan Gmail arXiv ingestion. It resolves the "
         "Vontology-authored terminal completion hint, lists arXiv-related "
-        "messages that lack the represented completion Gmail label, processes "
-        "each message with partial batch semantics, and relies on the child "
-        "workflow to mark only successfully ingested source messages as "
-        "vontology/ingested."
+        "messages through read-only Gmail access, processes each message with "
+        "partial batch semantics, and relies on the child workflow to record "
+        "represented source-processing evidence only for successfully ingested "
+        "source messages."
     )
     spec.pop("description", None)
 
@@ -249,16 +247,31 @@ def rewrite_email_message_workflow_spec(
     spec["workflow_description"] = (
         "Processes one Gmail message: extract resource links, ingest each arXiv "
         "reference through represented subworkflows with collectable partial "
-        "outcomes, and execute the Vontology-authored Gmail completion-label "
-        "follow-up only when all discovered arXiv resources for the message "
-        "succeed. Messages with failed arXiv items remain unmarked for later "
-        "repair or retry."
+        "outcomes, and record a represented source-processing marker only when "
+        "all discovered arXiv resources for the message succeed. Messages with "
+        "failed arXiv items remain without a marker for later repair or retry."
     )
     spec.pop("description", None)
 
     extract_step = _find_step(spec, CHILD_EXTRACT_RESOURCES_STEP_ID)
     ingest_step = _find_step(spec, CHILD_INGEST_ARXIV_STEP_ID)
     mark_done_step = _find_step(spec, CHILD_MARK_DONE_STEP_ID)
+    marker_args = {
+        "source_system": "gmail",
+        "source_profile": {"$context_key": "gmail_profile"},
+        "source_item_id": {"$context_key": "message_id"},
+        "represented_outputs": {"$context_key": "arxiv_iteration_results"},
+        "processing_status": "processed",
+        "workflow_id": EMAIL_ARXIV_MESSAGE_WORKFLOW_ID,
+    }
+    transition_changed = False
+    for transition in ingest_step.get("conditional_transitions") or []:
+        if not isinstance(transition, dict):
+            continue
+        if _clean_text(transition.get("to_state")) != "resolve_done_hint":
+            continue
+        transition["to_state"] = CHILD_MARK_DONE_STEP_ID
+        transition_changed = True
     changed = {
         "arxiv_batch_allows_partial": _set_static_binding(
             ingest_step,
@@ -292,6 +305,27 @@ def rewrite_email_message_workflow_spec(
             mark_done_step,
             EXTERNAL_WRITE_RETRY_POLICY,
         ),
+        "successful_arxiv_batch_records_marker": transition_changed,
+        "mark_done_uses_source_processing_marker_tool": _set_static_binding(
+            mark_done_step,
+            "tool_name",
+            "record_source_processing_marker",
+        ),
+        "mark_done_marker_arguments": _set_static_binding(
+            mark_done_step,
+            "tool_arguments",
+            marker_args,
+        ),
+        "mark_done_marker_output": _ensure_tool_output_mapping(
+            mark_done_step,
+            context_key="message_processing_marker",
+            tool_output_field="result.message_processing_marker",
+            mapping_concept_id=(
+                "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_"
+                "workflow_mark_done_result_message_processing_marker_to_"
+                "message_processing_marker"
+            ),
+        ),
     }
     changed["arxiv_partial_success_declared"] = _ensure_list_item(
         ingest_step,
@@ -303,13 +337,18 @@ def rewrite_email_message_workflow_spec(
         "writes_context_keys",
         "arxiv_item_count",
     )
+    changed["message_processing_marker_declared"] = _ensure_list_item(
+        mark_done_step,
+        "writes_context_keys",
+        "message_processing_marker",
+    )
     return spec, changed
 
 
 def rewrite_gmail_completion_hint_payload(
     payload: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bool]:
-    """Use Gmail label IDs for mutation while preserving name-based filtering."""
+    """Represent completion with source-processing markers, not Gmail labels."""
 
     hint = copy.deepcopy(dict(payload))
     entries = hint.get("entries")
@@ -317,31 +356,53 @@ def rewrite_gmail_completion_hint_payload(
         raise ValueError("gmail_completion_hint_entries_missing")
 
     changed = False
+    desired_description = (
+        "After a message's arXiv resources have been successfully ingested, "
+        "record durable represented source-processing evidence for the source "
+        "Gmail message."
+    )
+    desired_action = {
+        "type": "workflow_mcp.invoke_tool",
+        "tool_name": "record_source_processing_marker",
+        "tool_concept_id": "#V#record_source_processing_marker_tool",
+    }
+    desired_tool_arguments = {
+        "source_system": "gmail",
+        "source_profile_context_key": "gmail_profile",
+        "source_item_id_context_key": "message_id",
+        "represented_outputs_context_key": "arxiv_iteration_results",
+        "processing_status": "processed",
+    }
+    desired_effects = [
+        {
+            "effect_kind": "record_source_processing_marker",
+            "marker_type_concept_id": "#V#source_processing_marker",
+            "evidence_predicate_concept_id": "#V#hasSourceProcessingEvidenceJson",
+        }
+    ]
+    desired_upstream_filter = {
+        "query_fragment": "",
+        "rationale": (
+            "Gmail listing remains read-only; child workflows check represented "
+            "source-processing markers before repeating source-message work."
+        ),
+    }
     for raw_entry in entries:
         if not isinstance(raw_entry, dict):
             continue
         if _clean_text(raw_entry.get("action_kind")) != "terminal_completion":
             continue
-        effects = raw_entry.get("represented_effects")
-        represented_effect = None
-        if isinstance(effects, list):
-            represented_effect = next(
-                (item for item in effects if isinstance(item, Mapping)),
-                None,
-            )
-        if not isinstance(represented_effect, Mapping):
-            raise ValueError("gmail_completion_hint_represented_effect_missing")
-        label_id = _clean_text(represented_effect.get("gmail_label_id"))
-        if not label_id:
-            raise ValueError("gmail_completion_hint_label_id_missing")
-        tool_arguments = raw_entry.get("tool_arguments")
-        if not isinstance(tool_arguments, dict):
-            tool_arguments = {}
-            raw_entry["tool_arguments"] = tool_arguments
-            changed = True
-        desired_add_labels = [label_id]
-        if tool_arguments.get("add_labels") != desired_add_labels:
-            tool_arguments["add_labels"] = desired_add_labels
+        desired_values = {
+            "description": desired_description,
+            "action": desired_action,
+            "tool_arguments": desired_tool_arguments,
+            "represented_effects": desired_effects,
+            "upstream_filter": desired_upstream_filter,
+        }
+        for key, desired in desired_values.items():
+            if raw_entry.get(key) == desired:
+                continue
+            raw_entry[key] = copy.deepcopy(desired)
             changed = True
     return hint, changed
 
@@ -362,6 +423,26 @@ def build_zhan_launch_input_contract() -> dict[str, Any]:
                 "source_expression": "inputs.base_gmail_query",
                 "required": False,
                 "description": "Optional caller override for the base Gmail query.",
+            },
+            {
+                "target_context_key": "base_gmail_query",
+                "source_expression": "inputs.arxiv_id",
+                "extractor": "arxiv_id",
+                "required": False,
+                "description": (
+                    "Optional prior-evidence arXiv identifier used as a narrow "
+                    "Gmail query when no explicit base Gmail query is supplied."
+                ),
+            },
+            {
+                "target_context_key": "arxiv_id",
+                "source_expression": "inputs.arxiv_id",
+                "extractor": "arxiv_id",
+                "required": False,
+                "description": (
+                    "Optional prior-evidence arXiv identifier preserved for "
+                    "downstream workflow context."
+                ),
             },
             {
                 "target_context_key": "gmail_max_results",
@@ -408,15 +489,19 @@ def _validate_launch_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _publish_definition(definition: WorkflowDefinition) -> dict[str, Any]:
-    publication = workflow_concept_authority_service.publish_workflow_definition_from_definition(
-        definition=definition,
-        create_missing=False,
-        purpose=definition.purpose,
+    publication = (
+        workflow_concept_authority_service.publish_workflow_definition_from_definition(
+            definition=definition,
+            create_missing=False,
+            purpose=definition.purpose,
+        )
     )
     errors = publication.get("errors_by_workflow_id") or {}
     validation = publication.get("validation_failures_by_workflow_id") or {}
     if errors.get(definition.workflow_id) or validation.get(definition.workflow_id):
-        raise RuntimeError(json.dumps(publication, indent=2, sort_keys=True, default=str))
+        raise RuntimeError(
+            json.dumps(publication, indent=2, sort_keys=True, default=str)
+        )
     workflow_concept_authority_service.upsert_workflow_publication_lifecycle(
         workflow_id=definition.workflow_id,
         phase="published",
@@ -466,7 +551,9 @@ def publish_jvnautosci_2272_repair(*, dry_run: bool = False) -> dict[str, Any]:
     child_definition = build_workflow_definition_from_authoring_spec(child_spec)
 
     zhan_contract = _validate_launch_contract(build_zhan_launch_input_contract())
-    child_contract = _validate_launch_contract(build_email_message_launch_input_contract())
+    child_contract = _validate_launch_contract(
+        build_email_message_launch_input_contract()
+    )
     hint_payload, hint_changed = rewrite_gmail_completion_hint_payload(
         _load_gmail_completion_hint()
     )

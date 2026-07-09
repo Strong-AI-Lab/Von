@@ -19,6 +19,7 @@ from src.backend.workflows.workflow_authoring_service import (
 )
 from src.backend.workflows.workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
+    resolve_workflow_launch_inputs,
 )
 
 
@@ -42,7 +43,7 @@ def test_parent_rewrite_collects_partial_message_outcomes() -> None:
         "initial_state_key": PARENT_LIST_MESSAGES_STEP_ID,
         "steps": [
             {
-            "state_id": PARENT_LIST_MESSAGES_STEP_ID,
+                "state_id": PARENT_LIST_MESSAGES_STEP_ID,
                 "action_id": "workflow_mcp.invoke_tool",
                 "static_input_bindings": [
                     {"tool_param": "tool_name", "value": "gmail_list_messages"}
@@ -71,12 +72,14 @@ def test_parent_rewrite_collects_partial_message_outcomes() -> None:
     list_step = rewritten["steps"][0]
 
     assert changes["message_batch_allows_partial"] is True
-    assert _binding_value(process_step, "success_policy") == ALLOW_PARTIAL_SUCCESS_POLICY
+    assert (
+        _binding_value(process_step, "success_policy") == ALLOW_PARTIAL_SUCCESS_POLICY
+    )
     assert "message_partial_success" in process_step["writes_context_keys"]
     assert "message_item_count" in process_step["writes_context_keys"]
-    assert _mapping_for(process_step, "message_partial_success")["tool_output_field"] == (
-        "for_each_partial_success"
-    )
+    assert _mapping_for(process_step, "message_partial_success")[
+        "tool_output_field"
+    ] == ("for_each_partial_success")
     assert _mapping_for(process_step, "message_item_count")["tool_output_field"] == (
         "for_each_item_count"
     )
@@ -87,13 +90,13 @@ def test_parent_rewrite_collects_partial_message_outcomes() -> None:
     assert action.inputs["success_policy"] == ALLOW_PARTIAL_SUCCESS_POLICY
 
 
-def test_child_rewrite_collects_arxiv_partial_outcomes_before_label_step() -> None:
+def test_child_rewrite_collects_arxiv_partial_outcomes_before_marker_step() -> None:
     spec = {
         "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow",
         "initial_state_key": CHILD_EXTRACT_RESOURCES_STEP_ID,
         "steps": [
             {
-            "state_id": CHILD_EXTRACT_RESOURCES_STEP_ID,
+                "state_id": CHILD_EXTRACT_RESOURCES_STEP_ID,
                 "subworkflow_id": "#V#email_resource_link_extraction",
                 "next_state_key": CHILD_INGEST_ARXIV_STEP_ID,
             },
@@ -149,16 +152,28 @@ def test_child_rewrite_collects_arxiv_partial_outcomes_before_label_step() -> No
     assert _mapping_for(ingest_step, "arxiv_item_count")["tool_output_field"] == (
         "for_each_item_count"
     )
-    assert ingest_step["conditional_transitions"][0]["to_state"] == "resolve_done_hint"
+    assert (
+        ingest_step["conditional_transitions"][0]["to_state"] == CHILD_MARK_DONE_STEP_ID
+    )
     assert extract_step["metadata"]["retry_policy"]["max_attempts"] == 2
     assert mark_done_step["metadata"]["retry_policy"]["max_attempts"] == 2
+    assert _binding_value(mark_done_step, "tool_name") == (
+        "record_source_processing_marker"
+    )
+    marker_args = _binding_value(mark_done_step, "tool_arguments")
+    assert marker_args["source_system"] == "gmail"
+    assert marker_args["source_item_id"] == {"$context_key": "message_id"}
+    assert marker_args["represented_outputs"] == {
+        "$context_key": "arxiv_iteration_results"
+    }
+    assert "message_processing_marker" in mark_done_step["writes_context_keys"]
 
     definition = build_workflow_definition_from_authoring_spec(rewritten)
     action = definition.states[CHILD_INGEST_ARXIV_STEP_ID].actions[0]
     assert action.inputs["success_policy"] == ALLOW_PARTIAL_SUCCESS_POLICY
 
 
-def test_completion_hint_uses_label_id_for_mutation_and_name_for_filter() -> None:
+def test_completion_hint_uses_represented_marker_without_gmail_mutation() -> None:
     hint = {
         "schema_version": "tool_output_followup_hint.v1",
         "entries": [
@@ -186,8 +201,22 @@ def test_completion_hint_uses_label_id_for_mutation_and_name_for_filter() -> Non
     entry = rewritten["entries"][0]
 
     assert changed is True
-    assert entry["tool_arguments"]["add_labels"] == ["Label_7"]
-    assert entry["upstream_filter"]["query_fragment"] == "-label:vontology/ingested"
+    assert entry["action"]["tool_name"] == "record_source_processing_marker"
+    assert entry["tool_arguments"] == {
+        "source_system": "gmail",
+        "source_profile_context_key": "gmail_profile",
+        "source_item_id_context_key": "message_id",
+        "represented_outputs_context_key": "arxiv_iteration_results",
+        "processing_status": "processed",
+    }
+    assert entry["represented_effects"] == [
+        {
+            "effect_kind": "record_source_processing_marker",
+            "marker_type_concept_id": "#V#source_processing_marker",
+            "evidence_predicate_concept_id": "#V#hasSourceProcessingEvidenceJson",
+        }
+    ]
+    assert entry["upstream_filter"]["query_fragment"] == ""
 
 
 def test_launch_contracts_are_valid_and_mapping_backed() -> None:
@@ -201,7 +230,22 @@ def test_launch_contracts_are_valid_and_mapping_backed() -> None:
         assert normalised["input_mappings"]
 
 
-def test_serialise_authoring_spec_does_not_reauthor_loader_transition_metadata() -> None:
+def test_zhan_launch_contract_uses_prior_arxiv_evidence_as_narrow_query() -> None:
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id="#V#zhan_gmail_arxiv_ingestion_workflow",
+        contract=build_zhan_launch_input_contract(),
+        inputs={"arxiv_id": "2606.30544"},
+        contract_source="repair_script_test",
+    )
+
+    assert resolution.resolved_inputs["base_gmail_query"] == "2606.30544"
+    assert resolution.resolved_inputs["arxiv_id"] == "2606.30544"
+    assert resolution.diagnostics["status"] == "resolved"
+
+
+def test_serialise_authoring_spec_does_not_reauthor_loader_transition_metadata() -> (
+    None
+):
     definition = build_workflow_definition_from_authoring_spec(
         {
             "workflow_id": "#V#sample_transition_roundtrip_workflow",
