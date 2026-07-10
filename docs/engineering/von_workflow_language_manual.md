@@ -847,6 +847,18 @@ A missing or invalid receipt must remain visible as typed validation evidence.
 It may fail closed for completion safety, but it must not erase already
 committed effects or the remaining represented recovery opportunities.
 
+Read and evaluation surfaces use
+`terminal_outcome_receipt_projection.v1` as a neutral projection of that same
+authored receipt. The projection is available in the persisted Turn Execution
+Record, tool-observation ledger, bounded live-progress snapshot, workflow-trace
+summary, and turn benchmark/dashboard drill-down. Projection code may locate,
+validate, redact, bound, copy, and count receipt fields. It must not reinterpret
+legacy completion text, tool errors, or workflow names into a replacement
+outcome. Benchmark receipt metrics therefore report coverage and distributions
+for the represented `outcome`, `causal_stage`, `retryability`, recovery
+affordances, and decision provenance rather than silently substituting legacy
+failure classifiers.
+
 Validation phases:
 
 - pre-action: preconditions/reads checks,

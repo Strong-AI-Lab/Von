@@ -6155,6 +6155,8 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
         "completion_gate_verdict",
         "completion_report",
         "required_tool_obligation_ledger",
+        "terminal_outcome_receipt",
+        "terminal_outcome_receipt_validation",
         "response_transformations",
     ):
         value = outputs.get(key)
@@ -6423,83 +6425,6 @@ def _mark_background_generate_completed_if_ready(
             background_task_id,
             exc_info=True,
         )
-
-
-def _mark_background_generate_completed_from_orchestrator_ready_progress(
-    *,
-    background_task_id: str | None,
-    progress_payload: Mapping[str, Any],
-    request_id: str,
-    session_id: str | None,
-    created_conversation_session_name: str | None,
-    created_conversation_session: bool,
-    user_id: str | None,
-    rag_trace: Any,
-) -> None:
-    if str(progress_payload.get("status") or "").strip() != "orchestrator_result_ready":
-        return
-    response_text = progress_payload.get("response_text")
-    if not isinstance(response_text, str) or not response_text.strip():
-        return
-
-    presenter_channels = _extract_presenter_channels(response_text)
-    workflow_discovery = progress_payload.get("workflow_discovery")
-    workflow_routing = progress_payload.get("workflow_routing")
-    selected_workflow_trace = progress_payload.get("selected_workflow_trace")
-    aux_llm_calls = progress_payload.get("aux_llm_calls")
-    llm_calls = progress_payload.get("llm_calls")
-    tool_invocations = progress_payload.get("tool_invocations")
-    render_plan = progress_payload.get("render_plan")
-    llm_debug_info: dict[str, Any] = {
-        "interaction_timestamp_utc": _now_utc_iso(),
-        "request_id": request_id,
-        "model": progress_payload.get("model"),
-        "response": response_text,
-        "presenter_channels": presenter_channels,
-        "tool_invocations": (
-            list(tool_invocations) if isinstance(tool_invocations, list) else []
-        ),
-        "aux_llm_calls": list(aux_llm_calls) if isinstance(aux_llm_calls, list) else [],
-        "llm_calls": list(llm_calls) if isinstance(llm_calls, list) else [],
-        "workflow_discovery": (
-            dict(workflow_discovery)
-            if isinstance(workflow_discovery, Mapping)
-            else None
-        ),
-        "workflow_routing": (
-            dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
-        ),
-        "selected_workflow_trace": (
-            dict(selected_workflow_trace)
-            if isinstance(selected_workflow_trace, Mapping)
-            else None
-        ),
-        "background_result_source": "orchestrator_result_ready_progress",
-    }
-    if isinstance(render_plan, Mapping):
-        llm_debug_info["render_plan"] = dict(render_plan)
-
-    result_body = _build_generate_success_body(
-        request_id=request_id,
-        session_id=session_id,
-        created_conversation_session_name=created_conversation_session_name,
-        created_conversation_session=created_conversation_session,
-        response_text=response_text,
-        presenter_channels=(
-            presenter_channels if isinstance(presenter_channels, dict) else None
-        ),
-        llm_debug_info=llm_debug_info,
-        display_elements_contract=None,
-        rag_trace=rag_trace,
-    )
-    _mark_background_generate_completed_if_ready(
-        background_task_id=background_task_id,
-        result_body=result_body,
-        request_id=request_id,
-        session_id=session_id,
-        user_id=user_id,
-        response_text=response_text,
-    )
 
 
 def _resolve_generate_requested_model(
@@ -7653,6 +7578,48 @@ def _finalise_llm_debug_info(
             ),
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
+        terminal_outcome_receipt = turn_execution_record.get(
+            "terminal_outcome_receipt"
+        )
+        terminal_outcome_receipt_validation = turn_execution_record.get(
+            "terminal_outcome_receipt_validation"
+        )
+        if isinstance(terminal_outcome_receipt, Mapping):
+            llm_debug_info["terminal_outcome_receipt"] = dict(
+                terminal_outcome_receipt
+            )
+            llm_debug_info["terminal_outcome_receipt_validation"] = (
+                dict(terminal_outcome_receipt_validation)
+                if isinstance(terminal_outcome_receipt_validation, Mapping)
+                else {}
+            )
+            tool_observation_ledger = build_tool_observation_ledger(
+                existing_ledger=tool_observation_ledger,
+                terminal_outcome_receipt=terminal_outcome_receipt,
+                terminal_outcome_receipt_validation=(
+                    terminal_outcome_receipt_validation
+                    if isinstance(terminal_outcome_receipt_validation, Mapping)
+                    else None
+                ),
+            )
+            llm_debug_info["tool_observation_ledger"] = dict(
+                tool_observation_ledger
+            )
+            diagnostics_payload = llm_debug_info.get(
+                "turn_execution_diagnostics"
+            )
+            if isinstance(diagnostics_payload, dict):
+                diagnostics_payload["terminal_outcome_receipt"] = dict(
+                    terminal_outcome_receipt
+                )
+                diagnostics_payload["terminal_outcome_receipt_validation"] = (
+                    dict(terminal_outcome_receipt_validation)
+                    if isinstance(terminal_outcome_receipt_validation, Mapping)
+                    else {}
+                )
+                diagnostics_payload["tool_observation_ledger"] = dict(
+                    tool_observation_ledger
+                )
         routing_diagnostics = turn_execution_record.get("workflow_routing_diagnostics")
         if isinstance(routing_diagnostics, Mapping):
             llm_debug_info["workflow_routing_diagnostics"] = dict(routing_diagnostics)
@@ -12493,16 +12460,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             else {"status": "unknown"}
                         )
                         payload.setdefault("request_id", request_id)
-                        _mark_background_generate_completed_from_orchestrator_ready_progress(
-                            background_task_id=background_task_id or request_id,
-                            progress_payload=payload,
-                            request_id=request_id,
-                            session_id=session_id,
-                            created_conversation_session_name=created_conversation_session_name,
-                            created_conversation_session=created_conversation_session,
-                            user_id=history_user_id or user_concept_id,
-                            rag_trace=rag_trace,
-                        )
                         _emit_generate_progress(payload)
 
                     progress_tracker = ProgressTracker(
@@ -12769,11 +12726,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if key != "screen"
             }
 
-        # Publish a compact background result as soon as the supervised
-        # workflow has produced the response. The rest of this route still
-        # performs presenter backfill, diagnostics, history persistence, and
-        # durable-finalisation best effort, and can enrich the task result
-        # later without blocking polling clients on that bookkeeping.
+        # A supervised response is progress, not a terminal task result.  Keep
+        # polling clients active until the Turn Execution Record and canonical
+        # receipt projection have been assembled below.  The progress stream
+        # already exposes ``orchestrator_result_ready`` without claiming that
+        # terminal evidence is final.
         current_turn_messages = [{"role": "user", "content": prompt_text}]
         if tool_messages:
             current_turn_messages.extend(tool_messages)
@@ -12792,63 +12749,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
             tool_invocations
         )
-        background_ready_llm_debug: dict[str, Any] = {
-            "interaction_timestamp_utc": interaction_timestamp_utc,
-            "request_id": request_id,
-            "model": model_name,
-            "llm_interaction": {
-                **llm_interaction,
-                "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                * 1000.0,
-            },
-            "messages": current_turn_messages,
-            "response": response_text,
-            "presenter_channels": presenter_channels,
-            "user_prompt": user_prompt_debug,
-            "namespace_report": namespace_report,
-            "tool_invocations": serialised_tool_invocations,
-            "aux_llm_calls": auxiliary_llm_calls,
-            "workflow_discovery": workflow_discovery_result,
-            "workflow_routing": workflow_routing_info,
-            "selected_workflow_trace": selected_workflow_trace_payload,
-            "display_elements": None,
-            "background_result_source": "generate_response_ready",
-        }
-        background_ready_tool_observation_ledger = build_tool_observation_ledger(
-            tool_invocations=serialised_tool_invocations,
-            aux_llm_calls=auxiliary_llm_calls,
-        )
-        if (
-            int(background_ready_tool_observation_ledger.get("observation_count") or 0)
-            > 0
-        ):
-            background_ready_llm_debug["tool_observation_ledger"] = dict(
-                background_ready_tool_observation_ledger
-            )
-        if isinstance(render_plan_debug, dict):
-            background_ready_llm_debug["render_plan"] = dict(render_plan_debug)
-        background_ready_body = _build_generate_success_body(
-            request_id=request_id,
-            session_id=session_id,
-            created_conversation_session_name=created_conversation_session_name,
-            created_conversation_session=created_conversation_session,
-            response_text=response_text,
-            presenter_channels=(
-                presenter_channels if isinstance(presenter_channels, dict) else None
-            ),
-            llm_debug_info=background_ready_llm_debug,
-            display_elements_contract=None,
-            rag_trace=rag_trace,
-        )
-        _mark_background_generate_completed_if_ready(
-            background_task_id=background_task_id,
-            result_body=background_ready_body,
-            request_id=request_id,
-            session_id=session_id,
-            user_id=history_user_id or user_concept_id,
-            response_text=response_text,
-        )
-
         presenter_channels_missing = (
             not isinstance(presenter_channels, dict) or not presenter_channels
         )
@@ -14670,28 +14570,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         _refresh_llm_debug_timing_payload(llm_debug_info)
 
-        background_success_body = _build_generate_success_body(
-            request_id=request_id,
-            session_id=session_id,
-            created_conversation_session_name=created_conversation_session_name,
-            created_conversation_session=created_conversation_session,
-            response_text=response_text,
-            presenter_channels=(
-                presenter_channels if isinstance(presenter_channels, dict) else None
-            ),
-            llm_debug_info=llm_debug_info,
-            display_elements_contract=display_elements_contract,
-            rag_trace=rag_trace,
-        )
-        _mark_background_generate_completed_if_ready(
-            background_task_id=background_task_id,
-            result_body=background_success_body,
-            request_id=request_id,
-            session_id=session_id,
-            user_id=history_user_id or user_concept_id,
-            response_text=response_text,
-        )
-
         current_app.config["CONTEXT"] = _persist_generate_turn_messages(
             history_user_id=history_user_id,
             user_message_persisted_early=_user_message_persisted_early,
@@ -14763,25 +14641,30 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ):
                 _emit_generate_progress(final_progress_payload)
         _refresh_llm_debug_timing_payload(llm_debug_info)
-        return jsonify(
-            _json_safe_response_payload(
-                _build_generate_success_body(
-                    request_id=request_id,
-                    session_id=session_id,
-                    created_conversation_session_name=created_conversation_session_name,
-                    created_conversation_session=created_conversation_session,
-                    response_text=response_text,
-                    presenter_channels=(
-                        presenter_channels
-                        if isinstance(presenter_channels, dict)
-                        else None
-                    ),
-                    llm_debug_info=llm_debug_info,
-                    display_elements_contract=display_elements_contract,
-                    rag_trace=rag_trace,
-                )
+        final_success_body = _json_safe_response_payload(
+            _build_generate_success_body(
+                request_id=request_id,
+                session_id=session_id,
+                created_conversation_session_name=created_conversation_session_name,
+                created_conversation_session=created_conversation_session,
+                response_text=response_text,
+                presenter_channels=(
+                    presenter_channels if isinstance(presenter_channels, dict) else None
+                ),
+                llm_debug_info=llm_debug_info,
+                display_elements_contract=display_elements_contract,
+                rag_trace=rag_trace,
             )
         )
+        _mark_background_generate_completed_if_ready(
+            background_task_id=background_task_id,
+            result_body=final_success_body,
+            request_id=request_id,
+            session_id=session_id,
+            user_id=history_user_id or user_concept_id,
+            response_text=response_text,
+        )
+        return jsonify(final_success_body)
     except CancellationRequested:
         if progress_updates_enabled:
             try:

@@ -13,6 +13,34 @@ from tests.backend.benchmark_suite_test_helpers import (
 )
 
 
+def _terminal_receipt(
+    *,
+    outcome: str,
+    causal_stage: str,
+    cause_code: str | None,
+    retryability: str,
+    recovery_affordances: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": outcome,
+        "cause_code": cause_code,
+        "causal_stage": causal_stage,
+        "summary": f"Represented outcome: {outcome}.",
+        "evidence_refs": [{"source": "test", "ref": f"evidence-{outcome}"}],
+        "committed_effects": [],
+        "remaining_obligations": (
+            [] if outcome == "verified_success" else [{"effect_id": "effect-1"}]
+        ),
+        "retryability": retryability,
+        "recovery_affordances": recovery_affordances or [],
+        "learning_candidate": None,
+        "redaction_status": "safe_projection",
+        "provenance": {"decision_source": "represented_llm"},
+    }
+
+
 @pytest.fixture(autouse=True)
 def _use_represented_benchmark_suites(monkeypatch: pytest.MonkeyPatch) -> None:
     for module in (
@@ -437,6 +465,13 @@ def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="recoverable_failure",
+                causal_stage="execution",
+                cause_code="required_action_missing",
+                retryability="now",
+                recovery_affordances=[{"action_type": "retry"}],
+            ),
         },
         {
             "request_id": "req-hes-2",
@@ -473,6 +508,13 @@ def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_partial",
+                causal_stage="verification",
+                cause_code="verification_inconclusive",
+                retryability="now",
+                recovery_affordances=[{"action_type": "inspect"}],
+            ),
         },
         {
             "request_id": "req-hes-3",
@@ -804,6 +846,12 @@ def _build_dashboard_trace_docs() -> list[dict[str, Any]]:
                 "completion_claim_detected": False,
                 "completion_claim_validated": True,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_success",
+                causal_stage="not_applicable",
+                cause_code=None,
+                retryability="not_applicable",
+            ),
         },
         {
             "request_id": "req-dash-3",
@@ -1188,6 +1236,13 @@ def test_turn_execution_get_includes_rag_indexing_state_from_chat_history(monkey
         "workflow_selection": {"selected_workflow_id": "#V#tool_calling_workflow"},
         "prompt": {"preview": "Attempted update"},
         "critic": {"summary": {"inconclusive_count": 1}},
+        "terminal_outcome_receipt": _terminal_receipt(
+            outcome="inconclusive",
+            causal_stage="unknown",
+            cause_code="causal_evidence_missing",
+            retryability="now",
+            recovery_affordances=[{"action_type": "inspect"}],
+        ),
     }
     chat_docs = [
         {
@@ -1220,6 +1275,9 @@ def test_turn_execution_get_includes_rag_indexing_state_from_chat_history(monkey
     assert state["sync_state"] == "error"
     assert state["indexed"] is False
     assert state["reason_code"] == "all_indexing_attempts_failed"
+    projection = result["terminal_outcome_receipt_projection"]
+    assert projection["available"] is True
+    assert projection["outcome"] == "inconclusive"
     assert "rag_indexing_lookup_warning" not in result
 
 
@@ -1634,6 +1692,13 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="recoverable_failure",
+                causal_stage="execution",
+                cause_code="required_action_missing",
+                retryability="now",
+                recovery_affordances=[{"action_type": "retry"}],
+            ),
         },
         {
             "request_id": "req-fail-2",
@@ -1658,6 +1723,13 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_partial",
+                causal_stage="verification",
+                cause_code="verification_inconclusive",
+                retryability="now",
+                recovery_affordances=[{"action_type": "inspect"}],
+            ),
         },
         {
             "request_id": "req-ok-1",
@@ -1682,6 +1754,12 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
                 "completion_claim_detected": False,
                 "completion_claim_validated": True,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_success",
+                causal_stage="not_applicable",
+                cause_code=None,
+                retryability="not_applicable",
+            ),
         },
     ]
 
@@ -1821,6 +1899,13 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="recoverable_failure",
+                causal_stage="execution",
+                cause_code="required_action_missing",
+                retryability="now",
+                recovery_affordances=[{"action_type": "retry"}],
+            ),
         },
         {
             "request_id": "req-fail-2",
@@ -1845,6 +1930,13 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
                 "completion_claim_detected": True,
                 "completion_claim_validated": False,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_partial",
+                causal_stage="verification",
+                cause_code="verification_inconclusive",
+                retryability="now",
+                recovery_affordances=[{"action_type": "inspect"}],
+            ),
         },
         {
             "request_id": "req-ok-1",
@@ -1869,6 +1961,12 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
                 "completion_claim_detected": False,
                 "completion_claim_validated": True,
             },
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_success",
+                causal_stage="not_applicable",
+                cause_code=None,
+                retryability="not_applicable",
+            ),
         },
     ]
 
@@ -1901,6 +1999,16 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert metrics["outcome_label_counts"]["successful_completion"] == 1
     assert metrics["outcome_label_counts"]["unresolved_follow_up_needed"] == 2
     assert metrics["outcome_label_rates_pct"]["successful_completion_rate_pct"] == 33.33
+    receipt_metrics = metrics["terminal_outcome_receipts"]
+    assert receipt_metrics["valid_receipt_coverage_pct"] == 100.0
+    assert receipt_metrics["typed_non_success_coverage_pct"] == 100.0
+    assert receipt_metrics["causal_stage_coverage_pct"] == 100.0
+    assert receipt_metrics["recovery_affordance_coverage_pct"] == 100.0
+    assert receipt_metrics["outcome_counts"] == {
+        "recoverable_failure": 1,
+        "verified_partial": 1,
+        "verified_success": 1,
+    }
     assert isinstance(result.get("benchmark_fingerprint"), str)
     assert len(result["benchmark_fingerprint"]) == 16
 
@@ -1913,6 +2021,9 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert first_case["pass_criteria"]["action_attempted"] is True
     assert first_case["pass_criteria"]["postcondition_satisfied"] is True
     assert first_case["pass_criteria"]["no_false_success"] is True
+    assert first_case["evidence"]["terminal_outcome_receipt_projection"][
+        "outcome"
+    ] == "recoverable_failure"
     triage = first_case.get("triage")
     assert isinstance(triage, dict)
     assert "JVNAUTOSCI-1202" in triage.get("jira_issue_keys", [])
@@ -2833,6 +2944,9 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     assert card_by_id["selector_accuracy"]["status"] == "fail"
     assert card_by_id["avg_pre_dispatch_duration"]["status"] == "fail"
     assert "minimal_imposition_score" in card_by_id
+    assert "valid_terminal_receipt_coverage" in card_by_id
+    assert "typed_non_success_coverage" in card_by_id
+    assert "recovery_affordance_coverage" in card_by_id
 
     regression_views = payload.get("regression_views")
     assert isinstance(regression_views, dict)

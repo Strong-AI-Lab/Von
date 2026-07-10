@@ -1,8 +1,12 @@
+import pytest
+
 from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
 )
 from src.backend.workflows.terminal_outcome_receipts import (
     apply_terminal_outcome_receipt_to_completion_gate,
+    build_terminal_outcome_receipt_projection,
+    terminal_outcome_receipt_projection_from_record,
     validate_terminal_outcome_receipt,
 )
 
@@ -183,3 +187,113 @@ def test_turn_execution_record_persists_the_critic_authored_receipt() -> None:
     assert record["terminal_outcome_receipt_validation"]["valid"] is True
     assert record["completion_gate"]["decision"] == "recoverable_failure"
     assert record["completion_gate"]["safe_to_claim_completion"] is False
+    ledger_projection = record["execution"]["tool_observation_ledger"][
+        "terminal_outcome_receipt_projection"
+    ]
+    assert ledger_projection["available"] is True
+    assert ledger_projection["outcome"] == "recoverable_failure"
+    assert ledger_projection["source"] == "tool_observation_ledger"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "causal_stage", "cause_code", "retryability", "affordance"),
+    [
+        ("verified_success", "not_applicable", None, "not_applicable", None),
+        ("verified_partial", "persistence", "partial_effects", "now", "resume"),
+        ("input_required", "planning", "required_input_missing", "after_input", "elicit_input"),
+        (
+            "externally_blocked",
+            "invocation",
+            "authorisation_denied",
+            "after_external_change",
+            "inspect",
+        ),
+        ("recoverable_failure", "retrieval", "empty_result", "now", "alternate_tool"),
+        (
+            "terminal_failure",
+            "verification",
+            "forbidden_target",
+            "not_safely_recoverable",
+            "escalate",
+        ),
+        ("cancelled", "execution", "execution_interrupted", "now", "resume"),
+        ("inconclusive", "unknown", "causal_evidence_missing", "now", "inspect"),
+    ],
+)
+def test_accepts_the_full_represented_terminal_outcome_family(
+    outcome: str,
+    causal_stage: str,
+    cause_code: str | None,
+    retryability: str,
+    affordance: str | None,
+) -> None:
+    receipt, validation = validate_terminal_outcome_receipt(
+        _receipt(
+            outcome=outcome,
+            causal_stage=causal_stage,
+            cause_code=cause_code,
+            retryability=retryability,
+            recovery_affordances=(
+                [{"action_type": affordance}] if affordance else []
+            ),
+        ),
+        completion_gate={"safe_to_claim_completion": True},
+        required=True,
+    )
+
+    assert validation["valid"] is True
+    assert receipt is not None
+    assert receipt["outcome"] == outcome
+    assert receipt["causal_stage"] == causal_stage
+    assert receipt["retryability"] == retryability
+
+
+def test_projection_preserves_partial_effects_and_idempotent_reuse_evidence() -> None:
+    projection = build_terminal_outcome_receipt_projection(
+        _receipt(
+            outcome="verified_partial",
+            cause_code="remaining_readback_pending",
+            causal_stage="verification",
+            committed_effects=[
+                {
+                    "effect_id": "effect-reuse",
+                    "effect_type": "idempotent_reuse",
+                    "authoritative_postcondition_rechecked": True,
+                    "status": "satisfied",
+                }
+            ],
+            remaining_obligations=[
+                {"effect_id": "effect-readback", "status": "not_satisfied"}
+            ],
+            retryability="now",
+            recovery_affordances=[{"action_type": "resume"}],
+        ),
+        source="test.partial_idempotent_reuse",
+    )
+
+    assert projection["available"] is True
+    assert projection["outcome"] == "verified_partial"
+    assert projection["committed_effects"][0]["effect_type"] == "idempotent_reuse"
+    assert projection["committed_effects"][0][
+        "authoritative_postcondition_rechecked"
+    ] is True
+    assert projection["remaining_obligations"] == [
+        {"effect_id": "effect-readback", "status": "not_satisfied"}
+    ]
+
+
+def test_record_projection_falls_back_to_completion_gate_evidence() -> None:
+    projection = terminal_outcome_receipt_projection_from_record(
+        {
+            "completion_gate": {
+                "evidence_payload": {
+                    "terminal_outcome_receipt": _receipt(),
+                }
+            }
+        },
+        source="test.legacy_record",
+    )
+
+    assert projection["available"] is True
+    assert projection["outcome"] == "recoverable_failure"
+    assert projection["source"] == "test.legacy_record"

@@ -335,6 +335,19 @@ Before the first replay:
    - actual model reported by Von telemetry;
    - local branch/commit identity for the checkout you ran from;
    - server-reported version/branch/commit when the server exposes them.
+7. For terminal-outcome acceptance, reconcile the same
+   `terminal_outcome_receipt_projection.v1` across the Turn Execution Record,
+   tool-observation ledger, bounded live progress, workflow trace, and
+   benchmark/dashboard output. A nested critic JSON object alone is not enough:
+   the outcome, causal stage, cause code, committed effects, remaining
+   obligations, retryability, recovery affordances, and provenance must agree.
+   Treat a missing projection as an evidence gap, not permission to derive an
+   outcome from response wording.
+8. Treat `orchestrator_result_ready` and equivalent answer-available events as
+   non-terminal progress. A background task may be reported as completed only
+   after its Turn Execution Record and terminal-outcome evidence have been
+   assembled. Otherwise polling clients can stop on an answer that has not yet
+   acquired the receipt needed to explain success, partial success, or failure.
 
 For the current `JVNAUTOSCI-1894` replay programme, the default scripted model
 override should be Ollama `gemma4:26b` unless a task explicitly requires a

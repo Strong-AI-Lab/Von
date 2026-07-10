@@ -7,6 +7,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from .namespace_service import derive_actor_context_from_namespace
+from ..workflows.terminal_outcome_receipts import (
+    build_terminal_outcome_receipt_projection,
+)
 
 _DEFAULT_SECTION_LIMIT = 20
 _MAX_SECTION_LIMIT = 200
@@ -20,6 +23,7 @@ _LIVE_PROGRESS_DETAIL_SECTIONS = frozenset(
         "progress_events",
         "selected_workflow_execution",
         "stage_diagnostics",
+        "terminal_outcome_receipt_projection",
         "thinking_interpretability",
         "timing_spans",
         "turn_timing_trace",
@@ -98,6 +102,51 @@ def _section_counts(payload: Mapping[str, Any]) -> dict[str, int | None]:
         else:
             counts[section] = 1
     return counts
+
+
+def _build_live_terminal_outcome_receipt_projection(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt = payload.get("terminal_outcome_receipt")
+    validation = payload.get("terminal_outcome_receipt_validation")
+    source = "live_progress.terminal_outcome_receipt"
+
+    if not isinstance(receipt, Mapping):
+        completion_gate = payload.get("completion_gate")
+        if not isinstance(completion_gate, Mapping):
+            completion_gate = payload.get("completion_gate_verdict")
+        if isinstance(completion_gate, Mapping):
+            evidence_payload = completion_gate.get("evidence_payload")
+            if isinstance(evidence_payload, Mapping):
+                receipt = evidence_payload.get("terminal_outcome_receipt")
+                validation = evidence_payload.get(
+                    "terminal_outcome_receipt_validation"
+                )
+                source = "live_progress.completion_gate.evidence_payload"
+
+    if not isinstance(receipt, Mapping):
+        stage_diagnostics = payload.get("stage_diagnostics")
+        if isinstance(stage_diagnostics, list):
+            for entry in reversed(stage_diagnostics):
+                if not isinstance(entry, Mapping):
+                    continue
+                critic_verdict = entry.get("critic_verdict")
+                if not isinstance(critic_verdict, Mapping):
+                    continue
+                candidate = critic_verdict.get("terminal_outcome_receipt")
+                if isinstance(candidate, Mapping):
+                    receipt = candidate
+                    validation = critic_verdict.get(
+                        "terminal_outcome_receipt_validation"
+                    )
+                    source = "live_progress.stage_diagnostics.critic_verdict"
+                    break
+
+    return build_terminal_outcome_receipt_projection(
+        receipt if isinstance(receipt, Mapping) else None,
+        validation=validation if isinstance(validation, Mapping) else None,
+        source=source,
+    )
 
 
 def _build_section_payload(
@@ -206,6 +255,9 @@ def _build_bounded_live_progress_payload(
             payload.get("workflow_stage_path")
         ),
         "selected_workflow_execution_summary": selected_workflow_summary,
+        "terminal_outcome_receipt_projection": payload.get(
+            "terminal_outcome_receipt_projection"
+        ),
         "available_sections": sorted(_LIVE_PROGRESS_DETAIL_SECTIONS),
         "section_counts": _section_counts(payload),
         "detail_access": {
@@ -267,6 +319,9 @@ def get_turn_execution_live_progress_payload(
         return None
 
     payload = _serialise_tool_progress_state(state)
+    receipt_projection = _build_live_terminal_outcome_receipt_projection(payload)
+    if receipt_projection.get("available"):
+        payload["terminal_outcome_receipt_projection"] = receipt_projection
     section_name = _safe_str(section)
     if section_name:
         if section_name not in _LIVE_PROGRESS_DETAIL_SECTIONS:

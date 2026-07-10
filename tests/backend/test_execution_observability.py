@@ -7,6 +7,7 @@ from pymongo.errors import PyMongoError
 
 from src.backend.workflows.durable.execution_observability import (
     await_workflow_terminal_state,
+    build_workflow_execution_trace_summary,
     build_workflow_execution_response,
 )
 from src.backend.workflows.durable.workflow_instance_submission_service import (
@@ -46,6 +47,45 @@ def test_await_workflow_terminal_state_retries_transient_get_instance() -> None:
     assert result.timed_out is False
     assert result.final_status == "completed"
     assert manager.get_instance.call_count == 2
+
+
+def test_trace_summary_surfaces_terminal_outcome_receipt_from_action_outputs() -> None:
+    receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "recoverable_failure",
+        "cause_code": "verification_mismatch",
+        "causal_stage": "verification",
+        "summary": "Read-back did not establish the represented postcondition.",
+        "evidence_refs": [{"source": "readback", "ref": "check-1"}],
+        "committed_effects": [{"effect_id": "effect-write"}],
+        "remaining_obligations": [{"effect_id": "effect-readback"}],
+        "retryability": "now",
+        "recovery_affordances": [{"action_type": "inspect"}],
+        "learning_candidate": None,
+        "redaction_status": "safe_projection",
+        "provenance": {"decision_source": "represented_llm"},
+    }
+    summary = build_workflow_execution_trace_summary(
+        {
+            "execution_id": "trace-1",
+            "workflow_id": "#V#synthetic_workflow",
+            "status": "completed",
+            "actions": [
+                {
+                    "action_id": "turn_execution.critic",
+                    "status": "success",
+                    "outputs": {"terminal_outcome_receipt": receipt},
+                }
+            ],
+            "steps": [],
+        }
+    )
+
+    projection = summary["terminal_outcome_receipt_projection"]
+    assert projection["available"] is True
+    assert projection["outcome"] == "recoverable_failure"
+    assert projection["causal_stage"] == "verification"
 
 
 def test_workflow_execution_response_marks_queued_timeout_as_not_started() -> None:
