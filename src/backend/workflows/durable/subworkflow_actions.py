@@ -105,6 +105,7 @@ _INVOCATION_LEDGER_KEY = "__workflow_subworkflow_invocation_ledger"
 _MAX_SUBWORKFLOW_DEPTH_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH"
 _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT = 8
 _MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
+_AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV = "VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC"
 _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
@@ -169,6 +170,8 @@ def _normalise_namespaced_workflow_launch_inputs(raw_value: Any) -> dict[str, An
             continue
         normalised[key_text] = value
     return normalised
+
+
 _TELEMETRY_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
     {
         "aux_llm_calls",
@@ -190,6 +193,12 @@ def _truthy_env_value(value: str | None) -> bool:
 
 def _is_agent_test_instance() -> bool:
     return _truthy_env_value(os.getenv("VON_AGENT_TEST_INSTANCE"))
+
+
+def _agent_test_real_postcondition_critic_enabled() -> bool:
+    """Allow acceptance replays to exercise the represented critic workflow."""
+
+    return _truthy_env_value(os.getenv(_AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV))
 
 
 def _agent_test_workflow_experience_profile_concept_id(
@@ -388,7 +397,10 @@ def _completion_report_indicates_success(report: Mapping[str, Any]) -> bool:
         return False
 
     terminal_success = report.get("terminal_success_evaluation")
-    if isinstance(terminal_success, Mapping) and terminal_success.get("success") is True:
+    if (
+        isinstance(terminal_success, Mapping)
+        and terminal_success.get("success") is True
+    ):
         return True
 
     if report.get("effective_completed") is True:
@@ -577,8 +589,10 @@ def is_subworkflow_resource_exhaustion_error(error: Any) -> bool:
     that failed on resource exhaustion cannot succeed on retry.
     """
 
-    return str(error or "").strip().startswith(
-        SUBWORKFLOW_RESOURCE_EXHAUSTION_ERROR_PREFIXES
+    return (
+        str(error or "")
+        .strip()
+        .startswith(SUBWORKFLOW_RESOURCE_EXHAUSTION_ERROR_PREFIXES)
     )
 
 
@@ -696,11 +710,7 @@ def _normalise_input_key_list(value: Any) -> set[str]:
         return {cleaned} if cleaned else set()
     if not isinstance(value, (list, tuple, set)):
         return set()
-    return {
-        cleaned
-        for item in value
-        if (cleaned := _normalise_text(item))
-    }
+    return {cleaned for item in value if (cleaned := _normalise_text(item))}
 
 
 def _extract_child_inputs(
@@ -839,7 +849,9 @@ def _append_parent_trace_event(
     existing.append(dict(invocation_event))
 
 
-def _compact_child_result_payload(child_data: Mapping[str, Any] | None) -> Dict[str, Any]:
+def _compact_child_result_payload(
+    child_data: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
     """Strip child runtime telemetry before copying child context into parent state.
 
     Parent workflows should consume child business outputs via explicit
@@ -931,15 +943,14 @@ def _build_subworkflow_handler(
         if len(invocation_chain) >= max_depth:
             return WorkflowActionResult(
                 status="failed",
-                error=(
-                    "subworkflow_invocation_depth_exceeded:"
-                    f"max_depth={max_depth}"
-                ),
+                error=(f"subworkflow_invocation_depth_exceeded:max_depth={max_depth}"),
             )
 
         invocation_limit = _coerce_invocation_limit()
         try:
-            invocation_count = int(request.data.get("__workflow_subworkflow_invocation_count", 0))
+            invocation_count = int(
+                request.data.get("__workflow_subworkflow_invocation_count", 0)
+            )
         except (TypeError, ValueError):
             invocation_count = 0
         if invocation_count >= invocation_limit:
@@ -985,6 +996,7 @@ def _build_subworkflow_handler(
         if (
             child_workflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
             and _is_agent_test_instance()
+            and not _agent_test_real_postcondition_critic_enabled()
             and (
                 _agent_test_completed_selected_workflow_context(request.data)
                 or (
@@ -1134,9 +1146,7 @@ def _build_subworkflow_handler(
         if child_invocations:
             outputs["invocations"] = list(child_invocations)
         child_control_signal = normalise_control_signal(
-            (
-                child_result.result_envelope or {}
-            ).get("control_signal")
+            (child_result.result_envelope or {}).get("control_signal")
             if isinstance(child_result.result_envelope, Mapping)
             else None
         )
@@ -1154,7 +1164,9 @@ def _build_subworkflow_handler(
         if child_result.completed:
             return WorkflowActionResult(status="success", outputs=outputs)
 
-        failure_error = child_result.error or child_result.final_state or "subworkflow_failed"
+        failure_error = (
+            child_result.error or child_result.final_state or "subworkflow_failed"
+        )
         formatted_error = f"subworkflow_failed:{child_workflow_id}:{failure_error}"
         if failure_mode == WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE:
             outputs["child_workflow_failed"] = True

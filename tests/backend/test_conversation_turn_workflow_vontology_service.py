@@ -397,11 +397,14 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "completion_gate_escalation_signal" in recovery_text
     assert "Turn Expected Outcome Summary" in recovery_text
     assert "unresolved mechanically extractable targets remain" in recovery_text
-    assert "Gmail/mail tool blockers" in recovery_text
-    assert "gmail_list_profiles" in recovery_text
-    assert "do not answer as if Gmail auth or mailbox state was verified" in (
-        recovery_text
-    )
+    assert "Terminal Outcome Receipt" in recovery_text
+    assert "represented critic's primary semantic" in recovery_text
+    assert "Preserve committed effects from the receipt" in recovery_text
+    assert "Never invent placeholder identifiers" in recovery_text
+    assert "Recovery must not broaden the user's mutation authority" in recovery_text
+    assert "excluded candidate merely because" in recovery_text
+    assert "Recovery Retry Structurally Viable" in recovery_text
+    assert "terminal_outcome_receipt.retryability` is exactly `now`" in recovery_text
     assert (
         '`"retry_execution"`, `"execute_tool_batch"`, '
         '`"respond_with_answer"`, or `"respond_with_follow_up"`'
@@ -418,6 +421,12 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert isinstance(critic_text, str)
     assert "postcondition critic for one completed Von turn" in critic_text
+    assert "terminal_outcome_receipt" in critic_text
+    assert "#V#terminal_outcome_receipt" in critic_text
+    assert "The terminal outcome is your semantic judgement" in critic_text
+    assert "Recovery affordances must not broaden the user's mutation authority" in (
+        critic_text
+    )
     assert "required_evidence_answer_consistency_blocker" in critic_text
     assert "effect_prompt_required_evidence_answer_consistency" in critic_text
     assert "Focus on grounded answer consistency" in critic_text
@@ -1390,8 +1399,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     assert any(
         isinstance(mapping, dict)
-        and mapping.get("context_key")
-        == "turn_expected_conditional_required_tools"
+        and mapping.get("context_key") == "turn_expected_conditional_required_tools"
         and mapping.get("tool_output_field")
         == "validated_json.conditional_required_tools"
         for mapping in expected_outcome_mappings
@@ -1510,9 +1518,15 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     ]
     evaluate_authoritative_prompt_action = evaluate_authoritative_prompt.actions[0]
     assert evaluate_authoritative_prompt_action.action_id == "llm.action"
-    assert evaluate_authoritative_prompt_action.validation_policy == {
-        "output_format": "json_value"
-    }
+    critic_validation_policy = evaluate_authoritative_prompt_action.validation_policy
+    assert isinstance(critic_validation_policy, dict)
+    assert critic_validation_policy.get("output_format") == "json_value"
+    assert "terminal_outcome_receipt.outcome" in (
+        critic_validation_policy.get("required_json_fields") or []
+    )
+    assert "terminal_outcome_receipt" in (
+        critic_validation_policy.get("json_field_defaults") or {}
+    )
     evaluate_authoritative_prompt_contract = (
         evaluate_authoritative_prompt_action.prompt_contract
     )
@@ -1536,7 +1550,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     recovery_decision = turn_definition.states[recovery_decision_step_id]
     recovery_action = recovery_decision.actions[0]
     assert recovery_action.action_id == "llm.action"
-    assert recovery_action.validation_policy == {"output_format": "json_value"}
+    recovery_validation_policy = recovery_action.validation_policy
+    assert isinstance(recovery_validation_policy, dict)
+    assert recovery_validation_policy.get("output_format") == "json_value"
+    assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
+        "turn_next_action.response_text"
+    )
     recovery_prompt_contract = recovery_action.prompt_contract
     assert isinstance(recovery_prompt_contract, dict)
     assert recovery_prompt_contract.get("resolved_prompt_concept_id") == (
@@ -1557,6 +1576,11 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "completion_gate_repeat_eligible"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "terminal_outcome_receipt"
         for field in recovery_context_fields
     )
     assert any(

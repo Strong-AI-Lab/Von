@@ -238,6 +238,31 @@ def test_execute_llm_step_parses_json_value_output() -> None:
     assert envelope["validation"]["output_format"] == "json_value"
 
 
+def test_internal_decision_step_can_suppress_raw_response_projection() -> None:
+    llm_client = MagicMock()
+    llm_client.generate.return_value = '{"decision":"retry"}'
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={},
+        prompt_contract={"prompt_text": "Return decision JSON only."},
+        llm_policy={"project_raw_response_to_final_response": False},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"] == {"decision": "retry"}
+    assert result.outputs["llm_step_response"] == '{"decision":"retry"}'
+    assert "final_response" not in result.outputs
+    assert (
+        result.outputs["llm_step_envelope"]["raw_response_projected_to_final_response"]
+        is False
+    )
+
+
 def test_execute_llm_step_recovers_embedded_json_value_output() -> None:
     request = _build_request(
         llm_response=(
@@ -2312,7 +2337,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(
         "#V#workflow_step_turn_prompt_context_adjudication_workflow_"
         "context_adjudication_decision"
     )
-    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
     assert envelope["selected_model"] == "gpt-4.1-mini"
     assert envelope["selected_model_candidate"]["provider"] == "openai"
     assert envelope["timeout_seconds"] == 2.0
@@ -2331,7 +2358,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(
         "context_adjudication_decision"
     )
     assert timeout_entries[0]["provider"] == "openai"
-    assert timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
 
 
 def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
@@ -2391,7 +2420,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["completion_reason"] == "timeout"
     assert envelope["timeout_stage"] == "context_adjudication"
-    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
     assert envelope["selected_model"] == "gpt-4.1-mini"
     assert envelope["selected_model_candidate"]["provider"] == "openai"
     assert envelope["timeout_seconds"] == 1.0
@@ -2474,7 +2505,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["completion_reason"] == "timeout"
     assert envelope["timeout_stage"] == "context_adjudication"
-    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
     assert envelope["selected_model"] == "gpt-4.1-mini"
     assert envelope["selected_model_candidate"]["provider"] == "openai"
     assert envelope["timeout_seconds"] == 2.0
@@ -2543,7 +2576,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_prompt_render(
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["completion_reason"] == "timeout"
     assert envelope["timeout_stage"] == "context_adjudication"
-    assert envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        envelope["selected_prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
     assert envelope["selected_model"] == "gpt-4.1-mini"
     assert envelope["selected_model_candidate"]["provider"] == "openai"
     assert envelope["timeout_seconds"] == 2.0
@@ -2555,7 +2590,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_prompt_render(
     ]
     assert len(timeout_entries) == 1
     assert timeout_entries[0]["stage"] == "context_adjudication"
-    assert timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    assert (
+        timeout_entries[0]["prompt_id"] == "#V#turn_prompt_context_adjudication_prompt"
+    )
 
 
 def test_execute_llm_step_uses_explicit_timeout_override_from_request_data(

@@ -316,6 +316,11 @@ Before the first replay:
    interactive/user-facing server on port 5000.
    If you intentionally use a different `-AgentTest -Port`, set
    `VON_AGENT_TEST_BASE_URL` or pass the matching `--base-url`.
+   When the acceptance claim depends on the represented postcondition critic,
+   start AgentTest with `VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC=1`. The normal
+   AgentTest shortcut intentionally skips that LLM subworkflow for speed and is
+   not valid evidence for critic prompts, terminal outcome receipts, or
+   represented recovery decisions.
 4. If the issue depends on authenticated state, use the browser-test login path
    or another canonical authenticated route rather than faking user context.
 5. If you are using a sampled prompt, record the prompt id, category, prompt

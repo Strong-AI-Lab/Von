@@ -6557,6 +6557,13 @@ class InternalMCPChatOrchestrator:
         if not isinstance(text, str):
             return False
         candidate = text.strip()
+        fenced_match = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            candidate,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced_match:
+            candidate = fenced_match.group(1).strip()
         if not candidate or candidate[0] not in "[{":
             return False
         try:
@@ -47422,6 +47429,7 @@ class InternalMCPChatOrchestrator:
         if preserved_response_text and (
             not final_response_text.strip()
             or final_response_text.lstrip().startswith("Execution status:")
+            or self._looks_like_machine_json_text(final_response_text)
         ):
             final_response_text = preserved_response_text
 
@@ -47477,6 +47485,7 @@ class InternalMCPChatOrchestrator:
             if (
                 not result_response_text.strip()
                 or result_response_text.lstrip().startswith("Execution status:")
+                or self._looks_like_machine_json_text(result_response_text)
             ):
                 result = replace(result, response_text=preserved_response_text)
         _emit_orchestrator_result_ready_local(result)

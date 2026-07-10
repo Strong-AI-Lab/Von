@@ -1201,6 +1201,19 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     )
     assert any(
         isinstance(mapping, dict)
+        and mapping.get("context_key") == "terminal_outcome_receipt"
+        and mapping.get("tool_output_field") == "result.terminal_outcome_receipt"
+        for mapping in critic_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "terminal_outcome_receipt_validation"
+        and mapping.get("tool_output_field")
+        == "result.terminal_outcome_receipt_validation"
+        for mapping in critic_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
         and mapping.get("context_key") == "completion_gate_decision"
         and mapping.get("tool_output_field") == "result.completion_gate_decision"
         for mapping in critic_mappings
@@ -1215,6 +1228,12 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert any(
         mapping.get("context_key") == "completion_gate_evidence_payload"
         and mapping.get("tool_output_field") == "completion_gate_evidence_payload"
+        for mapping in completion_gate_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("context_key") == "terminal_outcome_receipt"
+        and mapping.get("tool_output_field") == "terminal_outcome_receipt"
         for mapping in completion_gate_mappings
         if isinstance(mapping, dict)
     )
@@ -1234,7 +1253,15 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     recovery_action = recovery_decision.actions[0]
     assert recovery_action.action_id == "llm.action"
     assert recovery_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
-    assert recovery_action.validation_policy == {"output_format": "json_value"}
+    recovery_validation_policy = recovery_action.validation_policy
+    assert isinstance(recovery_validation_policy, dict)
+    assert recovery_validation_policy.get("output_format") == "json_value"
+    assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
+        "turn_next_action.response_text"
+    )
+    assert "turn_next_action.response_text" in (
+        recovery_validation_policy.get("required_json_fields") or []
+    )
     prompt_contract = recovery_action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("requested_prompt_concept_ids") == [
@@ -1242,6 +1269,9 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     ]
     recovery_context_fields = (recovery_action.llm_policy or {}).get("context_fields")
     assert isinstance(recovery_context_fields, list)
+    assert (recovery_action.llm_policy or {}).get(
+        "project_raw_response_to_final_response"
+    ) is False
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "turn_expected_outcome_summary"
@@ -1259,7 +1289,22 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     )
     assert any(
         isinstance(field, dict)
+        and field.get("context_key") == "terminal_outcome_receipt"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "terminal_outcome_receipt_validation"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
         and field.get("context_key") == "turn_recovery_last_target_workflow_id"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_retry_viable"
         for field in recovery_context_fields
     )
     assert any(
@@ -1304,6 +1349,26 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         "kind": "context_flag",
         "key": "completion_gate_repeat_eligible",
         "expected": True,
+    } in retry_conditions
+    assert {
+        "kind": "context_value_equals",
+        "key": "terminal_outcome_receipt.retryability",
+        "value": "now",
+    } in retry_conditions
+    assert {
+        "kind": "any",
+        "conditions": [
+            {
+                "kind": "context_exists",
+                "key": "turn_recovery_retry_viable",
+                "expected": False,
+            },
+            {
+                "kind": "context_flag",
+                "key": "turn_recovery_retry_viable",
+                "expected": True,
+            },
+        ],
     } in retry_conditions
     assert any(
         t.to_state == "apply_recovery_tool_batch" and t.reason == "execute_tool_batch"
@@ -1389,6 +1454,10 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert isinstance(follow_up_assignments, list)
     assert {
         "key": "response_text",
+        "value_from_context": "turn_next_action_response_text",
+    } in follow_up_assignments
+    assert {
+        "key": "selected_workflow_user_response",
         "value_from_context": "turn_next_action_response_text",
     } in follow_up_assignments
     assert any(
@@ -1576,7 +1645,23 @@ def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement(
     evaluate_action = evaluate_authoritative_prompt.actions[0]
     assert evaluate_action.action_id == "llm.action"
     assert evaluate_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
-    assert evaluate_action.validation_policy == {"output_format": "json_value"}
+    validation_policy = evaluate_action.validation_policy
+    assert isinstance(validation_policy, dict)
+    assert validation_policy.get("output_format") == "json_value"
+    required_fields = validation_policy.get("required_json_fields") or []
+    assert "terminal_outcome_receipt.outcome" in required_fields
+    assert "terminal_outcome_receipt.recovery_affordances" in required_fields
+    receipt_default = (validation_policy.get("json_field_defaults") or {}).get(
+        "terminal_outcome_receipt"
+    )
+    assert isinstance(receipt_default, dict)
+    assert receipt_default.get("outcome") == "inconclusive"
+    assert (receipt_default.get("provenance") or {}).get("decision_source") == (
+        "represented_workflow_default"
+    )
+    assert (validation_policy.get("json_field_defaults") or {}).get(
+        "terminal_outcome_receipt.cause_code"
+    ) == "represented_critic_cause_unspecified"
     prompt_contract = evaluate_action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("requested_prompt_concept_ids") == [
@@ -1584,6 +1669,9 @@ def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement(
     ]
     context_fields = (evaluate_action.llm_policy or {}).get("context_fields")
     assert isinstance(context_fields, list)
+    assert (evaluate_action.llm_policy or {}).get(
+        "project_raw_response_to_final_response"
+    ) is False
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "turn_execution_critic_evidence_bundle"
@@ -1610,9 +1698,24 @@ def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement(
 
     finalise_authoritative = workflow.states["finalise_authoritative"]
     assert finalise_authoritative.actions[0].action_id == "turn_execution.critic"
+    assert "terminal_outcome_receipt" in (
+        finalise_authoritative.metadata.get("writes_context_keys") or []
+    )
 
     finalise_fallback = workflow.states["finalise_fallback"]
     assert finalise_fallback.actions[0].action_id == "turn_execution.critic"
+    fallback_verdict = finalise_fallback.actions[0].inputs.get("critic_verdict")
+    assert isinstance(fallback_verdict, dict)
+    assert fallback_verdict.get("verdict") == "inconclusive"
+    fallback_receipt = fallback_verdict.get("terminal_outcome_receipt")
+    assert isinstance(fallback_receipt, dict)
+    assert fallback_receipt.get("outcome") == "inconclusive"
+    assert (fallback_receipt.get("provenance") or {}).get("decision_source") == (
+        "represented_workflow_default"
+    )
+    assert "terminal_outcome_receipt_validation" in (
+        finalise_fallback.metadata.get("writes_context_keys") or []
+    )
 
 
 def test_test_registry_includes_turn_execution_workflows() -> None:
@@ -1721,6 +1824,86 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
     assert result.data["response_text"] == "You are Michael Witbrock."
     assert result.data["final_response"] == "You are Michael Witbrock."
     assert result.data["selected_workflow_user_response"] == "You are Michael Witbrock."
+
+
+def test_conversation_turn_recovery_routes_non_viable_retry_to_follow_up() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="recovery_decision",
+        states={
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=workflow.states["recovery_decision"].terminal,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            **{
+                state_id: workflow.states[state_id]
+                for state_id in (
+                    "apply_recovery_retry",
+                    "apply_recovery_answer",
+                    "apply_recovery_follow_up",
+                    "completed",
+                    "failed",
+                )
+            },
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    llm_client = MagicMock()
+    llm_client.generate.return_value = (
+        '{"turn_next_action":{"action_type":"retry_execution",'
+        '"target_workflow_id":"#V#tool_calling_workflow",'
+        '"response_text":null,"tool_calls":null},'
+        '"reasoning":"Retry the failed route."}'
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={
+            "completion_gate_repeat_eligible": True,
+            "turn_recovery_retry_viable": False,
+            "terminal_outcome_receipt": {"retryability": "after_external_change"},
+        },
+    )
+
+    expected_fallback = (
+        "I could not complete this reliably because the required evidence-producing "
+        "action did not execute. The terminal outcome receipt records the exact "
+        "cause and safe recovery options, but no further automated action remained "
+        "applicable."
+    )
+    assert result.completed is True
+    assert result.final_state == "failed"
+    assert result.data["turn_next_action_type"] == "retry_execution"
+    assert result.data["response_text"] == expected_fallback
+    assert result.data["final_response"] == expected_fallback
+    assert result.data["selected_workflow_user_response"] == expected_fallback
 
 
 def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
@@ -1994,6 +2177,28 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
                 "completion_gate_requires_follow_up": unresolved,
                 "completion_gate_safe_to_claim_completion": not unresolved,
                 "completion_gate_repeat_eligible": unresolved,
+                "terminal_outcome_receipt": {
+                    "schema_version": "terminal_outcome_receipt.v1",
+                    "profile_concept_id": "#V#terminal_outcome_receipt",
+                    "outcome": (
+                        "recoverable_failure" if unresolved else "verified_success"
+                    ),
+                    "cause_code": (
+                        "synthetic_target_remaining" if unresolved else None
+                    ),
+                    "causal_stage": "execution",
+                    "summary": "Synthetic recovery-loop terminal judgement.",
+                    "evidence_refs": [],
+                    "committed_effects": [],
+                    "remaining_obligations": [],
+                    "retryability": "now" if unresolved else "not_applicable",
+                    "recovery_affordances": (
+                        [{"action_type": "retry"}] if unresolved else []
+                    ),
+                    "learning_candidate": None,
+                    "provenance": {"decision_source": "represented_llm"},
+                    "redaction_status": "safe_projection",
+                },
                 "completion_gate_unresolved_preconditions": [
                     effect
                     for effect in required_effects

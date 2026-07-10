@@ -813,6 +813,40 @@ Normative semantics:
 - typed-subworkflow route maps define supported route keys, candidate subworkflow lists, threshold defaults, and unavailable/low-confidence fallback semantics declaratively;
 - runtimes that depend on typed-subworkflow route maps MUST resolve them from Vontology authority and fail closed with explicit diagnostics when the required metadata is missing or invalid.
 
+### 8.1 Terminal outcome receipts
+
+The canonical conversation-turn workflow uses
+`terminal_outcome_receipt.v1` (`#V#terminal_outcome_receipt`) to carry the
+represented postcondition critic's terminal judgement into completion and
+recovery. The receipt records:
+
+- the LLM-authored outcome and causal stage;
+- bounded references to the evidence used for that judgement;
+- effects already committed and obligations still outstanding;
+- retryability and the recovery affordances that remain available;
+- a non-authoritative learning candidate when the trajectory may warrant later
+  review; and
+- decision provenance and redaction status.
+
+The authority split is normative:
+
+- VWL controls the critic, completion-gate, recovery-decision, retry, alternate
+  tool/workflow, answer, and follow-up transitions;
+- the represented critic and recovery prompts ask the LLM to judge semantics
+  from current evidence and select among represented affordances;
+- Python MAY validate and bound the receipt, redact sensitive fields, persist
+  it, expose telemetry, and veto a claimed success that conflicts with a hard
+  required-effect or safety invariant;
+- Python MUST NOT infer receipt outcomes, causes, recovery actions, or
+  user-facing failure wording from tool names, workflow IDs, domains, or error
+  strings; and
+- learning candidates MUST NOT become prompt, workflow, or KB authority without
+  a separate evidence-gated promotion workflow.
+
+A missing or invalid receipt must remain visible as typed validation evidence.
+It may fail closed for completion safety, but it must not erase already
+committed effects or the remaining represented recovery opportunities.
+
 Validation phases:
 
 - pre-action: preconditions/reads checks,

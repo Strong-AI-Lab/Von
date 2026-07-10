@@ -40,9 +40,7 @@ _REPO_SEED_ASSET_PATH = (
 _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
-_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = (
-    "#V#turn_prompt_context_adjudication_prompt"
-)
+_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = "#V#turn_prompt_context_adjudication_prompt"
 _SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 _NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
@@ -460,9 +458,14 @@ def _ensure_conversation_turn_prompt_support(
         or _prompt_seed_needs_refresh(
             _RECOVERY_PROMPT_CONCEPT_ID,
             required_markers=(
-                "Gmail/mail tool blockers",
-                "gmail_list_profiles",
-                "do not answer as if Gmail auth or mailbox state was verified",
+                "Terminal Outcome Receipt",
+                "represented critic's primary semantic",
+                "Preserve committed effects from the receipt",
+                "Never invent placeholder identifiers",
+                "Recovery must not broaden the user's mutation authority",
+                "excluded candidate merely because",
+                "Recovery Retry Structurally Viable",
+                "terminal_outcome_receipt.retryability` is exactly `now`",
             ),
         )
     ):
@@ -471,7 +474,7 @@ def _ensure_conversation_turn_prompt_support(
             predicate="hasContent",
             text=_load_recovery_prompt_seed_text(),
             lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            context={"jira": "JVNAUTOSCI-1104", "source": _MANAGED_BY},
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
@@ -510,6 +513,10 @@ def _ensure_conversation_turn_prompt_support(
         or _prompt_seed_needs_refresh(
             _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
             required_markers=(
+                "terminal_outcome_receipt",
+                "#V#terminal_outcome_receipt",
+                "The terminal outcome is your semantic judgement",
+                "Recovery affordances must not broaden the user's mutation authority",
                 "final-answer synthesis telemetry",
                 "final_answer_synthesis.tool_evidence_projection",
                 "operational status/ledger summary",
@@ -521,7 +528,7 @@ def _ensure_conversation_turn_prompt_support(
             predicate="hasContent",
             text=_load_postcondition_critic_prompt_seed_text(),
             lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            context={"jira": "JVNAUTOSCI-1104", "source": _MANAGED_BY},
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)

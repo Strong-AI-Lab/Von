@@ -13,7 +13,16 @@ import os
 import re
 import threading
 import time
-from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional, Sequence, cast
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    cast,
+)
 
 from ..services.buttonify_service import (
     parse_buttonify_options_json,
@@ -131,7 +140,8 @@ def _request_uses_agent_test_local_model(request: WorkflowActionRequest) -> bool
     if provider == _AGENT_TEST_LOCAL_PROVIDER_NAME:
         return True
     requested_model = _context_string(
-        request.data.get("requested_model") or getattr(request.environment, "model", None)
+        request.data.get("requested_model")
+        or getattr(request.environment, "model", None)
     )
     model_provider, model_name = _split_model_provider_prefix(requested_model)
     if model_provider:
@@ -221,9 +231,7 @@ def _agent_test_selector_authoritative_candidate_ids(
             if not isinstance(entry, Mapping):
                 continue
             concept_id = _context_string(
-                entry.get("concept_id")
-                or entry.get("workflow_id")
-                or entry.get("id")
+                entry.get("concept_id") or entry.get("workflow_id") or entry.get("id")
             )
             if not concept_id:
                 continue
@@ -247,7 +255,9 @@ def _build_agent_test_expected_outcome_response(
     request: WorkflowActionRequest,
 ) -> str:
     required_tools = _agent_test_required_tools(request)
-    user_prompt = _context_string(request.data.get("user_prompt") or request.data.get("prompt"))
+    user_prompt = _context_string(
+        request.data.get("user_prompt") or request.data.get("prompt")
+    )
     if required_tools:
         selector_guidance = (
             "Prefer the most specific represented workflow already prepared "
@@ -257,14 +267,18 @@ def _build_agent_test_expected_outcome_response(
         if "get_text_relations_summary" in required_tools:
             summary = "Answer the represented-relation request using grounded Vontology tool evidence."
             answering_guidance = "Report the text relation predicates and counts found by the relation-summary tool."
-            grounding_requirement = "Use authoritative Vontology text relation summary evidence."
+            grounding_requirement = (
+                "Use authoritative Vontology text relation summary evidence."
+            )
         else:
             summary = "Answer the user's request using grounded evidence from the requested external surfaces."
             answering_guidance = "Use the required tools before finalising; report unavailable evidence clearly."
             grounding_requirement = "Use the requested external evidence tools; avoid answering from unsupported memory."
     else:
         summary = "Answer the user's request accurately using available context and grounded evidence."
-        selector_guidance = "Choose the route most likely to answer the request with grounded evidence."
+        selector_guidance = (
+            "Choose the route most likely to answer the request with grounded evidence."
+        )
         answering_guidance = "Answer directly only when sufficiently grounded; otherwise use tools or state what evidence is missing."
         grounding_requirement = "Use available conversation context and authoritative tool evidence; avoid unsupported claims."
     payload = {
@@ -369,10 +383,9 @@ def _agent_test_conversation_turn_fast_path_result(
     response_text: str | None = None
     if state_id == "expected_outcome_inference":
         prompt_id = _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID
-        if (
-            use_represented_selector_llm_for_agent_test_replay(request.data)
-            and not _agent_test_required_tools(request)
-        ):
+        if use_represented_selector_llm_for_agent_test_replay(
+            request.data
+        ) and not _agent_test_required_tools(request):
             return None
         response_text = _build_agent_test_expected_outcome_response(request)
     elif state_id == "selector_decision":
@@ -386,10 +399,17 @@ def _agent_test_conversation_turn_fast_path_result(
     if response_text is None:
         return None
 
-    selected_model = _context_string(
-        request.data.get("requested_model") or getattr(request.environment, "model", None)
-    ) or None
-    selected_candidate = {"provider": _AGENT_TEST_LOCAL_PROVIDER_NAME, "locality": "local"}
+    selected_model = (
+        _context_string(
+            request.data.get("requested_model")
+            or getattr(request.environment, "model", None)
+        )
+        or None
+    )
+    selected_candidate = {
+        "provider": _AGENT_TEST_LOCAL_PROVIDER_NAME,
+        "locality": "local",
+    }
     llm_call = {
         "type": "llm.generate_skipped",
         "stage": stage,
@@ -2221,6 +2241,7 @@ def _build_gateway_runtime(
     )
     user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
     policy_state = request.data.get("policy_state")
+
     def _policy_state_needs_refresh(value: Any) -> bool:
         if not isinstance(value, _WorkflowModelPolicyState):
             return value is None
@@ -2231,6 +2252,7 @@ def _build_gateway_runtime(
         }
 
     if _policy_state_needs_refresh(policy_state):
+
         def _timeout_workflow_model_policy(
             timeout_seconds: float,
         ) -> tuple[Any, Mapping[str, Any]]:
@@ -2279,6 +2301,7 @@ def _build_gateway_runtime(
     if isinstance(registry_snapshot_raw, Mapping):
         registry_snapshot = registry_snapshot_raw
     else:
+
         def _timeout_registry_snapshot(timeout_seconds: float) -> Mapping[str, Any]:
             return {
                 "source": "timeout",
@@ -2334,15 +2357,20 @@ def _selected_candidate_context_from_request(
 ) -> dict[str, Any] | None:
     candidate: dict[str, Any] = {}
     requested_model = _context_string(
-        request.data.get("requested_model") or getattr(request.environment, "model", None)
+        request.data.get("requested_model")
+        or getattr(request.environment, "model", None)
     )
     model_provider, _model_name = _split_model_provider_prefix(requested_model)
-    provider = _context_string(
-        request.data.get("requested_client_type")
-        or request.data.get("selected_model_provider")
-        or request.data.get("model_provider")
-    ) or model_provider or _context_string(
-        infer_llm_client_provider(getattr(request.environment, "llm_client", None))
+    provider = (
+        _context_string(
+            request.data.get("requested_client_type")
+            or request.data.get("selected_model_provider")
+            or request.data.get("model_provider")
+        )
+        or model_provider
+        or _context_string(
+            infer_llm_client_provider(getattr(request.environment, "llm_client", None))
+        )
     )
     if provider:
         candidate["provider"] = provider
@@ -2485,8 +2513,12 @@ def _build_result(
             prompt_context_diagnostics
         )
 
+    project_raw_response = bool(
+        llm_policy_map.get("project_raw_response_to_final_response", True)
+    )
+    llm_step_envelope["raw_response_projected_to_final_response"] = project_raw_response
+
     outputs = {
-        "final_response": response_text,
         "llm_step_response": response_text,
         "llm_step_envelope": llm_step_envelope,
         "tool_invocations": list(tool_invocations),
@@ -2494,6 +2526,8 @@ def _build_result(
         "llm_calls": list(llm_calls),
         "aux_llm_calls": list(aux_llm_calls),
     }
+    if project_raw_response:
+        outputs["final_response"] = response_text
     if required_prompt_tools:
         outputs["required_prompt_tools"] = list(required_prompt_tools)
     if isinstance(required_tool_obligation_ledger, Mapping):
@@ -2912,41 +2946,37 @@ def _run_gateway_llm_step_no_tools(
         )
 
     try:
-        response_text, selected_model, selected_candidate = (
-            _run_llm_call_with_timeout(
-                request,
+        response_text, selected_model, selected_candidate = _run_llm_call_with_timeout(
+            request,
+            stage=stage,
+            prompt_id=prompt_id,
+            selected_model=timeout_selected_model,
+            selected_candidate=timeout_selected_candidate,
+            timeout_seconds=_conversation_turn_llm_fallback_guard_timeout_sec(
+                timeout_override_sec
+            ),
+            llm_calls=llm_calls,
+            operation=lambda: orchestrator._run_llm_with_fallbacks(
                 stage=stage,
-                prompt_id=prompt_id,
-                selected_model=timeout_selected_model,
-                selected_candidate=timeout_selected_candidate,
-                timeout_seconds=_conversation_turn_llm_fallback_guard_timeout_sec(
-                    timeout_override_sec
-                ),
-                llm_calls=llm_calls,
-                operation=lambda: orchestrator._run_llm_with_fallbacks(
-                    stage=stage,
-                    prompt=rendered_prompt,
-                    context=context_messages,
-                    default_client=request.environment.llm_client,
-                    default_model=request.environment.model,
-                    default_model_parameters=_default_model_parameters_for_request(
-                        request
-                    ),
-                    policy_state=policy_state,
-                    registry_snapshot=registry_snapshot,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
-                    llm_calls_log=llm_calls,
-                    aux_log=aux_llm_calls,
-                    record_llm_call=_record_llm_call,
-                    emit_progress=heartbeat_progress,
-                    context_telemetry=context_telemetry,
-                    prefer_default_model=prefer_default_model,
-                    timeout_override_sec=timeout_override_sec,
-                    check_cancellation=check_cancellation,
-                    response_validator=_validate_candidate_response,
-                ),
-            )
+                prompt=rendered_prompt,
+                context=context_messages,
+                default_client=request.environment.llm_client,
+                default_model=request.environment.model,
+                default_model_parameters=_default_model_parameters_for_request(request),
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
+                emit_progress=heartbeat_progress,
+                context_telemetry=context_telemetry,
+                prefer_default_model=prefer_default_model,
+                timeout_override_sec=timeout_override_sec,
+                check_cancellation=check_cancellation,
+                response_validator=_validate_candidate_response,
+            ),
         )
     except TimeoutError as exc:
         timeout_detail = _context_string(str(exc)) or "llm_call_timed_out"
