@@ -9157,6 +9157,11 @@ def build_turn_execution_record(
         validation=terminal_outcome_receipt_validation,
         authoritative_receipt_required=authoritative_receipt_required,
     )
+    tool_observation_ledger_payload = build_tool_observation_ledger(
+        existing_ledger=tool_observation_ledger_payload,
+        terminal_outcome_receipt=terminal_outcome_receipt,
+        terminal_outcome_receipt_validation=terminal_outcome_receipt_validation,
+    )
 
     requested_evidence_lineage = _build_requested_evidence_lineage(
         response_text=response_text,
@@ -9529,6 +9534,12 @@ def build_turn_execution_record(
                 dict(tool_observation_ledger_payload)
                 if int(tool_observation_ledger_payload.get("observation_count") or 0)
                 > 0
+                or isinstance(
+                    tool_observation_ledger_payload.get(
+                        "terminal_outcome_receipt_projection"
+                    ),
+                    Mapping,
+                )
                 else None
             ),
             "llm_calls": llm_call_log,

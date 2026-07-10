@@ -10353,6 +10353,13 @@ def _build_turn_execution_replay_case(
                 ),
             },
             "tool_invocation_summary": tool_invocation_summary,
+            "terminal_outcome_receipt_projection": (
+                dict(item.get("terminal_outcome_receipt_projection"))
+                if isinstance(
+                    item.get("terminal_outcome_receipt_projection"), Mapping
+                )
+                else None
+            ),
             "weak_follow_up_action": _has_turn_execution_weak_follow_up_action(item),
             "follow_up": follow_up,
             "episode_evaluation": episode_evaluation,
@@ -10767,6 +10774,117 @@ def _format_turn_execution_rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round((float(numerator) / float(denominator)) * 100.0, 2)
+
+
+def _build_terminal_outcome_receipt_metrics(
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Count represented receipt facts without reclassifying their semantics."""
+
+    outcome_counts: dict[str, int] = {}
+    causal_stage_counts: dict[str, int] = {}
+    retryability_counts: dict[str, int] = {}
+    decision_authority_counts: dict[str, int] = {}
+    available_count = 0
+    valid_count = 0
+    non_success_count = 0
+    typed_non_success_count = 0
+    causal_stage_located_count = 0
+    recoverable_count = 0
+    recoverable_with_affordance_count = 0
+    learning_candidate_count = 0
+
+    recoverable_retryability = {
+        "now",
+        "after_input",
+        "after_external_change",
+        "after_represented_learning",
+    }
+
+    for item in items:
+        projection = item.get("terminal_outcome_receipt_projection")
+        if not isinstance(projection, Mapping) or not projection.get("available"):
+            continue
+        available_count += 1
+        validation = projection.get("validation")
+        if isinstance(validation, Mapping) and validation.get("valid") is True:
+            valid_count += 1
+
+        outcome = str(projection.get("outcome") or "").strip()
+        causal_stage = str(projection.get("causal_stage") or "").strip()
+        retryability = str(projection.get("retryability") or "").strip()
+        cause_code = str(projection.get("cause_code") or "").strip()
+        if outcome:
+            outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if causal_stage:
+            causal_stage_counts[causal_stage] = (
+                causal_stage_counts.get(causal_stage, 0) + 1
+            )
+        if retryability:
+            retryability_counts[retryability] = (
+                retryability_counts.get(retryability, 0) + 1
+            )
+
+        provenance = projection.get("provenance")
+        decision_authority = (
+            str(provenance.get("decision_source") or "").strip()
+            if isinstance(provenance, Mapping)
+            else ""
+        )
+        if decision_authority:
+            decision_authority_counts[decision_authority] = (
+                decision_authority_counts.get(decision_authority, 0) + 1
+            )
+
+        if outcome and outcome != "verified_success":
+            non_success_count += 1
+            if cause_code:
+                typed_non_success_count += 1
+            if causal_stage and causal_stage != "unknown":
+                causal_stage_located_count += 1
+        if retryability in recoverable_retryability:
+            recoverable_count += 1
+            recovery_affordances = projection.get("recovery_affordances")
+            if isinstance(recovery_affordances, list) and recovery_affordances:
+                recoverable_with_affordance_count += 1
+        if isinstance(projection.get("learning_candidate"), Mapping):
+            learning_candidate_count += 1
+
+    scanned_count = len(items)
+    return {
+        "schema_version": "terminal_outcome_receipt_metrics.v1",
+        "scanned_count": scanned_count,
+        "available_count": available_count,
+        "missing_count": max(0, scanned_count - available_count),
+        "valid_count": valid_count,
+        "invalid_count": max(0, available_count - valid_count),
+        "valid_receipt_coverage_pct": _format_turn_execution_rate(
+            valid_count,
+            scanned_count,
+        ),
+        "non_success_count": non_success_count,
+        "typed_non_success_count": typed_non_success_count,
+        "typed_non_success_coverage_pct": _format_turn_execution_rate(
+            typed_non_success_count,
+            non_success_count,
+        ),
+        "causal_stage_located_count": causal_stage_located_count,
+        "causal_stage_coverage_pct": _format_turn_execution_rate(
+            causal_stage_located_count,
+            non_success_count,
+        ),
+        "recoverable_count": recoverable_count,
+        "recoverable_with_affordance_count": recoverable_with_affordance_count,
+        "recovery_affordance_coverage_pct": _format_turn_execution_rate(
+            recoverable_with_affordance_count,
+            recoverable_count,
+        ),
+        "learning_candidate_count": learning_candidate_count,
+        "outcome_counts": outcome_counts,
+        "causal_stage_counts": causal_stage_counts,
+        "retryability_counts": retryability_counts,
+        "decision_authority_counts": decision_authority_counts,
+    }
 
 
 def _safe_turn_execution_float_values(values: Sequence[Any]) -> list[float]:
@@ -11670,6 +11788,10 @@ def _build_execution_dashboard_summary_cards(
         if isinstance(selector_outcome_rates_raw, Mapping)
         else {}
     )
+    receipt_metrics_raw = turn_metrics.get("terminal_outcome_receipts")
+    receipt_metrics = (
+        receipt_metrics_raw if isinstance(receipt_metrics_raw, Mapping) else {}
+    )
 
     def _comparison_for(
         assessment: Mapping[str, Any],
@@ -11742,6 +11864,24 @@ def _build_execution_dashboard_summary_cards(
                 turn_regression_assessment,
                 "unresolved_follow_up_rate_pct",
             ),
+        ),
+        _card(
+            card_id="valid_terminal_receipt_coverage",
+            title="Valid terminal receipt coverage",
+            value=receipt_metrics.get("valid_receipt_coverage_pct"),
+            unit="pct",
+        ),
+        _card(
+            card_id="typed_non_success_coverage",
+            title="Typed non-success coverage",
+            value=receipt_metrics.get("typed_non_success_coverage_pct"),
+            unit="pct",
+        ),
+        _card(
+            card_id="recovery_affordance_coverage",
+            title="Recovery-affordance coverage",
+            value=receipt_metrics.get("recovery_affordance_coverage_pct"),
+            unit="pct",
         ),
         _card(
             card_id="selector_accuracy",
@@ -12065,6 +12205,9 @@ def _turn_execution_build_benchmark(**kwargs):
             )
 
     scanned_count = len(sorted_items)
+    terminal_outcome_receipt_metrics = _build_terminal_outcome_receipt_metrics(
+        sorted_items
+    )
     likely_failure_count = len(likely_items)
     false_success_count = sum(
         1
@@ -12376,6 +12519,7 @@ def _turn_execution_build_benchmark(**kwargs):
             ),
         },
         "failure_mode_counts": failure_mode_counts,
+        "terminal_outcome_receipts": terminal_outcome_receipt_metrics,
         "outcome_label_counts": outcome_label_counts,
         "outcome_label_rates_pct": {
             f"{label_name}_rate_pct": _format_turn_execution_rate(count, scanned_count)
@@ -12844,6 +12988,10 @@ def _turn_execution_build_dashboard(**kwargs):
                 "unresolved_follow_up_rate_pct": turn_metrics.get(
                     "unresolved_follow_up_rate_pct"
                 ),
+                "terminal_outcome_receipts": turn_metrics.get(
+                    "terminal_outcome_receipts"
+                )
+                or {},
             },
             "selector_routing": {
                 "benchmark_fingerprint": selector_report.get("benchmark_fingerprint"),
@@ -18735,6 +18883,9 @@ def _rag_list_indexed(**kwargs):
         from ...services.turn_execution_record_service import (
             build_turn_execution_correctness_summary,
         )
+        from ...workflows.terminal_outcome_receipts import (
+            terminal_outcome_receipt_projection_from_record,
+        )
 
         coll = db["turn_execution_records"]
 
@@ -18809,6 +18960,8 @@ def _rag_list_indexed(**kwargs):
                     "prompt": 1,
                     "critic": 1,
                     "final_response": 1,
+                    "terminal_outcome_receipt": 1,
+                    "terminal_outcome_receipt_validation": 1,
                 },
             )
             .skip(offset)
@@ -18902,6 +19055,12 @@ def _rag_list_indexed(**kwargs):
                 final_response_payload_raw
                 if isinstance(final_response_payload_raw, dict)
                 else {}
+            )
+            terminal_outcome_receipt_projection = (
+                terminal_outcome_receipt_projection_from_record(
+                    doc,
+                    source="turn_execution_benchmark.turn_execution_record",
+                )
             )
             current_execution_correctness = build_turn_execution_correctness_summary(
                 completion_gate=completion_gate,
@@ -19097,6 +19256,9 @@ def _rag_list_indexed(**kwargs):
                     "escalation_signal": escalation_signal,
                     "escalation_reason": escalation_reason,
                     "critic_summary": critic_summary,
+                    "terminal_outcome_receipt_projection": (
+                        terminal_outcome_receipt_projection
+                    ),
                     "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
                         tool_invocations
                     ),
@@ -19730,6 +19892,9 @@ def _rag_get_item(**kwargs):
         from ...services.turn_execution_record_service import (
             build_turn_execution_correctness_summary,
         )
+        from ...workflows.terminal_outcome_receipts import (
+            terminal_outcome_receipt_projection_from_record,
+        )
 
         coll = db["turn_execution_records"]
         doc = coll.find_one({"request_id": session_id, "namespace": ns})
@@ -19871,6 +20036,12 @@ def _rag_get_item(**kwargs):
         missing_required_tools = [
             tool for tool in required_tools if tool.lower() not in invoked_tool_set
         ]
+        terminal_outcome_receipt_projection = (
+            terminal_outcome_receipt_projection_from_record(
+                doc,
+                source="turn_execution_get.turn_execution_record",
+            )
+        )
 
         payload = {
             "collection": collection,
@@ -19916,6 +20087,9 @@ def _rag_get_item(**kwargs):
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
             "critic": critic_payload,
+            "terminal_outcome_receipt_projection": (
+                terminal_outcome_receipt_projection
+            ),
             "final_response": final_response_payload,
             "rag_indexing_state": rag_indexing_state,
             "identifier_binding": {

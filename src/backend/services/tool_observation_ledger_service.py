@@ -11,6 +11,10 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
+from ..workflows.terminal_outcome_receipts import (
+    build_terminal_outcome_receipt_projection,
+)
+
 TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION = "tool_observation_ledger.v1"
 
 _EMPTY_RESULT_MARKERS = (
@@ -477,6 +481,8 @@ def build_tool_observation_ledger(
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
     existing_ledger: Mapping[str, Any] | None = None,
+    terminal_outcome_receipt: Mapping[str, Any] | None = None,
+    terminal_outcome_receipt_validation: Mapping[str, Any] | None = None,
     max_observations: int = 32,
 ) -> dict[str, Any]:
     """Return a compact, versioned ledger of tool execution observations."""
@@ -535,7 +541,7 @@ def build_tool_observation_ledger(
         status = _safe_str(observation.get("status")) or "unknown"
         status_counts[status] = status_counts.get(status, 0) + 1
 
-    return {
+    ledger = {
         "schema_version": TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
         "observation_count": len(observations),
         "observed_tools": observed_tools,
@@ -554,3 +560,32 @@ def build_tool_observation_ledger(
         ),
         "observations": observations,
     }
+    existing_receipt_projection = (
+        existing_ledger.get("terminal_outcome_receipt_projection")
+        if isinstance(existing_ledger, Mapping)
+        and isinstance(
+            existing_ledger.get("terminal_outcome_receipt_projection"), Mapping
+        )
+        else None
+    )
+    effective_receipt = terminal_outcome_receipt
+    effective_validation = terminal_outcome_receipt_validation
+    if not isinstance(effective_receipt, Mapping) and isinstance(
+        existing_receipt_projection, Mapping
+    ):
+        existing_receipt = existing_receipt_projection.get("receipt")
+        existing_validation = existing_receipt_projection.get("validation")
+        effective_receipt = (
+            existing_receipt if isinstance(existing_receipt, Mapping) else None
+        )
+        effective_validation = (
+            existing_validation if isinstance(existing_validation, Mapping) else None
+        )
+    receipt_projection = build_terminal_outcome_receipt_projection(
+        effective_receipt,
+        validation=effective_validation,
+        source="tool_observation_ledger",
+    )
+    if receipt_projection.get("available"):
+        ledger["terminal_outcome_receipt_projection"] = receipt_projection
+    return ledger

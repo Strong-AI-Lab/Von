@@ -18,6 +18,9 @@ TERMINAL_OUTCOME_RECEIPT_SCHEMA_VERSION = "terminal_outcome_receipt.v1"
 TERMINAL_OUTCOME_RECEIPT_VALIDATION_SCHEMA_VERSION = (
     "terminal_outcome_receipt_validation.v1"
 )
+TERMINAL_OUTCOME_RECEIPT_PROJECTION_SCHEMA_VERSION = (
+    "terminal_outcome_receipt_projection.v1"
+)
 TERMINAL_OUTCOME_RECEIPT_PROFILE_CONCEPT_ID = "#V#terminal_outcome_receipt"
 
 TERMINAL_OUTCOMES = frozenset(
@@ -345,3 +348,109 @@ def apply_terminal_outcome_receipt_to_completion_gate(
 
     gate["evidence_payload"] = evidence_payload
     return gate
+
+
+def build_terminal_outcome_receipt_projection(
+    receipt: Mapping[str, Any] | None,
+    *,
+    validation: Mapping[str, Any] | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Build one neutral, bounded projection for read and evaluation surfaces.
+
+    The projection copies an already-authored receipt.  It does not infer an
+    outcome, causal stage, retry policy, or recovery action from surrounding
+    runtime data.  Re-validating here ensures every projection receives the
+    same redaction and bounding treatment even when its caller loaded an older
+    persisted record.
+    """
+
+    clean_source = _safe_text(source) or "unspecified"
+    if not isinstance(receipt, Mapping):
+        return {
+            "schema_version": TERMINAL_OUTCOME_RECEIPT_PROJECTION_SCHEMA_VERSION,
+            "available": False,
+            "source": clean_source,
+            "receipt": None,
+            "validation": (
+                dict(validation) if isinstance(validation, Mapping) else None
+            ),
+        }
+
+    projected_receipt, current_validation = validate_terminal_outcome_receipt(
+        receipt,
+        required=True,
+    )
+    if isinstance(validation, Mapping):
+        supplied_validation = dict(validation)
+        supplied_errors = supplied_validation.get("errors")
+        current_errors = current_validation.get("errors")
+        if isinstance(supplied_errors, list) and supplied_errors:
+            current_validation["source_validation_errors"] = list(supplied_errors)
+        if supplied_validation.get("valid") is False:
+            current_validation["source_validation_valid"] = False
+        if isinstance(current_errors, list) and current_errors:
+            current_validation["projection_validation_errors"] = list(current_errors)
+
+    if not isinstance(projected_receipt, Mapping):
+        return {
+            "schema_version": TERMINAL_OUTCOME_RECEIPT_PROJECTION_SCHEMA_VERSION,
+            "available": False,
+            "source": clean_source,
+            "receipt": None,
+            "validation": current_validation,
+        }
+
+    receipt_payload = dict(projected_receipt)
+    return {
+        "schema_version": TERMINAL_OUTCOME_RECEIPT_PROJECTION_SCHEMA_VERSION,
+        "available": True,
+        "source": clean_source,
+        "receipt_schema_version": receipt_payload.get("schema_version"),
+        "profile_concept_id": receipt_payload.get("profile_concept_id"),
+        "outcome": receipt_payload.get("outcome"),
+        "causal_stage": receipt_payload.get("causal_stage"),
+        "cause_code": receipt_payload.get("cause_code"),
+        "summary": receipt_payload.get("summary"),
+        "evidence_refs": list(receipt_payload.get("evidence_refs") or []),
+        "committed_effects": list(receipt_payload.get("committed_effects") or []),
+        "remaining_obligations": list(
+            receipt_payload.get("remaining_obligations") or []
+        ),
+        "retryability": receipt_payload.get("retryability"),
+        "recovery_affordances": list(
+            receipt_payload.get("recovery_affordances") or []
+        ),
+        "learning_candidate": receipt_payload.get("learning_candidate"),
+        "provenance": dict(receipt_payload.get("provenance") or {}),
+        "redaction_status": receipt_payload.get("redaction_status"),
+        "receipt": receipt_payload,
+        "validation": current_validation,
+    }
+
+
+def terminal_outcome_receipt_projection_from_record(
+    record: Mapping[str, Any] | None,
+    *,
+    source: str = "turn_execution_record",
+) -> dict[str, Any]:
+    """Project the canonical receipt from a persisted turn-record shape."""
+
+    if not isinstance(record, Mapping):
+        return build_terminal_outcome_receipt_projection(None, source=source)
+    receipt = record.get("terminal_outcome_receipt")
+    validation = record.get("terminal_outcome_receipt_validation")
+    if not isinstance(receipt, Mapping):
+        completion_gate = record.get("completion_gate")
+        if isinstance(completion_gate, Mapping):
+            evidence_payload = completion_gate.get("evidence_payload")
+            if isinstance(evidence_payload, Mapping):
+                receipt = evidence_payload.get("terminal_outcome_receipt")
+                validation = evidence_payload.get(
+                    "terminal_outcome_receipt_validation"
+                )
+    return build_terminal_outcome_receipt_projection(
+        receipt if isinstance(receipt, Mapping) else None,
+        validation=validation if isinstance(validation, Mapping) else None,
+        source=source,
+    )

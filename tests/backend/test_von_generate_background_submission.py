@@ -55,6 +55,7 @@ class _CapturingTaskRegistry:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.progress_updates: list[tuple[str, dict[str, Any]]] = []
+        self.terminal_updates: list[tuple[str, dict[str, Any]]] = []
         self.cancelled_task_ids: set[str] = set()
 
     def submit_task(
@@ -83,6 +84,10 @@ class _CapturingTaskRegistry:
 
     def is_cancellation_requested(self, task_id: str) -> bool:
         return task_id in self.cancelled_task_ids
+
+    def mark_terminal_external(self, task_id: str, **kwargs):
+        self.terminal_updates.append((task_id, dict(kwargs)))
+        return _SubmittedTaskStatus(str(kwargs.get("status") or "completed"))
 
 
 def _make_app(monkeypatch, orchestrator, task_registry) -> Flask:
@@ -220,6 +225,14 @@ def test_background_generate_reentry_passes_workflow_inputs_to_orchestrator(
         "base_gmail_query": "arxiv.org newer_than:365d",
         "gmail_max_results": 1,
     }
+    assert len(task_registry.terminal_updates) == 1
+    terminal_task_id, terminal_update = task_registry.terminal_updates[0]
+    assert terminal_task_id == submitted["task_id"]
+    terminal_result = terminal_update["result"]
+    assert isinstance(terminal_result, dict)
+    llm_debug = terminal_result["llm_debug"]
+    assert llm_debug.get("background_result_source") is None
+    assert isinstance(llm_debug.get("turn_execution_record"), dict)
 
 
 def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):

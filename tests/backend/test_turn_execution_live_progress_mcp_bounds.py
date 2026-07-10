@@ -178,6 +178,54 @@ def test_live_progress_default_projection_is_bounded(monkeypatch) -> None:
     assert len(json.dumps(result, indent=2, default=str)) < 20_000
 
 
+def test_live_progress_surfaces_terminal_receipt_from_critic_stage(monkeypatch) -> None:
+    from src.backend.services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    payload = _large_serialised_progress_payload()
+    payload["stage_diagnostics"].append(
+        {
+            "stage_id": "postcondition_critic",
+            "critic_verdict": {
+                "terminal_outcome_receipt": {
+                    "schema_version": "terminal_outcome_receipt.v1",
+                    "profile_concept_id": "#V#terminal_outcome_receipt",
+                    "outcome": "input_required",
+                    "cause_code": "required_input_missing",
+                    "causal_stage": "planning",
+                    "summary": "A required represented input was not available.",
+                    "evidence_refs": [{"source": "critic", "ref": "input-1"}],
+                    "committed_effects": [],
+                    "remaining_obligations": [{"effect_id": "effect-1"}],
+                    "retryability": "after_input",
+                    "recovery_affordances": [
+                        {"action_type": "elicit_input"}
+                    ],
+                    "learning_candidate": None,
+                    "redaction_status": "safe_projection",
+                    "provenance": {"decision_source": "represented_llm"},
+                }
+            },
+        }
+    )
+    _install_live_progress_stubs(monkeypatch, payload)
+
+    result = get_turn_execution_live_progress_payload(
+        request_id="req-large-live-progress",
+        namespace="#V#tester@org",
+    )
+
+    assert result is not None
+    projection = result["terminal_outcome_receipt_projection"]
+    assert projection["available"] is True
+    assert projection["outcome"] == "input_required"
+    assert projection["retryability"] == "after_input"
+    assert projection["source"] == (
+        "live_progress.stage_diagnostics.critic_verdict"
+    )
+
+
 def test_live_progress_section_projection_paginates_large_details(monkeypatch) -> None:
     from src.backend.services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,

@@ -146,3 +146,30 @@ def test_turn_execution_record_projects_tool_observation_ledger() -> None:
     assert ledger["observed_tools"] == ["jira_get_issue"]
     assert ledger["status_counts"] == {"non_empty_result": 1}
     assert record["execution"]["summary"]["tool_observation_count"] == 1
+
+
+def test_ledger_carries_authored_terminal_receipt_without_tool_observations() -> None:
+    ledger = build_tool_observation_ledger(
+        terminal_outcome_receipt={
+            "schema_version": "terminal_outcome_receipt.v1",
+            "profile_concept_id": "#V#terminal_outcome_receipt",
+            "outcome": "externally_blocked",
+            "cause_code": "service_unavailable",
+            "causal_stage": "invocation",
+            "summary": "The represented action reached an unavailable dependency.",
+            "evidence_refs": [{"source": "runtime", "ref": "event-1"}],
+            "committed_effects": [],
+            "remaining_obligations": [{"effect_id": "effect-1"}],
+            "retryability": "after_external_change",
+            "recovery_affordances": [{"action_type": "inspect"}],
+            "learning_candidate": None,
+            "redaction_status": "safe_projection",
+            "provenance": {"decision_source": "represented_llm"},
+        }
+    )
+
+    assert ledger["observation_count"] == 0
+    projection = ledger["terminal_outcome_receipt_projection"]
+    assert projection["available"] is True
+    assert projection["outcome"] == "externally_blocked"
+    assert projection["retryability"] == "after_external_change"

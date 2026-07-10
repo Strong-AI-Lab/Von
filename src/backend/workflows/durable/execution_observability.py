@@ -18,6 +18,9 @@ from ..execution_contracts import (
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
+from ..terminal_outcome_receipts import (
+    terminal_outcome_receipt_projection_from_record,
+)
 from ..trace_store import get_workflow_execution_trace
 from .workflow_instance_submission_service import (
     WorkflowInstanceSubmissionResult,
@@ -470,6 +473,25 @@ def build_workflow_execution_trace_summary(
             last_error = error
             break
 
+    receipt_projection = terminal_outcome_receipt_projection_from_record(
+        None,
+        source="workflow_execution_trace",
+    )
+    for collection_name, entries in (("steps", steps), ("actions", actions)):
+        for entry in reversed(entries):
+            outputs = entry.get("outputs") if isinstance(entry, Mapping) else None
+            if not isinstance(outputs, Mapping):
+                continue
+            candidate_projection = terminal_outcome_receipt_projection_from_record(
+                outputs,
+                source=f"workflow_execution_trace.{collection_name}.outputs",
+            )
+            if candidate_projection.get("available"):
+                receipt_projection = candidate_projection
+                break
+        if receipt_projection.get("available"):
+            break
+
     return {
         "execution_id": _safe_str(trace_doc.get("execution_id")) or None,
         "workflow_id": _safe_str(trace_doc.get("workflow_id")) or None,
@@ -486,4 +508,5 @@ def build_workflow_execution_trace_summary(
         "step_count": len(steps),
         "failed_step_count": len(failed_steps),
         "last_error": last_error,
+        "terminal_outcome_receipt_projection": receipt_projection,
     }
