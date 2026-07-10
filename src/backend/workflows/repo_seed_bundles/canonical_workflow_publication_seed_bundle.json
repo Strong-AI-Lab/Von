@@ -3468,8 +3468,9 @@
             "invoked_workflow_id": null,
             "llm_policy": {
               "policy_stage": "postcondition_critic",
+              "project_raw_response_to_final_response": false,
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys verdict, confidence, assessment_summary, required_evidence_answer_consistency_blocker, and recommendations.",
+              "response_contract_text": "Return JSON with keys verdict, confidence, assessment_summary, required_evidence_answer_consistency_blocker, recommendations, and terminal_outcome_receipt conforming to terminal_outcome_receipt.v1.",
               "context_fields": [
                 {
                   "context_key": "turn_execution_critic_evidence_bundle",
@@ -3512,7 +3513,49 @@
               }
             ],
             "validation_policy": {
-              "output_format": "json_value"
+              "json_field_defaults": {
+                "terminal_outcome_receipt": {
+                  "schema_version": "terminal_outcome_receipt.v1",
+                  "profile_concept_id": "#V#terminal_outcome_receipt",
+                  "outcome": "inconclusive",
+                  "causal_stage": "unknown",
+                  "cause_code": "represented_critic_receipt_missing",
+                  "summary": "The represented critic did not produce a complete terminal outcome receipt.",
+                  "evidence_refs": [],
+                  "committed_effects": [],
+                  "remaining_obligations": [],
+                  "retryability": "now",
+                  "recovery_affordances": [
+                    {
+                      "action_type": "alternate_model",
+                      "reason": "The critic output did not satisfy the represented receipt contract."
+                    }
+                  ],
+                  "learning_candidate": null,
+                  "provenance": {
+                    "decision_source": "represented_workflow_default",
+                    "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+                    "prompt_concept_id": "#V#prompt_turn_execution_postcondition_critic"
+                  },
+                  "redaction_status": "safe_projection"
+                },
+                "terminal_outcome_receipt.cause_code": "represented_critic_cause_unspecified"
+              },
+              "output_format": "json_value",
+              "required_json_fields": [
+                "terminal_outcome_receipt.schema_version",
+                "terminal_outcome_receipt.profile_concept_id",
+                "terminal_outcome_receipt.outcome",
+                "terminal_outcome_receipt.causal_stage",
+                "terminal_outcome_receipt.summary",
+                "terminal_outcome_receipt.evidence_refs",
+                "terminal_outcome_receipt.committed_effects",
+                "terminal_outcome_receipt.remaining_obligations",
+                "terminal_outcome_receipt.retryability",
+                "terminal_outcome_receipt.recovery_affordances",
+                "terminal_outcome_receipt.provenance",
+                "terminal_outcome_receipt.redaction_status"
+              ]
             },
             "writes_context_keys": [
               "critic_verdict"
@@ -3559,6 +3602,8 @@
               "turn_execution_critic_evidence_bundle",
               "critic_summary",
               "critic_verdict",
+              "terminal_outcome_receipt",
+              "terminal_outcome_receipt_validation",
               "completion_gate_decision",
               "completion_gate_requires_follow_up",
               "completion_gate_safe_to_claim_completion"
@@ -3594,7 +3639,49 @@
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "finalise_fallback",
-            "static_input_bindings": [],
+            "static_input_bindings": [
+              [
+                "critic_verdict",
+                {
+                  "verdict": "inconclusive",
+                  "confidence": 0.0,
+                  "assessment_summary": "The represented postcondition critic did not produce a valid judgement, so completion remains inconclusive.",
+                  "required_evidence_answer_consistency_blocker": null,
+                  "recommendations": [
+                    "Use the represented recovery workflow to inspect the critic failure and choose a bounded alternate path."
+                  ],
+                  "terminal_outcome_receipt": {
+                    "schema_version": "terminal_outcome_receipt.v1",
+                    "profile_concept_id": "#V#terminal_outcome_receipt",
+                    "outcome": "inconclusive",
+                    "causal_stage": "verification",
+                    "cause_code": "represented_postcondition_critic_unavailable",
+                    "summary": "The represented postcondition critic did not produce a valid semantic judgement.",
+                    "evidence_refs": [],
+                    "committed_effects": [],
+                    "remaining_obligations": [],
+                    "retryability": "now",
+                    "recovery_affordances": [
+                      {
+                        "action_type": "alternate_model",
+                        "reason": "The represented critic did not produce a valid receipt."
+                      },
+                      {
+                        "action_type": "inspect",
+                        "target_ref": "terminal_outcome_receipt_validation"
+                      }
+                    ],
+                    "learning_candidate": null,
+                    "provenance": {
+                      "decision_source": "represented_workflow_default",
+                      "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+                      "prompt_concept_id": "#V#prompt_turn_execution_postcondition_critic"
+                    },
+                    "redaction_status": "safe_projection"
+                  }
+                }
+              ]
+            ],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
@@ -3605,6 +3692,8 @@
               "turn_execution_critic_evidence_bundle",
               "critic_summary",
               "critic_verdict",
+              "terminal_outcome_receipt",
+              "terminal_outcome_receipt_validation",
               "completion_gate_decision",
               "completion_gate_requires_follow_up",
               "completion_gate_safe_to_claim_completion"
@@ -4644,6 +4733,16 @@
                 "tool_output_field": "result.critic_verdict"
               },
               {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_terminal_outcome_receipt_to_terminal_outcome_receipt",
+                "context_key": "terminal_outcome_receipt",
+                "tool_output_field": "result.terminal_outcome_receipt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_terminal_outcome_receipt_validation_to_terminal_outcome_receipt_validation",
+                "context_key": "terminal_outcome_receipt_validation",
+                "tool_output_field": "result.terminal_outcome_receipt_validation"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_turn_execution_critic_result_completion_gate_decision_to_completion_gate_decision",
                 "context_key": "completion_gate_decision",
                 "tool_output_field": "result.completion_gate_decision"
@@ -4670,6 +4769,8 @@
               "postcondition_checks",
               "critic_summary",
               "critic_verdict",
+              "terminal_outcome_receipt",
+              "terminal_outcome_receipt_validation",
               "completion_gate_decision",
               "completion_gate_requires_follow_up",
               "completion_gate_safe_to_claim_completion",
@@ -4772,6 +4873,16 @@
                 "tool_output_field": "completion_gate_evidence_payload"
               },
               {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_terminal_outcome_receipt_to_terminal_outcome_receipt",
+                "context_key": "terminal_outcome_receipt",
+                "tool_output_field": "terminal_outcome_receipt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_terminal_outcome_receipt_validation_to_terminal_outcome_receipt_validation",
+                "context_key": "terminal_outcome_receipt_validation",
+                "tool_output_field": "terminal_outcome_receipt_validation"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_turn_execution_completion_gate_output_terminal_outcome_to_completion_gate_terminal_outcome",
                 "context_key": "completion_gate_terminal_outcome",
                 "tool_output_field": "completion_gate_terminal_outcome"
@@ -4825,6 +4936,8 @@
               "completion_gate_repeat_eligible",
               "completion_gate_unresolved_preconditions",
               "completion_gate_evidence_payload",
+              "terminal_outcome_receipt",
+              "terminal_outcome_receipt_validation",
               "completion_gate_terminal_outcome",
               "completion_gate_repeat_iteration",
               "completion_gate_loop_retry_reason",
@@ -4857,11 +4970,31 @@
                       "key": "turn_next_action_target_workflow_id",
                       "expected": false
                     },
-                    {
-                      "kind": "context_flag",
-                      "key": "completion_gate_repeat_eligible",
-                      "expected": true
-                    }
+                  {
+                    "kind": "context_flag",
+                    "key": "completion_gate_repeat_eligible",
+                    "expected": true
+                  },
+                  {
+                    "kind": "context_value_equals",
+                    "key": "terminal_outcome_receipt.retryability",
+                    "value": "now"
+                  },
+                  {
+                    "kind": "any",
+                    "conditions": [
+                      {
+                        "kind": "context_exists",
+                        "key": "turn_recovery_retry_viable",
+                        "expected": false
+                      },
+                      {
+                        "kind": "context_flag",
+                        "key": "turn_recovery_retry_viable",
+                        "expected": true
+                      }
+                    ]
+                  }
                   ]
                 },
                 "reason": "retry_execution",
@@ -4925,6 +5058,7 @@
             ],
             "execution_mode": "llm",
             "llm_policy": {
+              "project_raw_response_to_final_response": false,
               "context_fields": [
                 {
                   "context_key": "user_prompt",
@@ -4983,6 +5117,14 @@
                   "label": "Required Effects"
                 },
                 {
+                  "context_key": "terminal_outcome_receipt",
+                  "label": "Terminal Outcome Receipt"
+                },
+                {
+                  "context_key": "terminal_outcome_receipt_validation",
+                  "label": "Terminal Outcome Receipt Validation"
+                },
+                {
                   "context_key": "completion_gate_decision",
                   "label": "Completion Gate Decision"
                 },
@@ -5022,10 +5164,14 @@
                   "context_key": "completion_gate_loop_stop_reason",
                   "label": "Recovery Loop Stop Reason"
                 },
-                {
-                  "context_key": "turn_recovery_attempted",
-                  "label": "Recovery Already Attempted"
-                },
+              {
+                "context_key": "turn_recovery_attempted",
+                "label": "Recovery Already Attempted"
+              },
+              {
+                "context_key": "turn_recovery_retry_viable",
+                "label": "Recovery Retry Structurally Viable"
+              },
                 {
                   "context_key": "turn_recovery_last_target_workflow_id",
                   "label": "Previous Recovery Target Workflow"
@@ -5049,6 +5195,10 @@
                 {
                   "context_key": "response_text",
                   "label": "Current User-Facing Response"
+                },
+                {
+                  "context_key": "completion_gate_preserved_response",
+                  "label": "Preserved Pre-Gate Response Candidate"
                 },
                 {
                   "context_key": "thinking_card_mode",
@@ -5132,7 +5282,17 @@
               }
             ],
             "validation_policy": {
-              "output_format": "json_value"
+              "json_field_defaults": {
+                "turn_next_action.action_type": "respond_with_follow_up",
+                "turn_next_action.response_text": "I could not complete this reliably because the required evidence-producing action did not execute. The terminal outcome receipt records the exact cause and safe recovery options, but no further automated action remained applicable.",
+                "reasoning": "The represented recovery output did not identify an applicable automated action with the fields required by the workflow transition."
+              },
+              "output_format": "json_value",
+              "required_json_fields": [
+                "turn_next_action.action_type",
+                "turn_next_action.response_text",
+                "reasoning"
+              ]
             },
             "writes_context_keys": [
               "turn_next_action",
@@ -5274,12 +5434,12 @@
                     "key": "current_response",
                     "value_from_context": "turn_next_action_response_text"
                   },
-                  {
-                    "key": "selected_workflow_user_response",
-                    "value_from_context": "turn_next_action_response_text"
-                  },
-                  {
-                    "key": "turn_recovery_attempted",
+            {
+              "key": "selected_workflow_user_response",
+              "value_from_context": "turn_next_action_response_text"
+            },
+            {
+              "key": "turn_recovery_attempted",
                     "value": true
                   },
                   {
@@ -5338,6 +5498,10 @@
                     "value_from_context": "turn_next_action_response_text"
                   },
                   {
+                    "key": "selected_workflow_user_response",
+                    "value_from_context": "turn_next_action_response_text"
+                  },
+                  {
                     "key": "turn_recovery_attempted",
                     "value": true
                   },
@@ -5360,6 +5524,7 @@
               "response_text",
               "final_response",
               "current_response",
+              "selected_workflow_user_response",
               "turn_recovery_attempted",
               "turn_recovery_last_decision",
               "turn_recovery_last_reasoning",

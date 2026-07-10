@@ -13,10 +13,67 @@ Return JSON with exactly these fields:
 - assessment_summary: one short paragraph describing the judgement
 - required_evidence_answer_consistency_blocker: an object or null
 - recommendations: array of short actionable recommendations
+- terminal_outcome_receipt: an object with exactly these fields:
+  - schema_version: "terminal_outcome_receipt.v1"
+  - profile_concept_id: "#V#terminal_outcome_receipt"
+  - outcome: one of "verified_success", "verified_partial", "input_required",
+    "externally_blocked", "recoverable_failure", "terminal_failure",
+    "cancelled", or "inconclusive"
+  - causal_stage: one of "discovery", "selection", "planning", "retrieval",
+    "invocation", "execution", "verification", "persistence",
+    "answer_construction", "unknown", or "not_applicable"
+  - cause_code: a stable snake_case code, or null for verified success
+  - summary: a concise evidence-grounded account of what happened
+  - evidence_refs: an array of bounded objects identifying the evidence used
+  - committed_effects: an array of bounded objects describing durable or
+    externally visible effects already verified this turn
+  - remaining_obligations: an array of bounded objects describing unsatisfied
+    expected outcomes or postconditions
+  - retryability: one of "now", "after_input", "after_external_change",
+    "after_represented_learning", "not_safely_recoverable", or
+    "not_applicable"
+  - recovery_affordances: an array of objects whose action_type is one of
+    "inspect", "retry", "alternate_workflow", "alternate_tool",
+    "alternate_model", "resume", "narrower_answer", "elicit_input",
+    "escalate", or "create_learning_candidate"
+  - learning_candidate: a bounded object describing a possible represented
+    learning target, or null when learning is not justified
+  - provenance: an object containing decision_source="represented_llm",
+    workflow_id="#V#kb_mutation_postcondition_critic_workflow", and
+    prompt_concept_id="#V#prompt_turn_execution_postcondition_critic"
+  - redaction_status: "safe_projection", "redacted", or
+    "contains_no_sensitive_values"
 
 Rules:
 - Prefer "inconclusive" over overconfident claims when the evidence is sparse,
   degraded, contradictory, or not mechanically checkable.
+- The terminal outcome is your semantic judgement. Python support will validate,
+  redact, persist, and project it, but must not replace it with a code-authored
+  classification.
+- Use "verified_success" only when the expected outcome and any required
+  effects/postconditions are supported by this turn's evidence and the supplied
+  completion gate is safe. Never infer success from response wording or tool
+  invocation presence alone.
+- Use "verified_partial" when useful effects are verified but material
+  obligations remain. List both the committed effects and remaining obligations.
+- Distinguish missing user input, an external dependency block, a recoverable
+  execution failure, and a non-recoverable terminal failure rather than calling
+  all non-successes "failed".
+- For every outcome except "verified_success", always provide a non-empty
+  snake_case `cause_code`; do not omit it or return null.
+- Recovery affordances are opportunities available to the represented recovery
+  workflow, not commands that Python should execute automatically. Include only
+  affordances supported by current evidence and safety boundaries.
+- Recovery affordances must not broaden the user's mutation authority or task
+  intent. For a read-only retrieval or explanation request, do not suggest an
+  alternate workflow/tool that authors, creates, updates, sends, labels, or
+  otherwise causes a side effect unless the user explicitly requested it.
+- Evidence refs must be bounded locators or safe summaries. Do not include
+  secrets, credentials, raw private content, cookies, authorisation headers, or
+  unbounded tool payloads.
+- Set learning_candidate only when the evidence identifies a reusable failure
+  pattern or missing represented authority/primitive. Do not propose learning
+  merely because one run failed.
 - Emit `required_evidence_answer_consistency_blocker` only when the answer is
   not safely supported by the evidence actually produced.
 - If you emit that blocker, use these fields:

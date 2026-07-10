@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
+from src.backend.workflows.action_registry import (
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_critic,
 )
@@ -88,6 +91,62 @@ def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict
     )
 
 
+def test_turn_execution_critic_accepts_represented_fallback_receipt_input(
+    monkeypatch,
+) -> None:
+    fallback_receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "inconclusive",
+        "causal_stage": "verification",
+        "cause_code": "represented_postcondition_critic_unavailable",
+        "summary": "The represented critic did not produce a valid judgement.",
+        "evidence_refs": [],
+        "committed_effects": [],
+        "remaining_obligations": [],
+        "retryability": "now",
+        "recovery_affordances": [{"action_type": "alternate_model"}],
+        "learning_candidate": None,
+        "provenance": {"decision_source": "represented_workflow_default"},
+        "redaction_status": "safe_projection",
+    }
+    request = WorkflowActionRequest(
+        action_id="turn_execution.critic",
+        inputs={
+            "critic_verdict": {
+                "verdict": "inconclusive",
+                "terminal_outcome_receipt": fallback_receipt,
+            }
+        },
+        environment=WorkflowEnvironment(llm_client=MagicMock(), user_namespace="ns"),
+        data={
+            "turn_id": "req-critic-fallback-receipt",
+            "conversation_session_id": "sess-critic-fallback-receipt",
+            "user_concept_id": "#V#user:test",
+            "prompt": "Attempt the represented task.",
+            "final_response": "A candidate response.",
+            "invocations": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: {},
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function=(
+            "test_turn_execution_critic_accepts_represented_fallback_receipt_input"
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["terminal_outcome_receipt"] == fallback_receipt
+    assert result.outputs["terminal_outcome_receipt_validation"]["valid"] is True
+    assert result.outputs["completion_gate_decision"] == "inconclusive"
+
+
 def test_turn_execution_critic_materialises_gmail_read_tools_as_required_evidence(
     monkeypatch,
 ) -> None:
@@ -127,14 +186,10 @@ def test_turn_execution_critic_materialises_gmail_read_tools_as_required_evidenc
                     "status": "ok",
                     "payload": {"query": "newer_than:7d"},
                     "result_preview": {
-                        "messages": [
-                            {"id": "msg-1", "subject": "NeurIPS 2026 review"}
-                        ]
+                        "messages": [{"id": "msg-1", "subject": "NeurIPS 2026 review"}]
                     },
                     "result": {
-                        "messages": [
-                            {"id": "msg-1", "subject": "NeurIPS 2026 review"}
-                        ]
+                        "messages": [{"id": "msg-1", "subject": "NeurIPS 2026 review"}]
                     },
                 },
                 {

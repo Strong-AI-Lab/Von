@@ -207,6 +207,11 @@ Isolated coding-agent replay backend:
   `--base-url` to the replay tool.
 - Use replay-tool `--allow-non-agent-test-server` only when the test's purpose
   is specifically to exercise the interactive/user-facing server.
+- For acceptance that must exercise the represented postcondition critic and
+  terminal-outcome/recovery path, set
+  `VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC=1` on the AgentTest launcher. Without
+  it, the fast deterministic critic shortcut is useful for routine tests but is
+  not evidence that the represented critic prompt ran.
 - Do not treat `-Port` alone as isolation. The isolated mode changes launcher
   ownership semantics so an automated run does not globally clean up or adopt
   unrelated local Von processes.

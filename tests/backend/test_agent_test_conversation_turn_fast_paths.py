@@ -28,7 +28,9 @@ from src.backend.workflows.definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
 )
-from src.backend.workflows.durable.subworkflow_actions import register_subworkflow_actions
+from src.backend.workflows.durable.subworkflow_actions import (
+    register_subworkflow_actions,
+)
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
 )
@@ -51,7 +53,7 @@ class _CapturingLLM:
         self.response = response
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, prompt: str, context=None, model=None) -> str:
+    def generate(self, prompt: str, context=None, model=None, **_kwargs: Any) -> str:
         self.calls.append(
             {"prompt": prompt, "context": list(context or []), "model": model}
         )
@@ -205,6 +207,50 @@ def test_agent_test_postcondition_critic_subworkflow_uses_deterministic_record(
     assert payload["turn_execution_record"]["execution"]["required_prompt_tools"] == [
         "get_text_relations_summary"
     ]
+
+
+def test_agent_test_can_exercise_represented_postcondition_critic(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC", "1")
+    loaded_workflow_ids: list[str] = []
+
+    def _definition_loader(workflow_id: str) -> WorkflowDefinition:
+        loaded_workflow_ids.append(workflow_id)
+        return WorkflowDefinition(
+            workflow_id=workflow_id,
+            initial_state="completed",
+            states={
+                "completed": WorkflowStateSpec(
+                    state_id="completed",
+                    terminal=True,
+                )
+            },
+            termination_states=("completed",),
+        )
+
+    registry = ActionRegistry()
+    register_subworkflow_actions(registry, definition_loader=_definition_loader)
+
+    result = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+            "failure_mode": "capture",
+        },
+        context={
+            "prompt": "Inspect the represented terminal outcome.",
+            "final_response": "A candidate response.",
+            "requested_model": "gemma4:e4b",
+        },
+        env=WorkflowEnvironment(llm_client=_ExplodingLLM(), model="gemma4:e4b"),
+    )
+
+    assert result.status == "success"
+    assert loaded_workflow_ids == [KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID]
+    assert result.outputs["subworkflow_invocation"]["child_final_state"] == "completed"
+    assert "agent_test_critic_skip_reason" not in result.outputs["result"]
 
 
 def test_agent_test_postcondition_critic_bounds_completed_selected_workflow(
@@ -902,9 +948,7 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
 
     outputs = orchestrator._prepare_turn_selector_context_outputs(request)
 
-    assert outputs["selector_authoritative_candidate_ids"] == [
-        represented_workflow_id
-    ]
+    assert outputs["selector_authoritative_candidate_ids"] == [represented_workflow_id]
     assert outputs["selector_candidate_ids"] == [
         represented_workflow_id,
         TOOL_CALLING_WORKFLOW_ID,
@@ -930,9 +974,7 @@ def test_agent_test_selector_preparation_exposes_required_tool_workflow_overlap(
     assert discovery["candidate_count"] == 2
     assert discovery["match_count"] == 1
     assert discovery["candidates"][0]["concept_id"] == represented_workflow_id
-    assert discovery["candidates"][0]["matched_required_tools"] == [
-        required_action_id
-    ]
+    assert discovery["candidates"][0]["matched_required_tools"] == [required_action_id]
     assert discovery["candidates"][1]["concept_id"] == TOOL_CALLING_WORKFLOW_ID
 
 
@@ -1059,9 +1101,7 @@ def test_agent_test_selector_preparation_represented_mode_uses_selector_prompt(
         "Select workflow for this user request:"
     )
     assert represented_workflow_id in captured_selector_candidates
-    assert outputs["selector_authoritative_candidate_ids"] == [
-        represented_workflow_id
-    ]
+    assert outputs["selector_authoritative_candidate_ids"] == [represented_workflow_id]
     assert represented_workflow_id in outputs["selector_candidate_ids"]
     assert TOOL_CALLING_WORKFLOW_ID in outputs["selector_candidate_ids"]
     assert outputs["selector_context_lineage"]["stage"] == "selector_decision"
@@ -1151,9 +1191,7 @@ def test_agent_test_selector_preparation_prefers_represented_discovery_candidate
     outputs = orchestrator._prepare_turn_selector_context_outputs(request)
 
     assert represented_workflow_id in outputs["selector_candidate_ids"]
-    assert outputs["selector_authoritative_candidate_ids"] == [
-        represented_workflow_id
-    ]
+    assert outputs["selector_authoritative_candidate_ids"] == [represented_workflow_id]
     assert outputs["selector_authoritative_candidate_source"] == (
         "workflow_discovery_pre_policy"
     )
@@ -1544,8 +1582,7 @@ def test_completion_gate_blocks_workflow_llm_timeout_with_zero_required_effects(
                 "completion_reason": "timeout",
                 "timeout_stage": "tool_calling.plan",
                 "timeout_detail": (
-                    "LLM call timed out after 45s "
-                    "(stage=planner, model=qwen3:8b)"
+                    "LLM call timed out after 45s (stage=planner, model=qwen3:8b)"
                 ),
             },
             "turn_execution_record": {

@@ -459,7 +459,9 @@ def _selected_workflow_failure_blocker_from_turn_data(
     )
     effective_completed = _bool_field(completion_report.get("effective_completed"))
     completed = _bool_field(completion_report.get("completed"))
-    terminal_status = (_safe_str(completion_report.get("terminal_status")) or "").lower()
+    terminal_status = (
+        _safe_str(completion_report.get("terminal_status")) or ""
+    ).lower()
     final_state = (_safe_str(completion_report.get("final_state")) or "").lower()
     failure_count = _coerce_non_negative_int(
         completion_report.get("action_failure_count"),
@@ -470,7 +472,9 @@ def _selected_workflow_failure_blocker_from_turn_data(
         completion_report.get("failed_action_ids")
     )
     first_failing_state_id = _safe_str(completion_report.get("first_failing_state_id"))
-    first_failing_action_id = _safe_str(completion_report.get("first_failing_action_id"))
+    first_failing_action_id = _safe_str(
+        completion_report.get("first_failing_action_id")
+    )
 
     failed = bool(
         effective_completed is False
@@ -1019,6 +1023,13 @@ def _looks_like_machine_json_text(text: Any) -> bool:
     candidate = _coerce_non_empty_text(text)
     if not candidate:
         return False
+    fenced_match = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        candidate,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced_match:
+        candidate = fenced_match.group(1).strip()
     if not (
         (candidate.startswith("{") and candidate.endswith("}"))
         or (candidate.startswith("[") and candidate.endswith("]"))
@@ -2927,6 +2938,14 @@ def run_turn_execution_critic(
         data=data,
         environment=env,
     )
+    critic_verdict_input = request_inputs.get("critic_verdict")
+    effective_critic_verdict = (
+        data.get("critic_verdict")
+        if isinstance(data.get("critic_verdict"), Mapping)
+        else critic_verdict_input
+        if isinstance(critic_verdict_input, Mapping)
+        else None
+    )
 
     turn_execution_record = build_turn_execution_record(
         request_id=data.get("turn_id"),
@@ -2960,7 +2979,7 @@ def run_turn_execution_critic(
                 else None
             )
         ),
-        critic_verdict=data.get("critic_verdict"),
+        critic_verdict=effective_critic_verdict,
         completion_gate_verdict=data.get("completion_gate_verdict"),
         completion_report=data.get("completion_report"),
         required_prompt_tools=(
@@ -3025,6 +3044,21 @@ def run_turn_execution_critic(
                 **critic_payload,
                 "verdict": dict(critic_verdict_payload),
             }
+
+    terminal_outcome_receipt_raw = turn_execution_record.get("terminal_outcome_receipt")
+    terminal_outcome_receipt = (
+        dict(terminal_outcome_receipt_raw)
+        if isinstance(terminal_outcome_receipt_raw, Mapping)
+        else None
+    )
+    terminal_outcome_receipt_validation_raw = turn_execution_record.get(
+        "terminal_outcome_receipt_validation"
+    )
+    terminal_outcome_receipt_validation = (
+        dict(terminal_outcome_receipt_validation_raw)
+        if isinstance(terminal_outcome_receipt_validation_raw, Mapping)
+        else {}
+    )
 
     required_effects = turn_execution_record.get("required_effects")
     if not isinstance(required_effects, list):
@@ -3102,6 +3136,15 @@ def run_turn_execution_critic(
             max_items=8,
             max_string_length=400,
         ),
+        "terminal_outcome_receipt": _bounded_snapshot(
+            terminal_outcome_receipt,
+            max_depth=6,
+            max_items=16,
+            max_string_length=600,
+        ),
+        "terminal_outcome_receipt_validation": dict(
+            terminal_outcome_receipt_validation
+        ),
     }
 
     if isinstance(raw_aux, list) and isinstance(critic_verdict_payload, dict):
@@ -3143,6 +3186,10 @@ def run_turn_execution_critic(
                 dict(critic_verdict_payload)
                 if isinstance(critic_verdict_payload, dict)
                 else None
+            ),
+            "terminal_outcome_receipt": terminal_outcome_receipt,
+            "terminal_outcome_receipt_validation": (
+                terminal_outcome_receipt_validation
             ),
             "completion_gate_decision": gate_decision,
             "completion_gate_requires_follow_up": gate_requires_follow_up,
@@ -3212,6 +3259,21 @@ def run_turn_execution_completion_gate(
     completion_gate_payload = record.get("completion_gate")
     if not isinstance(completion_gate_payload, Mapping):
         completion_gate_payload = {}
+
+    terminal_outcome_receipt_raw = record.get("terminal_outcome_receipt")
+    terminal_outcome_receipt = (
+        dict(terminal_outcome_receipt_raw)
+        if isinstance(terminal_outcome_receipt_raw, Mapping)
+        else None
+    )
+    terminal_outcome_receipt_validation_raw = record.get(
+        "terminal_outcome_receipt_validation"
+    )
+    terminal_outcome_receipt_validation = (
+        dict(terminal_outcome_receipt_validation_raw)
+        if isinstance(terminal_outcome_receipt_validation_raw, Mapping)
+        else {}
+    )
 
     decision = _safe_str(completion_gate_payload.get("decision")) or "completed"
     decision_reason = _safe_str(completion_gate_payload.get("decision_reason")) or ""
@@ -3300,7 +3362,9 @@ def run_turn_execution_completion_gate(
             record=record,
         )
     )
-    execution_blocker = workflow_llm_timeout_blocker or selected_workflow_failure_blocker
+    execution_blocker = (
+        workflow_llm_timeout_blocker or selected_workflow_failure_blocker
+    )
     if execution_blocker:
         execution_signal_blocker = dict(execution_blocker)
         effect_id = _safe_str(execution_blocker.get("effect_id"))
@@ -3309,9 +3373,7 @@ def run_turn_execution_completion_gate(
         blocker_failure_codes = _normalise_string_list(
             execution_blocker.get("failure_codes")
         )
-        blocker_failure_code = _safe_str(
-            execution_blocker.get("failure_code")
-        )
+        blocker_failure_code = _safe_str(execution_blocker.get("failure_code"))
         if blocker_failure_code and blocker_failure_code not in blocker_failure_codes:
             blocker_failure_codes.append(blocker_failure_code)
         for code in blocker_failure_codes:
@@ -3333,13 +3395,10 @@ def run_turn_execution_completion_gate(
             )
         if decision == "completed" or not decision:
             decision = (
-                _safe_str(execution_blocker.get("decision"))
-                or "escalation_required"
+                _safe_str(execution_blocker.get("decision")) or "escalation_required"
             )
         if not decision_reason:
-            decision_reason = (
-                _safe_str(execution_blocker.get("decision_reason")) or ""
-            )
+            decision_reason = _safe_str(execution_blocker.get("decision_reason")) or ""
 
     if not blocking_failure_codes:
         for unresolved in unresolved_preconditions:
@@ -3490,96 +3549,14 @@ def run_turn_execution_completion_gate(
         current_response = strip_completion_ledger_suffix(current_response)
 
     if not safe_to_claim_completion:
-        unresolved_effect_types = {
-            str(unresolved.get("effect_type") or "").strip()
-            for unresolved in unresolved_preconditions
-            if isinstance(unresolved, Mapping)
-            and isinstance(unresolved.get("effect_type"), str)
-            and str(unresolved.get("effect_type") or "").strip()
-        }
-        if unresolved_effect_types == {"tool_execution"}:
-            if decision == "failed":
-                status_line = "Execution status: planned tool execution did not complete successfully."
-            else:
-                status_line = (
-                    "Execution status: required tool execution was not completed."
-                )
-        elif unresolved_effect_types == {"workflow_execution"}:
-            status_line = "Execution status: selected workflow execution did not complete successfully."
-        elif unresolved_effect_types and all(
-            _is_evidence_effect_type(effect_type)
-            for effect_type in unresolved_effect_types
-        ):
-            status_line = (
-                "Execution status: required grounded evidence was not retrieved."
-            )
-        elif decision == "failed":
-            status_line = "Execution status: requested mutation failed or was blocked."
-        elif decision == "escalation_required":
-            status_line = "Execution status: requested mutation was not executed."
-        elif decision == "partial":
-            status_line = "Execution status: mutation may have run but verification is inconclusive."
-        else:
-            status_line = "Execution status: follow-up verification is required."
-
-        if decision_reason:
-            status_line = f"{status_line} {decision_reason}"
-        if blocking_effect_ids:
-            status_line = (
-                f"{status_line} Blocking effect IDs: {', '.join(blocking_effect_ids)}."
-            )
-        if unresolved_preconditions:
-            unresolved_reasons: list[str] = []
-            unresolved_failure_codes: list[str] = []
-            for unresolved in unresolved_preconditions:
-                if not isinstance(unresolved, Mapping):
-                    continue
-                reason = unresolved.get("status_reason")
-                if isinstance(reason, str) and reason.strip():
-                    unresolved_reasons.append(reason.strip())
-                for code in _normalise_string_list(unresolved.get("failure_codes")):
-                    if code not in unresolved_failure_codes:
-                        unresolved_failure_codes.append(code)
-            if unresolved_reasons:
-                status_line = (
-                    f"{status_line} Unresolved preconditions: "
-                    f"{'; '.join(unresolved_reasons[:2])}."
-                )
-            if unresolved_failure_codes:
-                status_line = (
-                    f"{status_line} Failure codes: "
-                    f"{', '.join(unresolved_failure_codes[:3])}."
-                )
-
-        preserve_existing_user_response = bool(
-            unresolved_effect_types == {"required_evidence_answer_consistency"}
-            and user_response_for_preservation
-        )
-        if preserve_existing_user_response:
-            preserved_user_response = user_response_for_preservation
-        replace_existing_user_response = bool(
-            unresolved_effect_types
-            and not preserve_existing_user_response
-            and all(
-                _is_evidence_effect_type(effect_type)
-                for effect_type in unresolved_effect_types
-            )
-        )
-        ledger_replaced_empty = not (
-            isinstance(final_response, str) and final_response.strip()
-        )
-        if preserve_existing_user_response:
-            pass
-        elif replace_existing_user_response:
-            final_response = status_line
-        elif isinstance(final_response, str) and final_response.strip():
-            if "Execution status:" not in final_response:
-                final_response = f"{final_response.rstrip()}\n\n{status_line}"
-        else:
-            final_response = status_line
-
-        response_text = final_response
-        current_response = final_response
+        # User-facing recovery and failure wording is represented policy owned by
+        # the conversation workflow's recovery-decision LLM step.  Preserve the
+        # previous candidate as evidence, but clear the surfaceable response so
+        # Python cannot accidentally author or publish a terminal explanation.
+        preserved_user_response = user_response_for_preservation
+        final_response = ""
+        response_text = ""
+        current_response = ""
 
         aux_llm_calls = data.get("aux_llm_calls")
         if isinstance(aux_llm_calls, list):
@@ -3587,26 +3564,26 @@ def run_turn_execution_completion_gate(
                 aux_llm_calls.append(
                     annotate_python_decision_event(
                         {
-                            "type": "completion_ledger_injection",
+                            "type": "completion_response_deferred_to_workflow",
                             "decision": decision,
-                            "ledger_replaced_empty_response": ledger_replaced_empty,
-                            "ledger_preserved_existing_user_response": (
-                                preserve_existing_user_response
+                            "preserved_response_available": bool(
+                                preserved_user_response
                             ),
-                            "decision_authority": {
-                                "origin": "python",
-                                "decision_class": "completion_ledger_injection",
-                                "scaffolding": True,
-                            },
+                            "represented_recovery_workflow_id": (
+                                "#V#conversation_turn_execution_workflow"
+                            ),
+                            "represented_recovery_prompt_id": (
+                                "#V#prompt_turn_execution_recovery_decision"
+                            ),
                         },
                         stage="completion_gate",
                         component=annotation_component,
                         function=annotation_function,
-                        decision_class="completion_ledger_injection",
-                        decision_source="execution_postcondition_check",
-                        changed_outcome=True,
-                        reason_code=decision or "unknown",
-                        possible_inappropriate_python_code_use=True,
+                        decision_class="completion_response_deferred_to_workflow",
+                        decision_source="represented_recovery_policy",
+                        changed_outcome=False,
+                        reason_code="user_facing_wording_owned_by_workflow",
+                        possible_inappropriate_python_code_use=False,
                     )
                 )
             except Exception:
@@ -3745,6 +3722,10 @@ def run_turn_execution_completion_gate(
             "escalation_signal": escalation_signal,
             "escalation_reason": escalation_reason,
             "budget_diagnostics": budget_diagnostics,
+            "terminal_outcome_receipt": terminal_outcome_receipt,
+            "terminal_outcome_receipt_validation": (
+                terminal_outcome_receipt_validation
+            ),
         }
     )
 
@@ -4039,9 +4020,7 @@ def run_turn_execution_completion_gate(
 
     emit_progress = data.get("emit_progress")
     response_ready_permitted = bool(
-        (not repeat_iteration)
-        and safe_to_claim_completion
-        and not requires_follow_up
+        (not repeat_iteration) and safe_to_claim_completion and not requires_follow_up
     )
     if callable(emit_progress) and response_ready_permitted:
         ready_response_text = _completion_gate_ready_response_text()
@@ -4117,6 +4096,10 @@ def run_turn_execution_completion_gate(
             "completion_gate_escalation_signal": escalation_signal,
             "completion_gate_escalation_reason": escalation_reason,
             "completion_gate_preserved_response": preserved_user_response,
+            "terminal_outcome_receipt": terminal_outcome_receipt,
+            "terminal_outcome_receipt_validation": (
+                terminal_outcome_receipt_validation
+            ),
             "workflow_introspection_autotrigger": introspection_autotrigger,
             "episode_evaluation_autotrigger": introspection_autotrigger,
             "result": requires_follow_up,

@@ -66,6 +66,10 @@ from ..workflows.conversation_turn_stage_model import (
 from ..workflows.required_effects_contracts import (
     WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION,
 )
+from ..workflows.terminal_outcome_receipts import (
+    apply_terminal_outcome_receipt_to_completion_gate,
+    validate_terminal_outcome_receipt,
+)
 from ..workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     extract_vontology_concept_ids_from_text,
@@ -2673,11 +2677,7 @@ def _compact_final_answer_projection_payload(
         return value
     if isinstance(value, str):
         text = value.strip()
-        return (
-            text[:max_string_chars] + "..."
-            if len(text) > max_string_chars
-            else text
-        )
+        return text[:max_string_chars] + "..." if len(text) > max_string_chars else text
     if _depth >= max_depth:
         if isinstance(value, Mapping):
             compact: dict[str, Any] = {}
@@ -3249,7 +3249,9 @@ def _entry_targets_final_answer_synthesis(entry: Mapping[str, Any]) -> bool:
     request = entry.get("request")
     request_prompt_ids = set(_request_prompt_concept_ids(request))
     entry_prompt_ids = set(_request_prompt_concept_ids(entry))
-    if (request_prompt_ids | entry_prompt_ids) & _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS:
+    if (
+        request_prompt_ids | entry_prompt_ids
+    ) & _FINAL_ANSWER_SYNTHESIS_PROMPT_CONCEPT_IDS:
         return True
 
     prompt_text = _request_prompt_text(request)
@@ -6127,9 +6129,9 @@ def _normalise_representation_decision_policy(raw: Any) -> dict[str, bool]:
     return policy
 
 
-def _load_representation_domain_profiles_from_vontology() -> (
-    tuple[list[dict[str, Any]], dict[str, Any]]
-):
+def _load_representation_domain_profiles_from_vontology() -> tuple[
+    list[dict[str, Any]], dict[str, Any]
+]:
     requested_profile_concept_ids = list(canonical_representation_profile_concept_ids())
     loaded_profiles, diagnostics = (
         load_representation_contract_profiles_from_concept_ids(
@@ -8483,7 +8485,9 @@ def _derive_completion_gate(
         "completion_outcome": (
             "success"
             if decision == "completed"
-            else "inconclusive" if decision == "partial" else "failure"
+            else "inconclusive"
+            if decision == "partial"
+            else "failure"
         ),
     }
     return {
@@ -8601,9 +8605,7 @@ def build_turn_execution_record(
             ),
             (
                 "completion_report",
-                completion_report
-                if isinstance(completion_report, Mapping)
-                else None,
+                completion_report if isinstance(completion_report, Mapping) else None,
             ),
         )
     )
@@ -9132,6 +9134,30 @@ def build_turn_execution_record(
             blocker=prompt_required_evidence_answer_consistency_blocker,
         )
 
+    authoritative_receipt_required = bool(
+        isinstance(critic_verdict, Mapping)
+        and "terminal_outcome_receipt" in critic_verdict
+    )
+    terminal_outcome_receipt_candidate = (
+        critic_verdict.get("terminal_outcome_receipt")
+        if isinstance(critic_verdict, Mapping)
+        else None
+    )
+    (
+        terminal_outcome_receipt,
+        terminal_outcome_receipt_validation,
+    ) = validate_terminal_outcome_receipt(
+        terminal_outcome_receipt_candidate,
+        completion_gate=completion_gate,
+        required=authoritative_receipt_required,
+    )
+    completion_gate = apply_terminal_outcome_receipt_to_completion_gate(
+        completion_gate,
+        receipt=terminal_outcome_receipt,
+        validation=terminal_outcome_receipt_validation,
+        authoritative_receipt_required=authoritative_receipt_required,
+    )
+
     requested_evidence_lineage = _build_requested_evidence_lineage(
         response_text=response_text,
         final_answer_synthesis=final_answer_synthesis,
@@ -9373,21 +9399,19 @@ def build_turn_execution_record(
                 context_adjudication_source
             )
     if isinstance(obligation_carry_forward_projection, Mapping):
-        execution_summary_with_contract[
-            "expected_outcome_obligation_carry_forward"
-        ] = dict(obligation_carry_forward_projection)
+        execution_summary_with_contract["expected_outcome_obligation_carry_forward"] = (
+            dict(obligation_carry_forward_projection)
+        )
         suppressed_prior_obligations = list(
             obligation_carry_forward_projection.get("suppressed_prior_obligations")
             or ()
         )
         if suppressed_prior_obligations:
-            execution_summary_with_contract[
-                "suppressed_prior_obligation_tools"
-            ] = suppressed_prior_obligations
-            execution_summary_with_contract[
-                "suppressed_prior_obligation_reason"
-            ] = _safe_str(
-                obligation_carry_forward_projection.get("suppression_reason")
+            execution_summary_with_contract["suppressed_prior_obligation_tools"] = (
+                suppressed_prior_obligations
+            )
+            execution_summary_with_contract["suppressed_prior_obligation_reason"] = (
+                _safe_str(obligation_carry_forward_projection.get("suppression_reason"))
             )
     execution_summary_with_contract["final_answer_synthesis_observed"] = bool(
         final_answer_synthesis
@@ -9571,6 +9595,8 @@ def build_turn_execution_record(
             "summary": critic_summary,
             "verdict": critic_verdict,
         },
+        "terminal_outcome_receipt": terminal_outcome_receipt,
+        "terminal_outcome_receipt_validation": terminal_outcome_receipt_validation,
         "completion_gate": completion_gate,
         "completion_gate_verdict": completion_gate_verdict,
         "completion_report": completion_report,
@@ -9788,9 +9814,7 @@ def persist_failed_turn_execution_record(
     clean_request_id = _safe_str(request_id)
     if not clean_request_id:
         return {"updated": False, "reason": "missing_request_id"}
-    clean_terminal_status = (
-        _safe_str(terminal_status) or "failed"
-    ).lower()
+    clean_terminal_status = (_safe_str(terminal_status) or "failed").lower()
 
     debug = llm_debug_info if isinstance(llm_debug_info, Mapping) else {}
 
@@ -9814,9 +9838,7 @@ def persist_failed_turn_execution_record(
             interaction_timestamp_utc=debug.get("interaction_timestamp_utc"),
             workflow_discovery=_debug_mapping("workflow_discovery"),
             workflow_routing=_debug_mapping("workflow_routing"),
-            turn_execution_diagnostics=_debug_mapping(
-                "turn_execution_diagnostics"
-            ),
+            turn_execution_diagnostics=_debug_mapping("turn_execution_diagnostics"),
             aux_llm_calls=_debug_list("aux_llm_calls"),
             llm_calls=_debug_list("llm_calls"),
         )
@@ -9843,9 +9865,7 @@ def persist_failed_turn_execution_record(
         "error": _safe_str(error_text),
         "error_class": _safe_str(error_class),
         "progress_snapshot": (
-            dict(progress_snapshot)
-            if isinstance(progress_snapshot, Mapping)
-            else None
+            dict(progress_snapshot) if isinstance(progress_snapshot, Mapping) else None
         ),
         "recorded_at_utc": _iso_utc(_now_utc()),
     }

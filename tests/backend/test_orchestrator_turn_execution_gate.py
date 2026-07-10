@@ -371,7 +371,7 @@ def test_turn_execution_critic_prefers_concrete_verification_reads() -> None:
     assert evidence_payload.get("completion_outcome") == "success"
 
 
-def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -> None:
+def test_turn_completion_gate_defers_unresolved_effect_wording_to_workflow() -> None:
     orchestrator = _build_orchestrator()
     aux_llm_calls: list[dict[str, Any]] = []
     request = _build_request(
@@ -423,21 +423,29 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
     assert unresolved_preconditions
 
     final_response = result.outputs.get("final_response")
-    assert isinstance(final_response, str)
-    assert "Execution status:" in final_response
-    assert "Blocking effect IDs: effect_1." in final_response
-    assert "Unresolved preconditions:" in final_response
-    assert "Failure codes: worker_unavailable_zero_execution." in final_response
+    assert final_response == ""
+    assert result.outputs.get("completion_gate_preserved_response") == (
+        "I have completed the update."
+    )
+    assert any(
+        event.get("type") == "completion_response_deferred_to_workflow"
+        for event in aux_llm_calls
+    )
 
     evidence_payload = result.outputs.get("completion_gate_evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("terminal_outcome") == "retrying"
-
     assert any(
         entry.get("type") == "turn_completion_gate"
         for entry in aux_llm_calls
         if isinstance(entry, dict)
     )
+
+
+def test_machine_json_detection_accepts_single_fenced_json_block() -> None:
+    payload = '```json\n{"turn_next_action":{"action_type":"retry_execution"}}\n```'
+
+    assert InternalMCPChatOrchestrator._looks_like_machine_json_text(payload) is True
 
 
 def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditions() -> (
@@ -479,9 +487,7 @@ def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditio
     ]
 
 
-def test_turn_completion_gate_replaces_unsafe_answer_for_missing_grounded_evidence() -> (
-    None
-):
+def test_turn_completion_gate_defers_unsafe_grounded_answer_to_workflow() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.completion_gate",
@@ -523,12 +529,10 @@ def test_turn_completion_gate_replaces_unsafe_answer_for_missing_grounded_eviden
 
     assert result.ok
     final_response = result.outputs.get("final_response")
-    assert isinstance(final_response, str)
-    assert final_response.startswith(
-        "Execution status: required grounded evidence was not retrieved."
+    assert final_response == ""
+    assert result.outputs.get("completion_gate_preserved_response") == (
+        "You are Test User. I could not find any papers explicitly linked to you."
     )
-    assert "You are Test User." not in final_response
-    assert "entity_information_evidence_missing" in final_response
 
 
 def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None:
@@ -1994,10 +1998,10 @@ def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted()
     assert int(result.outputs.get("completion_gate_loop_stall_events") or 0) >= 1
     assert int(result.outputs.get("completion_gate_loop_stall_elapsed_ms") or 0) >= 500
     final_response = result.outputs.get("final_response")
-    assert isinstance(final_response, str)
-    assert "Execution status:" in final_response
-    assert "Escalation trigger:" not in final_response
-    assert "stall_latency_budget_exhausted" not in final_response
+    assert final_response == ""
+    assert result.outputs.get("completion_gate_preserved_response") == (
+        "I have completed the update."
+    )
     evidence_payload = result.outputs.get("completion_gate_evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("terminal_outcome") == "stall_latency_budget_exhausted"

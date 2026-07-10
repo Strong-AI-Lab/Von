@@ -28,12 +28,68 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.workflows.terminal_success_contracts import (
     evaluate_workflow_terminal_success_contract,
 )
+from src.backend.workflows.terminal_outcome_receipts import (
+    apply_terminal_outcome_receipt_to_completion_gate,
+    validate_terminal_outcome_receipt,
+)
 from src.backend.services.turn_expected_outcome_obligation_carry_forward import (
     adjudicate_conditional_required_tool_activation,
 )
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
 )
+
+
+# --- terminal receipts retain represented recovery opportunities ------------
+
+
+def test_terminal_receipt_preserves_recovery_affordances_and_committed_effects() -> (
+    None
+):
+    authored_receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "verified_partial",
+        "cause_code": "remaining_obligation_unverified",
+        "causal_stage": "verification",
+        "summary": "One effect is established and one remains unverified.",
+        "evidence_refs": [{"kind": "observation", "ref": "observation-1"}],
+        "committed_effects": [{"effect_id": "effect-1", "status": "satisfied"}],
+        "remaining_obligations": [{"effect_id": "effect-2", "status": "unverified"}],
+        "retryability": "now",
+        "recovery_affordances": [
+            {"action_type": "inspect", "target_ref": "observation-1"},
+            {"action_type": "retry", "target_ref": "effect-2"},
+            {"action_type": "narrower_answer", "target_ref": "effect-1"},
+        ],
+        "learning_candidate": None,
+        "redaction_status": "contains_no_sensitive_values",
+        "provenance": {"decision_source": "represented_llm"},
+    }
+
+    receipt, validation = validate_terminal_outcome_receipt(
+        authored_receipt,
+        completion_gate={"safe_to_claim_completion": True},
+        required=True,
+    )
+    gate = apply_terminal_outcome_receipt_to_completion_gate(
+        {"safe_to_claim_completion": True, "requires_follow_up": False},
+        receipt=receipt,
+        validation=validation,
+        authoritative_receipt_required=True,
+    )
+
+    assert validation["valid"] is True
+    assert gate["decision"] == "verified_partial"
+    persisted = gate["evidence_payload"]["terminal_outcome_receipt"]
+    assert persisted["committed_effects"] == [
+        {"effect_id": "effect-1", "status": "satisfied"}
+    ]
+    assert [item["action_type"] for item in persisted["recovery_affordances"]] == [
+        "inspect",
+        "retry",
+        "narrower_answer",
+    ]
 
 
 # --- schema tolerance: a represented workflow is not denied a fair run for a
@@ -149,7 +205,10 @@ def test_non_terminal_status_is_not_blessed_as_success() -> None:
 
 def test_stale_prior_obligations_do_not_remove_a_narrow_answer_opportunity() -> None:
     contract = TurnExpectedOutcomeContract(
-        conditional_required_tools=("some_prior_mutation_tool", "some_prior_readback_tool"),
+        conditional_required_tools=(
+            "some_prior_mutation_tool",
+            "some_prior_readback_tool",
+        ),
         target_concept_ids=("#V#carried_referent_concept",),
     )
     activated, projection = adjudicate_conditional_required_tool_activation(

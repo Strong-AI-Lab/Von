@@ -33,7 +33,9 @@ _KR_REQUIRED_TOOLS = [
 ]
 
 
-def test_tool_route_zero_execution_overrides_custom_workflow_action_completion() -> None:
+def test_tool_route_zero_execution_overrides_custom_workflow_action_completion() -> (
+    None
+):
     reason = _derive_zero_tool_execution_reason(
         selected_execution_mode="custom_workflow",
         tool_route_selected=True,
@@ -274,13 +276,15 @@ def test_turn_record_marks_required_tool_schema_failure_as_unresolved_effect() -
     assert create_obligation["tool_call_validation_errors"][0]["message"] == (
         _CREATE_CONCEPTS_PARENT_ERROR
     )
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        summary["required_tool_obligation_blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (summary["required_tool_obligation_blocking_failure_codes"])
     )
 
     dispatch = record["workflow_routing_diagnostics"]["dispatch"]
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        dispatch["required_tool_obligation_blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (dispatch["required_tool_obligation_blocking_failure_codes"])
     )
 
 
@@ -337,8 +341,9 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
         "schema_validation_failed"
         in result.outputs["completion_gate_blocking_failure_codes"]
     )
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        result.outputs["completion_gate_blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (result.outputs["completion_gate_blocking_failure_codes"])
     )
     assert any(
         entry.get("type") == "completion_gate_record_rebuilt"
@@ -445,7 +450,9 @@ def test_completion_gate_rebuilds_stale_required_tool_obligation_effect() -> Non
     )
 
 
-def test_completion_gate_does_not_rebuild_failed_required_verification_as_success() -> None:
+def test_completion_gate_does_not_rebuild_failed_required_verification_as_success() -> (
+    None
+):
     data: dict[str, Any] = {
         "turn_execution_record": {
             "required_effects": [
@@ -912,7 +919,9 @@ def test_completion_gate_does_not_publish_partial_answer_as_ready_response() -> 
     ] == []
 
 
-def test_completion_gate_blocks_failed_selected_workflow_with_zero_required_effects() -> None:
+def test_completion_gate_blocks_failed_selected_workflow_with_zero_required_effects() -> (
+    None
+):
     data = {
         "turn_execution_record": {
             "completion_gate": {
@@ -978,8 +987,13 @@ def test_completion_gate_blocks_failed_selected_workflow_with_zero_required_effe
             "failure_codes": ["selected_workflow_execution_failed"],
         }
     ]
-    assert "selected workflow execution did not complete successfully" in (
-        result.outputs["response_text"]
+    assert result.outputs["response_text"] == ""
+    assert result.outputs["completion_gate_preserved_response"] == (
+        "A stale selected-workflow response."
+    )
+    assert any(
+        event.get("type") == "completion_response_deferred_to_workflow"
+        for event in data["aux_llm_calls"]
     )
 
 
@@ -1008,8 +1022,9 @@ def test_selected_workflow_outputs_render_structured_response_text() -> None:
         "subject: Re: Paper and chat?; date: Thu, 18 Jun 2026 10:59:59 -0600; "
         "snippet: Great. Let me know what times could work for you."
     )
-    assert outputs["completion_report"]["response_text"] == (
-        outputs["selected_workflow_user_response"]
+    assert (
+        outputs["completion_report"]["response_text"]
+        == (outputs["selected_workflow_user_response"])
     )
 
 
@@ -1248,15 +1263,15 @@ def test_completion_gate_blocks_operational_summary_when_authoritative_critic_fl
     assert result.outputs["completion_gate_safe_to_claim_completion"] is False
     assert result.outputs["completion_gate_requires_follow_up"] is True
     assert result.outputs["completion_gate_decision"] == "partial"
-    assert "projected_final_answer_evidence_not_consumed" in (
-        result.outputs["completion_gate_blocking_failure_codes"]
-    )
-    assert result.outputs["final_response"].startswith(
-        "Execution status: required grounded evidence was not retrieved."
-    )
     assert (
         "projected_final_answer_evidence_not_consumed"
-        in result.outputs["final_response"]
+        in (result.outputs["completion_gate_blocking_failure_codes"])
+    )
+    assert result.outputs["final_response"] == ""
+    assert result.outputs["completion_gate_preserved_response"] is None
+    assert any(
+        event.get("type") == "completion_response_deferred_to_workflow"
+        for event in data["aux_llm_calls"]
     )
     evidence_payload = result.outputs["completion_gate_evidence_payload"]
     blocker = evidence_payload["required_evidence_answer_consistency_blocker"]
@@ -1311,14 +1326,17 @@ def test_kr_required_tools_block_completion_when_write_and_readback_are_absent()
         == "not_executed"
     )
     assert record["completion_gate"]["safe_to_claim_completion"] is False
-    assert "prompt_required_mutation_create_concepts_missing" in (
-        record["completion_gate"]["blocking_failure_codes"]
+    assert (
+        "prompt_required_mutation_create_concepts_missing"
+        in (record["completion_gate"]["blocking_failure_codes"])
     )
-    assert "prompt_required_mutation_add_relationship_missing" in (
-        record["completion_gate"]["blocking_failure_codes"]
+    assert (
+        "prompt_required_mutation_add_relationship_missing"
+        in (record["completion_gate"]["blocking_failure_codes"])
     )
-    assert "prompt_required_mutation_upsert_singleton_text_relation_missing" in (
-        record["completion_gate"]["blocking_failure_codes"]
+    assert (
+        "prompt_required_mutation_upsert_singleton_text_relation_missing"
+        in (record["completion_gate"]["blocking_failure_codes"])
     )
 
 
@@ -1348,11 +1366,13 @@ def test_kr_required_tools_block_completion_when_write_lacks_readback() -> None:
 
     gate = record["completion_gate"]
     assert gate["safe_to_claim_completion"] is False
-    assert "prompt_required_evidence_fetch_concept_missing" in (
-        gate["blocking_failure_codes"]
+    assert (
+        "prompt_required_evidence_fetch_concept_missing"
+        in (gate["blocking_failure_codes"])
     )
-    assert "prompt_required_evidence_get_text_relations_summary_missing" in (
-        gate["blocking_failure_codes"]
+    assert (
+        "prompt_required_evidence_get_text_relations_summary_missing"
+        in (gate["blocking_failure_codes"])
     )
     assert any(
         check.get("effect_id") == "mutation_3"
@@ -1429,11 +1449,13 @@ def test_contract_required_gmail_profile_and_relation_tools_block_generic_chat()
 
     gate = record["completion_gate"]
     assert gate["safe_to_claim_completion"] is False
-    assert "prompt_required_evidence_gmail_list_profiles_missing" in (
-        gate["blocking_failure_codes"]
+    assert (
+        "prompt_required_evidence_gmail_list_profiles_missing"
+        in (gate["blocking_failure_codes"])
     )
-    assert "prompt_required_evidence_find_relations_with_argument_missing" in (
-        gate["blocking_failure_codes"]
+    assert (
+        "prompt_required_evidence_find_relations_with_argument_missing"
+        in (gate["blocking_failure_codes"])
     )
     summary = record["execution"]["summary"]
     assert summary["required_tool_obligations"]["unsatisfied_required_tools"] == [
@@ -1478,15 +1500,15 @@ def test_target_type_required_evidence_rejects_other_target_success() -> None:
 
     gate = record["completion_gate"]
     assert gate["safe_to_claim_completion"] is False
-    assert "prompt_required_evidence_get_predicate_incidence_wrong_target" in (
-        gate["blocking_failure_codes"]
+    assert (
+        "prompt_required_evidence_get_predicate_incidence_wrong_target"
+        in (gate["blocking_failure_codes"])
     )
     effect = next(
         item
         for item in record["required_effects"]
-        if item["effect_id"] == (
-            "effect_prompt_required_evidence_get_predicate_incidence_1"
-        )
+        if item["effect_id"]
+        == ("effect_prompt_required_evidence_get_predicate_incidence_1")
     )
     assert effect["targets"] == ["#V#scientific_paper"]
     assert effect["status"] == "not_executed"
@@ -1534,9 +1556,8 @@ def test_target_type_required_evidence_accepts_instance_of_target() -> None:
     effect = next(
         item
         for item in record["required_effects"]
-        if item["effect_id"] == (
-            "effect_prompt_required_evidence_get_predicate_incidence_1"
-        )
+        if item["effect_id"]
+        == ("effect_prompt_required_evidence_get_predicate_incidence_1")
     )
     assert effect["status"] == "satisfied"
 
@@ -1610,15 +1631,16 @@ def test_target_failed_required_reads_are_not_closed_by_later_other_target_succe
     gate = record["completion_gate"]
     assert gate["safe_to_claim_completion"] is False
     assert gate["requires_follow_up"] is True
-    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
-        gate["blocking_failure_codes"]
+    assert (
+        BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (gate["blocking_failure_codes"])
     )
 
     summary = record["execution"]["summary"]
     ledger = summary["required_tool_obligations"]
     assert ledger["unsatisfied_required_tools"] == required_tools
-    assert BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED in (
-        summary["required_tool_obligation_blocking_failure_codes"]
+    assert (
+        BLOCKER_TARGET_REQUIRED_TOOL_ATTEMPT_FAILED
+        in (summary["required_tool_obligation_blocking_failure_codes"])
     )
     fetch_obligation = next(
         item for item in ledger["obligations"] if item["tool_name"] == "fetch_concept"
