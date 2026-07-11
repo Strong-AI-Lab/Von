@@ -24319,7 +24319,7 @@ function forceScrollToBottomWithRetries(scrollableField, options = {}) {
             return;
         }
 
-        scrollableField.scrollTop = scrollableField.scrollHeight;
+        scrollConversationToEnd(scrollableField, { smooth: false });
         remaining -= 1;
         requestFrame(tick);
     };
@@ -24385,8 +24385,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         forceScrollToBottom = false
     } = options;
 
-    const previousScrollHeight = scrollableField.scrollHeight;
-    const previousScrollTop = scrollableField.scrollTop;
+    const previousScrollHeight = getConversationPageScrollHeight();
+    const previousScrollTop = getConversationPageScrollTop();
 
     scrollableField.innerHTML = '';
     transcriptTurns.length = 0;
@@ -24450,11 +24450,11 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
 
     requestFrame(() => {
         if (preserveScroll) {
-            const newScrollHeight = scrollableField.scrollHeight;
+            const newScrollHeight = getConversationPageScrollHeight();
             const delta = newScrollHeight - previousScrollHeight;
-            scrollableField.scrollTop = previousScrollTop + Math.max(delta, 0);
+            scrollConversationPageTo(previousScrollTop + Math.max(delta, 0));
         } else if (scrollToBottom) {
-            scrollableField.scrollTop = scrollableField.scrollHeight;
+            scrollConversationToEnd(scrollableField, { smooth: false });
 
             if (forceScrollToBottom) {
                 forceScrollToBottomWithRetries(scrollableField);
@@ -25550,14 +25550,14 @@ function appendSharedTurnToTranscript(message) {
     messageDiv.appendChild(sourceIndicator);
     messageDiv.appendChild(contentDiv);
 
-    // Check if user is scrolled to bottom before appending
-    const wasAtBottom = scrollableField.scrollHeight - scrollableField.scrollTop <= scrollableField.clientHeight + 50;
+    // Follow incoming content only when the reader was already near the page end.
+    const wasAtBottom = isScrollableFieldNearBottom(scrollableField);
 
     scrollableField.appendChild(messageDiv);
 
     // Auto-scroll if user was at bottom
     if (wasAtBottom) {
-        scrollableField.scrollTop = scrollableField.scrollHeight;
+        scrollConversationToEnd(scrollableField, { smooth: false });
         clearLatestUnreadBoundary();
         hideNewSharedMessagesIndicator();
     } else {
@@ -25659,11 +25659,41 @@ function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_
     if (!(scrollableField instanceof HTMLElement)) {
         return true;
     }
-    const clientHeight = Number(scrollableField.clientHeight) || 0;
-    const scrollHeight = Number(scrollableField.scrollHeight) || 0;
-    const scrollTop = Number(scrollableField.scrollTop) || 0;
+    const clientHeight = getConversationPageViewportHeight();
+    const scrollHeight = getConversationPageScrollHeight();
+    const scrollTop = getConversationPageScrollTop();
     const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
     return distanceToBottom <= Math.max(0, Number(thresholdPx) || 0);
+}
+
+function getConversationPageScrollTop() {
+    if (typeof window === 'undefined') return 0;
+    return Number(window.scrollY ?? window.pageYOffset ?? document.documentElement?.scrollTop ?? 0) || 0;
+}
+
+function getConversationPageViewportHeight() {
+    if (typeof window === 'undefined') return 0;
+    return Number(window.innerHeight || document.documentElement?.clientHeight || 0) || 0;
+}
+
+function getConversationPageScrollHeight() {
+    if (typeof document === 'undefined') return 0;
+    return Math.max(
+        Number(document.documentElement?.scrollHeight) || 0,
+        Number(document.body?.scrollHeight) || 0
+    );
+}
+
+function scrollConversationPageTo(top, options = {}) {
+    if (typeof window === 'undefined') return false;
+    const smooth = options?.smooth === true;
+    const safeTop = Math.max(0, Number(top) || 0);
+    try {
+        window.scrollTo({ top: safeTop, behavior: smooth ? 'smooth' : 'auto' });
+    } catch (_err) {
+        window.scrollTo(0, safeTop);
+    }
+    return true;
 }
 
 function scrollConversationToEnd(scrollableField, options = {}) {
@@ -25672,12 +25702,8 @@ function scrollConversationToEnd(scrollableField, options = {}) {
     }
 
     const smooth = options?.smooth !== false;
-    const top = scrollableField.scrollHeight;
-    try {
-        scrollableField.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
-    } catch (_err) {
-        scrollableField.scrollTop = top;
-    }
+    const top = getConversationPageScrollHeight();
+    scrollConversationPageTo(top, { smooth });
 
     const schedule = (typeof window !== 'undefined' && typeof window.setTimeout === 'function')
         ? window.setTimeout.bind(window)
@@ -25705,7 +25731,7 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
         return;
     }
 
-    const hasOverflow = (targetField.scrollHeight - targetField.clientHeight) > 1;
+    const hasOverflow = (getConversationPageScrollHeight() - getConversationPageViewportHeight()) > 1;
     const nearBottom = isScrollableFieldNearBottom(targetField);
     const shouldShow = hasOverflow && !nearBottom;
 
@@ -25725,6 +25751,16 @@ function handleConversationScrollPositionChange(scrollableField) {
     }
 
     updateScrollToEndButtonVisibility(scrollableField);
+}
+
+function resizePromptComposer(promptInput) {
+    if (!(promptInput instanceof HTMLTextAreaElement)) return;
+    promptInput.style.height = 'auto';
+    const minHeight = 44;
+    const maxHeight = 144;
+    const nextHeight = Math.min(maxHeight, Math.max(minHeight, Number(promptInput.scrollHeight) || minHeight));
+    promptInput.style.height = `${nextHeight}px`;
+    promptInput.style.overflowY = (Number(promptInput.scrollHeight) || 0) > maxHeight ? 'auto' : 'hidden';
 }
 
 function setLatestUnreadBoundary(messageElement) {
@@ -27831,6 +27867,9 @@ function initializeWorkflowStatusPanel() {
     if (!panel) return;
     if (workflowStatusPanelInitialised) return;
     workflowStatusPanelInitialised = true;
+    // Keep the diagnostic surface compact on first load; users can unfurl it
+    // when they need the full operational detail.
+    workflowStatusGroupUiState.globallyFurled = true;
     const {
         closeButton: closeEpisodesButton,
         copyJsonButton: copyEpisodesJsonButton
@@ -28238,9 +28277,12 @@ export function initializeChatTab() {
 
         if (!scrollableField._sharedIndicatorWired) {
             scrollableField._sharedIndicatorWired = true;
-            scrollableField.addEventListener('scroll', () => {
+            window.addEventListener('scroll', () => {
                 handleConversationScrollPositionChange(scrollableField);
-            });
+            }, { passive: true });
+            window.addEventListener('resize', () => {
+                updateScrollToEndButtonVisibility(scrollableField);
+            }, { passive: true });
         }
 
         // Prevent the browser navigating away when dropping files.
@@ -28538,7 +28580,9 @@ export function initializeChatTab() {
 
     promptInput.addEventListener('input', function () {
         setSelectedChatPromptQueueEntryId(null);
+        resizePromptComposer(promptInput);
     });
+    resizePromptComposer(promptInput);
 
     promptInput.addEventListener('keypress', function (event) {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -30687,6 +30731,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
     const options = (messageOptions && typeof messageOptions === 'object')
         ? messageOptions
         : {};
+    const shouldFollowNewMessage = !isHistory && isScrollableFieldNearBottom(scrollableField);
 
     try {
         const displayTimestamp = formatChatTimestamp(timestampStr);
@@ -31270,9 +31315,9 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
         recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: timestampStr || new Date().toISOString() });
 
-        // Auto-scroll to bottom
-        if (!isHistory) {
-            scrollableField.scrollTop = scrollableField.scrollHeight;
+        // Follow new output only when the reader had not deliberately moved away.
+        if (shouldFollowNewMessage) {
+            scrollConversationToEnd(scrollableField, { smooth: false });
         }
         updateScrollToEndButtonVisibility(scrollableField);
     } catch (err) {

@@ -129,8 +129,6 @@
       </div>
     </div>
 
-    <!-- Textarea for user prompt -->
-    <textarea id="promptInput" rows="6" class="prompt-input" placeholder="Talk with Von here..."></textarea>
     <section id="chatTaskQueuePanel" class="chat-task-queue-panel hidden" aria-live="polite" aria-label="Queued tasks">
       <div class="chat-task-queue-header">
         <span class="chat-task-queue-title">Queued tasks</span>
@@ -139,40 +137,52 @@
       <div id="chatTaskQueueList" class="chat-task-queue-list"></div>
     </section>
 
-    <!-- Buttons for sending prompt and resetting context -->
-    <div class="button-row">
-      <button id="sendButton" class="btn btn-primary">Send Prompt</button>
-      <button id="dictateButton" class="btn btn-secondary" type="button" title="Dictate with your microphone">
-        Dictate
-      </button>
-      <button id="resetButton" class="btn btn-secondary" type="button"
-        title="End this conversation (resets Von's context while keeping the conversation view)">End
-        conversation</button>
+    <div class="chat-composer" aria-label="Conversation composer">
+      <!-- Textarea for user prompt -->
+      <textarea id="promptInput" rows="1" class="prompt-input" placeholder="Talk with Von here..."></textarea>
 
-      <button id="uploadFileButton" class="btn btn-secondary" type="button"
-        title="Upload a file, drag and drop onto the conversation, or paste an image">Upload File</button>
-      <span id="uploadFileStatus" class="upload-file-status" aria-live="polite"></span>
-      <input id="uploadFileInput" class="visually-hidden" type="file" aria-label="Upload file" />
+      <div class="chat-composer-actions">
+        <div class="chat-composer-primary-actions">
+          <button id="sendButton" class="btn btn-primary">Send Prompt</button>
+          <button id="dictateButton" class="btn btn-secondary" type="button" title="Dictate with your microphone">
+            Dictate
+          </button>
+        </div>
 
-      {% if expert_tabs_enabled %}
-      <label class="annotation-toggle" title="Enable concept annotations in chat responses">
-        <input type="checkbox" id="annotationToggle">
-        <span class="eye-icon">
-          <svg aria-hidden="true" class="icon icon-annotate" viewBox="0 0 24 24" width="16" height="16"
-            stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-        </span>
-        <span class="toggle-label">Annotations</span>
-      </label>
-      {% endif %}
+        <details class="chat-composer-more-actions">
+          <summary>More actions</summary>
+          <div class="button-row">
+            <button id="resetButton" class="btn btn-secondary" type="button"
+              title="End this conversation (resets Von's context while keeping the conversation view)">End
+              conversation</button>
 
-      <label class="annotation-toggle" title="Speak Von responses aloud">
-        <input type="checkbox" id="ttsToggle">
-        <span class="eye-icon" aria-hidden="true">TTS</span>
-        <span class="toggle-label">Speech</span>
-      </label>
+            <button id="uploadFileButton" class="btn btn-secondary" type="button"
+              title="Upload a file, drag and drop onto the conversation, or paste an image">Upload File</button>
+            <span id="uploadFileStatus" class="upload-file-status" aria-live="polite"></span>
+            <input id="uploadFileInput" class="visually-hidden" type="file" aria-label="Upload file" />
+
+            {% if expert_tabs_enabled %}
+            <label class="annotation-toggle" title="Enable concept annotations in chat responses">
+              <input type="checkbox" id="annotationToggle">
+              <span class="eye-icon">
+                <svg aria-hidden="true" class="icon icon-annotate" viewBox="0 0 24 24" width="16" height="16"
+                  stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              </span>
+              <span class="toggle-label">Annotations</span>
+            </label>
+            {% endif %}
+
+            <label class="annotation-toggle" title="Speak Von responses aloud">
+              <input type="checkbox" id="ttsToggle">
+              <span class="eye-icon" aria-hidden="true">TTS</span>
+              <span class="toggle-label">Speech</span>
+            </label>
+          </div>
+        </details>
+      </div>
     </div>
   </div>
 
