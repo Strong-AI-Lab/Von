@@ -1,8 +1,15 @@
 # Von for Agentic AI
 
-**Status:** working architecture note
-**Updated:** 24 April 2026
-**Scope:** current Von architectural direction, recent progress, remaining gaps, and the path from a capable neuro-symbolic assistant toward minimal-imposition agentic AI in the stronger Von sense
+- **Kind:** Long-horizon programme and target-architecture design
+- **Lifecycle:** Active as advisory design; implementation snapshot frozen
+- **Authority:** Advisory; `AGENTS.md` and current explicit user direction govern
+- **State evidence as of:** 24 April 2026
+- **Freshness boundary:** Durable target-direction arguments may remain useful;
+  all “current”, “already”, “still”, code-size, gap, and priority claims require
+  live revalidation
+- **Scope:** Von's architectural direction and the path from a capable
+  neuro-symbolic assistant toward minimal-imposition agentic AI in the stronger
+  Von sense
 
 ## 1. Purpose
 

@@ -1,7 +1,13 @@
 # Intro to Modern Agentic AI for Coding Agents
 
-**Status**: Draft design/background guidance  
-**Date**: 2026-04-04
+- **Kind:** Principle and engineering-background guide
+- **Lifecycle:** Active
+- **Authority:** Required for substantial implementation planning because it is
+  selected by [`AGENTS.md`](../../AGENTS.md); subordinate to that constitution
+  and current explicit user direction
+- **Created:** 2026-04-04
+- **Freshness boundary:** Design guidance, not a report of current
+  implementation state; verify factual claims against live evidence
 
 ## 1. Purpose
 

@@ -1,6 +1,12 @@
 # Durable Workflow System Design
 
-**Status**: Draft
+> **Document status: Historical design precursor; non-normative.** Current-state
+> and gap descriptions reflect February 2026 and have been overtaken by later
+> durable-workflow implementation. Use the current VWL manual and live
+> code/Vontology state for workflow planning.
+
+**Lifecycle**: Superseded design precursor
+**Authority**: Historical only
 **Version**: 1.0
 **Date**: 2026-02-03
 **Parent JIRA**: [JVNAUTOSCI-803](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-803) (LLM Workflows)

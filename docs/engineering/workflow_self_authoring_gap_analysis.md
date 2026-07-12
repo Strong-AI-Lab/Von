@@ -1,9 +1,16 @@
 # Workflow Self-Authoring and Intent Generation: Gap Analysis & Plan
 
-**Status**: Draft
-**Date**: 2026-04-05
-**Related Epics**: `JVNAUTOSCI-833`, `JVNAUTOSCI-964`, `JVNAUTOSCI-1586`
-**Related Tasks**: `JVNAUTOSCI-1531`, `JVNAUTOSCI-1654`, `JVNAUTOSCI-1574`
+> **Document status: Dated gap analysis and proposed plan; not current programme
+> authority.** “Current”, “exists”, “missing”, and task-ordering claims reflect
+> the 5–6 April 2026 audit. Re-read live Jira, code, Vontology materialisation,
+> and current VWL authority rules before planning.
+
+- **Kind:** Gap analysis and design proposal
+- **Lifecycle:** Frozen proposal
+- **Authority:** Advisory only
+- **State as of:** 2026-04-06
+- **Related Epics:** `JVNAUTOSCI-833`, `JVNAUTOSCI-964`, `JVNAUTOSCI-1586`
+- **Related Tasks:** `JVNAUTOSCI-1531`, `JVNAUTOSCI-1654`, `JVNAUTOSCI-1574`
 
 ## 1. Purpose
 This document examines the extent to which Von meets its goal of driving user interaction behaviours primarily through workflows that are self-authored following collaborative problem-solving sessions. It outlines the met goals, identifies the architectural gaps, and provides a concrete implementation plan.

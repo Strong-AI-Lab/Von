@@ -1,7 +1,13 @@
 # Real-Path Server Replay and Telemetry Loop
 
-**Status**: Living practical guidance  
-**Date**: 2026-04-17
+- **Kind:** Validation protocol and practical guidance
+- **Lifecycle:** Active
+- **Authority:** Required by `AGENTS.md` for live user-visible behaviour,
+  real-path replay, and telemetry-based diagnosis
+- **Created:** 2026-04-17
+- **Last substantive content update before this metadata review:** 2026-07-11
+- **Evidence boundary:** Each acceptance claim still requires its own dated
+  exact-path evidence
 
 ## 1. Purpose
 

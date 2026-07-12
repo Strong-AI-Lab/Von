@@ -1,9 +1,17 @@
 # Chat-Turn Workflow Control Plane Analysis
 
-**Status**: Analytical paper - not a specification  
-**Date**: 2026-04-07  
-**Author**: Analysis prepared for Michael Witbrock  
-**Scope**: Intended chat-turn and workflow hierarchy versus the current implementation reality
+> **Document status: Dated diagnostic snapshot; not a current implementation
+> guide.** Present-tense implementation claims and source line numbers describe
+> evidence available on 7 April 2026. Revalidate them against current code,
+> live Vontology, telemetry, and Jira before acting.
+
+- **Kind:** Diagnostic analysis
+- **Lifecycle:** Frozen
+- **Authority:** Evidence only; not a specification
+- **State as of:** 2026-04-07
+- **Author:** Analysis prepared for Michael Witbrock
+- **Scope:** Intended chat-turn and workflow hierarchy versus the implementation
+  observed at that date
 
 ---
 

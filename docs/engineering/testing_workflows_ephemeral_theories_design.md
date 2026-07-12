@@ -64,10 +64,10 @@ The literature scan in this task found adjacent work, but not an exact match for
 
 Von already has the core workflow runtime and durable execution model:
 
-1. [von_workflow_language_manual.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/von_workflow_language_manual.md)
-2. [durable_workflow_system_design.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/durable_workflow_system_design.md)
-3. [models.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/models.py)
-4. [plan_state_runtime.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/plan_state_runtime.py)
+1. [von_workflow_language_manual.md](von_workflow_language_manual.md)
+2. [durable_workflow_system_design.md](durable_workflow_system_design.md)
+3. [models.py](../../src/backend/workflows/durable/models.py)
+4. [plan_state_runtime.py](../../src/backend/workflows/plan_state_runtime.py)
 
 Relevant consequences:
 
@@ -80,9 +80,9 @@ Relevant consequences:
 
 There is already a notion of `transient_microtheory`, but only as a payload shape for renderer applicability:
 
-1. [renderer_applicability_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/renderer_applicability_service.py)
-2. [orchestrator.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/orchestrator.py)
-3. [renderer_applicability_vontology_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/renderer_applicability_vontology_service.py)
+1. [renderer_applicability_service.py](../../src/backend/services/renderer_applicability_service.py)
+2. [orchestrator.py](../../src/backend/integrations/internal_mcp/orchestrator.py)
+3. [renderer_applicability_vontology_service.py](../../src/backend/services/renderer_applicability_vontology_service.py)
 
 This is important because it shows the system already accepts an object kind that is neither a canonical concept nor a free-text blob. It is a strong seed for a more general ephemeral-theory design.
 
@@ -90,9 +90,9 @@ This is important because it shows the system already accepts an object kind tha
 
 Von already records structured execution evidence and benchmarkable failure signals:
 
-1. [turn_execution_completion_schema_proposal.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/turn_execution_completion_schema_proposal.md)
-2. [turn_execution_record_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py)
-3. `turn_execution_*` MCP tools in [catalogue.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/catalogue.py)
+1. [turn_execution_completion_schema_proposal.md](turn_execution_completion_schema_proposal.md)
+2. [turn_execution_record_service.py](../../src/backend/services/turn_execution_record_service.py)
+3. `turn_execution_*` MCP tools in [catalogue.py](../../src/backend/integrations/internal_mcp/catalogue.py)
 
 This means Testing Workflows do not need to invent result evidence from scratch. They should extend this discipline to theory experiments.
 
@@ -100,8 +100,8 @@ This means Testing Workflows do not need to invent result evidence from scratch.
 
 Von already has a guarded end-to-end benchmark harness:
 
-1. [kb_clone_benchmark_harness.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/kb_clone_benchmark_harness.md)
-2. [kb_clone_benchmark_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/kb_clone_benchmark_service.py)
+1. [kb_clone_benchmark_harness.md](kb_clone_benchmark_harness.md)
+2. [kb_clone_benchmark_service.py](../../src/backend/services/kb_clone_benchmark_service.py)
 
 This is already suitable for destructive integration tests and system-wide experiments. It is too heavy for rapid internal experimentation, but it should become Tier 2 of the Testing Workflows design rather than a parallel subsystem.
 
@@ -109,9 +109,9 @@ This is already suitable for destructive integration tests and system-wide exper
 
 Von already has the pattern "identify a workflow gap, create a candidate, optionally test it, then decide whether to use it":
 
-1. [workflow_gap_recovery_workflow.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/workflow_gap_recovery_workflow.py)
-2. [workflow_gap_workflow_contracts.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_gap_workflow_contracts.py)
-3. [workflow_creation_contracts.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_creation_contracts.py)
+1. [workflow_gap_recovery_workflow.py](../../src/backend/workflows/durable/workflow_gap_recovery_workflow.py)
+2. [workflow_gap_workflow_contracts.py](../../src/backend/workflows/workflow_gap_workflow_contracts.py)
+3. [workflow_creation_contracts.py](../../src/backend/workflows/workflow_creation_contracts.py)
 
 That is already very close in spirit to Testing Workflows.
 
@@ -119,9 +119,9 @@ That is already very close in spirit to Testing Workflows.
 
 Von already has learning-oriented workflow selection and episode history machinery:
 
-1. [workflow_selection_experience.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_selection_experience.py)
-2. [workflow_selection_policy_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_selection_policy_service.py)
-3. [workflow_episode_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_episode_service.py)
+1. [workflow_selection_experience.py](../../src/backend/services/workflow_selection_experience.py)
+2. [workflow_selection_policy_service.py](../../src/backend/services/workflow_selection_policy_service.py)
+3. [workflow_episode_service.py](../../src/backend/services/workflow_episode_service.py)
 
 Testing Workflows should consume and emit signals compatible with those services.
 
@@ -157,8 +157,8 @@ The safety model is not complete enough yet for theory inclusion and self-experi
 
 Relevant evidence:
 
-1. [security_considerations.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/security_considerations.md) explicitly says namespace is intended to interact with future microtheory and theory-inclusion work.
-2. [effective_namespace_contract.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/effective_namespace_contract.md) already defines one authoritative namespace-resolution path, but not theory inclusion semantics.
+1. [security_considerations.md](security_considerations.md) explicitly says namespace is intended to interact with future microtheory and theory-inclusion work.
+2. [effective_namespace_contract.md](effective_namespace_contract.md) already defines one authoritative namespace-resolution path, but not theory inclusion semantics.
 
 Missing capabilities:
 
@@ -369,8 +369,8 @@ Current recommendation:
 
 Relevant existing substrates:
 
-1. [uncertain_relationship_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/uncertain_relationship_service.py)
-2. [relation_elicitation_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/relation_elicitation_service.py)
+1. [uncertain_relationship_service.py](../../src/backend/services/uncertain_relationship_service.py)
+2. [relation_elicitation_service.py](../../src/backend/services/relation_elicitation_service.py)
 
 ## 9. Workflow Architecture
 
@@ -425,7 +425,7 @@ Canonical ontology writes should occur only in a separate promotion workflow.
 
 ## 10.2 Namespace and theory inclusion
 
-Namespace must become the main access-safety primitive for theory inclusion and promotion. This is already anticipated in [security_considerations.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/security_considerations.md).
+Namespace must become the main access-safety primitive for theory inclusion and promotion. This is already anticipated in [security_considerations.md](security_considerations.md).
 
 Required policy:
 

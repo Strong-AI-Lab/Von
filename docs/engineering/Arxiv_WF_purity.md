@@ -1,4 +1,13 @@
-Code Review: JVNAUTOSCI-1763 Branch vs Jira Requirements & No-Thin-Shim Rule
+# Historical JVNAUTOSCI-1763 Branch Review Transcript
+
+> **Document status: Historical, unnormalised branch-review transcript.** These
+> findings refer to the JVNAUTOSCI-1763 branch and runtime state inspected at
+> the time. They are incident provenance, not current architecture or Jira
+> status. Re-check every finding against current code, Vontology, telemetry, and
+> Jira before acting on it.
+
+## Code Review: JVNAUTOSCI-1763 Branch vs Jira Requirements and No-Thin-Shim Rule
+
 Critical Concerns (architectural/rule violations)
 1. von_routes.py still owns the arXiv dispatch decision — violates 1766
 
@@ -76,6 +85,4 @@ Medium: The turn-execution record extension is not actually wired through, and I
 I would not consider JVNAUTOSCI-1763 or subtasks 1764-1767 genuinely done in their current state. The strongest concern is not just code quality; it’s that the branch still leaves the real authority in the wrong place, and the actual authoritative Vontology workflows have not been brought along.
 
 I didn’t change code. I checked the working tree, the Jira task texts/comments, the authoritative workflow registry, and a couple of targeted runtime validations; I did not run a full /von/generate end-to-end because the import/registration failures and unchanged authoritative workflows already show the path is not in a closable state.
-
-
 

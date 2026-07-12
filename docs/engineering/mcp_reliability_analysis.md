@@ -1,5 +1,11 @@
 # Analysis: Why MCP Service Wasn't Used & How to Fix It
 
+> **Document status: Historical incident reflection; evidence date not recorded.**
+> It explains one mistaken implementation approach and may retain a useful MCP
+> invariant, but its tool inventory and proposed fixes are not current MCP
+> documentation. Re-discover the live MCP surface and use current operational
+> guidance before acting.
+
 ## What I Did (Wrong Approach)
 I performed critical Vontology operations by writing manual Python scripts:
 1. Used `text_value_service.upsert_text_for_concept()` to add detector prompt text

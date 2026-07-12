@@ -1,5 +1,11 @@
 # Phase 3: Orchestrator Integration - Completion Summary
 
+> **Document status: Historical JVNAUTOSCI-799 implementation record from
+> December 2025.** “Complete”, replacement, validation, and “ready for
+> deployment” claims below are phase-local historical claims, not evidence of
+> current architecture, reliability, or production readiness. Revalidate the
+> present orchestrator path and tests before relying on them.
+
 **JIRA Issue**: JVNAUTOSCI-799
 **Status**: ✅ Complete
 **Date**: December 2025

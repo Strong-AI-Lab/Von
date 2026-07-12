@@ -1,5 +1,16 @@
 # Workflow Authoritative Publication Process
 
+> **Document status: Dated implementation note from 20 February 2026.** The
+> Vontology-authority invariant remains applicable. The named bootstrap and
+> publication functions below are historical implementation anchors, not the
+> exclusive current authoring procedure. Follow the current VWL manual, live
+> Vontology tooling, and authority read-back for new work.
+
+- **Kind:** Implementation note with a retained authority invariant
+- **Lifecycle:** Frozen
+- **Authority:** Advisory implementation detail; the authority invariant is
+  governed by `AGENTS.md`
+
 Date: 2026-02-20  
 Related: `JVNAUTOSCI-803`, `JVNAUTOSCI-1217`
 

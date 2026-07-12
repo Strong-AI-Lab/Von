@@ -40,6 +40,7 @@ docs/copilot_histories/
 
 # Temporary/private paper draft workspaces
 docs/papers/
+docs/von_compendium_design_and_go_forward_review.md
 
 # Generated replay-suite validation artefacts
 docs/generated/validation_reports/replay_suite_*

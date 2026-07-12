@@ -1,12 +1,21 @@
-# Option 1 Security Implementation - Completed
+# Historical Option 1 Security Mitigation Record
+
+> **Document status: Historical mitigation record from 2 December 2024; not a
+> statement of Von's current security posture.** “Secure” below referred only
+> to removal of the client-provided `user_id` fallback on the named path. It did
+> not establish complete caller authentication, authorisation, namespace
+> isolation, or deployment security. Use
+> [`security_considerations.md`](security_considerations.md) for current
+> requirements and limitations.
 
 **Date**: December 2, 2024
 **Issue**: JVNAUTOSCI-760 (RAG namespace filtering)
-**Security Level**: ✅ **SECURE**
+**Bounded milestone result**: Client-provided `user_id` fallback removed on the
+named path
 
 ## Summary
 
-Successfully implemented **Option 1 (Secure)** authentication approach:
+At the time, this implemented the bounded “Option 1” authentication mitigation:
 - ❌ **Removed** insecure client-provided user_id fallback
 - ✅ **Require** proper authentication via session or validated headers
 - ✅ **Inform** agent about authentication status and tool availability

@@ -1,5 +1,12 @@
 # JVNAUTOSCI-799 Phases 0-2: Final Status Report
 
+> **Document status: Historical JVNAUTOSCI-799 implementation record
+> (November–December 2025).** “Complete”, “validated”, “current”, coverage, and
+> readiness claims below refer only to the named phase and evidence available
+> then. They are not claims about current Von behaviour, broader reliability,
+> present test coverage, or production readiness. Revalidate the current code
+> path, targeted tests, and live authority surfaces before relying on details.
+
 **Date**: 2025-11-15
 **Status**: ✅ COMPLETE AND VALIDATED
 **Tests**: 23/23 Passing (100%)

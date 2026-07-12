@@ -1,9 +1,12 @@
-"""
-JVNAUTOSCI-799: Structured Tool Calling - Quick Reference
+# JVNAUTOSCI-799 Structured Tool Calling Quick Reference
 
-Short reference for using the structured tool calling module.
-For detailed docs, see: structured_tool_calling_guide.md
-"""
+> **Document status: Legacy component reference; last evidenced during
+> JVNAUTOSCI-799 in 2025.** The component still exists, but API names, provider
+> examples, fallbacks, and integration behaviour below are not guaranteed
+> current. Inspect the current package and targeted tests before copying code.
+
+For the associated historical guide, see
+[`structured_tool_calling_guide.md`](structured_tool_calling_guide.md).
 
 ## Import Everything You Need
 

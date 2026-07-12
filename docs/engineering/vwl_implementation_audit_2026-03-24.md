@@ -1,5 +1,10 @@
 # VWL Implementation Audit 2026-03-24
 
+> **Document status: Frozen audit and correction record from March 2026.** Its
+> authority lessons may remain relevant, but completion state, code anchors,
+> fallback paths, and Jira sequencing require current verification. Use the VWL
+> manual and live Vontology/runtime evidence as the implementation reference.
+
 Task: `JVNAUTOSCI-1575`  
 Date: 2026-03-24
 

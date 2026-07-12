@@ -1,8 +1,15 @@
 # Von Workflow Language (VWL) Manual
 
-Status: Draft (current implementation-aligned)
-Last updated: 2026-05-03 (Pacific/Auckland)
-Audience: Human engineers and AI agents
+- **Kind:** Workflow-language manual
+- **Lifecycle:** Active
+- **Authority:** Canonical reference for VWL vocabulary, authoring rules, and
+  runtime interfaces; required by `AGENTS.md` for workflow/orchestration work
+- **Live-authority boundary:** Live Vontology artefacts govern individual
+  workflow definitions; current code, tests, and telemetry govern observed
+  runtime behaviour
+- **Created:** 2026-05-03
+- **Last substantive content update before this metadata review:** 2026-07-11
+- **Audience:** Human engineers and AI agents
 
 ## 1. Purpose and Scope
 

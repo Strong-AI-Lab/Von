@@ -1,21 +1,22 @@
-"AINotes" is a living scratchpad for agents.
+# AI Notes — Frozen Operational Snapshot
 
-Goal: help a fresh agent get oriented in <2 minutes.
+> **Document status: Frozen tactical snapshot from 23 April 2026; not current
+> task, branch, tool, or repository status.** Start with [`AGENTS.md`](../AGENTS.md),
+> the [design and engineering document index](design_index.md), live `git`
+> state, and live Jira. Revalidate any operational advice below before using it.
 
-Rules of thumb:
-- Keep this file short and current.
-- Prefer pointers over prose.
-- When something is no longer relevant, delete it (or move it to the archive).
-
-Last updated: 2026-04-23
+- **Kind:** Tactical notes snapshot
+- **Lifecycle:** Frozen
+- **Authority:** Historical only
+- **State as of:** 2026-04-23
 
 ---
 
-## Now (current focus)
+## Focus recorded on 23 April 2026
 - Fix/verify: interaction-session UX issues (see current branch name in git).
 - Run focused tests after UI changes: `npm run test:frontend`.
 
-## Next (likely follow-ups)
+## Follow-ups recorded on 23 April 2026
 - Add a short regression note here when a bug is fixed (1–2 bullets), then move details to Jira/PR.
 - Keep Phase/initiative tracking in Jira rather than in this file.
 
@@ -53,7 +54,7 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 - Engineering notes: `docs/engineering/`
 - Archive (historical details): `docs/AINotes_archive.md`
 
-## Recent decisions / changes worth remembering
+## Decisions and changes recorded in this snapshot
 - Presenter “spoken vs screen” behaviour is documented in Jira (JVNAUTOSCI-894); avoid duplicating the write-up here.
 - 2026-04-20: Atlassian MCP transport verification/migration follow-through
 	- Repo workspace config now ships an Atlassian MCP entry in `.vscode/mcp.json` on `https://mcp.atlassian.com/v1/mcp`.
@@ -157,5 +158,3 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 	- Write-tool guardrail: moved write permissioning into a workflow-driven policy (`write_tool_policy`) instead of hard-coded orchestrator logic; added regression test (JVNAUTOSCI-956).
 - 2026-01-09 diary
 	- Chat prompts: treat legacy `#V#von_llm_prompt` as a behaviour prompt so user-specific prompts load in chat and MCP introspection; updated tests; closed JVNAUTOSCI-974.
-
-

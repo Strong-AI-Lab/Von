@@ -1,5 +1,15 @@
 # Agentic Architecture Status - 23 April 2026
 
+> **Document status: Frozen architecture and task-ordering snapshot.** This
+> records evidence and conclusions from 23 April 2026. It is not current
+> programme status. Revalidate code, Vontology, telemetry, and live Jira before
+> using any “current”, “remaining”, or “next” claim.
+
+- **Kind:** Status snapshot
+- **Lifecycle:** Frozen
+- **Authority:** Evidence only
+- **State as of:** 2026-04-23
+
 ## Purpose
 
 This note records the current engineering status of the Von codebase against the
@@ -81,41 +91,41 @@ The remaining umbrellas should now be interpreted against the following live
 surfaces rather than against older pre-`1988` or pre-`1993` wording:
 
 - Memory substrate and turn-context integration:
-  [conversation_turn_memory_context_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/conversation_turn_memory_context_service.py:547),
-  [context_bundle_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/context_bundle_service.py:630),
-  [context_bundle_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/context_bundle_service.py:1296),
-  [orchestrator.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/orchestrator.py:28847),
-  [orchestrator.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/orchestrator.py:29840),
-  [von_routes.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/routes/von_routes.py:7717)
+  [conversation_turn_memory_context_service.py](../../src/backend/services/conversation_turn_memory_context_service.py),
+  [context_bundle_service.py](../../src/backend/services/context_bundle_service.py),
+  [context_bundle_service.py](../../src/backend/services/context_bundle_service.py),
+  [orchestrator.py](../../src/backend/integrations/internal_mcp/orchestrator.py),
+  [orchestrator.py](../../src/backend/integrations/internal_mcp/orchestrator.py),
+  [von_routes.py](../../src/backend/server/routes/von_routes.py)
 
 - Episode self-improvement and proposal/promotion loop:
-  [episode_evaluation_workflow.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/episode_evaluation_workflow.py:318),
-  [episode_self_improvement_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_self_improvement_service.py:310),
-  [episode_self_improvement_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_self_improvement_service.py:638),
-  [episode_self_improvement_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_self_improvement_service.py:706),
-  [episode_self_improvement_workflow.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/episode_self_improvement_workflow.py:239),
-  [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:869)
+  [episode_evaluation_workflow.py](../../src/backend/workflows/durable/episode_evaluation_workflow.py),
+  [episode_self_improvement_service.py](../../src/backend/services/episode_self_improvement_service.py),
+  [episode_self_improvement_service.py](../../src/backend/services/episode_self_improvement_service.py),
+  [episode_self_improvement_service.py](../../src/backend/services/episode_self_improvement_service.py),
+  [episode_self_improvement_workflow.py](../../src/backend/workflows/durable/episode_self_improvement_workflow.py),
+  [workflow_studio_service.py](../../src/backend/workflows/workflow_studio_service.py)
 
 - Experiment worlds, testing theories, and publication rollback support:
-  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1046),
-  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1181),
-  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1688),
-  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:363),
-  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:573),
-  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:625),
-  [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:1684),
-  [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:2251)
+  [experiment_run_service.py](../../src/backend/services/experiment_run_service.py),
+  [experiment_run_service.py](../../src/backend/services/experiment_run_service.py),
+  [experiment_run_service.py](../../src/backend/services/experiment_run_service.py),
+  [testing_theory_service.py](../../src/backend/services/testing_theory_service.py),
+  [testing_theory_service.py](../../src/backend/services/testing_theory_service.py),
+  [testing_theory_service.py](../../src/backend/services/testing_theory_service.py),
+  [workflow_studio_service.py](../../src/backend/workflows/workflow_studio_service.py),
+  [workflow_studio_service.py](../../src/backend/workflows/workflow_studio_service.py)
 
 - Current critic/evaluator surfaces:
-  [episode_evaluator_contract_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_evaluator_contract_service.py:1),
-  [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:1300),
-  [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:6399),
-  [episode_critic_evidence_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_critic_evidence_service.py:1395),
-  [episode_evaluation_workflow.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/episode_evaluation_workflow.py:228),
-  [episode_critique_memory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_critique_memory_service.py:716),
-  [episode_critique_memory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_critique_memory_service.py:1723),
-  [episode_critique_benchmark_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_critique_benchmark_service.py:1393),
-  [episode_evaluation_workflow_vontology_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_evaluation_workflow_vontology_service.py:79)
+  [episode_evaluator_contract_service.py](../../src/backend/services/episode_evaluator_contract_service.py),
+  [turn_execution_record_service.py](../../src/backend/services/turn_execution_record_service.py),
+  [turn_execution_record_service.py](../../src/backend/services/turn_execution_record_service.py),
+  [episode_critic_evidence_service.py](../../src/backend/services/episode_critic_evidence_service.py),
+  [episode_evaluation_workflow.py](../../src/backend/workflows/durable/episode_evaluation_workflow.py),
+  [episode_critique_memory_service.py](../../src/backend/services/episode_critique_memory_service.py),
+  [episode_critique_memory_service.py](../../src/backend/services/episode_critique_memory_service.py),
+  [episode_critique_benchmark_service.py](../../src/backend/services/episode_critique_benchmark_service.py),
+  [episode_evaluation_workflow_vontology_service.py](../../src/backend/services/episode_evaluation_workflow_vontology_service.py)
 
 These anchors matter because the remaining gaps are no longer mostly "missing
 live-path repair" tasks. They are broader substrate-shaping tasks that should

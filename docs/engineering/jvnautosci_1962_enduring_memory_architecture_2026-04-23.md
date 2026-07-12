@@ -1,5 +1,10 @@
 # JVNAUTOSCI-1962 Enduring Memory Architecture - 23 April 2026
 
+> **Document status: Long-horizon design with a dated implementation snapshot.**
+> The design may remain useful. Claims using “current”, “already”, “still”,
+> source anchors, and task priority describe the April 2026 evidence base and
+> require live revalidation. This is not release-status authority.
+
 ## Purpose
 
 This note records the concrete enduring-memory architecture for Von after the

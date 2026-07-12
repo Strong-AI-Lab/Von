@@ -1,12 +1,21 @@
 # Arxiv Paper Workflow: Comparative Architectural Analysis
 
-**Status**: Comparative Analysis
-**Date**: 2026-04-07
-**Subject**: Analysis of `#V#arxiv_paper_representation_workflow` and the Von Control Plane
-**Sources**: 
-- [Doc A: Chat-Turn Workflow Control Plane Analysis](docs/engineering/chat_turn_workflow_control_plane_analysis.md)
-- [Doc B: Workflow Execution Architecture Analysis](docs/engineering/workflow_execution_architecture_analysis.md)
-- [Reference: Von Workflow Language Manual](docs/engineering/von_workflow_language_manual.md)
+> **Document status: Dated comparative diagnostic; not a current
+> implementation guide.** Workflow inventories, Vontology counts, line anchors,
+> and Jira conclusions describe the 7 April 2026 evidence base and require live
+> revalidation.
+
+- **Kind:** Comparative diagnostic analysis
+- **Lifecycle:** Frozen
+- **Authority:** Evidence only
+- **State as of:** 2026-04-07
+- **Subject:** Analysis of `#V#arxiv_paper_representation_workflow` and the Von
+  control plane
+
+**Sources:**
+- [Doc A: Chat-Turn Workflow Control Plane Analysis](chat_turn_workflow_control_plane_analysis.md)
+- [Doc B: Workflow Execution Architecture Analysis](workflow_execution_architecture_analysis.md)
+- [Reference: Von Workflow Language Manual](von_workflow_language_manual.md)
 
 ---
 

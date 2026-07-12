@@ -1,5 +1,11 @@
 # JVNAUTOSCI-799: Structured Tool Calling - Implementation Roadmap
 
+> **Document status: Historical JVNAUTOSCI-799 implementation record
+> (November–December 2025).** Phase status, “current state”, completion, and
+> next-step language below records that milestone, not current work sequencing
+> or system behaviour. Revalidate against live Jira, code, tests, and authority
+> surfaces before acting.
+
 **Issue**: JVNAUTOSCI-799 (Structured tool calling for internal MCP)
 **Epic**: JVNAUTOSCI-640 (Von Agent Foundations)
 **Related**: JVNAUTOSCI-803 (LLM Workflows) - **DEPENDS ON THIS**
@@ -492,8 +498,8 @@ If structured calling fails in Phase 3:
 ### Documentation
 - [Phase 0 Audit](jvnautosci_799_phase0_audit.md)
 - [Usage Guide](structured_tool_calling_guide.md)
-- [CONTRIBUTING.md](/CONTRIBUTING.md)
-- [Code Style Guide](/docs/engineering/software_engineering.md)
+- [CONTRIBUTING.md](../../CONTRIBUTING.md)
+- [AI Agent Guide](../../AGENTS.md)
 
 ### External References
 - OpenAI Function Calling: https://platform.openai.com/docs/guides/function-calling
