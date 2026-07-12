@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Mapping, Sequence
 
+from src.backend.services.required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+)
+
 WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID = "workflow_mcp.invoke_tool"
 _TOOL_NAME_KEYS: tuple[str, ...] = (
     "mcp_resolved_tool",
@@ -192,7 +197,10 @@ def derive_tool_invocation_records_from_step_envelopes(
 
     context_payload_map = dict(context_payload or {})
     required = dedupe_string_sequence(required_tools)
-    required_lookup = {item.lower() for item in required}
+    required_lookup = canonical_required_tool_keys(
+        required,
+        known_tool_names=required,
+    )
     workflow_filter = clean_text(workflow_id_filter)
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -225,7 +233,11 @@ def derive_tool_invocation_records_from_step_envelopes(
                 continue
             if (
                 required_lookup
-                and nested_tool.lower() not in required_lookup
+                and canonical_required_tool_key(
+                    nested_tool,
+                    known_tool_names=[*required, nested_tool],
+                )
+                not in required_lookup
                 and action_id.lower() != WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID
             ):
                 continue
@@ -258,12 +270,20 @@ def derive_tool_invocation_records_from_step_envelopes(
         candidate_tool_names = dedupe_string_sequence(
             [action_id, canonical_tool, *tool_invocation_names(output_payload)]
         )
+        known_names = [*required, *candidate_tool_names]
+        candidate_keys = canonical_required_tool_keys(
+            candidate_tool_names,
+            known_tool_names=known_names,
+        )
         matched_required_tool = next(
             (
                 required_tool
                 for required_tool in required
-                if required_tool.lower()
-                in {candidate.lower() for candidate in candidate_tool_names}
+                if canonical_required_tool_key(
+                    required_tool,
+                    known_tool_names=known_names,
+                )
+                in candidate_keys
             ),
             None,
         )

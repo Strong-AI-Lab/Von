@@ -219,6 +219,7 @@ def _prompt_seed_needs_refresh(
 def _ensure_conversation_turn_prompt_support(
     *,
     force_prompt_seed: bool = False,
+    ensure_tool_evidence_contracts: bool = False,
 ) -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
@@ -324,6 +325,27 @@ def _ensure_conversation_turn_prompt_support(
         ),
         provenance_source=_MANAGED_BY,
     )
+
+    # Jira-specific extraction and evidence expectations are represented in
+    # Vontology. Materialise that graph before publishing the conversation
+    # workflow so a clean environment cannot silently use an uncontracted
+    # projection path.
+    support_bootstraps: dict[str, Any] = {}
+    if ensure_tool_evidence_contracts:
+        try:
+            from .jira_tool_evidence_contract_vontology_service import (
+                bootstrap_jira_tool_evidence_contract,
+            )
+
+            support_bootstraps["jira_tool_evidence_contract"] = (
+                bootstrap_jira_tool_evidence_contract()
+            )
+        except Exception as exc:
+            support_bootstraps["jira_tool_evidence_contract"] = {
+                "success": False,
+                "error": str(exc),
+            }
+    report["support_bootstraps"] = support_bootstraps
 
     seeded_prompt_ids: list[str] = []
     if (
@@ -682,7 +704,16 @@ def _ensure_conversation_turn_prompt_support(
     report["managed_by"] = _MANAGED_BY
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
-    report["success"] = not errors_by_target and not missing_content_prompt_ids
+    support_bootstrap_success = all(
+        bool(value.get("success"))
+        for value in support_bootstraps.values()
+        if isinstance(value, Mapping)
+    )
+    report["success"] = (
+        not errors_by_target
+        and not missing_content_prompt_ids
+        and support_bootstrap_success
+    )
     return report
 
 
@@ -694,6 +725,7 @@ def bootstrap_canonical_conversation_turn_workflows(
 
     prompt_support = _ensure_conversation_turn_prompt_support(
         force_prompt_seed=bool(force_republish),
+        ensure_tool_evidence_contracts=True,
     )
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,

@@ -18,10 +18,135 @@ Note:
 """
 
 from __future__ import annotations
-from typing import Protocol, Iterable, Dict, Any, Optional, List, Tuple
+from typing import Protocol, Iterable, Dict, Any, Optional, List, Mapping, Tuple
 
 
 _RAG_SERVICE_SINGLETONS: dict[str, "RAGService"] = {}
+
+RAG_RETRIEVAL_STATE_SCHEMA_VERSION = "rag_retrieval_state.v1"
+RAG_RETRIEVAL_STATUSES = frozenset(
+    {
+        "results_available",
+        "partial_results",
+        "valid_empty",
+        "missing_index",
+        "signature_missing",
+        "embedding_signature_mismatch",
+        "rebuild_in_progress",
+        "candidate_window_exhausted",
+        "unavailable",
+        "degraded",
+    }
+)
+_RAG_USABLE_RETRIEVAL_STATUSES = frozenset(
+    {"results_available", "partial_results", "valid_empty"}
+)
+_RAG_REBUILD_REQUIRED_STATUSES = frozenset(
+    {"missing_index", "signature_missing", "embedding_signature_mismatch"}
+)
+_RAG_RETRYABLE_RETRIEVAL_STATUSES = frozenset(
+    {
+        "rebuild_in_progress",
+        "candidate_window_exhausted",
+        "partial_results",
+        "unavailable",
+        "degraded",
+    }
+)
+
+
+def build_rag_retrieval_state(
+    status: str,
+    *,
+    result_count: int = 0,
+    cause: str | None = None,
+    detail: str | None = None,
+    candidate_count: int | None = None,
+    filtered_candidate_count: int | None = None,
+    candidate_limit: int | None = None,
+    candidate_limit_reached: bool | None = None,
+) -> dict[str, Any]:
+    """Build the bounded, backend-neutral state for one retrieval attempt.
+
+    The state deliberately reports support-layer facts rather than deciding how
+    a workflow should respond. In particular, ``valid_empty`` means a usable
+    index was queried and yielded no accessible matches; all other empty-result
+    states remain distinguishable so callers do not mistake incompatibility or
+    unavailability for evidence that the corpus contains nothing relevant.
+    """
+
+    clean_status = str(status or "").strip().lower()
+    clean_cause = str(cause or "").strip() or None
+    if clean_status not in RAG_RETRIEVAL_STATUSES:
+        clean_cause = clean_cause or clean_status or "unknown_retrieval_state"
+        clean_status = "degraded"
+
+    try:
+        bounded_result_count = max(0, int(result_count))
+    except (TypeError, ValueError):
+        bounded_result_count = 0
+
+    usable = clean_status in _RAG_USABLE_RETRIEVAL_STATUSES
+    rebuild_required = clean_status in _RAG_REBUILD_REQUIRED_STATUSES
+    retryable = clean_status in _RAG_RETRYABLE_RETRIEVAL_STATUSES
+    recovery_affordances: list[dict[str, str]] = []
+    if retryable:
+        recovery_affordances.append({"action_type": "retry"})
+    if clean_status in {"candidate_window_exhausted", "partial_results"}:
+        recovery_affordances.append({"action_type": "expand_candidate_window"})
+    if rebuild_required:
+        recovery_affordances.append({"action_type": "rebuild_namespace_index"})
+    if clean_status in {"unavailable", "degraded"}:
+        recovery_affordances.append({"action_type": "inspect_runtime"})
+
+    state: dict[str, Any] = {
+        "schema_version": RAG_RETRIEVAL_STATE_SCHEMA_VERSION,
+        "status": clean_status,
+        "usable": usable,
+        "authoritative_empty": clean_status == "valid_empty",
+        "result_count": bounded_result_count,
+        "retryable": retryable,
+        "rebuild_required": rebuild_required,
+        "recovery_affordances": recovery_affordances,
+    }
+    if clean_cause:
+        state["cause"] = clean_cause
+    clean_detail = str(detail or "").strip()
+    if clean_detail:
+        # Keep diagnostic payloads bounded; exception bodies and secrets must not
+        # become an unbounded tool-result surface.
+        state["detail"] = clean_detail[:500]
+    for key, value in (
+        ("candidate_count", candidate_count),
+        ("filtered_candidate_count", filtered_candidate_count),
+        ("candidate_limit", candidate_limit),
+    ):
+        if value is not None:
+            try:
+                state[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                pass
+    if isinstance(candidate_limit_reached, bool):
+        state["candidate_limit_reached"] = candidate_limit_reached
+    return state
+
+
+class RAGQueryResults(list[Dict[str, Any]]):
+    """List-compatible query result carrying attempt-specific retrieval state.
+
+    A list subclass avoids breaking existing RAG consumers while keeping the
+    state attached to the exact result object, rather than relying solely on a
+    mutable process-global "last query" diagnostic that can race across turns.
+    """
+
+    def __init__(
+        self,
+        values: Iterable[Dict[str, Any]] = (),
+        *,
+        retrieval_state: Mapping[str, Any],
+    ) -> None:
+        super().__init__(values)
+        self.retrieval_state = dict(retrieval_state)
 
 
 class RAGService(Protocol):
@@ -75,6 +200,8 @@ class RAGService(Protocol):
 
         Returns a list of dicts with keys like:
           - `id`, `score`, `text`, `metadata`
+        Implementations may return `RAGQueryResults`, which remains list-compatible
+        while attaching the typed state for the exact retrieval attempt.
         Implementations must honour `permissions_context` to filter results.
         """
         ...

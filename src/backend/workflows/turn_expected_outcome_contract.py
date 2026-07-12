@@ -11,6 +11,10 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping, Sequence
 
+from src.backend.services.required_tool_identity_service import (
+    canonical_required_tool_key,
+)
+
 from .turn_target_contract import (
     TARGET_BINDING_ENTITY,
     TARGET_BINDING_TYPE,
@@ -61,10 +65,6 @@ TURN_EXPECTED_OUTCOME_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "required_evidence",
         "required_grounding",
     ),
-}
-TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES: dict[str, str] = {
-    "get_predicate_extent": "get_predicate_incidence",
-    "get_predicates_for_class": "get_predicate_incidence",
 }
 TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_FIELDS: tuple[str, ...] = (
     "required_tools",
@@ -204,13 +204,7 @@ def _dedupe_strings(values: Any) -> tuple[str, ...]:
 
 
 def _normalise_required_tool_id(value: str) -> str:
-    cleaned = value.strip()
-    if not cleaned:
-        return ""
-    return TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES.get(
-        cleaned.lower(),
-        cleaned,
-    )
+    return value.strip()
 
 
 def _dedupe_required_tools(values: Any) -> tuple[str, ...]:
@@ -221,10 +215,10 @@ def _dedupe_required_tools(values: Any) -> tuple[str, ...]:
         tool_id = _normalise_required_tool_id(raw_value)
         if not tool_id:
             continue
-        lowered = tool_id.lower()
-        if lowered in seen:
+        canonical_key = canonical_required_tool_key(tool_id)
+        if not canonical_key or canonical_key in seen:
             continue
-        seen.add(lowered)
+        seen.add(canonical_key)
         ordered.append(tool_id)
     return tuple(ordered)
 

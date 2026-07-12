@@ -102,13 +102,9 @@ class ReplayTurnCase:
 
 
 GMAIL_ARXIV_IDEMPOTENCE_CASE_ID = "gmail-arxiv-idempotence-2571"
-GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID = (
-    "gmail_arxiv_idempotence_2571_sequence"
-)
+GMAIL_ARXIV_IDEMPOTENCE_REPLAY_CASE_ID = "gmail_arxiv_idempotence_2571_sequence"
 GMAIL_ARXIV_IDEMPOTENCE_DEFAULT_QUERY = "arxiv.org newer_than:365d"
-GMAIL_ARXIV_IDEMPOTENCE_PROCESSING_MARKER = (
-    "represented message-processing evidence"
-)
+GMAIL_ARXIV_IDEMPOTENCE_PROCESSING_MARKER = "represented message-processing evidence"
 GMAIL_MUTATION_TOOL_NAMES = frozenset(
     {
         "gmail_create_label",
@@ -266,6 +262,7 @@ def collect_run_environment(
     session: requests.Session,
     base_url: str,
 ) -> dict[str, Any]:
+    local_repo_status = _git_capture("status", "--porcelain")
     environment: dict[str, Any] = {
         "run_started_at_utc": datetime.now(timezone.utc).isoformat(),
         "base_url": base_url,
@@ -274,6 +271,11 @@ def collect_run_environment(
         "local_platform": platform.platform(),
         "local_repo_git_branch": _git_capture("rev-parse", "--abbrev-ref", "HEAD"),
         "local_repo_git_head": _git_capture("rev-parse", "HEAD"),
+        "local_repo_git_dirty": (
+            bool(local_repo_status.strip())
+            if isinstance(local_repo_status, str)
+            else None
+        ),
     }
     for source, path in (("health", "/health"), ("diag", "/diag")):
         try:
@@ -310,9 +312,7 @@ def require_agent_test_server(
         return
     error = build_agent_test_server_requirement_error(
         {
-            "server_agent_test_instance": environment.get(
-                "server_agent_test_instance"
-            ),
+            "server_agent_test_instance": environment.get("server_agent_test_instance"),
             "server_metadata_source": environment.get("server_metadata_source"),
             "server_metadata_error": environment.get("server_metadata_error"),
         },
@@ -363,7 +363,9 @@ def establish_browser_test_session(
         return {
             "success": False,
             "error": str(exc),
-            "status_code": exc.status_code if isinstance(exc, JsonRequestError) else None,
+            "status_code": exc.status_code
+            if isinstance(exc, JsonRequestError)
+            else None,
             "payload": payload,
             "browser_test_mode": _as_mapping(payload.get("browser_test_mode")),
         }
@@ -468,7 +470,9 @@ def apply_target_session_context(
             f"requested organisation {requested_org} but effective organisation is {actual_org}"
         )
     result["target_session_context_ready"] = bool(
-        context.get("authenticated") is True and not update_errors and not mismatch_reasons
+        context.get("authenticated") is True
+        and not update_errors
+        and not mismatch_reasons
     )
     if mismatch_reasons:
         result["mismatch_reasons"] = mismatch_reasons
@@ -682,12 +686,9 @@ def build_database_preflight(
         "attempt_count": total_attempts,
         "poll_interval_seconds": max(float(poll_interval_seconds or 0.0), 0.0),
     }
-    if not latest["database_runtime_available"] and not _safe_text(
-        latest.get("error")
-    ):
+    if not latest["database_runtime_available"] and not _safe_text(latest.get("error")):
         latest["error"] = (
-            "Mongo read/write health was not stable across replay preflight "
-            "samples."
+            "Mongo read/write health was not stable across replay preflight samples."
         )
     return latest
 
@@ -780,9 +781,9 @@ def build_llm_preflight(
                 params={"nocache": "1"},
             )
             available_model_names = _normalised_ollama_model_names(models_payload)
-            preflight["available_ollama_model_names"] = sorted(
-                available_model_names
-            )[:200]
+            preflight["available_ollama_model_names"] = sorted(available_model_names)[
+                :200
+            ]
             preflight["selected_model_available"] = (
                 model_to_check in available_model_names
             )
@@ -1151,9 +1152,9 @@ def extract_selector_diagnostics(*payloads: Any) -> list[dict[str, Any]]:
                         raw_items = raw_value.get(nested_key)
                         if isinstance(raw_items, list):
                             items = [_safe_text(item) for item in raw_items]
-                            nested_entry[nested_key] = [
-                                item for item in items if item
-                            ][:20]
+                            nested_entry[nested_key] = [item for item in items if item][
+                                :20
+                            ]
                     if nested_entry:
                         entry[key] = nested_entry
             if not entry:
@@ -1521,7 +1522,10 @@ def analyse_gmail_arxiv_idempotence_sequence(
             return _blocked_sequence_analysis(
                 "turn_not_completed",
                 f"Turn {turn_id!r} ended with status {terminal_status!r}.",
-                evidence={"blocked_turn_id": turn_id, "terminal_status": terminal_status},
+                evidence={
+                    "blocked_turn_id": turn_id,
+                    "terminal_status": terminal_status,
+                },
                 turn_reports=reports,
             )
 
@@ -1550,7 +1554,11 @@ def analyse_gmail_arxiv_idempotence_sequence(
             turn_reports=reports,
         )
 
-    initial_selected = set(_as_list(_as_mapping(initial_report.get("analysis")).get("selected_workflow_ids")))
+    initial_selected = set(
+        _as_list(
+            _as_mapping(initial_report.get("analysis")).get("selected_workflow_ids")
+        )
+    )
     if GMAIL_ARXIV_WORKFLOW_ID not in initial_selected:
         return _blocked_sequence_analysis(
             "initial_workflow_not_selected",
@@ -1926,9 +1934,7 @@ def _terminal_workflow_action_blocker(
     phase = _safe_text(progress.get("phase")) or None
     reason_parts = [f"Background task ended with status {terminal_status!r}"]
     if workflow_id or state_id or action_id:
-        location = "/".join(
-            item for item in (workflow_id, state_id, action_id) if item
-        )
+        location = "/".join(item for item in (workflow_id, state_id, action_id) if item)
         reason_parts.append(f"after reaching {location}")
     return {
         "type": "workflow_action_terminal_state_blocker",
@@ -2062,7 +2068,9 @@ def build_precondition_blockers(
             }
         )
 
-    gmail_payload = dict(gmail_preflight if isinstance(gmail_preflight, Mapping) else {})
+    gmail_payload = dict(
+        gmail_preflight if isinstance(gmail_preflight, Mapping) else {}
+    )
     if not gmail_payload.get("gmail_capability_ready") and not gmail_forced:
         access_test = _as_mapping(gmail_payload.get("access_test"))
         gmail_reason = (
@@ -2100,8 +2108,12 @@ def classify_replay(
     progress_facts: Sequence[Mapping[str, Any]],
     workflow_capability_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    missing_fact_ids = sorted(set(case.expected_progress_fact_ids) - _fact_ids(progress_facts))
-    missing_contract_ids = sorted(set(case.expected_contract_ids) - _contract_ids(progress_facts))
+    missing_fact_ids = sorted(
+        set(case.expected_progress_fact_ids) - _fact_ids(progress_facts)
+    )
+    missing_contract_ids = sorted(
+        set(case.expected_contract_ids) - _contract_ids(progress_facts)
+    )
     selected_expected_workflow = (
         not case.expected_workflow_id
         or case.expected_workflow_id in set(selected_workflow_ids)
@@ -2143,9 +2155,8 @@ def classify_replay(
         blocker = dict(precondition_blockers[0])
     elif context_build_blocker is not None:
         blocker = context_build_blocker
-    elif (
-        not selected_expected_workflow
-        and (route_evidence_present or terminal_status == "completed")
+    elif not selected_expected_workflow and (
+        route_evidence_present or terminal_status == "completed"
     ):
         blocker = {
             "type": "selector_or_dispatch_blocker",
@@ -2420,8 +2431,7 @@ def run_replay(
         or run_despite_database_preflight_blocker
     )
     llm_ready_or_forced = bool(
-        llm_preflight.get("llm_runtime_available")
-        or run_despite_llm_preflight_blocker
+        llm_preflight.get("llm_runtime_available") or run_despite_llm_preflight_blocker
     )
     target_context_ready = bool(
         target_session_context.get("target_session_context_ready") is not False
@@ -2663,7 +2673,9 @@ def run_gmail_arxiv_idempotence_replay(
                 case=turn.case,
                 client_request_id=client_request_id,
                 conversation_session_id=conversation_session_id,
-                gmail_profile=_safe_text(gmail_preflight.get("requested_gmail_profile")),
+                gmail_profile=_safe_text(
+                    gmail_preflight.get("requested_gmail_profile")
+                ),
                 model=model,
                 presenter_mode=presenter_mode,
                 thinking_card_mode=thinking_card_mode,
@@ -2767,12 +2779,16 @@ def _resolve_case(
             expected_workflow_id=_safe_text(expected_workflow_id) or None,
             expected_progress_fact_ids=tuple(
                 item
-                for item in (_safe_text(value) for value in (expected_progress_fact_ids or ()))
+                for item in (
+                    _safe_text(value) for value in (expected_progress_fact_ids or ())
+                )
                 if item
             ),
             expected_contract_ids=tuple(
                 item
-                for item in (_safe_text(value) for value in (expected_contract_ids or ()))
+                for item in (
+                    _safe_text(value) for value in (expected_contract_ids or ())
+                )
                 if item
             ),
             requires_gmail=requires_gmail,
@@ -3005,9 +3021,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_despite_database_preflight_blocker=bool(
             args.run_despite_database_preflight_blocker
         ),
-        run_despite_llm_preflight_blocker=bool(
-            args.run_despite_llm_preflight_blocker
-        ),
+        run_despite_llm_preflight_blocker=bool(args.run_despite_llm_preflight_blocker),
         run_despite_workflow_capability_preflight_blocker=bool(
             args.run_despite_workflow_capability_preflight_blocker
         ),

@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from .required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+    required_tool_names_match,
+    resolve_required_tool_identity,
+)
 from .tool_metadata_service import get_tool_required_obligation_metadata
 from .tool_target_contract_validation import (
     validate_tool_target_contract,
@@ -121,24 +127,25 @@ def normalise_required_tool_sources(
 def classify_required_tool_operation(tool_name: str) -> str:
     """Classify a required tool into a generic execution obligation class."""
 
-    cleaned = _safe_str(tool_name)
-    metadata = get_tool_required_obligation_metadata(cleaned)
+    identity = resolve_required_tool_identity(tool_name)
+    metadata = get_tool_required_obligation_metadata(identity.operation_name)
     return metadata.operation_class or OPERATION_EXTERNAL_SIDE_EFFECT
 
 
 def _has_required_tool_operation_metadata(tool_name: str) -> bool:
-    metadata = get_tool_required_obligation_metadata(tool_name)
+    identity = resolve_required_tool_identity(tool_name)
+    metadata = get_tool_required_obligation_metadata(identity.operation_name)
     return bool(metadata.operation_class)
 
 
 def _method_lookup(method_catalogue: Mapping[str, Any] | None) -> set[str] | None:
     if not isinstance(method_catalogue, Mapping):
         return None
-    return {
-        str(name).strip().lower()
-        for name in method_catalogue.keys()
-        if str(name).strip()
-    }
+    method_names = [str(name).strip() for name in method_catalogue if str(name).strip()]
+    return canonical_required_tool_keys(
+        method_names,
+        known_tool_names=method_names,
+    )
 
 
 def _method_definition_for_tool(
@@ -147,9 +154,13 @@ def _method_definition_for_tool(
 ) -> Any | None:
     if not isinstance(method_catalogue, Mapping):
         return None
-    lowered = tool_name.lower()
+    method_names = [str(name).strip() for name in method_catalogue if str(name).strip()]
     for name, definition in method_catalogue.items():
-        if str(name).strip().lower() == lowered:
+        if required_tool_names_match(
+            tool_name,
+            name,
+            known_tool_names=method_names,
+        ):
             return definition
     return None
 
@@ -188,7 +199,11 @@ def _catalogue_operation_class(method_definition: Any | None) -> str | None:
 def _allowed_lookup(allowed_tools: Sequence[Any] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
-    return {str(name).strip().lower() for name in allowed_tools if str(name).strip()}
+    known_names = [str(name).strip() for name in allowed_tools if str(name).strip()]
+    return canonical_required_tool_keys(
+        known_names,
+        known_tool_names=known_names,
+    )
 
 
 def _tool_from_invocation(invocation: Mapping[str, Any]) -> str:
@@ -229,7 +244,7 @@ def _normalise_equivalent_execution_record(
     if not tool_name:
         return None
     status = _safe_str(execution.get("status")) or _safe_str(execution.get("outcome"))
-    record = {
+    record: dict[str, Any] = {
         "tool": tool_name,
         "status": status or fallback_status,
         "source": _safe_str(execution.get("source")) or "equivalent_execution_surface",
@@ -473,7 +488,8 @@ def _attempt_failure_blocker(
 
 
 def _operation_supports_target_closure(tool_name: str, operation_class: str) -> bool:
-    metadata = get_tool_required_obligation_metadata(tool_name)
+    identity = resolve_required_tool_identity(tool_name)
+    metadata = get_tool_required_obligation_metadata(identity.operation_name)
     if metadata.target_closure_required is not None:
         return metadata.target_closure_required
     return operation_class in {
@@ -497,8 +513,11 @@ def _existing_obligation_lookup(
         if not isinstance(item, Mapping):
             continue
         tool_name = _safe_str(item.get("tool_name"))
-        if tool_name:
-            lookup[tool_name.lower()] = item
+        canonical_key = _safe_str(item.get("canonical_tool_key")) or (
+            canonical_required_tool_key(tool_name) if tool_name else ""
+        )
+        if canonical_key:
+            lookup[canonical_key] = item
     return lookup
 
 
@@ -511,8 +530,11 @@ def _append_validation_errors(
     cleaned_tool = _safe_str(tool_name)
     if not cleaned_tool:
         return
-    lowered = cleaned_tool.lower()
-    entry = lookup.setdefault(lowered, {"tool": cleaned_tool, "errors": []})
+    canonical_key = canonical_required_tool_key(cleaned_tool)
+    entry = lookup.setdefault(
+        canonical_key,
+        {"tool": cleaned_tool, "canonical_tool_key": canonical_key, "errors": []},
+    )
     serialised_errors = entry.setdefault("errors", [])
     if not isinstance(serialised_errors, list):
         serialised_errors = []
@@ -655,26 +677,73 @@ def build_required_tool_obligation_ledger(
 ) -> dict[str, Any]:
     """Build a serialisable ledger for required tool closure."""
 
-    sources_by_tool = normalise_required_tool_sources(
+    raw_sources_by_tool = normalise_required_tool_sources(
         required_tools_by_source,
         required_tools=required_tools,
     )
     existing_lookup = _existing_obligation_lookup(existing_ledger)
-    for tool_name, obligation in existing_lookup.items():
+    known_surface_names = [
+        *[_safe_str(name) for name in (allowed_tools or ())],
+        *(
+            [_safe_str(name) for name in method_catalogue]
+            if isinstance(method_catalogue, Mapping)
+            else []
+        ),
+        *[
+            _tool_from_planned_call(call)
+            for call in (planned_tool_calls or ())
+            if isinstance(call, Mapping)
+        ],
+        *[
+            _tool_from_invocation(invocation)
+            for invocation in (invocations or ())
+            if isinstance(invocation, Mapping)
+        ],
+        *normalise_required_tool_names(observed_equivalent_successful_tools),
+        *normalise_required_tool_names(observed_equivalent_failed_tools),
+        *[
+            _tool_from_equivalent_execution(execution)
+            for execution in (observed_equivalent_successful_executions or ())
+            if isinstance(execution, Mapping)
+        ],
+        *[
+            _tool_from_equivalent_execution(execution)
+            for execution in (observed_equivalent_failed_executions or ())
+            if isinstance(execution, Mapping)
+        ],
+    ]
+    known_surface_names = [name for name in known_surface_names if name]
+
+    def tool_key(value: Any) -> str:
+        return canonical_required_tool_key(
+            value,
+            known_tool_names=known_surface_names,
+        )
+
+    sources_by_tool: dict[str, list[str]] = {}
+    represented_name_by_key: dict[str, str] = {}
+    for represented_name, sources in raw_sources_by_tool.items():
+        canonical_key = tool_key(represented_name)
+        if not canonical_key:
+            continue
+        represented_name_by_key.setdefault(canonical_key, represented_name)
+        target_sources = sources_by_tool.setdefault(canonical_key, [])
+        for source in sources:
+            if source not in target_sources:
+                target_sources.append(source)
+
+    for canonical_key, obligation in existing_lookup.items():
         existing_sources = normalise_required_tool_names(obligation.get("sources"))
         if not existing_sources:
             existing_source = _safe_str(obligation.get("source"))
             existing_sources = [existing_source] if existing_source else []
         if existing_sources:
-            sources_by_tool.setdefault(_safe_str(obligation.get("tool_name")), [])
+            represented_name = _safe_str(obligation.get("tool_name")) or canonical_key
+            represented_name_by_key.setdefault(canonical_key, represented_name)
+            sources_by_tool.setdefault(canonical_key, [])
             for source in existing_sources:
-                if (
-                    source
-                    not in sources_by_tool[_safe_str(obligation.get("tool_name"))]
-                ):
-                    sources_by_tool[_safe_str(obligation.get("tool_name"))].append(
-                        source
-                    )
+                if source not in sources_by_tool[canonical_key]:
+                    sources_by_tool[canonical_key].append(source)
 
     if not sources_by_tool:
         return {
@@ -700,9 +769,8 @@ def build_required_tool_obligation_ledger(
             continue
         tool_name = _tool_from_planned_call(call)
         if tool_name:
-            planned_counts[tool_name.lower()] = (
-                planned_counts.get(tool_name.lower(), 0) + 1
-            )
+            canonical_key = tool_key(tool_name)
+            planned_counts[canonical_key] = planned_counts.get(canonical_key, 0) + 1
 
     validation_failures_by_tool = _validation_failure_lookup(
         tool_call_validation_failure_context=tool_call_validation_failure_context,
@@ -714,8 +782,12 @@ def build_required_tool_obligation_ledger(
         tool_name = _tool_from_planned_call(call)
         if not tool_name:
             continue
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
+        )
         target_validation = validate_tool_target_contract(
-            tool_name=tool_name,
+            tool_name=identity.operation_name,
             payload=_payload_from_planned_call(call),
             target_contract_state=target_contract_state,
         )
@@ -738,13 +810,19 @@ def build_required_tool_obligation_ledger(
         cleaned_tool_name = _safe_str(tool_name)
         if not cleaned_tool_name:
             return
-        normalised = {
+        identity = resolve_required_tool_identity(
+            cleaned_tool_name,
+            known_tool_names=known_surface_names,
+        )
+        normalised: dict[str, Any] = {
             "source": _safe_str(surface.get("source"))
             or "equivalent_execution_surface",
             "status": _safe_str(surface.get("status")),
             "workflow_id": _safe_str(surface.get("workflow_id")),
             "state_id": _safe_str(surface.get("state_id")),
             "action_id": _safe_str(surface.get("action_id")) or cleaned_tool_name,
+            "observed_tool_name": cleaned_tool_name,
+            "canonical_tool_key": identity.canonical_key,
         }
         for field_name in _EQUIVALENT_EXECUTION_CONTEXT_FIELDS:
             value = _safe_str(surface.get(field_name))
@@ -755,7 +833,7 @@ def build_required_tool_obligation_ledger(
             if isinstance(value, Mapping):
                 normalised[field_name] = dict(value)
         existing = execution_surfaces_by_tool.setdefault(
-            cleaned_tool_name.lower(),
+            identity.canonical_key,
             [],
         )
         fingerprint = tuple(sorted(normalised.items()))
@@ -764,7 +842,7 @@ def build_required_tool_obligation_ledger(
                 return
         existing.append(normalised)
 
-    for lowered, failure in validation_failures_by_tool.items():
+    for canonical_key, failure in validation_failures_by_tool.items():
         tool_name = _safe_str(failure.get("tool"))
         if not tool_name:
             continue
@@ -775,15 +853,21 @@ def build_required_tool_obligation_ledger(
             and not isinstance(errors, (str, bytes, bytearray))
             else 1
         )
-        planned_counts[lowered] = max(planned_counts.get(lowered, 0), 1)
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + max(
+        planned_counts[canonical_key] = max(planned_counts.get(canonical_key, 0), 1)
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + max(
             error_count,
             1,
         )
-        last_status_by_tool[lowered] = (
+        last_status_by_tool[canonical_key] = (
             _validation_failure_status(failure) or "tool_call_validation_failed"
         )
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
+        )
+        attempted_operation_classes.append(
+            classify_required_tool_operation(identity.operation_name)
+        )
 
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
@@ -791,13 +875,17 @@ def build_required_tool_obligation_ledger(
         tool_name = _tool_from_invocation(invocation)
         if not tool_name:
             continue
-        lowered = tool_name.lower()
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
-        planned_counts[lowered] = max(
-            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
+        )
+        canonical_key = identity.canonical_key
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + 1
+        planned_counts[canonical_key] = max(
+            planned_counts.get(canonical_key, 0), attempted_counts[canonical_key]
         )
         status = _invocation_status(invocation)
-        operation_class = classify_required_tool_operation(tool_name)
+        operation_class = classify_required_tool_operation(identity.operation_name)
         if (
             status == "ok"
             and operation_class == OPERATION_VERIFICATION_READ
@@ -808,7 +896,7 @@ def build_required_tool_obligation_ledger(
         if not validation_payload:
             validation_payload = _payload_from_invocation(invocation)
         target_validation = validate_tool_target_contract(
-            tool_name=tool_name,
+            tool_name=identity.operation_name,
             payload=validation_payload,
             target_contract_state=target_contract_state,
         )
@@ -819,15 +907,21 @@ def build_required_tool_obligation_ledger(
                 errors=target_validation.errors,
             )
             status = target_validation.first_error_code() or "target_contract_failed"
-        last_status_by_tool[lowered] = status
-        last_invocation_by_tool[lowered] = invocation
+        last_status_by_tool[canonical_key] = status
+        last_invocation_by_tool[canonical_key] = invocation
         attempted_operation_classes.append(operation_class)
         if status == "ok":
-            successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
-        if _operation_supports_target_closure(tool_name, operation_class):
-            for target in _target_tokens_from_invocation(tool_name, invocation):
+            successful_counts[canonical_key] = successful_counts.get(canonical_key, 0) + 1
+        if _operation_supports_target_closure(identity.operation_name, operation_class):
+            for target in _target_tokens_from_invocation(
+                identity.operation_name,
+                invocation,
+            ):
                 target_key = _target_closure_key(target)
-                target_entry = target_status_by_tool.setdefault(lowered, {}).setdefault(
+                target_entry = target_status_by_tool.setdefault(
+                    canonical_key,
+                    {},
+                ).setdefault(
                     target_key,
                     {
                         "target": target,
@@ -852,14 +946,18 @@ def build_required_tool_obligation_ledger(
     for tool_name in normalise_required_tool_names(
         observed_equivalent_successful_tools
     ):
-        lowered = tool_name.lower()
-        observed_equivalent_invocation_count += 1
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
-        planned_counts[lowered] = max(
-            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
         )
-        successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
-        last_status_by_tool[lowered] = "ok"
+        canonical_key = identity.canonical_key
+        observed_equivalent_invocation_count += 1
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + 1
+        planned_counts[canonical_key] = max(
+            planned_counts.get(canonical_key, 0), attempted_counts[canonical_key]
+        )
+        successful_counts[canonical_key] = successful_counts.get(canonical_key, 0) + 1
+        last_status_by_tool[canonical_key] = "ok"
         add_execution_surface(
             tool_name,
             {
@@ -868,17 +966,23 @@ def build_required_tool_obligation_ledger(
                 "action_id": tool_name,
             },
         )
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        attempted_operation_classes.append(
+            classify_required_tool_operation(identity.operation_name)
+        )
 
     for tool_name in normalise_required_tool_names(observed_equivalent_failed_tools):
-        lowered = tool_name.lower()
-        observed_equivalent_invocation_count += 1
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
-        planned_counts[lowered] = max(
-            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
         )
-        last_status_by_tool[lowered] = "error"
-        last_invocation_by_tool[lowered] = {
+        canonical_key = identity.canonical_key
+        observed_equivalent_invocation_count += 1
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + 1
+        planned_counts[canonical_key] = max(
+            planned_counts.get(canonical_key, 0), attempted_counts[canonical_key]
+        )
+        last_status_by_tool[canonical_key] = "error"
+        last_invocation_by_tool[canonical_key] = {
             "tool": tool_name,
             "status": "error",
             "error": "Equivalent execution surface reported failure.",
@@ -891,7 +995,9 @@ def build_required_tool_obligation_ledger(
                 "action_id": tool_name,
             },
         )
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        attempted_operation_classes.append(
+            classify_required_tool_operation(identity.operation_name)
+        )
 
     for execution in observed_equivalent_successful_executions or ():
         if not isinstance(execution, Mapping):
@@ -903,16 +1009,22 @@ def build_required_tool_obligation_ledger(
         if record is None:
             continue
         tool_name = _safe_str(record.get("tool"))
-        lowered = tool_name.lower()
-        observed_equivalent_invocation_count += 1
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
-        planned_counts[lowered] = max(
-            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
         )
-        successful_counts[lowered] = successful_counts.get(lowered, 0) + 1
-        last_status_by_tool[lowered] = "ok"
+        canonical_key = identity.canonical_key
+        observed_equivalent_invocation_count += 1
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + 1
+        planned_counts[canonical_key] = max(
+            planned_counts.get(canonical_key, 0), attempted_counts[canonical_key]
+        )
+        successful_counts[canonical_key] = successful_counts.get(canonical_key, 0) + 1
+        last_status_by_tool[canonical_key] = "ok"
         add_execution_surface(tool_name, record)
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        attempted_operation_classes.append(
+            classify_required_tool_operation(identity.operation_name)
+        )
 
     for execution in observed_equivalent_failed_executions or ():
         if not isinstance(execution, Mapping):
@@ -924,13 +1036,17 @@ def build_required_tool_obligation_ledger(
         if record is None:
             continue
         tool_name = _safe_str(record.get("tool"))
-        lowered = tool_name.lower()
-        observed_equivalent_invocation_count += 1
-        attempted_counts[lowered] = attempted_counts.get(lowered, 0) + 1
-        planned_counts[lowered] = max(
-            planned_counts.get(lowered, 0), attempted_counts[lowered]
+        identity = resolve_required_tool_identity(
+            tool_name,
+            known_tool_names=known_surface_names,
         )
-        last_status_by_tool[lowered] = "error"
+        canonical_key = identity.canonical_key
+        observed_equivalent_invocation_count += 1
+        attempted_counts[canonical_key] = attempted_counts.get(canonical_key, 0) + 1
+        planned_counts[canonical_key] = max(
+            planned_counts.get(canonical_key, 0), attempted_counts[canonical_key]
+        )
+        last_status_by_tool[canonical_key] = "error"
         last_error = (
             _safe_str(record.get("error"))
             or _safe_str(record.get("message"))
@@ -945,63 +1061,93 @@ def build_required_tool_obligation_ledger(
             value = _safe_str(record.get(field_name))
             if value:
                 last_invocation[field_name] = value
-        last_invocation_by_tool[lowered] = last_invocation
+        last_invocation_by_tool[canonical_key] = last_invocation
         add_execution_surface(tool_name, record)
-        attempted_operation_classes.append(classify_required_tool_operation(tool_name))
+        attempted_operation_classes.append(
+            classify_required_tool_operation(identity.operation_name)
+        )
 
     obligations: list[dict[str, Any]] = []
-    for tool_name, sources in sources_by_tool.items():
-        cleaned_tool = _safe_str(tool_name)
+    for canonical_key, sources in sources_by_tool.items():
+        cleaned_tool = _safe_str(represented_name_by_key.get(canonical_key))
         if not cleaned_tool:
             continue
-        lowered = cleaned_tool.lower()
-        existing = existing_lookup.get(lowered, {})
+        identity = resolve_required_tool_identity(
+            cleaned_tool,
+            known_tool_names=known_surface_names,
+        )
+        operation_name = identity.operation_name
+        existing = existing_lookup.get(canonical_key, {})
         catalogue_operation_class = _catalogue_operation_class(
-            _method_definition_for_tool(method_catalogue, cleaned_tool)
+            _method_definition_for_tool(method_catalogue, operation_name)
         )
         existing_operation_class = _safe_str(existing.get("operation_class"))
         existing_metadata_present = existing.get("operation_metadata_present") is True
         operation_class = (
-            classify_required_tool_operation(cleaned_tool)
-            if _has_required_tool_operation_metadata(cleaned_tool)
+            classify_required_tool_operation(operation_name)
+            if _has_required_tool_operation_metadata(operation_name)
             else catalogue_operation_class
             or (existing_operation_class if existing_metadata_present else "")
             or OPERATION_EXTERNAL_SIDE_EFFECT
         )
         operation_metadata_present = bool(
-            _has_required_tool_operation_metadata(cleaned_tool)
+            _has_required_tool_operation_metadata(operation_name)
             or catalogue_operation_class
             or existing_metadata_present
         )
+        execution_surfaces = execution_surfaces_by_tool.get(canonical_key) or []
+        if execution_surfaces:
+            # An exact represented workflow/action surface is itself execution
+            # metadata.  It must not be declared impossible merely because it
+            # is not also an identically named gateway method.
+            operation_metadata_present = True
 
         if allowed is None:
             allowed_by_policy = existing.get("allowed_by_workflow_policy")
             if not isinstance(allowed_by_policy, bool):
                 allowed_by_policy = True
         else:
-            allowed_by_policy = lowered in allowed
+            allowed_by_policy = canonical_key in allowed
 
         if available is None:
             available_on_gateway = existing.get("available_on_gateway")
             if not isinstance(available_on_gateway, bool):
                 available_on_gateway = None
         else:
-            available_on_gateway = lowered in available
+            available_on_gateway = canonical_key in available
 
-        planned_count = planned_counts.get(lowered, 0)
-        attempted_count = attempted_counts.get(lowered, 0)
-        successful_count = successful_counts.get(lowered, 0)
-        validation_failure = validation_failures_by_tool.get(lowered)
+        planned_count = planned_counts.get(canonical_key, 0)
+        attempted_count = attempted_counts.get(canonical_key, 0)
+        successful_count = successful_counts.get(canonical_key, 0)
+        validation_failure = validation_failures_by_tool.get(canonical_key)
         target_closure = _build_target_closure_payload(
-            target_status_by_tool.get(lowered)
+            target_status_by_tool.get(canonical_key)
         )
         unresolved_failed_target_count = (
             int(target_closure.get("unresolved_failed_target_count") or 0)
             if isinstance(target_closure, Mapping)
             else 0
         )
+        availability_surfaces: list[str] = []
+        if available_on_gateway is True:
+            availability_surfaces.append("gateway")
+        if attempted_count > 0:
+            availability_surfaces.append("observed_invocation")
+        for execution_surface in execution_surfaces:
+            source = _safe_str(execution_surface.get("source"))
+            surface_name = (
+                "workflow_action"
+                if _safe_str(execution_surface.get("workflow_id"))
+                or _safe_str(execution_surface.get("action_id"))
+                else source or "equivalent_execution"
+            )
+            if surface_name not in availability_surfaces:
+                availability_surfaces.append(surface_name)
+        available_on_any_surface = bool(availability_surfaces)
         availability_blocks_obligation = (
-            available_on_gateway is False and attempted_count <= 0
+            available_on_gateway is False
+            and not available_on_any_surface
+            and attempted_count <= 0
         )
         satisfied = (
             successful_count > 0
@@ -1034,14 +1180,14 @@ def build_required_tool_obligation_ledger(
                     blocking_reason = BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
                 failure_class = blocking_reason
             elif attempted_count > 0:
-                last_status = last_status_by_tool.get(lowered, "")
+                last_status = last_status_by_tool.get(canonical_key, "")
                 if last_status == "blocked":
                     blocking_reason = BLOCKER_WRITE_POLICY_DENIED_OR_UNCONFIRMED
                     failure_class = blocking_reason
                 else:
                     blocking_reason = _attempt_failure_blocker(
                         operation_class=operation_class,
-                        invocation=last_invocation_by_tool.get(lowered),
+                        invocation=last_invocation_by_tool.get(canonical_key),
                     )
                     failure_class = blocking_reason
             else:
@@ -1050,23 +1196,53 @@ def build_required_tool_obligation_ledger(
 
         obligation = {
             "tool_name": cleaned_tool,
+            "original_required_tool_name": cleaned_tool,
+            "canonical_tool_key": canonical_key,
+            "canonical_operation_key": canonical_key,
+            "canonical_operation_name": operation_name,
+            "identity_resolution_source": identity.canonicalisation_source,
+            "family_qualifier": identity.family_qualifier,
+            "qualification_syntax": identity.qualification_syntax,
             "source": sources[0] if sources else "required_tools",
             "sources": list(sources),
             "operation_class": operation_class,
             "operation_metadata_present": operation_metadata_present,
             "allowed_by_workflow_policy": bool(allowed_by_policy),
             "available_on_gateway": available_on_gateway,
+            "available_on_any_surface": available_on_any_surface,
+            "availability_surfaces": availability_surfaces,
+            "matched_gateway_names": [
+                _safe_str(name)
+                for name in (method_catalogue or {})
+                if tool_key(name) == canonical_key
+            ],
+            "matched_allowed_names": [
+                _safe_str(name)
+                for name in (allowed_tools or ())
+                if tool_key(name) == canonical_key
+            ],
+            "matched_planned_names": [
+                _tool_from_planned_call(call)
+                for call in (planned_tool_calls or ())
+                if isinstance(call, Mapping)
+                and tool_key(_tool_from_planned_call(call)) == canonical_key
+            ],
+            "matched_observed_names": [
+                _tool_from_invocation(invocation)
+                for invocation in (invocations or ())
+                if isinstance(invocation, Mapping)
+                and tool_key(_tool_from_invocation(invocation)) == canonical_key
+            ],
             "planned_count": planned_count,
             "attempted_count": attempted_count,
             "successful_count": successful_count,
-            "last_attempt_status": last_status_by_tool.get(lowered, ""),
+            "last_attempt_status": last_status_by_tool.get(canonical_key, ""),
             "blocking_reason": blocking_reason,
             "failure_class": failure_class,
             "satisfied": satisfied,
         }
         if isinstance(target_closure, Mapping):
             obligation["target_closure"] = dict(target_closure)
-        execution_surfaces = execution_surfaces_by_tool.get(lowered)
         if execution_surfaces:
             obligation["execution_surfaces"] = [
                 dict(surface) for surface in execution_surfaces

@@ -16,6 +16,10 @@ from typing import Any, Mapping, Sequence
 from ...services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
+from ...services.required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+)
 from ...services.tool_evidence_projection_service import (
     project_surfaceable_concept_evidence,
     render_surfaceable_concept_lines,
@@ -545,8 +549,20 @@ def _filter_string_sequence_to_allowed(
     allowed = _dedupe_string_sequence(allowed_values)
     if not allowed:
         return values
-    allowed_lower = {item.lower() for item in allowed}
-    return [item for item in values if item.lower() in allowed_lower]
+    known_names = [*values, *allowed]
+    allowed_keys = canonical_required_tool_keys(
+        allowed,
+        known_tool_names=known_names,
+    )
+    return [
+        item
+        for item in values
+        if canonical_required_tool_key(
+            item,
+            known_tool_names=known_names,
+        )
+        in allowed_keys
+    ]
 
 
 def _is_mapping_sequence(value: Any) -> bool:
@@ -898,19 +914,28 @@ def _missing_required_tools_from_invocations(
     if not required:
         return []
 
-    successful_tools: set[str] = set()
+    observed_names: list[str] = []
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
             continue
         if not tool_invocation_completed_successfully(invocation):
             continue
-        for tool_name in tool_invocation_names(invocation):
-            successful_tools.add(tool_name.lower())
+        observed_names.extend(tool_invocation_names(invocation))
+
+    known_names = [*required, *observed_names]
+    successful_tools = canonical_required_tool_keys(
+        observed_names,
+        known_tool_names=known_names,
+    )
 
     return [
         tool_name
         for tool_name in required
-        if tool_name.strip().lower() not in successful_tools
+        if canonical_required_tool_key(
+            tool_name,
+            known_tool_names=known_names,
+        )
+        not in successful_tools
     ]
 
 

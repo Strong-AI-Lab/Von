@@ -35,9 +35,147 @@ from src.backend.workflows.terminal_outcome_receipts import (
 from src.backend.services.turn_expected_outcome_obligation_carry_forward import (
     adjudicate_conditional_required_tool_activation,
 )
+from src.backend.services.rag_service import build_rag_retrieval_state
+from src.backend.services.required_tool_obligation_service import (
+    build_required_tool_obligation_ledger,
+)
+from src.backend.services.operational_learning_release_service import (
+    project_learning_release_recovery_affordances,
+)
+from src.backend.services.operational_learning_release_vontology_service import (
+    LearningReleaseStateConflictError,
+    LearningReleasePersistenceError,
+    _apply_and_readback_release_activation,
+)
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
 )
+
+
+# --- retrieval barriers remain inspectable and recoverable ------------------
+
+
+def test_retrieval_incompatibility_is_not_collapsed_into_authoritative_empty() -> None:
+    blocked = build_rag_retrieval_state(
+        "embedding_signature_mismatch",
+        cause="synthetic_signature_mismatch",
+    )
+    empty = build_rag_retrieval_state(
+        "valid_empty",
+        cause="synthetic_query_completed",
+    )
+
+    assert blocked["usable"] is False
+    assert blocked["authoritative_empty"] is False
+    assert blocked["rebuild_required"] is True
+    assert blocked["recovery_affordances"] == [
+        {"action_type": "rebuild_namespace_index"}
+    ]
+
+    assert empty["usable"] is True
+    assert empty["authoritative_empty"] is True
+    assert empty["rebuild_required"] is False
+
+
+# --- terminal receipts retain represented recovery opportunities ------------
+
+
+def test_equivalent_execution_surface_is_not_erased_by_gateway_name_mismatch() -> (
+    None
+):
+    action_id = "synthetic_family.verify_effect"
+    ledger = build_required_tool_obligation_ledger(
+        required_tools=[action_id],
+        allowed_tools=[action_id],
+        method_catalogue={},
+        observed_equivalent_successful_executions=[
+            {
+                "action_id": action_id,
+                "workflow_id": "#V#synthetic_workflow",
+                "status": "success",
+            }
+        ],
+    )
+
+    obligation = ledger["obligations"][0]
+    assert obligation["available_on_gateway"] is False
+    assert obligation["available_on_any_surface"] is True
+    assert obligation["availability_surfaces"] == [
+        "observed_invocation",
+        "workflow_action",
+    ]
+    assert obligation["satisfied"] is True
+    assert obligation["blocking_reason"] == ""
+
+
+def test_rejected_learning_release_preserves_active_pointer_and_recovery_options() -> (
+    None
+):
+    active = {
+        "release_id": "release-active",
+        "release_sha256": "a" * 64,
+        "candidate_id": "candidate-active",
+    }
+
+    affordances = project_learning_release_recovery_affordances(
+        action="reject",
+        prior_active=active,
+        resulting_active=active,
+        resulting_previous=None,
+    )
+
+    assert {item["action_type"] for item in affordances} == {
+        "inspect_release_evidence",
+        "retest_candidate",
+        "revise_candidate",
+        "retain_active_release",
+    }
+    retained = next(
+        item for item in affordances if item["action_type"] == "retain_active_release"
+    )
+    assert retained["release"] == active
+
+
+def test_learning_release_optimistic_conflict_preserves_inspect_and_retry_paths() -> (
+    None
+):
+    conflict = LearningReleaseStateConflictError(
+        expected_version=3,
+        expected_state_sha256="a" * 64,
+        current_version=4,
+        current_state_sha256="b" * 64,
+        state_concept_id="#V#operational_learning_release_state_synthetic",
+    ).to_dict()
+
+    assert conflict["details"]["current_version"] == 4
+    assert conflict["details"]["current_state_sha256"] == "b" * 64
+    assert {
+        item["action_type"] for item in conflict["recovery_affordances"]
+    } == {"read_latest_state", "retry_with_latest_version"}
+
+
+def test_missing_release_activation_adapter_retains_active_release_opportunity() -> (
+    None
+):
+    try:
+        _apply_and_readback_release_activation(
+            {
+                "candidate_id": "candidate-synthetic",
+                "affected_artifact": "#V#synthetic_artifact",
+                "release_sha256": "a" * 64,
+            }
+        )
+    except LearningReleasePersistenceError as exc:
+        projection = exc.to_dict()
+    else:  # pragma: no cover - the default adapter must fail closed
+        raise AssertionError("missing activation adapter unexpectedly succeeded")
+
+    assert projection["details"]["decision_state"] == (
+        "promotion_approved_not_activated"
+    )
+    assert {
+        item["action_type"] for item in projection["recovery_affordances"]
+    } == {"register_canonical_release_activation_adapter", "retain_active_release"}
 
 
 # --- terminal receipts retain represented recovery opportunities ------------

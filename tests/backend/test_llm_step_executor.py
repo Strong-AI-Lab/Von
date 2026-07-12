@@ -467,7 +467,7 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
     )
     assert result.outputs["validated_json"]["required_tools"] == [
         "search_concepts",
-        "get_predicate_incidence",
+        "get_predicate_extent",
     ]
     assert result.outputs["validated_json"]["conditional_required_tools"] == [
         "workflow_execute"
@@ -477,7 +477,7 @@ def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() ->
     ]
 
 
-def test_execute_llm_step_final_ledger_activates_conditional_required_tools(
+def test_execute_llm_step_does_not_activate_conditional_tool_from_domain_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Gateway:
@@ -574,10 +574,10 @@ def test_execute_llm_step_final_ledger_activates_conditional_required_tools(
     result = execute_llm_step(request)
 
     assert result.status == "success"
-    assert "workflow_execute" in result.outputs["required_prompt_tools"]
+    assert "workflow_execute" not in result.outputs["required_prompt_tools"]
     ledger = result.outputs["required_tool_obligation_ledger"]
-    assert "workflow_execute" in ledger["unsatisfied_required_tools"]
-    assert "workflow_execute" in result.outputs["missing_prompt_tools"]
+    assert "workflow_execute" not in ledger["unsatisfied_required_tools"]
+    assert "workflow_execute" not in result.outputs["missing_prompt_tools"]
 
 
 def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> None:
@@ -608,7 +608,7 @@ def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> Non
         "Use Vontology relation evidence."
     )
     assert result.outputs["validated_json"]["required_tools"] == [
-        "get_predicate_incidence"
+        "get_predicates_for_class"
     ]
 
 

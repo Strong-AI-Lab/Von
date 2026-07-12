@@ -31,12 +31,12 @@ CONTEXT_BUNDLE_BENCHMARK_SUITE_CONCEPT_ID = (
 CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID = (
     "#V#context_grounded_answering_benchmark_suite"
 )
+OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID = (
+    "#V#operational_certification_benchmark_suite"
+)
 
 _SUITE_DEFINITION_TEXT_PREDICATES: tuple[str, ...] = (
     HAS_BENCHMARK_SUITE_DEFINITION_JSON,
-    "has_benchmark_suite_definition_json",
-    "hasBenchmarkSuiteDefinitionJson",
-    "hasContent",
 )
 
 _REPO_SEED_BUNDLE_DIR = (
@@ -58,6 +58,11 @@ _CANONICAL_SUITE_FIXTURES: tuple[dict[str, Any], ...] = (
         "suite_concept_id": CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID,
         "fixture_path": _REPO_SEED_BUNDLE_DIR
         / "context_grounded_answering_benchmark_seed_bundle.json",
+    },
+    {
+        "suite_concept_id": OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID,
+        "fixture_path": _REPO_SEED_BUNDLE_DIR
+        / "operational_certification_benchmark_seed_bundle.json",
     },
 )
 
@@ -240,34 +245,46 @@ def load_benchmark_suite_definition(
             diagnostics=diagnostics,
         )
 
-    for predicate in _SUITE_DEFINITION_TEXT_PREDICATES:
-        texts = get_texts_for_concept(
-            resolved_suite_concept_id,
-            predicate=predicate,
-            limit=10,
+    predicate = HAS_BENCHMARK_SUITE_DEFINITION_JSON
+    texts = get_texts_for_concept(
+        resolved_suite_concept_id,
+        predicate=predicate,
+        limit=10,
+    )
+    non_empty_texts = [
+        _safe_str((row or {}).get("text"))
+        for row in texts
+        if _safe_str((row or {}).get("text"))
+    ]
+    if len(non_empty_texts) > 1:
+        diagnostics["ambiguous_definition_count"] = len(non_empty_texts)
+        raise BenchmarkSuiteAuthorityMissingError(
+            "benchmark_suite_definition_ambiguous",
+            diagnostics=diagnostics,
         )
-        for row in texts:
-            text = _safe_str((row or {}).get("text"))
-            if not text:
-                continue
-            try:
-                raw = json.loads(text)
-                if not isinstance(raw, Mapping):
-                    raise ValueError("benchmark_suite_definition_not_mapping")
-                definition = _normalise_suite_definition(
-                    raw,
-                    suite_concept_id=resolved_suite_concept_id,
-                    source="vontology",
-                )
-            except Exception:
-                diagnostics["malformed_suite_concept_ids"].append(
-                    resolved_suite_concept_id
-                )
-                continue
-            diagnostics["loaded_suite_concept_id"] = resolved_suite_concept_id
-            diagnostics["source_predicate"] = predicate
-            diagnostics["definition_sha256"] = _hash_payload(definition)
-            return definition, diagnostics
+    if non_empty_texts:
+        try:
+            raw = json.loads(non_empty_texts[0])
+            if not isinstance(raw, Mapping):
+                raise ValueError("benchmark_suite_definition_not_mapping")
+            definition = _normalise_suite_definition(
+                raw,
+                suite_concept_id=resolved_suite_concept_id,
+                source="vontology",
+            )
+        except Exception as exc:
+            diagnostics["malformed_suite_concept_ids"].append(
+                resolved_suite_concept_id
+            )
+            diagnostics["malformed_definition_error"] = type(exc).__name__
+            raise BenchmarkSuiteAuthorityMissingError(
+                "benchmark_suite_definition_malformed",
+                diagnostics=diagnostics,
+            ) from exc
+        diagnostics["loaded_suite_concept_id"] = resolved_suite_concept_id
+        diagnostics["source_predicate"] = predicate
+        diagnostics["definition_sha256"] = _hash_payload(definition)
+        return definition, diagnostics
 
     diagnostics["missing_suite_concept_ids"] = [resolved_suite_concept_id]
     raise BenchmarkSuiteAuthorityMissingError(
@@ -328,6 +345,31 @@ def load_benchmark_suite_case_set(
         "source_predicate": diagnostics.get("source_predicate"),
         "authority_diagnostics": diagnostics,
     }
+
+
+def load_operational_certification_contract(
+    *,
+    suite_concept_id: str = OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID,
+    case_set: str | None = None,
+    fixture_path: Path | str | None = None,
+) -> Any:
+    """Load and validate the represented operational-certification contract.
+
+    ``fixture_path`` is intentionally explicit so production callers fail
+    closed on missing live authority while import/migration tests can opt into
+    the repository fixture.
+    """
+
+    from .operational_certification_contract_service import (
+        parse_operational_certification_contract,
+    )
+
+    payload = load_benchmark_suite_case_set(
+        suite_concept_id=suite_concept_id,
+        case_set=case_set,
+        fixture_path=fixture_path,
+    )
+    return parse_operational_certification_contract(payload)
 
 
 def _existing_suite_has_definition(suite_concept_id: str) -> bool:
@@ -468,6 +510,7 @@ __all__ = [
     "CONTEXT_BUNDLE_BENCHMARK_SUITE_CONCEPT_ID",
     "CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID",
     "HAS_BENCHMARK_SUITE_DEFINITION_JSON",
+    "OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID",
     "SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID",
     "BenchmarkSuiteAuthorityMissingError",
     "canonical_benchmark_suite_concept_ids",
@@ -476,4 +519,5 @@ __all__ = [
     "load_benchmark_suite_case_set",
     "load_benchmark_suite_definition",
     "load_benchmark_suite_definition_from_seed_fixture",
+    "load_operational_certification_contract",
 ]

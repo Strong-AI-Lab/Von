@@ -94,7 +94,10 @@ def get_runtime_code_version_info() -> dict[str, Any]:
     git_commit = _run_git_command("rev-parse", "HEAD")
     git_short_commit = _run_git_command("rev-parse", "--short=12", "HEAD")
     git_branch = _run_git_command("rev-parse", "--abbrev-ref", "HEAD")
-    git_status = _run_git_command("status", "--porcelain", "--untracked-files=no")
+    # Untracked Python/configuration files can change the running behaviour just
+    # as surely as modified tracked files.  Runtime identity must therefore not
+    # report a clean build while such files are present.
+    git_status = _run_git_command("status", "--porcelain", "--untracked-files=normal")
     git_commit_timestamp = _run_git_command("show", "-s", "--format=%cI", "HEAD")
     git_dirty = bool(git_status.strip()) if isinstance(git_status, str) else None
 

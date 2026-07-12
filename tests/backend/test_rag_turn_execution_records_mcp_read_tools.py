@@ -3066,6 +3066,193 @@ def test_turn_execution_build_dashboard_gateway_accepts_omitted_limit_and_offset
     assert payload.get("summary_cards")
 
 
+def test_turn_execution_dashboard_projects_strict_operational_campaign(
+    monkeypatch,
+):
+    from src.backend.services.operational_certification_contract_service import (
+        stable_payload_digest,
+    )
+    from src.backend.services.operational_certification_runner_service import (
+        build_campaign_experiment_observation,
+    )
+
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    docs = _build_dashboard_trace_docs()
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+    campaign = {
+        "schema_version": "operational_certification_campaign_result.v1",
+        "suite_id": "first_sail_operational_suite",
+        "certified": False,
+        "contract_sha256": "c" * 64,
+        "pass_rates": {
+            "pass^1": 1.0,
+            "pass^3": 0.8,
+            "pass^5": 0.6,
+        },
+        "families": {
+            "generic": {
+                "pass_rates": {
+                    "pass^1": 1.0,
+                    "pass^3": 0.8,
+                    "pass^5": 0.6,
+                }
+            }
+        },
+        "certification_gate_results": [
+            {
+                "gate_id": "pass_five",
+                "kind": "hard_interface",
+                "passed": False,
+                "check": {"required": True},
+            }
+        ],
+        "failed_certification_gate_ids": ["pass_five"],
+        "blockers": [],
+        "experiment_persistence_required": True,
+        "experiment_persistence_complete": True,
+    }
+    campaign["certification_gate_results"][0]["result_sha256"] = (
+        stable_payload_digest(campaign["certification_gate_results"][0])
+    )
+    campaign["report_sha256"] = stable_payload_digest(campaign)
+    provenance = {
+        "effective_namespace": "#V#user@org",
+        "effective_user_id": "#V#user",
+        "effective_org_id": "#V#org",
+    }
+    observation = build_campaign_experiment_observation(
+        campaign,
+        execution_provenance=provenance,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.experiment_run_service.get_experiment_run_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "observations": [observation],
+        },
+    )
+
+    payload = _build_gateway().invoke(
+        "turn_execution_build_dashboard",
+        {
+            "namespace": "#V#user@org",
+            "user_concept_id": "#V#user",
+            "organisation_concept_id": "#V#org",
+            "operational_certification_run_id": "#V#experiment_run_1",
+        },
+    ).payload
+
+    operational = payload["overview"]["operational_certification"]
+    assert operational["run_id"] == "#V#experiment_run_1"
+    assert operational["certified"] is False
+    assert operational["report_sha256"] == campaign["report_sha256"]
+    assert operational["family_pass_rates"]["generic"]["pass^3"] == 0.8
+    signal = next(
+        item
+        for item in payload["benchmark_signals"]
+        if item.get("signal_id") == "operational_certification_campaign"
+    )
+    assert signal["status"] == "fail"
+    assert payload["data_sources"]["operational_certification"] == {
+        "run_id": "#V#experiment_run_1",
+        "report_sha256": campaign["report_sha256"],
+        "contract_sha256": "c" * 64,
+        "source": "experiment_run.operational_certification_campaign",
+    }
+    assert payload["effective_namespace"] == "#V#user@org"
+    assert payload["user_id"] == "#V#user"
+    assert payload["org_id"] == "#V#org"
+
+
+def test_turn_execution_dashboard_requires_explicit_operational_caller_scope(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.backend.services.experiment_run_service.get_experiment_run_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "namespace": "#V#private@org",
+            "user_id": "#V#private",
+            "org_id": "#V#org",
+            "observations": [],
+        },
+    )
+
+    payload = _build_gateway().invoke(
+        "turn_execution_build_dashboard",
+        {"operational_certification_run_id": "#V#private_run"},
+    ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "operational_certification_scope_required"
+
+
+def test_turn_execution_dashboard_rejects_inconsistent_campaign_envelope(
+    monkeypatch,
+):
+    from src.backend.services.operational_certification_contract_service import (
+        stable_payload_digest,
+    )
+
+    campaign = {
+        "schema_version": "operational_certification_campaign_result.v1",
+        "suite_id": "tampered_suite",
+        "contract_sha256": "d" * 64,
+        "certified": True,
+        "certification_gate_results": [
+            {"gate_id": "failed_gate", "passed": False, "check": {}}
+        ],
+        "failed_certification_gate_ids": ["failed_gate"],
+        "blockers": [{"code": "blocked", "blocking": True}],
+    }
+    campaign["report_sha256"] = stable_payload_digest(campaign)
+    observation = {
+        "schema_version": "wrong_observation.v1",
+        "observation_type": "operational_certification_campaign",
+        "verdict": "pass",
+        "observed_outcome": {
+            "certified": True,
+            "report_sha256": campaign["report_sha256"],
+        },
+        "execution_provenance": {
+            "effective_namespace": "#V#user@org",
+            "effective_user_id": "#V#user",
+            "effective_org_id": "#V#org",
+        },
+        "evidence": {"operational_certification_campaign_result": campaign},
+    }
+    monkeypatch.setattr(
+        "src.backend.services.experiment_run_service.get_experiment_run_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "observations": [observation],
+        },
+    )
+
+    payload = _build_gateway().invoke(
+        "turn_execution_build_dashboard",
+        {
+            "namespace": "#V#user@org",
+            "user_concept_id": "#V#user",
+            "organisation_concept_id": "#V#org",
+            "operational_certification_run_id": "#V#tampered_run",
+        },
+    ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "operational_certification_integrity_mismatch"
+
+
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
