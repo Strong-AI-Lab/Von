@@ -283,5 +283,5 @@ for the step-by-step restore procedure when restoring from Catalyst Cloud.
 ## Related documents
 
 - If you’re configuring arXiv MCP usage as well, see the arXiv MCP integration notes in `AGENTS.md`.
-- For Terraform-based OpenStack infrastructure provisioning, see [docs/engineering/catalyst_cloud_terraform_iac.md](docs/engineering/catalyst_cloud_terraform_iac.md).
-- For general guidance on MCP tool design and reliability, see [docs/engineering/mcp_tools_best_practices.md](docs/engineering/mcp_tools_best_practices.md).
+- For Terraform-based OpenStack infrastructure provisioning, see [catalyst_cloud_terraform_iac.md](catalyst_cloud_terraform_iac.md).
+- For general guidance on MCP tool design and reliability, see [mcp_tools_best_practices.md](mcp_tools_best_practices.md).

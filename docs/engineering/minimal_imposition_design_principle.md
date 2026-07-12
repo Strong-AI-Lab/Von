@@ -1,7 +1,12 @@
 # Minimal Imposition as a Design Principle for Von
 
-**Status**: Draft design guidance  
-**Date**: 2026-04-03
+- **Kind:** Design principle
+- **Lifecycle:** Active
+- **Authority:** Normative within the minimal-imposition, elicitation, and
+  write-policy scope selected by `AGENTS.md`, subject to the precedence stated
+  below
+- **Created:** 2026-04-03
+- **Freshness boundary:** Principle, not current implementation evidence
 
 ## 1. Purpose
 

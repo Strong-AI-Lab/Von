@@ -1,10 +1,12 @@
-"""Documentation of current tool-call patterns and audit findings.
-
-This document captures the current state of tool invocation across Von,
-providing the baseline for Phase 0 (JVNAUTOSCI-799).
-"""
-
 # PHASE 0 AUDIT: Current Tool-Call Patterns
+
+> **Document status: Historical JVNAUTOSCI-799 implementation record from
+> November 2025.** “Current” below means current at that audit date. Line
+> numbers, invocation paths, gaps, and baseline findings are not guaranteed to
+> describe present Von. Revalidate the current code path, targeted tests, and
+> live authority surfaces before relying on them.
+
+This document captured the tool-invocation baseline for JVNAUTOSCI-799 Phase 0.
 
 ## 1. Current Invocation Paths
 
@@ -281,11 +283,10 @@ three categories of current problems:
 
 The implementation prioritises OpenAI first (highest reliability requirement), then
 adds Gemini and Ollama support for breadth of coverage.
-"""
 
 # Summary Table: Current Patterns vs Proposed
 
-"""
+```text
 Current State (JSON-in-Text):
 ┌─────────────────────┬─────────────────────────────┐
 │ Aspect              │ Current Implementation      │
@@ -313,4 +314,4 @@ Proposed State (JVNAUTOSCI-799):
 │ Async Support       │ async/sync both available   │
 │ Retry Logic         │ At adapter layer            │
 └─────────────────────┴─────────────────────────────┘
-"""
+```

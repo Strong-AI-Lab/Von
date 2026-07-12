@@ -1,5 +1,10 @@
 # Lessons Learned - JVNAUTOSCI-799
 
+> **Document status: Historical JVNAUTOSCI-799 implementation record from
+> December 2025.** The design lessons may remain useful, but coverage,
+> implementation-time, compatibility, and code-path claims are bounded to that
+> milestone and require current verification.
+
 **Project:** Structured Tool Calling for Internal MCP
 **Date:** December 2025
 **Implementation Time:** ~4 hours across all phases

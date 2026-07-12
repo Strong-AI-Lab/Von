@@ -1,6 +1,12 @@
 # LLM Workflows: Design Document
 
-**Status**: Draft
+> **Document status: Historical design precursor; non-normative.** Current-state
+> and gap descriptions reflect December 2025 and have been overtaken by later
+> implementation. Preserve this as design rationale, but use the current VWL
+> manual and live code/Vontology state for workflow planning.
+
+**Lifecycle**: Superseded design precursor
+**Authority**: Historical only
 **Version**: 1.0
 **Date**: 2025-12-21
 **JIRA**: [JVNAUTOSCI-803](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-803)

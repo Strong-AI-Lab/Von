@@ -1,5 +1,10 @@
 # JVNAUTOSCI-2011 Role-Learning Design Review - 24 April 2026
 
+> **Document status: Long-horizon design with a dated implementation snapshot.**
+> The role-learning framing may remain useful. Claims about the current
+> substrate, gaps, source anchors, or task ordering describe the 24 April 2026
+> evidence base and require live revalidation.
+
 ## Purpose
 
 This note records the design review that led to `JVNAUTOSCI-2011`, the epic

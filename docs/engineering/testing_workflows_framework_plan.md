@@ -163,10 +163,10 @@ This matters because Testing Workflows can now rely on an authoritative workflow
 
 Relevant existing bases:
 
-1. [von_workflow_language_manual.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/von_workflow_language_manual.md)
-2. [durable_workflow_system_design.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/durable_workflow_system_design.md)
-3. [models.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/models.py)
-4. [plan_state_runtime.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/plan_state_runtime.py)
+1. [von_workflow_language_manual.md](von_workflow_language_manual.md)
+2. [durable_workflow_system_design.md](durable_workflow_system_design.md)
+3. [models.py](../../src/backend/workflows/durable/models.py)
+4. [plan_state_runtime.py](../../src/backend/workflows/plan_state_runtime.py)
 
 What these already give us:
 
@@ -180,8 +180,8 @@ What these already give us:
 
 Relevant existing bases:
 
-1. [turn_execution_completion_schema_proposal.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/turn_execution_completion_schema_proposal.md)
-2. [turn_execution_record_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py)
+1. [turn_execution_completion_schema_proposal.md](turn_execution_completion_schema_proposal.md)
+2. [turn_execution_record_service.py](../../src/backend/services/turn_execution_record_service.py)
 3. `turn_execution_*` internal MCP tools.
 
 This gives Testing Workflows a model for:
@@ -194,8 +194,8 @@ This gives Testing Workflows a model for:
 
 Relevant existing bases:
 
-1. [kb_clone_benchmark_harness.md](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/docs/engineering/kb_clone_benchmark_harness.md)
-2. [kb_clone_benchmark_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/kb_clone_benchmark_service.py)
+1. [kb_clone_benchmark_harness.md](kb_clone_benchmark_harness.md)
+2. [kb_clone_benchmark_service.py](../../src/backend/services/kb_clone_benchmark_service.py)
 
 This is already a good Tier 2 runner. It should be treated as the heavyweight backend of the testing framework, not a separate evaluation universe.
 
@@ -203,10 +203,10 @@ This is already a good Tier 2 runner. It should be treated as the heavyweight ba
 
 Relevant existing bases:
 
-1. [workflow_gap_recovery_workflow.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/workflow_gap_recovery_workflow.py)
-2. [workflow_selection_experience.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_selection_experience.py)
-3. [workflow_selection_policy_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_selection_policy_service.py)
-4. [workflow_episode_service.py](/c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von/src/backend/services/workflow_episode_service.py)
+1. [workflow_gap_recovery_workflow.py](../../src/backend/workflows/durable/workflow_gap_recovery_workflow.py)
+2. [workflow_selection_experience.py](../../src/backend/services/workflow_selection_experience.py)
+3. [workflow_selection_policy_service.py](../../src/backend/services/workflow_selection_policy_service.py)
+4. [workflow_episode_service.py](../../src/backend/services/workflow_episode_service.py)
 
 These already suggest the right shape:
 

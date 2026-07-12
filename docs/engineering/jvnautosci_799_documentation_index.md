@@ -1,5 +1,11 @@
 # JVNAUTOSCI-799 Documentation Index
 
+> **Document status: Historical, task-local documentation index for the 2025
+> JVNAUTOSCI-799 milestone.** This is not the Von-wide document index. “Current
+> status”, “complete”, and readiness wording below is bounded to evidence at
+> that milestone. Use [`../design_index.md`](../design_index.md) for current
+> documentation authority and navigation.
+
 **Structured Tool Calling for Internal MCP - Complete Documentation**
 
 This index organizes all documentation for JVNAUTOSCI-799 (Phases 0-2 Complete).

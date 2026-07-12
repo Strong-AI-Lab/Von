@@ -2,7 +2,8 @@
 
 This file is the concise operating constitution for AI agents working on Von.
 
-All AI agents must read this file and `docs/engineering/security_considerations.md` before starting any work.
+All AI agents must read this file, `docs/engineering/security_considerations.md`,
+and `docs/design_index.md` before starting any work.
 
 ## 1. Purpose
 
@@ -16,6 +17,12 @@ This file is intentionally shorter and sharper than a catch-all agent handbook. 
 
 - `AGENTS.md`
 - `docs/engineering/security_considerations.md`
+- `docs/design_index.md` (document map, authority, and freshness status)
+
+The design index distinguishes current guidance, target design, dated evidence,
+proposals, and historical material. Consult it before treating any other
+engineering note as current authority. The direct mandatory-document links in
+this file remain authoritative if the index ever drifts.
 
 ### 2.2 Read before finalising the plan for any substantial implementation task
 
@@ -63,7 +70,7 @@ debugging work, see:
 - `docs/engineering/operational_engineering_guide.md`
 - `docs/engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md`
 
-Use that document for environment handling, shell and host behaviour,
+Use those documents for environment handling, shell and host behaviour,
 credential-path issues, access/tooling defaults, pytest execution practice, and
 similar operational lessons that do not belong in this constitutional guide.
 For frontend/browser user-view validation practice, also see

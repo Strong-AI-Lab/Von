@@ -1,9 +1,19 @@
 # Von Workflow Execution Architecture: Intended Design vs Current Reality
 
-**Status**: Analytical paper — not a specification  
-**Date**: 2026-04-07  
-**Author**: Analysis prepared for Michael Witbrock  
-**Trigger**: Observed failure-to-communicate in a live arXiv paper ingestion turn (session `d57ab88b`, request `51a65483`), where the system silently created a file copy and a paper concept without telling the user
+> **Document status: Dated diagnostic snapshot; not a current implementation
+> guide.** Present-tense claims, source line numbers, workflow inventories, and
+> Jira conclusions describe evidence available on 7 April 2026. Architectural
+> questions may remain useful, but revalidate every factual claim against
+> current code, live Vontology, telemetry, and Jira before implementation.
+
+- **Kind:** Diagnostic analysis
+- **Lifecycle:** Frozen
+- **Authority:** Evidence only; not a specification
+- **State as of:** 2026-04-07
+- **Author:** Analysis prepared for Michael Witbrock
+- **Trigger:** Observed failure-to-communicate in a live arXiv paper ingestion
+  turn (session `d57ab88b`, request `51a65483`), where the system silently
+  created a file copy and a paper concept without telling the user
 
 ---
 

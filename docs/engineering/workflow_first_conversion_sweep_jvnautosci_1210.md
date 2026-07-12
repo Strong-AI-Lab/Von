@@ -81,4 +81,9 @@ These are workflow-first migration candidates for follow-on work:
 
 `JVNAUTOSCI-1217` adds strict publication/runnability gates and deterministic definition identity/hash telemetry for workflow monitor/introspection surfaces.
 
-See `docs/engineering/workflow_authoritative_publication_process.md` for the authoritative publication procedure and validation expectations.
+The dated
+[`workflow_authoritative_publication_process.md`](workflow_authoritative_publication_process.md)
+records the February 2026 implementation provenance. For current authoring and
+validation procedure, use the
+[`von_workflow_language_manual.md`](von_workflow_language_manual.md), live
+Vontology tooling, and authority read-back.

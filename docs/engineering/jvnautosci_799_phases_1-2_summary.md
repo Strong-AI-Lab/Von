@@ -1,5 +1,10 @@
 # JVNAUTOSCI-799 Phases 1-2: Implementation Summary
 
+> **Document status: Historical JVNAUTOSCI-799 implementation record
+> (November–December 2025).** Completion, coverage, code-size, and replacement
+> claims below are bounded to that milestone and are not current system-level
+> evidence. Revalidate the current implementation and targeted tests.
+
 **Status**: ✅ Phases 0-2 Complete
 **Date Completed**: 2025-11-15
 **Lines of Code**: ~2000 (core + tests + documentation)

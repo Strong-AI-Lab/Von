@@ -1,4 +1,9 @@
-"""Structured Tool Calling Module - Documentation & Usage Guide
+# Structured Tool Calling Module — Historical Usage Guide
+
+> **Document status: Legacy component reference; last evidenced during
+> JVNAUTOSCI-799 in 2025.** The component still exists, but API names, provider
+> examples, fallbacks, and integration behaviour below are not guaranteed
+> current. Inspect the current package and targeted tests before copying code.
 
 ## Overview
 
@@ -465,4 +470,3 @@ docs/engineering/
 - Michael Witbrock (Von Lab, University of Auckland)
 
 See JIRA task JVNAUTOSCI-799 for detailed design and acceptance criteria.
-"""

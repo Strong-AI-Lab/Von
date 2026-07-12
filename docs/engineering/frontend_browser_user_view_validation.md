@@ -1,7 +1,13 @@
 # Frontend Browser User-View Validation Guide
 
-**Status**: Living practical guidance  
-**Date**: 2026-04-06
+- **Kind:** Browser-acceptance protocol and practical guidance
+- **Lifecycle:** Active
+- **Authority:** Required by `AGENTS.md` for frontend, browser acceptance, and
+  authenticated user-view testing
+- **Created:** 2026-04-06
+- **Last substantive content update before this metadata review:** 2026-06-08
+- **Evidence boundary:** Each acceptance claim still requires its own dated
+  user-view evidence
 
 ## 1. Purpose
 

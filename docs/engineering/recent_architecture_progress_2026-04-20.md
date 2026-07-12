@@ -174,7 +174,7 @@ The remaining work is now more concentrated. The biggest live problems are no lo
 
 ### 1. Buttonify’s residual heuristic helper slab has now been removed
 
-**Location:** [buttonify_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/buttonify_service.py:152)
+**Location:** [buttonify_service.py](../../src/backend/services/buttonify_service.py)
 
 The live route/workflow path was already structured-output-first through `#V#chat_buttonify_workflow` and `buttonify_options_json`, but `buttonify_service.py` still carried residual heuristic/prose-recovery helpers and stale tests/docs that obscured the intended authority boundary.
 
@@ -182,7 +182,7 @@ That residual slab is now gone. Buttonify options are validated from structured 
 
 ### 2. The orchestrator remains the biggest structural risk
 
-**Location:** [orchestrator.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/orchestrator.py:28634)
+**Location:** [orchestrator.py](../../src/backend/integrations/internal_mcp/orchestrator.py)
 
 Even after the recent cleanups, `InternalMCPChatOrchestrator` is still an oversized integration monolith. The most egregious surviving semantic slab from the previous draft, the structured tool-family prompt-keyword heuristic block, is gone, and `1954`/`1955` repaired two important grounded-answer failure families. But the class still combines too many concerns:
 
@@ -196,19 +196,19 @@ This is the main structural reason new hacks tend to accumulate here first.
 
 ### 3. Backend route layers improved materially, but the monolith is still too large
 
-**Location:** [von_routes.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/routes/von_routes.py)
+**Location:** [von_routes.py](../../src/backend/server/routes/von_routes.py)
 
 `JVNAUTOSCI-1121` is now done, and it made a real structural dent: the `/von/generate` durable-turn lifecycle, chat-history persistence, and success/error payload shaping helpers were extracted into `generate_route_support.py`, taking several hundred lines out of `von_routes.py` and giving later route work clearer seams. But the backend route layer is still large and mixed in responsibility, so this remains an ongoing structural concern rather than a solved problem.
 
 ### 4. Flask app-factory sprawl is no longer the main route-layer blocker
 
-**Location:** [utils_flask.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/utils_flask.py)
+**Location:** [utils_flask.py](../../src/backend/server/utils_flask.py)
 
 `JVNAUTOSCI-1825` is now done. The old `create_flask_app(...)` slab has been cut down materially by extracting request timing/configuration, startup bootstrap, chat-history admin context resolution, diagnostics helpers, and prewarm wiring into explicit support surfaces. The file is still large, but the structural risk has shifted away from one huge all-purpose app-factory function and toward the remaining large route modules themselves.
 
 ### 5. Catalogue size is still large, but the risk has shifted
 
-**Location:** [catalogue.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/catalogue.py:29952)
+**Location:** [catalogue.py](../../src/backend/integrations/internal_mcp/catalogue.py)
 
 `JVNAUTOSCI-1827` already removed the worst inline assembly slab by turning `build_default_catalogue()` into a composition layer over builder helpers. The file is still very large, but the remaining risk is now more about size, merge pressure, and further per-family decomposition than about one egregious remaining semantic-hack block.
 

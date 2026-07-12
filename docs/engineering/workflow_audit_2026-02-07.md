@@ -1,5 +1,10 @@
 # Workflow System Audit — 2026-02-07
 
+> **Document status: Frozen audit snapshot from 7 February 2026.** The fixes,
+> gaps, Jira states, and implementation anchors below describe that session,
+> not current workflow behaviour. Use the VWL manual and live
+> Vontology/code/telemetry evidence for new work.
+
 ## Summary
 
 This audit reviews the recent workflow system changes in the context of Jira tasks

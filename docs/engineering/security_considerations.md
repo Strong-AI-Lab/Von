@@ -1,5 +1,13 @@
 # Security Considerations for Von
 
+- **Kind:** Security guidance with dated deployment-posture observations
+- **Lifecycle:** Active
+- **Authority:** Always mandatory under [`AGENTS.md`](../../AGENTS.md)
+- **Evidence boundary:** Statements about current users, deployments, and
+  implemented controls are dated observations and must be revalidated; the
+  security requirements do not expire merely because implementation evidence
+  changes
+
 ## Critical Security Context
 
 **Von is currently a research prototype. As far as we know on 2026-04-24, the
@@ -54,11 +62,13 @@ Use different controls for different data and capability classes.
 
 ## Known Security Limitations
 
-### 1. Authentication Required (SECURE - Implemented December 2024)
+### 1. Narrow authentication safeguard implemented in December 2024
 
 **Location**: `src/backend/server/routes/von_routes.py` - `/generate` endpoint
 
-**Status**: ✅ **SECURE** - Client-provided user IDs are now **rejected**
+**Bounded result**: Client-provided user IDs are rejected on the named path.
+This is not a claim that Von's authentication or deployment posture is secure
+as a whole.
 
 **Implementation**: The system requires proper authentication for private
 user/org-scoped operations via:

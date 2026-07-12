@@ -1,7 +1,11 @@
 # Operational Engineering Guide for Coding Agents
 
-**Status**: Living practical guidance  
-**Date**: 2026-04-04
+- **Kind:** Operational runbook and practical guidance
+- **Lifecycle:** Active
+- **Authority:** Canonical operational companion selected by `AGENTS.md`
+- **Created:** 2026-04-04
+- **Last substantive content update before this metadata review:** 2026-07-11
+- **Freshness boundary:** Revalidate environment-, host-, and tool-specific facts
 
 ## 1. Purpose
 

@@ -1,11 +1,21 @@
-# Von Agentic AI Architecture Constitution
+# Superseded proposal: Von Agentic AI Architecture Constitution
 
-**Status**: Normative design guidance  
-**Date**: 2026-04-04
+> **Document status: Superseded proposal; non-authoritative.** This file was
+> never the guide selected by `AGENTS.md`. Do not treat its “normative”, “main
+> architecture guide”, or “mandatory” wording as current authority. Use
+> [`intro_to_modern_agentic_ai_for_coding_agents.md`](intro_to_modern_agentic_ai_for_coding_agents.md)
+> together with [`AGENTS.md`](../../AGENTS.md). This copy is retained only for
+> design provenance.
+
+- **Kind:** Unselected architecture proposal
+- **Lifecycle:** Superseded
+- **Authority:** Historical only
+- **Original date:** 2026-04-04
 
 ## 1. Purpose
 
-This document is the main architecture guide for coding agents working on Von.
+This document was proposed as the main architecture guide for coding agents
+working on Von. It was not selected as the canonical guide.
 
 It exists to prevent a recurring failure mode: treating modern agentic behaviour as if it were mainly ordinary application logic that should be hand-coded in Python, with prompts, workflows, knowledge representations, model portfolios, and learning loops treated as secondary decoration.
 
@@ -24,7 +34,9 @@ To drive progress towards the vision of Von as an advanced neuro-symbolic assist
 
 ## 2. When to read it
 
-Per `AGENTS.md`, this document is mandatory before finalising the plan for any substantial implementation task.
+This document is not required by `AGENTS.md`. Read it only when investigating
+design provenance or material that may merit deliberate promotion into a
+current guide.
 
 It is especially important when the task touches:
 
