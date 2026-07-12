@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from scripts import run_operational_certification as certification_script
+from scripts import run_authenticated_browser_workflow_replay as replay_script
 from src.backend.services.operational_certification_contract_service import (
     parse_operational_certification_contract,
 )
@@ -1243,6 +1244,27 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
     )
     assert misaligned["verified"] is False
     assert misaligned["checks"]["clean_server_build"] is False
+
+
+@pytest.mark.parametrize(("stdout", "expected"), [("", False), ("?? x.py\n", True)])
+def test_replay_environment_git_status_distinguishes_clean_from_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    expected: bool,
+) -> None:
+    class Completed:
+        returncode = 0
+
+        def __init__(self, output: str) -> None:
+            self.stdout = output
+
+    monkeypatch.setattr(
+        replay_script.subprocess,
+        "run",
+        lambda *_args, **_kwargs: Completed(stdout),
+    )
+
+    assert replay_script._git_status_dirty() is expected
 
 
 def test_live_execution_fails_before_auth_when_runtime_alignment_is_unverified(

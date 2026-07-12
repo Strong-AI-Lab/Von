@@ -197,6 +197,25 @@ def _git_capture(*args: str) -> str | None:
     return completed.stdout.strip() or None
 
 
+def _git_status_dirty() -> bool | None:
+    """Return an explicit clean/dirty result while preserving command failure."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=_PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
 def _request_json(
     session: requests.Session,
     method: str,
@@ -262,7 +281,6 @@ def collect_run_environment(
     session: requests.Session,
     base_url: str,
 ) -> dict[str, Any]:
-    local_repo_status = _git_capture("status", "--porcelain")
     environment: dict[str, Any] = {
         "run_started_at_utc": datetime.now(timezone.utc).isoformat(),
         "base_url": base_url,
@@ -271,11 +289,7 @@ def collect_run_environment(
         "local_platform": platform.platform(),
         "local_repo_git_branch": _git_capture("rev-parse", "--abbrev-ref", "HEAD"),
         "local_repo_git_head": _git_capture("rev-parse", "HEAD"),
-        "local_repo_git_dirty": (
-            bool(local_repo_status.strip())
-            if isinstance(local_repo_status, str)
-            else None
-        ),
+        "local_repo_git_dirty": _git_status_dirty(),
     }
     for source, path in (("health", "/health"), ("diag", "/diag")):
         try:
