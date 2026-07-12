@@ -312,6 +312,7 @@ def test_missing_reset_and_evaluator_fail_visibly_instead_of_skipping() -> None:
 
 def test_failed_dependency_is_not_executed_as_a_lucky_independent_case() -> None:
     executed: list[tuple[str, int]] = []
+    recorded: list[dict] = []
 
     def evaluate(scenario, spec, trial_index, observation):
         result = _evaluate(scenario, spec, trial_index, observation)
@@ -328,6 +329,9 @@ def test_failed_dependency_is_not_executed_as_a_lucky_independent_case() -> None
         reset_scenario=_reset,
         execute_scenario=execute,
         execute_represented_evaluator=evaluate,
+        record_experiment_observation=lambda payload: (
+            recorded.append(dict(payload)) or {"success": True}
+        ),
     )
 
     assert all(scenario_id == "first" for scenario_id, _trial in executed)
@@ -338,6 +342,20 @@ def test_failed_dependency_is_not_executed_as_a_lucky_independent_case() -> None
         "scenario_dependency_not_passed"
         in {blocker["code"] for blocker in item["blockers"]}
         for item in second_results
+    )
+    assert execution["campaign_result"]["experiment_persistence_complete"] is True
+    assert len(recorded) == 11
+    dependent_observations = [
+        item
+        for item in recorded
+        if item.get("observed_outcome", {}).get("scenario_id") == "second"
+    ]
+    assert len(dependent_observations) == 5
+    assert all(
+        item["metrics"]["represented_evaluator_missing"] is True
+        and item["metrics"]["valid_evaluator_result_count"] == 0
+        and item["verdict"] == "fail"
+        for item in dependent_observations
     )
 
 
@@ -353,6 +371,56 @@ def test_experiment_payload_refuses_non_represented_success_signal() -> None:
             },
             observation={"success": True},
         )
+
+
+def test_experiment_payload_refuses_evaluator_less_failure_without_typed_blocker() -> (
+    None
+):
+    with pytest.raises(ValueError, match="represented_certification_evaluator"):
+        build_strict_experiment_observation(
+            trial_result={
+                "schema_version": "operational_certification_trial_result.v1",
+                "scenario_id": "dependent",
+                "trial_index": 2,
+                "passed": False,
+                "represented_evaluator_results": [],
+                "blockers": [],
+            },
+            observation={},
+        )
+
+
+def test_experiment_payload_persists_typed_dependency_non_success_without_coverage() -> (
+    None
+):
+    payload = build_strict_experiment_observation(
+        trial_result={
+            "schema_version": "operational_certification_trial_result.v1",
+            "scenario_id": "dependent",
+            "trial_index": 2,
+            "passed": False,
+            "result_sha256": "a" * 64,
+            "required_evaluator_count": 1,
+            "valid_evaluator_result_count": 0,
+            "represented_evaluator_results": [],
+            "blockers": [
+                {
+                    "code": "scenario_dependency_not_passed",
+                    "blocking": True,
+                    "recoverable": True,
+                }
+            ],
+        },
+        observation={"turn_execution_request_ids": []},
+    )
+
+    assert payload["verdict"] == "fail"
+    assert payload["metrics"]["represented_evaluator_missing"] is True
+    assert payload["metrics"]["valid_evaluator_result_count"] == 0
+    assert payload["evidence"]["represented_evaluator_results"] == []
+    assert payload["evidence"]["typed_execution_blockers"][0]["code"] == (
+        "scenario_dependency_not_passed"
+    )
 
 
 def test_one_regressive_trial_breaks_pass_five_but_not_pass_three() -> None:

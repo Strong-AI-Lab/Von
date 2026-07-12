@@ -126,19 +126,26 @@ def build_strict_experiment_observation(
         "operational_certification_trial_result.v1"
     ):
         raise ValueError("operational_certification_trial_result_required")
-    represented_results = trial_result.get("represented_evaluator_results")
-    if (
-        not isinstance(represented_results, Sequence)
-        or isinstance(
-            represented_results,
-            (str, bytes, bytearray),
-        )
-        or not represented_results
-    ):
-        raise ValueError("represented_certification_evaluator_result_required")
     passed = trial_result.get("passed")
     if not isinstance(passed, bool):
         raise ValueError("operational_certification_explicit_pass_required")
+    represented_results = trial_result.get("represented_evaluator_results")
+    if not isinstance(represented_results, Sequence) or isinstance(
+        represented_results,
+        (str, bytes, bytearray),
+    ):
+        raise ValueError("represented_certification_evaluator_results_invalid")
+    blocking_blockers = [
+        item
+        for item in (trial_result.get("blockers") or [])
+        if isinstance(item, Mapping)
+        and item.get("blocking") is True
+        and isinstance(item.get("code"), str)
+        and str(item.get("code")).strip()
+    ]
+    represented_evaluator_missing = not represented_results
+    if represented_evaluator_missing and (passed or not blocking_blockers):
+        raise ValueError("represented_certification_evaluator_result_required")
 
     projected_result = json_serialisable_projection(trial_result)
     projected_observation = json_serialisable_projection(observation)
@@ -161,19 +168,15 @@ def build_strict_experiment_observation(
             "represented_evaluator_results": projected_result.get(
                 "represented_evaluator_results"
             ),
+            "typed_execution_blockers": json_serialisable_projection(blocking_blockers),
         },
         "metrics": {
             "required_evaluator_count": trial_result.get("required_evaluator_count"),
             "valid_evaluator_result_count": trial_result.get(
                 "valid_evaluator_result_count"
             ),
-            "blocking_blocker_count": len(
-                [
-                    item
-                    for item in (trial_result.get("blockers") or [])
-                    if isinstance(item, Mapping) and item.get("blocking") is True
-                ]
-            ),
+            "blocking_blocker_count": len(blocking_blockers),
+            "represented_evaluator_missing": represented_evaluator_missing,
         },
         "turn_execution_request_ids": [
             str(item).strip()
