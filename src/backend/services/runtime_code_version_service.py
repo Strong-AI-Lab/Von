@@ -50,6 +50,23 @@ def _run_git_command(*args: str) -> str | None:
     return cleaned or None
 
 
+def _run_git_status() -> str | None:
+    """Return porcelain status while preserving the clean empty-string result."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return None
+    return completed.stdout.strip()
+
+
 def _version_base_from_commit_timestamp(timestamp: object) -> str | None:
     cleaned = _clean_text(timestamp)
     if cleaned is None:
@@ -97,7 +114,7 @@ def get_runtime_code_version_info() -> dict[str, Any]:
     # Untracked Python/configuration files can change the running behaviour just
     # as surely as modified tracked files.  Runtime identity must therefore not
     # report a clean build while such files are present.
-    git_status = _run_git_command("status", "--porcelain", "--untracked-files=normal")
+    git_status = _run_git_status()
     git_commit_timestamp = _run_git_command("show", "-s", "--format=%cI", "HEAD")
     git_dirty = bool(git_status.strip()) if isinstance(git_status, str) else None
 

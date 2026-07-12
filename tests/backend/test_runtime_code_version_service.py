@@ -40,6 +40,7 @@ def test_git_version_leads_with_commit_timestamp(monkeypatch: pytest.MonkeyPatch
         "_run_git_command",
         lambda *args: responses.get(tuple(args)),
     )
+    monkeypatch.setattr(version_service, "_run_git_status", lambda: "")
 
     info = version_service.get_runtime_code_version_info()
 
@@ -63,6 +64,11 @@ def test_git_version_marks_dirty_tree(monkeypatch: pytest.MonkeyPatch):
         version_service,
         "_run_git_command",
         lambda *args: responses.get(tuple(args)),
+    )
+    monkeypatch.setattr(
+        version_service,
+        "_run_git_status",
+        lambda: " M src/file.py",
     )
 
     info = version_service.get_runtime_code_version_info()
