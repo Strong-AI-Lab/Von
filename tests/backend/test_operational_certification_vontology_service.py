@@ -193,3 +193,43 @@ def test_missing_safe_envelope_remains_absent_for_exists_gate(
 
     assert evidence is not None
     assert "safe_operating_envelope" not in evidence
+
+
+def test_forced_prompt_seed_revalidates_post_write_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports = [
+        {
+            "errors_by_target": {
+                service.OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID: [
+                    "prompt_content_missing"
+                ]
+            }
+        },
+        {"errors_by_target": {}, "validated_prompt_ids": ["prompt"]},
+    ]
+    calls: list[object] = []
+
+    def _ensure(**_kwargs):
+        calls.append(object())
+        return reports.pop(0)
+
+    monkeypatch.setattr(service, "ensure_prompt_concept_support", _ensure)
+    monkeypatch.setattr(
+        service,
+        "prompt_concept_has_content",
+        lambda _concept_id: True,
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: {"success": True},
+    )
+
+    result = service._ensure_evaluator_prompt(force_prompt_seed=True)
+
+    assert len(calls) == 2
+    assert result["seeded"] is True
+    assert result["content_ready"] is True
+    assert result["errors_by_target"] == {}
+    assert result["success"] is True

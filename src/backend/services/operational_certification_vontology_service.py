@@ -268,6 +268,35 @@ def _ensure_evaluator_prompt(*, force_prompt_seed: bool = False) -> dict[str, An
             garbage_collect=True,
         )
         seeded = True
+        # The first support pass may correctly report missing content before a
+        # new prompt is seeded.  Read the live authority again so bootstrap
+        # success reflects the post-write state rather than that transient
+        # precondition.
+        report = ensure_prompt_concept_support(
+            prompt_specs=(
+                WorkflowPromptConceptSpec(
+                    concept_id=OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID,
+                    name="Operational certification state evaluator prompt",
+                    description=(
+                        "Represented strict evaluator policy for operational trial "
+                        "world-state, path, receipt, safety and recovery evidence."
+                    ),
+                    parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+                ),
+            ),
+            workflow_links=(
+                WorkflowPromptLinkSpec(
+                    workflow_id=OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
+                    prompt_concept_id=OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID,
+                    predicate=(
+                        OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_LINK_PREDICATE
+                    ),
+                    context={"jira": _SOURCE_TAG},
+                    reason="operational_certification_evaluator_prompt_bootstrap",
+                ),
+            ),
+            provenance_source=_MANAGED_BY,
+        )
     projection = dict(report)
     projection["seeded"] = seeded
     projection["content_ready"] = prompt_concept_has_content(
