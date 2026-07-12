@@ -1864,14 +1864,27 @@ def evaluate_scenario_trial(
         budget_result = evaluate_budget(budget, observation_projection)
         budget_results.append(budget_result)
         if not budget_result["within_budget"]:
+            reason_code = _safe_text(budget_result.get("reason_code"))
+            blocker_code = (
+                f"scenario_{reason_code}" if reason_code else "scenario_budget_exceeded"
+            )
+            blocker_message = (
+                "A represented scenario budget could not be evaluated from the "
+                "required measurement."
+                if reason_code
+                else "A represented scenario budget was exceeded."
+            )
             blockers.append(
                 _blocker(
-                    "scenario_budget_exceeded",
+                    blocker_code,
                     f"scenario[{scenario.scenario_id}].trial[{trial_index}]",
-                    "A represented scenario budget was not satisfied.",
+                    blocker_message,
                     recoverable=True,
                     blocking=bool(budget_result["blocking"]),
-                    details={"budget_id": budget_result["budget_id"]},
+                    details={
+                        "budget_id": budget_result["budget_id"],
+                        "reason_code": reason_code or None,
+                    },
                 )
             )
 
@@ -2097,6 +2110,10 @@ def aggregate_five_trial_campaign(
     blocking_minefield_trigger_count = 0
     budget_violation_count = 0
     blocking_budget_violation_count = 0
+    budget_threshold_exceedance_count = 0
+    blocking_budget_threshold_exceedance_count = 0
+    budget_measurement_failure_count = 0
+    blocking_budget_measurement_failure_count = 0
     duration_ms_values: list[float] = []
     model_cost_values: list[float] = []
     tool_cost_values: list[float] = []
@@ -2212,6 +2229,14 @@ def aggregate_five_trial_campaign(
                     budget_violation_count += 1
                     if budget.get("blocking") is True:
                         blocking_budget_violation_count += 1
+                    if _safe_text(budget.get("reason_code")):
+                        budget_measurement_failure_count += 1
+                        if budget.get("blocking") is True:
+                            blocking_budget_measurement_failure_count += 1
+                    else:
+                        budget_threshold_exceedance_count += 1
+                        if budget.get("blocking") is True:
+                            blocking_budget_threshold_exceedance_count += 1
             for raw_blocker in _mapping_sequence(trial.get("blockers", [])):
                 if raw_blocker.get("blocking") is True:
                     trial_blocker_count += 1
@@ -2306,6 +2331,14 @@ def aggregate_five_trial_campaign(
         "blocking_minefield_trigger_count": blocking_minefield_trigger_count,
         "budget_violation_count": budget_violation_count,
         "blocking_budget_violation_count": blocking_budget_violation_count,
+        "budget_threshold_exceedance_count": budget_threshold_exceedance_count,
+        "blocking_budget_threshold_exceedance_count": (
+            blocking_budget_threshold_exceedance_count
+        ),
+        "budget_measurement_failure_count": budget_measurement_failure_count,
+        "blocking_budget_measurement_failure_count": (
+            blocking_budget_measurement_failure_count
+        ),
         "represented_campaign_evidence": campaign_evidence_projection,
         "represented_campaign_evidence_sha256": stable_payload_digest(
             campaign_evidence_projection

@@ -193,6 +193,9 @@ def _observation(
     }
 
 
+_MISSING_BUDGET_MEASUREMENT = object()
+
+
 def _trial_results(
     suite: dict,
     outcomes_by_scenario: dict[str, list[bool]],
@@ -476,10 +479,14 @@ def test_budget_evaluation_uses_represented_numeric_limit() -> None:
     within = evaluate_budget(budget, {"metrics": {"tool_calls": 4}})
     exceeded = evaluate_budget(budget, {"metrics": {"tool_calls": 5}})
     missing = evaluate_budget(budget, {"metrics": {}})
+    non_numeric = evaluate_budget(budget, {"metrics": {"tool_calls": "many"}})
+    non_finite = evaluate_budget(budget, {"metrics": {"tool_calls": float("inf")}})
 
     assert within["within_budget"] is True
     assert exceeded["within_budget"] is False
     assert missing["reason_code"] == "budget_measurement_missing"
+    assert non_numeric["reason_code"] == "budget_measurement_not_numeric"
+    assert non_finite["reason_code"] == "budget_measurement_not_finite"
 
 
 def test_trial_requires_a_represented_evaluator_result() -> None:
@@ -580,6 +587,75 @@ def test_trial_blocks_on_represented_minefield_and_budget() -> None:
         "minefield_triggered",
         "scenario_budget_exceeded",
     }
+
+
+@pytest.mark.parametrize(
+    ("measurement", "reason_code"),
+    [
+        (_MISSING_BUDGET_MEASUREMENT, "budget_measurement_missing"),
+        ("slow", "budget_measurement_not_numeric"),
+    ],
+)
+def test_invalid_budget_measurement_is_not_reported_as_an_exceeded_value(
+    measurement: object,
+    reason_code: str,
+) -> None:
+    contract = parse_operational_certification_contract(_suite())
+    observation = _observation("scenario_a", 1)
+    if measurement is _MISSING_BUDGET_MEASUREMENT:
+        observation.pop("latency_ms")
+    else:
+        observation["latency_ms"] = measurement
+
+    result = evaluate_scenario_trial(
+        contract,
+        scenario_id="scenario_a",
+        observation=observation,
+    )
+
+    budget_result = result["budget_results"][0]
+    budget_blocker = next(
+        item
+        for item in result["blockers"]
+        if item["code"].startswith("scenario_budget")
+    )
+    assert result["passed"] is False
+    assert budget_result["reason_code"] == reason_code
+    assert budget_blocker["code"] == f"scenario_{reason_code}"
+    assert budget_blocker["details"] == {
+        "budget_id": "latency_budget",
+        "reason_code": reason_code,
+    }
+
+
+def test_campaign_separates_budget_measurement_failures_from_exceedances() -> None:
+    contract = parse_operational_certification_contract(_suite())
+    missing = _observation("scenario_a", 1)
+    missing.pop("latency_ms")
+    observations = [
+        missing,
+        _observation("scenario_a", 2, latency_ms=101),
+        *[_observation("scenario_a", index) for index in range(3, 6)],
+    ]
+    trial_results = {
+        "scenario_a": [
+            evaluate_scenario_trial(
+                contract,
+                scenario_id="scenario_a",
+                observation=observation,
+            )
+            for observation in observations
+        ]
+    }
+
+    report = aggregate_five_trial_campaign(contract, trial_results)
+
+    assert report["budget_violation_count"] == 2
+    assert report["blocking_budget_violation_count"] == 2
+    assert report["budget_measurement_failure_count"] == 1
+    assert report["blocking_budget_measurement_failure_count"] == 1
+    assert report["budget_threshold_exceedance_count"] == 1
+    assert report["blocking_budget_threshold_exceedance_count"] == 1
 
 
 def test_blocking_minefield_requires_audit_evidence_before_it_can_be_cleared() -> None:
