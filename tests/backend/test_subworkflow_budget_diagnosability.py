@@ -151,6 +151,22 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
     from src.backend.services import turn_execution_record_service as service
 
     captured: dict = {}
+    represented_default = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "inconclusive",
+        "causal_stage": "unknown",
+        "cause_code": "represented_critic_receipt_missing",
+        "summary": "The represented critic did not produce a complete receipt.",
+        "evidence_refs": [{"source": "critic_workflow"}],
+        "committed_effects": [],
+        "remaining_obligations": [{"effect_id": "effect_terminal_receipt"}],
+        "retryability": "now",
+        "recovery_affordances": [{"action_type": "alternate_model"}],
+        "learning_candidate": None,
+        "provenance": {"decision_source": "represented_workflow_default"},
+        "redaction_status": "safe_projection",
+    }
 
     def _fake_upsert(*, record, user_id=None, session_id=None, namespace=None, org_id=None):
         captured["record"] = record
@@ -158,6 +174,17 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
 
     with patch.object(
         service, "upsert_turn_execution_record_projection", _fake_upsert
+    ), patch.object(
+        service,
+        "_load_represented_terminal_outcome_receipt_default",
+        return_value=(
+            represented_default,
+            {"valid": True},
+            {
+                "source": "vontology_workflow_validation_default",
+                "available": True,
+            },
+        ),
     ):
         outcome = service.persist_failed_turn_execution_record(
             request_id="req-2502-test",
@@ -183,6 +210,17 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
     assert failure["error"] == "generate_task_cancelled"
     assert failure["error_class"] == "CancellationRequested"
     assert failure["progress_snapshot"] == {"phase": "recovery_decision"}
+    assert record["terminal_outcome_receipt"]["outcome"] == "inconclusive"
+    assert record["terminal_outcome_receipt_authority"] == {
+        "source": "vontology_workflow_validation_default",
+        "available": True,
+    }
+    ledger_projection = record["execution"]["tool_observation_ledger"][
+        "terminal_outcome_receipt_projection"
+    ]
+    assert ledger_projection["receipt"]["cause_code"] == (
+        "represented_critic_receipt_missing"
+    )
 
 
 def test_persist_failed_turn_execution_record_requires_request_id():

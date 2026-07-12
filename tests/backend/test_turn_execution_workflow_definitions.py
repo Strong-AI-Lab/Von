@@ -1444,7 +1444,8 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         "value_from_context": "turn_next_action_response_text",
     } in answer_assignments
     assert any(
-        t.to_state == "completed" and t.reason == "recovery_answer_ready"
+        t.to_state == "reconcile_recovery_outcome"
+        and t.reason == "recovery_answer_ready_for_reconciliation"
         for t in recovery_answer.transitions
     )
 
@@ -1461,8 +1462,35 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         "value_from_context": "turn_next_action_response_text",
     } in follow_up_assignments
     assert any(
-        t.to_state == "failed" and t.reason == "recovery_follow_up_ready"
+        t.to_state == "reconcile_recovery_outcome"
+        and t.reason == "recovery_follow_up_ready_for_reconciliation"
         for t in recovery_follow_up.transitions
+    )
+
+    recovery_reconciliation = workflow.states["reconcile_recovery_outcome"]
+    assert (
+        recovery_reconciliation.actions[0].action_id == "workflow_invoke_subworkflow"
+    )
+    reconciliation_inputs = recovery_reconciliation.actions[0].inputs
+    assert reconciliation_inputs.get("response_text", {}).get("$context_key") == (
+        "response_text"
+    )
+    reconciliation_outputs = (
+        recovery_reconciliation.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "terminal_outcome_receipt"
+        and mapping.get("tool_output_field") == "result.terminal_outcome_receipt"
+        for mapping in reconciliation_outputs
+    )
+    assert any(
+        t.to_state == "completed" and t.reason == "recovery_answer_reconciled"
+        for t in recovery_reconciliation.transitions
+    )
+    assert any(
+        t.to_state == "failed" and t.reason == "recovery_follow_up_reconciled"
+        for t in recovery_reconciliation.transitions
     )
 
 
@@ -1659,9 +1687,9 @@ def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement(
     assert (receipt_default.get("provenance") or {}).get("decision_source") == (
         "represented_workflow_default"
     )
-    assert (validation_policy.get("json_field_defaults") or {}).get(
-        "terminal_outcome_receipt.cause_code"
-    ) == "represented_critic_cause_unspecified"
+    assert "terminal_outcome_receipt.cause_code" not in (
+        validation_policy.get("json_field_defaults") or {}
+    )
     prompt_contract = evaluate_action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("requested_prompt_concept_ids") == [
@@ -1762,6 +1790,11 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
         workflow_id=workflow.workflow_id,
         initial_state="recovery_decision",
         states={
+            "reconcile_recovery_outcome": WorkflowStateSpec(
+                state_id="reconcile_recovery_outcome",
+                transitions=workflow.states["reconcile_recovery_outcome"].transitions,
+                terminal=False,
+            ),
             "recovery_decision": WorkflowStateSpec(
                 state_id="recovery_decision",
                 actions=(
@@ -1826,6 +1859,149 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
     assert result.data["selected_workflow_user_response"] == "You are Michael Witbrock."
 
 
+def test_conversation_turn_recovery_reconciles_receipt_after_answer_changes() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="recovery_decision",
+        states={
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=False,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            **{
+                state_id: workflow.states[state_id]
+                for state_id in (
+                    "apply_recovery_answer",
+                    "apply_recovery_follow_up",
+                    "reconcile_recovery_outcome",
+                    "completed",
+                    "failed",
+                )
+            },
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+    reconciled_receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "verified_success",
+        "causal_stage": "not_applicable",
+        "cause_code": None,
+        "summary": "The recovered answer now satisfies the requested outcome.",
+        "evidence_refs": [{"kind": "response_text", "value": "Recovered."}],
+        "committed_effects": [],
+        "remaining_obligations": [],
+        "retryability": "not_applicable",
+        "recovery_affordances": [],
+        "learning_candidate": None,
+        "provenance": {"decision_source": "represented_llm"},
+        "redaction_status": "contains_no_sensitive_values",
+    }
+    observed_reconciliation_responses: list[str] = []
+
+    def _reconcile_receipt(request: WorkflowActionRequest) -> WorkflowActionResult:
+        observed_reconciliation_responses.append(str(request.data.get("response_text")))
+        return WorkflowActionResult(
+            outputs={
+                "turn_execution_record": {
+                    "terminal_outcome_receipt": dict(reconciled_receipt)
+                },
+                "required_effects": [],
+                "postcondition_checks": [],
+                "critic_summary": {"decision": "completed"},
+                "critic_verdict": {"verdict": "pass"},
+                "terminal_outcome_receipt": dict(reconciled_receipt),
+                "terminal_outcome_receipt_validation": {"valid": True},
+                "completion_gate_decision": "completed",
+                "completion_gate_requires_follow_up": False,
+                "completion_gate_safe_to_claim_completion": True,
+                "turn_execution_critic_evidence_bundle": {
+                    "response_text": request.data.get("response_text")
+                },
+            }
+        )
+
+    critic_definition = WorkflowDefinition(
+        workflow_id=KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        initial_state="evaluate",
+        states={
+            "evaluate": WorkflowStateSpec(
+                state_id="evaluate",
+                actions=(
+                    WorkflowActionInvocation(action_id="test.reconcile_receipt"),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("evaluate",),
+    )
+    definitions = {
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: recovery_definition,
+        KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID: critic_definition,
+    }
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry, definition_loader=lambda workflow_id: definitions.get(workflow_id)
+    )
+    register_subworkflow_actions(
+        registry, definition_loader=lambda workflow_id: definitions.get(workflow_id)
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="test.reconcile_receipt",
+            handler=_reconcile_receipt,
+            description="Return a represented post-recovery receipt for testing.",
+        )
+    )
+    llm_client = MagicMock()
+    llm_client.generate.return_value = (
+        '{"turn_next_action":{"action_type":"respond_with_answer",'
+        '"target_workflow_id":null,"response_text":"Recovered.",'
+        '"tool_calls":null},"reasoning":"The bounded recovery can answer."}'
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={
+            "terminal_outcome_receipt": {
+                "outcome": "recoverable_failure",
+                "cause_code": "pre_recovery_failure",
+            }
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    assert observed_reconciliation_responses == ["Recovered."]
+    assert result.data["response_text"] == "Recovered."
+    assert result.data["terminal_outcome_receipt"] == reconciled_receipt
+    assert result.data["terminal_outcome_receipt_validation"] == {"valid": True}
+
+
 def test_conversation_turn_recovery_routes_non_viable_retry_to_follow_up() -> None:
     workflow = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
@@ -1834,6 +2010,11 @@ def test_conversation_turn_recovery_routes_non_viable_retry_to_follow_up() -> No
         workflow_id=workflow.workflow_id,
         initial_state="recovery_decision",
         states={
+            "reconcile_recovery_outcome": WorkflowStateSpec(
+                state_id="reconcile_recovery_outcome",
+                transitions=workflow.states["reconcile_recovery_outcome"].transitions,
+                terminal=False,
+            ),
             "recovery_decision": WorkflowStateSpec(
                 state_id="recovery_decision",
                 actions=(

@@ -98,6 +98,47 @@ def test_hard_gate_can_veto_but_not_invent_verified_success() -> None:
     )
 
 
+def test_verified_success_normalises_an_omitted_cause_code_to_null() -> None:
+    candidate = _receipt(
+        outcome="verified_success",
+        causal_stage="not_applicable",
+        retryability="not_applicable",
+        recovery_affordances=[],
+    )
+    candidate.pop("cause_code")
+
+    receipt, validation = validate_terminal_outcome_receipt(
+        candidate,
+        completion_gate={"safe_to_claim_completion": True},
+        required=True,
+    )
+
+    assert validation["valid"] is True
+    assert receipt is not None
+    assert receipt["cause_code"] is None
+
+
+def test_verified_success_rejects_a_non_null_cause_code() -> None:
+    receipt, validation = validate_terminal_outcome_receipt(
+        _receipt(
+            outcome="verified_success",
+            cause_code="stale_pre_recovery_failure",
+            causal_stage="not_applicable",
+            retryability="not_applicable",
+            recovery_affordances=[],
+        ),
+        completion_gate={"safe_to_claim_completion": True},
+        required=True,
+    )
+
+    assert receipt is None
+    assert validation["valid"] is False
+    assert (
+        "terminal_outcome_receipt_verified_success_cause_code_must_be_null"
+        in validation["errors"]
+    )
+
+
 def test_projects_authored_non_success_while_preserving_recovery_evidence() -> None:
     receipt, validation = validate_terminal_outcome_receipt(
         _receipt(),
