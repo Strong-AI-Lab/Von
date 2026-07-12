@@ -282,9 +282,16 @@ def validate_terminal_outcome_receipt(
                 "terminal_outcome_receipt_verified_success_conflicts_with_gate"
             )
 
-    if outcome not in {None, "verified_success"} and not _safe_text(
-        receipt.get("cause_code")
-    ):
+    cause_code = _safe_text(receipt.get("cause_code"))
+    if outcome == "verified_success":
+        if cause_code:
+            errors.append(
+                "terminal_outcome_receipt_verified_success_cause_code_must_be_null"
+            )
+        # This is schema normalisation, not semantic inference: the represented
+        # critic already chose verified_success, whose cause slot is nullable.
+        receipt["cause_code"] = None
+    elif outcome is not None and not cause_code:
         errors.append("terminal_outcome_receipt_cause_code_missing")
 
     validation["valid"] = not errors

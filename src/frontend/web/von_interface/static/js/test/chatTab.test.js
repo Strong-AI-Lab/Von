@@ -9153,21 +9153,23 @@ describe('scroll to latest message affordance', () => {
                 </div>
             </div>
         `;
+        Object.defineProperty(document.documentElement, 'scrollHeight', { value: 1200, configurable: true });
+        Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+        Object.defineProperty(window, 'scrollY', { value: 100, writable: true, configurable: true });
+        window.scrollTo = jest.fn(({ top }) => {
+            window.scrollY = top;
+        });
     });
 
     test('shows floating control only when conversation is away from the end', () => {
         const scrollableField = document.getElementById('scrollableField');
-        Object.defineProperty(scrollableField, 'clientHeight', { value: 200, configurable: true });
-        Object.defineProperty(scrollableField, 'scrollHeight', { value: 600, configurable: true });
-
-        scrollableField.scrollTop = 20;
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         const button = __testOnly_ensureScrollToEndButton(scrollableField);
         expect(button).toBeTruthy();
         expect(button.classList.contains('visible')).toBe(true);
         expect(button.getAttribute('aria-hidden')).toBe('false');
 
-        scrollableField.scrollTop = 410;
+        window.scrollY = 610;
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         expect(button.classList.contains('visible')).toBe(false);
         expect(button.getAttribute('aria-hidden')).toBe('true');
@@ -9177,21 +9179,14 @@ describe('scroll to latest message affordance', () => {
         jest.useFakeTimers();
 
         const scrollableField = document.getElementById('scrollableField');
-        Object.defineProperty(scrollableField, 'clientHeight', { value: 180, configurable: true });
-        Object.defineProperty(scrollableField, 'scrollHeight', { value: 500, configurable: true });
-        scrollableField.scrollTop = 0;
-        scrollableField.scrollTo = jest.fn(({ top }) => {
-            scrollableField.scrollTop = top;
-        });
-
         const button = __testOnly_ensureScrollToEndButton(scrollableField);
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         expect(button.classList.contains('visible')).toBe(true);
 
         button.click();
 
-        expect(scrollableField.scrollTo).toHaveBeenCalledWith({
-            top: 500,
+        expect(window.scrollTo).toHaveBeenCalledWith({
+            top: 1200,
             behavior: 'smooth'
         });
 
@@ -9203,9 +9198,6 @@ describe('scroll to latest message affordance', () => {
 
     test('shift-clicking floating control scrolls to the conversation list', () => {
         const scrollableField = document.getElementById('scrollableField');
-        Object.defineProperty(scrollableField, 'clientHeight', { value: 180, configurable: true });
-        Object.defineProperty(scrollableField, 'scrollHeight', { value: 500, configurable: true });
-        scrollableField.scrollTop = 0;
         scrollableField.scrollTo = jest.fn();
 
         const sessionTabsRow = document.querySelector('.chat-session-tabs-row');

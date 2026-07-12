@@ -4929,9 +4929,9 @@ h1 {
 }
 
 .chat-scroll-to-end-btn {
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
+    position: fixed;
+    right: 28px;
+    bottom: 190px;
     z-index: 12;
     width: 40px;
     height: 40px;
@@ -4947,6 +4947,13 @@ h1 {
     cursor: pointer;
     box-shadow: 0 4px 12px rgba(15, 23, 42, 0.24);
     transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+@media (max-width: 520px) {
+    .chat-scroll-to-end-btn {
+        right: 18px;
+        bottom: 176px;
+    }
 }
 
 .chat-scroll-to-end-btn.visible {
@@ -9418,12 +9425,10 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border: 1px solid #ccc;
     padding: 10px;
     width: 100%;
-    overflow-y: auto;
+    overflow-y: visible;
     margin-bottom: 16px;
-    resize: vertical;
-    min-height: 150px;
-    max-height: calc(55vh);
-    /* cap so buttons & input remain visible */
+    resize: none;
+    min-height: 0;
     flex: 0 0 auto;
     /* prevent over-expanding */
     box-sizing: border-box;
@@ -9449,11 +9454,10 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border: 1px solid #ccc;
     padding: 10px;
     width: 100%;
-    overflow-y: auto;
+    overflow-y: visible;
     margin-bottom: 16px;
-    resize: vertical;
-    min-height: 150px;
-    max-height: calc(55vh);
+    resize: none;
+    min-height: 0;
     flex: 0 0 auto;
     box-sizing: border-box;
     height: auto !important;
@@ -9481,6 +9485,55 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     gap: 8px;
     margin-top: 4px;
     margin-bottom: 8px;
+}
+
+.chat-composer {
+    position: sticky;
+    bottom: 42px;
+    z-index: 30;
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    margin: 4px 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 -4px 18px rgba(15, 23, 42, 0.1);
+    backdrop-filter: blur(8px);
+}
+
+.chat-composer-actions,
+.chat-composer-primary-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.chat-composer-actions {
+    justify-content: space-between;
+}
+
+.chat-composer-more-actions {
+    position: relative;
+}
+
+.chat-composer-more-actions>summary {
+    cursor: pointer;
+    color: #475569;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.chat-composer-more-actions[open]>.button-row {
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+#promptInput {
+    min-height: 44px;
+    max-height: 144px;
+    resize: none;
+    overflow-y: auto;
 }
 
 /* Annotation toggle styling */
@@ -9523,6 +9576,15 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     #sendButton,
     #resetButton {
         margin-bottom: 8px;
+    }
+
+    .chat-composer {
+        bottom: 38px;
+        padding: 8px;
+    }
+
+    .chat-composer-actions {
+        align-items: flex-start;
     }
 }
 
@@ -9666,10 +9728,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 @media (max-height: 700px) {
-
-    .scrollable-field,
-    .chat-scrollable-field {
-        max-height: 45vh;
+    .chat-composer {
+        bottom: 36px;
     }
 }
 
@@ -9687,10 +9747,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
         min-height: 0;
     }
 
-    .scrollable-field,
-    .chat-scrollable-field {
-        min-height: 120px;
-    }
 }
 
 /* Legacy .loading-indicator styles - kept for compatibility, actual display uses .thinking-card */

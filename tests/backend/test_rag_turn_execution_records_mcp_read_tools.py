@@ -2418,6 +2418,63 @@ def test_turn_execution_build_benchmark_hesitancy_trace_gateway_e2e(monkeypatch)
     assert imposition.get("weighted_score_pct") is not None
 
 
+def test_turn_execution_build_benchmark_projects_represented_recovery_signal(
+    monkeypatch,
+):
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    docs = [
+        {
+            "request_id": "req-represented-recovery",
+            "session_id": "chat-represented-recovery",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-07-12T00:00:00Z",
+            "completion_gate": {
+                "decision": "partial",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect-1"],
+            },
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "required_effects": [{"effect_id": "effect-1", "status": "not_executed"}],
+            "prompt": {"preview": "Represented recovery signal"},
+            "terminal_outcome_receipt": _terminal_receipt(
+                outcome="verified_partial",
+                causal_stage="execution",
+                cause_code="required_action_missing",
+                retryability="after_external_change",
+                recovery_affordances=[{"action_type": "retry"}],
+            ),
+        }
+    ]
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    payload = _build_gateway().invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+            "include_completed": True,
+        },
+    ).payload
+
+    retry_metrics = payload["metrics"]["retry_metrics"]
+    assert retry_metrics["follow_up_count"] == 1
+    assert retry_metrics["follow_up_with_retry_signal_count"] == 1
+    signal_by_id = {
+        signal["signal_id"]: signal for signal in payload["benchmark_signals"]
+    }
+    assert signal_by_id["retry_guardrail_signals_recorded"]["status"] == "pass"
+
+
 def test_turn_execution_build_benchmark_hesitancy_signals_detect_plain_response_regression(
     monkeypatch,
 ):

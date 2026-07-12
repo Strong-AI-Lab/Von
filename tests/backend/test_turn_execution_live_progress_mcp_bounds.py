@@ -226,6 +226,57 @@ def test_live_progress_surfaces_terminal_receipt_from_critic_stage(monkeypatch) 
     )
 
 
+def test_terminal_live_progress_reads_back_persisted_receipt_when_snapshot_lags(
+    monkeypatch,
+) -> None:
+    from src.backend.services import turn_execution_record_service
+    from src.backend.services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    payload = _large_serialised_progress_payload()
+    payload["status"] = "completed"
+    payload["stage"] = "completed"
+    payload["stage_diagnostics"] = []
+    _install_live_progress_stubs(monkeypatch, payload)
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "get_turn_execution_record_projection",
+        lambda **_kwargs: {
+            "terminal_outcome_receipt": {
+                "schema_version": "terminal_outcome_receipt.v1",
+                "profile_concept_id": "#V#terminal_outcome_receipt",
+                "outcome": "verified_success",
+                "cause_code": None,
+                "causal_stage": "answer_construction",
+                "summary": "The represented answer satisfied the request.",
+                "evidence_refs": [{"source": "response_text"}],
+                "committed_effects": [],
+                "remaining_obligations": [],
+                "retryability": "not_applicable",
+                "recovery_affordances": [],
+                "learning_candidate": None,
+                "redaction_status": "safe_projection",
+                "provenance": {"decision_source": "represented_llm"},
+            },
+            "terminal_outcome_receipt_validation": {"valid": True},
+        },
+    )
+
+    result = get_turn_execution_live_progress_payload(
+        request_id="req-large-live-progress",
+        namespace="#V#tester@org",
+    )
+
+    assert result is not None
+    projection = result["terminal_outcome_receipt_projection"]
+    assert projection["available"] is True
+    assert projection["outcome"] == "verified_success"
+    assert projection["source"] == (
+        "live_progress.persisted_turn_execution_record"
+    )
+
+
 def test_live_progress_section_projection_paginates_large_details(monkeypatch) -> None:
     from src.backend.services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,

@@ -9,6 +9,7 @@ from typing import Any
 from .namespace_service import derive_actor_context_from_namespace
 from ..workflows.terminal_outcome_receipts import (
     build_terminal_outcome_receipt_projection,
+    terminal_outcome_receipt_projection_from_record,
 )
 
 _DEFAULT_SECTION_LIMIT = 20
@@ -320,6 +321,35 @@ def get_turn_execution_live_progress_payload(
 
     payload = _serialise_tool_progress_state(state)
     receipt_projection = _build_live_terminal_outcome_receipt_projection(payload)
+    if (
+        not receipt_projection.get("available")
+        and _safe_str(payload.get("status"))
+        in {"completed", "failed", "cancelled", "error"}
+    ):
+        # Terminal progress may have been emitted before the bounded progress
+        # payload copied the final receipt.  Read back the canonical persisted
+        # record rather than leaving the live-progress surface contradictory.
+        # This is neutral projection only; the represented critic remains the
+        # outcome authority.
+        try:
+            from .turn_execution_record_service import (
+                get_turn_execution_record_projection,
+            )
+
+            persisted_record = get_turn_execution_record_projection(
+                request_id=request_id_value,
+                namespace=_safe_str(namespace),
+            )
+            persisted_projection = terminal_outcome_receipt_projection_from_record(
+                persisted_record,
+                source="live_progress.persisted_turn_execution_record",
+            )
+            if persisted_projection.get("available"):
+                receipt_projection = persisted_projection
+        except Exception:
+            # Live progress remains available even if terminal read-back is
+            # temporarily unavailable; the missing projection stays explicit.
+            pass
     if receipt_projection.get("available"):
         payload["terminal_outcome_receipt_projection"] = receipt_projection
     section_name = _safe_str(section)

@@ -9799,6 +9799,78 @@ def _turn_execution_update_one(
         )
 
 
+def _load_represented_terminal_outcome_receipt_default() -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any],
+]:
+    """Load the critic workflow's represented fail-closed receipt default.
+
+    This path is used only when a failed/interrupted turn cannot finish the
+    represented critic.  It deliberately reads the default from live
+    Vontology rather than embedding a Python-side semantic fallback.
+    """
+
+    authority = {
+        "source": "vontology_workflow_validation_default",
+        "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+        "available": False,
+    }
+    try:
+        from ..workflows.vontology_loader import (
+            load_workflow_definition_from_vontology,
+        )
+
+        definition = load_workflow_definition_from_vontology(
+            "#V#kb_mutation_postcondition_critic_workflow"
+        )
+        if definition is None:
+            authority["reason"] = "represented_critic_workflow_unavailable"
+            return None, None, authority
+        for state_id, state in definition.states.items():
+            for action in state.actions:
+                validation_policy = action.validation_policy
+                if not isinstance(validation_policy, Mapping):
+                    continue
+                defaults = validation_policy.get("json_field_defaults")
+                if not isinstance(defaults, Mapping):
+                    continue
+                candidate = defaults.get("terminal_outcome_receipt")
+                if not isinstance(candidate, Mapping):
+                    continue
+                provenance = candidate.get("provenance")
+                if not isinstance(provenance, Mapping) or (
+                    _safe_str(provenance.get("decision_source"))
+                    != "represented_workflow_default"
+                ):
+                    continue
+                receipt, validation = validate_terminal_outcome_receipt(
+                    candidate,
+                    required=True,
+                )
+                authority.update(
+                    {
+                        "available": isinstance(receipt, Mapping),
+                        "state_id": _safe_str(state_id),
+                        "validation": dict(validation),
+                    }
+                )
+                return (
+                    dict(receipt) if isinstance(receipt, Mapping) else None,
+                    dict(validation),
+                    authority,
+                )
+        authority["reason"] = "represented_critic_receipt_default_missing"
+    except Exception as exc:
+        authority.update(
+            {
+                "reason": "represented_critic_receipt_default_load_failed",
+                "error_class": type(exc).__name__,
+            }
+        )
+    return None, None, authority
+
+
 def persist_failed_turn_execution_record(
     *,
     request_id: Any,
@@ -9837,6 +9909,21 @@ def persist_failed_turn_execution_record(
         value = debug.get(key)
         return list(value) if isinstance(value, list) else None
 
+    critic_verdict = _debug_mapping("critic_verdict")
+    receipt_authority: dict[str, Any] | None = None
+    if not isinstance(critic_verdict, Mapping):
+        existing_receipt = debug.get("terminal_outcome_receipt")
+        if isinstance(existing_receipt, Mapping):
+            critic_verdict = {"terminal_outcome_receipt": dict(existing_receipt)}
+    if not isinstance(critic_verdict, Mapping):
+        represented_default, _default_validation, receipt_authority = (
+            _load_represented_terminal_outcome_receipt_default()
+        )
+        if isinstance(represented_default, Mapping):
+            critic_verdict = {
+                "terminal_outcome_receipt": dict(represented_default),
+            }
+
     try:
         record = build_turn_execution_record(
             request_id=clean_request_id,
@@ -9849,9 +9936,19 @@ def persist_failed_turn_execution_record(
             interaction_timestamp_utc=debug.get("interaction_timestamp_utc"),
             workflow_discovery=_debug_mapping("workflow_discovery"),
             workflow_routing=_debug_mapping("workflow_routing"),
+            tool_invocations=_debug_list("invocations"),
             turn_execution_diagnostics=_debug_mapping("turn_execution_diagnostics"),
             aux_llm_calls=_debug_list("aux_llm_calls"),
             llm_calls=_debug_list("llm_calls"),
+            selected_workflow_trace=_debug_mapping("selected_workflow_trace"),
+            turn_expected_outcome_contract=_debug_mapping(
+                "turn_expected_outcome_contract"
+            ),
+            critic_verdict=critic_verdict,
+            completion_gate_verdict=_debug_mapping("completion_gate_verdict"),
+            completion_report=_debug_mapping("completion_report"),
+            required_prompt_tools=_debug_list("required_prompt_tools"),
+            tool_observation_ledger=_debug_mapping("tool_observation_ledger"),
         )
     except Exception as exc:
         logger.warning(
@@ -9870,6 +9967,8 @@ def persist_failed_turn_execution_record(
         }
 
     record["execution_terminal_status"] = clean_terminal_status
+    if isinstance(receipt_authority, Mapping):
+        record["terminal_outcome_receipt_authority"] = dict(receipt_authority)
     record["terminal_failure"] = {
         "schema_version": "turn_terminal_failure.v1",
         "terminal_status": clean_terminal_status,

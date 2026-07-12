@@ -10776,6 +10776,34 @@ def _format_turn_execution_rate(numerator: int, denominator: int) -> float:
     return round((float(numerator) / float(denominator)) * 100.0, 2)
 
 
+_TERMINAL_OUTCOME_RECOVERABLE_RETRYABILITY = frozenset(
+    {
+        "now",
+        "after_input",
+        "after_external_change",
+        "after_represented_learning",
+    }
+)
+
+
+def _terminal_outcome_receipt_has_retry_signal(item: Mapping[str, Any]) -> bool:
+    """Project represented recovery facts into the legacy retry benchmark signal."""
+
+    projection = item.get("terminal_outcome_receipt_projection")
+    if not isinstance(projection, Mapping) or not projection.get("available"):
+        return False
+    validation = projection.get("validation")
+    if not isinstance(validation, Mapping) or validation.get("valid") is not True:
+        return False
+    retryability = str(projection.get("retryability") or "").strip()
+    recovery_affordances = projection.get("recovery_affordances")
+    return (
+        retryability in _TERMINAL_OUTCOME_RECOVERABLE_RETRYABILITY
+        and isinstance(recovery_affordances, list)
+        and bool(recovery_affordances)
+    )
+
+
 def _build_terminal_outcome_receipt_metrics(
     items: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -10793,13 +10821,6 @@ def _build_terminal_outcome_receipt_metrics(
     recoverable_count = 0
     recoverable_with_affordance_count = 0
     learning_candidate_count = 0
-
-    recoverable_retryability = {
-        "now",
-        "after_input",
-        "after_external_change",
-        "after_represented_learning",
-    }
 
     for item in items:
         projection = item.get("terminal_outcome_receipt_projection")
@@ -10842,7 +10863,7 @@ def _build_terminal_outcome_receipt_metrics(
                 typed_non_success_count += 1
             if causal_stage and causal_stage != "unknown":
                 causal_stage_located_count += 1
-        if retryability in recoverable_retryability:
+        if retryability in _TERMINAL_OUTCOME_RECOVERABLE_RETRYABILITY:
             recoverable_count += 1
             recovery_affordances = projection.get("recovery_affordances")
             if isinstance(recovery_affordances, list) and recovery_affordances:
@@ -12321,7 +12342,12 @@ def _turn_execution_build_benchmark(**kwargs):
             if isinstance(item.get("loop_stop_reason"), str)
             else ""
         )
-        if repeat_iteration or loop_attempts > 0 or bool(loop_stop_reason):
+        if (
+            repeat_iteration
+            or loop_attempts > 0
+            or bool(loop_stop_reason)
+            or _terminal_outcome_receipt_has_retry_signal(item)
+        ):
             follow_up_with_retry_signal_count += 1
         if loop_stop_reason in bounded_loop_stop_reasons:
             bounded_retry_stop_count += 1
